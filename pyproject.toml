@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "codebugs"
+version = "0.1.0"
+description = "AI-native code finding tracker — SQLite-backed, MCP server + CLI"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "faxik" }]
+keywords = ["mcp", "code-review", "bug-tracker", "ai", "claude"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+    "mcp>=1.0.0",
+]
+
+[project.scripts]
+codebugs = "codebugs.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/codebugs"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
