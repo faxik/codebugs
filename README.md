@@ -1,8 +1,8 @@
 # codebugs
 
-**Persistent code finding tracker for AI assistants.** SQLite-backed, MCP server + CLI.
+**Persistent code finding & requirements tracker for AI assistants.** SQLite-backed, MCP server + CLI.
 
-AI assistants lose context between sessions. codebugs gives them persistent memory for code review findings, bug reports, and tech debt — with minimal token overhead.
+AI assistants lose context between sessions. codebugs gives them persistent memory for code review findings, bug reports, tech debt, and requirements tracking — with minimal token overhead.
 
 ```
 Session 1:  Review code → log 50 findings → forget them
@@ -48,6 +48,8 @@ Any MCP-compatible client can connect to `codebugs-mcp` via stdio transport.
 
 ### MCP Tools (for AI assistants)
 
+**Findings** (code review, bugs, tech debt):
+
 | Tool | Purpose |
 |------|---------|
 | `summary` | Dashboard overview — **start here** for orientation |
@@ -58,7 +60,25 @@ Any MCP-compatible client can connect to `codebugs-mcp` via stdio transport.
 | `stats` | Cross-tabulated counts (severity x category/file/status) |
 | `categories` | List existing categories — **call before `add`** for consistency |
 
+**Requirements** (specification tracking):
+
+| Tool | Purpose |
+|------|---------|
+| `reqs_summary` | Requirements dashboard — **start here** |
+| `reqs_add` | Add a requirement (FR-001, priority, status, test coverage) |
+| `reqs_update` | Change status, description, priority, test coverage |
+| `reqs_query` | Search/filter by status, priority, section, free text |
+| `reqs_stats` | Cross-tabulated counts (status x priority) |
+| `reqs_verify` | Automated checks: ghost test files, duplicate IDs, status contradictions |
+| `reqs_import` | Import from REQUIREMENTS.md (parses markdown tables) |
+| `reqs_embed` | Store an embedding vector for a requirement |
+| `reqs_batch_embed` | Store embeddings for multiple requirements |
+| `reqs_search_similar` | Semantic search across requirements by cosine similarity |
+| `reqs_embedding_stats` | Report on embedding coverage |
+
 ### CLI (for humans)
+
+**Findings:**
 
 ```bash
 # Add a finding
@@ -81,6 +101,33 @@ codebugs categories
 # Import/export
 codebugs import-csv findings.csv
 codebugs export-csv
+```
+
+**Requirements:**
+
+```bash
+# Import from existing REQUIREMENTS.md
+codebugs reqs-import REQUIREMENTS.md
+
+# Dashboard
+codebugs reqs-summary
+
+# Verify — find ghost test files, duplicate IDs, status contradictions
+codebugs reqs-verify
+codebugs reqs-verify --checks tests,status --project-dir /path/to/project
+
+# Search
+codebugs reqs-query --status Implemented --priority Must
+codebugs reqs-query --search "entity" --group-by section
+
+# Update
+codebugs reqs-update FR-090 --status Superseded --notes "Replaced by vault architecture"
+
+# Add
+codebugs reqs-add FR-700 -d "System shall support licensing" --section "1.72 Licensing" --priority Must
+
+# Export back to markdown
+codebugs reqs-export REQUIREMENTS.md
 ```
 
 ## How It Works
@@ -106,7 +153,9 @@ codebugs stores findings in a local SQLite database. AI assistants write finding
 
 ## Schema
 
-Lean core fields with a flexible `meta` JSON column for anything else:
+Both tables share the same SQLite database (`.codebugs/findings.db`) with flexible JSON columns.
+
+### Findings
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -120,9 +169,24 @@ Lean core fields with a flexible `meta` JSON column for anything else:
 | `tags` | json | Array of strings for ad-hoc grouping |
 | `meta` | json | Anything else: `lines`, `module`, `rule_code`, `cwe_id`, ... |
 
+### Requirements
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | text | User-provided (`FR-001`, `FR-002`, ...) |
+| `section` | text | Grouping (e.g. `1.10 Document Sorting`) |
+| `description` | text | What the system shall do |
+| `priority` | text | `Must`, `Should`, `Could` |
+| `status` | text | `Planned`, `Partial`, `Implemented`, `Verified`, `Superseded`, `Obsolete` |
+| `source` | text | Origin (e.g. `Take 26`, `NEW`, `R&A`) |
+| `test_coverage` | text | Test file name(s) |
+| `embedding` | blob | Optional float32 vector for semantic search |
+| `tags` | json | Array of strings |
+| `meta` | json | Anything else: `notes`, `superseded_by`, ... |
+
 ## Pattern Detection
 
-The killer feature emerges over time. Categories reveal systemic issues:
+The killer feature for findings emerges over time. Categories reveal systemic issues:
 
 ```
 $ codebugs categories
@@ -133,6 +197,42 @@ missing_input_validation            6     4      2
 ```
 
 If you keep fixing the same category → it's time for a lint rule, pre-commit check, or architectural fix. codebugs turns reactive bug-fixing into proactive prevention.
+
+## Requirements Verification
+
+The killer feature for requirements is `reqs-verify` — automated detection of documentation rot:
+
+```
+$ codebugs reqs-verify
+Verified 683 requirements.
+
+12 issue(s) found:
+
+check   sev       id      message
+------  --------  ------  --------------------------------------------------
+tests   high      FR-350  Test file not found: test_entity_graph.py
+tests   high      FR-351  Test file not found: test_entity_graph.py
+status  high      FR-090  Description mentions 'superseded' but status is 'Planned'
+status  medium    FR-006  Must-priority requirement implemented without test coverage
+ids     medium    --      Numbering gaps (5+): FR-025..FR-029, FR-316..FR-329
+```
+
+Run it after any documentation change to catch contradictions before they become misleading.
+
+## Semantic Requirements Search
+
+Store embeddings for requirements to enable semantic search — find related requirements even when the wording is different:
+
+```bash
+# Via MCP: store embeddings (caller generates vectors via embedding API)
+reqs_embed(req_id="FR-001", embedding=[0.1, 0.2, ...])
+reqs_batch_embed(embeddings={"FR-001": [...], "FR-002": [...]})
+
+# Search for similar requirements
+reqs_search_similar(query_embedding=[0.1, 0.2, ...], limit=5, min_similarity=0.3)
+```
+
+Embeddings are stored as float32 BLOBs in the same SQLite database. Search uses brute-force cosine similarity — fast enough for thousands of requirements.
 
 ## Requirements
 

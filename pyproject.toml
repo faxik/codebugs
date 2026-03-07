@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "codebugs"
 version = "0.1.0"
-description = "AI-native code finding tracker — SQLite-backed, MCP server + CLI"
+description = "AI-native code finding & requirements tracker — SQLite-backed, MCP server + CLI"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
