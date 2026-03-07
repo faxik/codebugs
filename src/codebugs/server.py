@@ -6,7 +6,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from codebugs import db
+from codebugs import db, reqs
 
 mcp = FastMCP("codebugs", json_response=True)
 
@@ -181,6 +181,259 @@ def categories() -> list[dict[str, Any]]:
     conn = _conn()
     try:
         return db.get_categories(conn)
+    finally:
+        conn.close()
+
+
+# --- Requirements tools ---
+
+
+@mcp.tool()
+def reqs_add(
+    req_id: str,
+    description: str,
+    section: str = "",
+    priority: str = "Should",
+    status: str = "Planned",
+    source: str = "",
+    test_coverage: str = "",
+    tags: list[str] | None = None,
+    meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Add a requirement.
+
+    Args:
+        req_id: Requirement ID (e.g. FR-001)
+        description: What the system shall do
+        section: Section name (e.g. "1.10 Document Sorting")
+        priority: Must, Should, or Could
+        status: Planned, Partial, Implemented, Verified, Superseded, Obsolete
+        source: Where this requirement came from (e.g. Take 26, NEW)
+        test_coverage: Test file name(s)
+        tags: Optional tags
+        meta: Optional metadata
+    """
+    conn = _conn()
+    try:
+        return reqs.add_requirement(
+            conn, req_id=req_id, description=description, section=section,
+            priority=priority, status=status, source=source,
+            test_coverage=test_coverage, tags=tags, meta=meta,
+        )
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def reqs_update(
+    req_id: str,
+    status: str | None = None,
+    description: str | None = None,
+    priority: str | None = None,
+    test_coverage: str | None = None,
+    notes: str | None = None,
+    tags: list[str] | None = None,
+    meta_update: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Update a requirement's status, description, or metadata.
+
+    Args:
+        req_id: Requirement ID (e.g. FR-001)
+        status: New status: Planned, Partial, Implemented, Verified, Superseded, Obsolete
+        description: Updated description
+        priority: Updated priority: Must, Should, Could
+        test_coverage: Updated test file reference
+        notes: Notes (stored in meta.notes)
+        tags: Replace tags
+        meta_update: Merge metadata keys
+    """
+    conn = _conn()
+    try:
+        return reqs.update_requirement(
+            conn, req_id, status=status, description=description,
+            priority=priority, test_coverage=test_coverage,
+            notes=notes, tags=tags, meta_update=meta_update,
+        )
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def reqs_query(
+    status: str | None = None,
+    priority: str | None = None,
+    section: str | None = None,
+    search: str | None = None,
+    source: str | None = None,
+    tag: str | None = None,
+    group_by: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Search and filter requirements.
+
+    Args:
+        status: Filter by status (Planned, Partial, Implemented, Verified, Superseded, Obsolete)
+        priority: Filter by priority (Must, Should, Could)
+        section: Filter by section (substring match)
+        search: Search in description and ID
+        source: Filter by source (substring match)
+        tag: Filter by tag
+        group_by: Group by: section, status, priority, source
+        limit: Max results (default 100)
+        offset: Pagination offset
+    """
+    conn = _conn()
+    try:
+        return reqs.query_requirements(
+            conn, status=status, priority=priority, section=section,
+            search=search, source=source, tag=tag,
+            group_by=group_by, limit=limit, offset=offset,
+        )
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def reqs_stats(group_by: str = "status") -> dict[str, Any]:
+    """Aggregated requirement counts by status x priority.
+
+    Args:
+        group_by: Group by: status, priority, section, source
+    """
+    conn = _conn()
+    try:
+        return reqs.get_reqs_stats(conn, group_by=group_by)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def reqs_summary() -> dict[str, Any]:
+    """Dashboard overview — status breakdown, priority split,
+    section progress, requirements without tests. Start here."""
+    conn = _conn()
+    try:
+        return reqs.get_reqs_summary(conn)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def reqs_verify(
+    checks: list[str] | None = None,
+    project_dir: str | None = None,
+) -> dict[str, Any]:
+    """Verify requirements for issues.
+
+    Runs automated checks to find problems:
+    - tests: do referenced test files actually exist?
+    - ids: duplicate IDs, numbering gaps
+    - status: contradictions (description says superseded but status says Planned)
+
+    Args:
+        checks: List of checks to run (default: all). Options: tests, ids, status
+        project_dir: Project root for test file verification (default: cwd)
+    """
+    conn = _conn()
+    try:
+        return reqs.verify_requirements(conn, project_dir=project_dir, checks=checks)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def reqs_import(
+    markdown_path: str,
+) -> dict[str, Any]:
+    """Import requirements from a REQUIREMENTS.md file.
+
+    Parses markdown tables with columns:
+    | ID | Requirement | Priority | Status | Source | Test Coverage |
+
+    Uses INSERT OR REPLACE, so re-importing updates existing entries.
+
+    Args:
+        markdown_path: Path to the REQUIREMENTS.md file
+    """
+    conn = _conn()
+    try:
+        return reqs.import_markdown(conn, markdown_path)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def reqs_embed(
+    req_id: str,
+    embedding: list[float],
+) -> dict[str, Any]:
+    """Store an embedding vector for a requirement.
+
+    The caller generates the embedding (e.g. via an embedding API).
+    Enables semantic search across requirements via reqs_search_similar.
+
+    Args:
+        req_id: Requirement ID
+        embedding: Float vector (any dimensionality)
+    """
+    conn = _conn()
+    try:
+        return reqs.store_embedding(conn, req_id, embedding)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def reqs_batch_embed(
+    embeddings: dict[str, list[float]],
+) -> dict[str, Any]:
+    """Store embeddings for multiple requirements at once.
+
+    Args:
+        embeddings: Dict mapping requirement ID to float vector
+    """
+    conn = _conn()
+    try:
+        return reqs.batch_store_embeddings(conn, embeddings)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def reqs_search_similar(
+    query_embedding: list[float],
+    limit: int = 10,
+    min_similarity: float = 0.3,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    """Find requirements semantically similar to a query.
+
+    Pass a query embedding (from the same model used to embed requirements).
+    Returns requirements ranked by cosine similarity.
+
+    Args:
+        query_embedding: Query vector
+        limit: Max results (default 10)
+        min_similarity: Minimum cosine similarity (default 0.3)
+        status: Optional status filter
+    """
+    conn = _conn()
+    try:
+        return reqs.search_similar(
+            conn, query_embedding, limit=limit,
+            min_similarity=min_similarity, status=status,
+        )
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def reqs_embedding_stats() -> dict[str, Any]:
+    """Report on embedding coverage — how many requirements have embeddings."""
+    conn = _conn()
+    try:
+        return reqs.embedding_stats(conn)
     finally:
         conn.close()
 
