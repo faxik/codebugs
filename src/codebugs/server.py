@@ -81,7 +81,10 @@ def update(
 
     Args:
         finding_id: The finding ID (e.g. CB-1)
-        status: New status: open, fixed, not_a_bug, wont_fix, stale
+        status: New status: open, in_progress, fixed, not_a_bug, wont_fix, stale.
+                Aliases accepted: done/resolved/implemented/closed → fixed,
+                wontfix → wont_fix, invalid → not_a_bug,
+                active/working/in-progress → in_progress
         notes: Add/update notes (stored in meta.notes)
         tags: Replace tags list
         meta_update: Merge additional metadata keys
@@ -117,7 +120,7 @@ def query(
     """Search and filter findings. Returns structured results.
 
     Args:
-        status: Filter by status (open, fixed, not_a_bug, wont_fix, stale)
+        status: Filter by status (open, in_progress, fixed, not_a_bug, wont_fix, stale). Aliases accepted.
         severity: Filter by severity (critical, high, medium, low)
         category: Filter by exact category
         file: Filter by file path (substring match)

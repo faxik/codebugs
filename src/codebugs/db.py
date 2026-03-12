@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS findings (
     category TEXT NOT NULL,
     file TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'open'
-        CHECK(status IN ('open', 'fixed', 'not_a_bug', 'wont_fix', 'stale')),
+        CHECK(status IN ('open', 'in_progress', 'fixed', 'not_a_bug', 'wont_fix', 'stale')),
     description TEXT NOT NULL,
     source TEXT NOT NULL DEFAULT 'human',
     tags TEXT NOT NULL DEFAULT '[]',
@@ -35,7 +35,39 @@ CREATE INDEX IF NOT EXISTS idx_findings_category ON findings(category);
 """
 
 VALID_SEVERITIES = ("critical", "high", "medium", "low")
-VALID_STATUSES = ("open", "fixed", "not_a_bug", "wont_fix", "stale")
+VALID_STATUSES = ("open", "in_progress", "fixed", "not_a_bug", "wont_fix", "stale")
+
+# Common aliases → canonical status.  Checked case-insensitively.
+STATUS_ALIASES: dict[str, str] = {
+    "done": "fixed",
+    "resolved": "fixed",
+    "implemented": "fixed",
+    "closed": "fixed",
+    "wontfix": "wont_fix",
+    "won't_fix": "wont_fix",
+    "invalid": "not_a_bug",
+    "in-progress": "in_progress",
+    "active": "in_progress",
+    "working": "in_progress",
+}
+
+
+def resolve_status(status: str) -> str:
+    """Resolve a status string to its canonical form.
+
+    Accepts canonical statuses as-is, or maps known aliases.
+    Raises ValueError for unrecognised values.
+    """
+    if status in VALID_STATUSES:
+        return status
+    canonical = STATUS_ALIASES.get(status.lower().replace(" ", "_"))
+    if canonical:
+        return canonical
+    raise ValueError(
+        f"Invalid status: {status}. "
+        f"Must be one of {VALID_STATUSES} "
+        f"(aliases: {', '.join(sorted(STATUS_ALIASES))})"
+    )
 
 
 def _now() -> str:
@@ -59,10 +91,51 @@ def connect(project_dir: str | None = None) -> sqlite3.Connection:
         if stmt:
             conn.execute(stmt)
     conn.commit()
+    _migrate_statuses(conn)
     # Initialize requirements schema (same DB)
     from codebugs import reqs
     reqs.ensure_schema(conn)
     return conn
+
+
+def _migrate_statuses(conn: sqlite3.Connection) -> None:
+    """Add 'in_progress' to the status CHECK constraint on existing databases."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='findings'"
+    ).fetchone()
+    if row is None:
+        return
+    ddl = row[0] or ""
+    if "in_progress" in ddl:
+        return  # already up-to-date
+
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute(
+        """CREATE TABLE findings_new (
+            id TEXT PRIMARY KEY,
+            severity TEXT NOT NULL CHECK(severity IN ('critical', 'high', 'medium', 'low')),
+            category TEXT NOT NULL,
+            file TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open'
+                CHECK(status IN ('open', 'in_progress', 'fixed', 'not_a_bug', 'wont_fix', 'stale')),
+            description TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'human',
+            tags TEXT NOT NULL DEFAULT '[]',
+            meta TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )"""
+    )
+    conn.execute("INSERT INTO findings_new SELECT * FROM findings")
+    conn.execute("DROP TABLE findings")
+    conn.execute("ALTER TABLE findings_new RENAME TO findings")
+    # Re-create indexes
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings(severity)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_file ON findings(file)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_category ON findings(category)")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.commit()
 
 
 def _next_id(conn: sqlite3.Connection) -> str:
@@ -170,8 +243,7 @@ def update_finding(
     params: list[Any] = []
 
     if status is not None:
-        if status not in VALID_STATUSES:
-            raise ValueError(f"Invalid status: {status}. Must be one of {VALID_STATUSES}")
+        status = resolve_status(status)
         updates.append("status = ?")
         params.append(status)
 
@@ -224,7 +296,7 @@ def query_findings(
 
     if status:
         conditions.append("status = ?")
-        params.append(status)
+        params.append(resolve_status(status))
     if severity:
         conditions.append("severity = ?")
         params.append(severity)

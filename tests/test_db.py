@@ -137,6 +137,41 @@ class TestUpdateFinding:
         with pytest.raises(KeyError, match="not found"):
             db.update_finding(conn, "CB-999", status="fixed")
 
+    def test_update_status_in_progress(self, conn):
+        db.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        result = db.update_finding(conn, "CB-1", status="in_progress")
+        assert result["status"] == "in_progress"
+
+    def test_update_status_alias_done(self, conn):
+        db.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        result = db.update_finding(conn, "CB-1", status="done")
+        assert result["status"] == "fixed"
+
+    def test_update_status_alias_resolved(self, conn):
+        db.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        result = db.update_finding(conn, "CB-1", status="resolved")
+        assert result["status"] == "fixed"
+
+    def test_update_status_alias_implemented(self, conn):
+        db.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        result = db.update_finding(conn, "CB-1", status="implemented")
+        assert result["status"] == "fixed"
+
+    def test_update_status_alias_wontfix(self, conn):
+        db.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        result = db.update_finding(conn, "CB-1", status="wontfix")
+        assert result["status"] == "wont_fix"
+
+    def test_update_status_alias_invalid(self, conn):
+        db.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        result = db.update_finding(conn, "CB-1", status="invalid")
+        assert result["status"] == "not_a_bug"
+
+    def test_update_status_alias_active(self, conn):
+        db.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        result = db.update_finding(conn, "CB-1", status="active")
+        assert result["status"] == "in_progress"
+
     def test_update_invalid_status_raises(self, conn):
         db.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
         with pytest.raises(ValueError, match="Invalid status"):
@@ -146,6 +181,20 @@ class TestUpdateFinding:
         db.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
         result = db.update_finding(conn, "CB-1")
         assert result["status"] == "open"
+
+
+class TestResolveStatus:
+    def test_canonical_passthrough(self):
+        for s in db.VALID_STATUSES:
+            assert db.resolve_status(s) == s
+
+    def test_all_aliases_resolve(self):
+        for alias, canonical in db.STATUS_ALIASES.items():
+            assert db.resolve_status(alias) == canonical
+
+    def test_unknown_raises(self):
+        with pytest.raises(ValueError, match="Invalid status"):
+            db.resolve_status("banana")
 
 
 class TestQueryFindings:
@@ -215,6 +264,11 @@ class TestQueryFindings:
         ids1 = {f["id"] for f in r1["findings"]}
         ids2 = {f["id"] for f in r2["findings"]}
         assert ids1.isdisjoint(ids2)
+
+    def test_query_by_status_alias(self, conn):
+        result = db.query_findings(conn, status="done")
+        assert result["total"] == 1
+        assert result["findings"][0]["status"] == "fixed"
 
     def test_query_combined_filters(self, conn):
         result = db.query_findings(conn, status="open", source="claude")
