@@ -303,6 +303,83 @@ def merge(
     return {"proceed": True, "session_id": session_id}
 
 
+def check_overlaps(
+    conn: sqlite3.Connection,
+    session_id: str,
+    *,
+    main_changed_files: list[str] | None = None,
+    current_main_head_fn: Callable[[], str] | None = None,
+) -> dict[str, Any]:
+    """Advisory conflict check. Does not acquire any lock.
+
+    Args:
+        session_id: Session to check.
+        main_changed_files: Files changed on main since this session branched.
+            Caller computes via git diff. If None, skips main-divergence check.
+        current_main_head_fn: Callable returning current main HEAD SHA.
+            If None, main_head is omitted from result.
+
+    Returns:
+        {clean: bool, conflicts: [...], main_head: "...", recommendation: "clean"|"dirty"}
+    """
+    row = conn.execute(
+        "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    if not row:
+        raise KeyError(f"Session not found: {session_id}")
+
+    my_claims = conn.execute(
+        "SELECT file_path FROM codemerge_claims WHERE session_id = ?", (session_id,)
+    ).fetchall()
+    my_files = {r["file_path"] for r in my_claims}
+
+    conflicts: list[dict[str, str]] = []
+
+    # Check against other active/merging sessions
+    others = conn.execute(
+        "SELECT session_id, branch FROM codemerge_sessions "
+        "WHERE session_id != ? AND status IN ('active', 'merging')",
+        (session_id,),
+    ).fetchall()
+
+    for other in others:
+        other_claims = conn.execute(
+            "SELECT file_path FROM codemerge_claims WHERE session_id = ?",
+            (other["session_id"],),
+        ).fetchall()
+        other_files = {r["file_path"] for r in other_claims}
+        overlap = my_files & other_files
+        for f in sorted(overlap):
+            conflicts.append({
+                "file": f,
+                "blocking_session": other["session_id"],
+                "blocking_branch": other["branch"],
+                "type": "parallel_session",
+            })
+
+    # Check main divergence
+    if main_changed_files is not None:
+        main_overlap = my_files & set(main_changed_files)
+        for f in sorted(main_overlap):
+            conflicts.append({
+                "file": f,
+                "blocking_session": "main",
+                "blocking_branch": "main",
+                "type": "main_diverged",
+            })
+
+    result: dict[str, Any] = {
+        "clean": len(conflicts) == 0,
+        "conflicts": conflicts,
+        "recommendation": "dirty" if conflicts else "clean",
+    }
+
+    if current_main_head_fn is not None:
+        result["main_head"] = current_main_head_fn()
+
+    return result
+
+
 def get_claims(
     conn: sqlite3.Connection,
     session_id: str,

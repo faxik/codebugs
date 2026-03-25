@@ -296,3 +296,68 @@ class TestMerge:
                 conn, "s1", expected_main_head="abc",
                 current_main_head_fn=self._head_fn("abc"),
             )
+
+
+class TestCheckOverlaps:
+    def test_no_overlaps(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        merge.start_session(conn, session_id="s2", branch="b2", description="d2")
+        merge.add_claim(conn, "s1", "src/foo.py")
+        merge.add_claim(conn, "s2", "src/bar.py")
+        result = merge.check_overlaps(conn, "s1")
+        assert result["clean"] is True
+        assert result["conflicts"] == []
+
+    def test_parallel_session_overlap(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        merge.start_session(conn, session_id="s2", branch="b2", description="d2")
+        merge.add_claim(conn, "s1", "src/shared.py")
+        merge.add_claim(conn, "s2", "src/shared.py")
+        result = merge.check_overlaps(conn, "s1")
+        assert result["clean"] is False
+        assert len(result["conflicts"]) == 1
+        conflict = result["conflicts"][0]
+        assert conflict["file"] == "src/shared.py"
+        assert conflict["blocking_session"] == "s2"
+        assert conflict["type"] == "parallel_session"
+
+    def test_main_diverged_overlap(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        merge.add_claim(conn, "s1", "src/foo.py")
+        result = merge.check_overlaps(
+            conn, "s1", main_changed_files=["src/foo.py", "src/other.py"],
+        )
+        assert result["clean"] is False
+        conflict = result["conflicts"][0]
+        assert conflict["file"] == "src/foo.py"
+        assert conflict["type"] == "main_diverged"
+
+    def test_ignores_done_sessions(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        merge.start_session(conn, session_id="s2", branch="b2", description="d2")
+        merge.add_claim(conn, "s1", "src/shared.py")
+        merge.add_claim(conn, "s2", "src/shared.py")
+        merge.merge(conn, "s2", expected_main_head="abc", current_main_head_fn=lambda: "abc")
+        merge.finish(conn, "s2", success=True)
+        result = merge.check_overlaps(conn, "s1")
+        assert result["clean"] is True
+
+    def test_ignores_abandoned_sessions(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        merge.start_session(conn, session_id="s2", branch="b2", description="d2")
+        merge.add_claim(conn, "s1", "src/shared.py")
+        merge.add_claim(conn, "s2", "src/shared.py")
+        merge.abandon_session(conn, "s2")
+        result = merge.check_overlaps(conn, "s1")
+        assert result["clean"] is True
+
+    def test_returns_main_head(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        result = merge.check_overlaps(
+            conn, "s1", current_main_head_fn=lambda: "abc123",
+        )
+        assert result["main_head"] == "abc123"
+
+    def test_unknown_session_raises(self, conn):
+        with pytest.raises(KeyError, match="not found"):
+            merge.check_overlaps(conn, "nope")
