@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -10,8 +11,22 @@ from mcp.server.fastmcp import FastMCP
 from codebugs import db, reqs
 
 
+@contextmanager
 def _conn():
-    return db.connect()
+    conn = db.connect()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def _get_main_head() -> str:
+    """Get current main branch HEAD SHA. Used by merge tools that need git."""
+    import subprocess
+    return subprocess.check_output(
+        ["git", "rev-parse", "main"],
+        text=True, timeout=10,
+    ).strip()
 
 
 def register_findings_tools(mcp: FastMCP) -> None:
@@ -39,8 +54,7 @@ def register_findings_tools(mcp: FastMCP) -> None:
             tags: Optional tags for grouping
             meta: Optional JSON metadata (lines, module, rule_code, etc.)
         """
-        conn = _conn()
-        try:
+        with _conn() as conn:
             return db.add_finding(
                 conn,
                 severity=severity,
@@ -51,8 +65,6 @@ def register_findings_tools(mcp: FastMCP) -> None:
                 tags=tags,
                 meta=meta,
             )
-        finally:
-            conn.close()
 
     @mcp.tool()
     def batch_add(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -63,11 +75,8 @@ def register_findings_tools(mcp: FastMCP) -> None:
                 severity, category, file, description, and optionally:
                 source, tags, meta
         """
-        conn = _conn()
-        try:
+        with _conn() as conn:
             return db.batch_add_findings(conn, findings)
-        finally:
-            conn.close()
 
     @mcp.tool()
     def update(
@@ -89,8 +98,7 @@ def register_findings_tools(mcp: FastMCP) -> None:
             tags: Replace tags list
             meta_update: Merge additional metadata keys
         """
-        conn = _conn()
-        try:
+        with _conn() as conn:
             return db.update_finding(
                 conn,
                 finding_id,
@@ -99,8 +107,6 @@ def register_findings_tools(mcp: FastMCP) -> None:
                 tags=tags,
                 meta_update=meta_update,
             )
-        finally:
-            conn.close()
 
     @mcp.tool()
     def query(
@@ -131,8 +137,7 @@ def register_findings_tools(mcp: FastMCP) -> None:
             limit: Max results (default 100)
             offset: Pagination offset
         """
-        conn = _conn()
-        try:
+        with _conn() as conn:
             return db.query_findings(
                 conn,
                 status=status,
@@ -147,8 +152,6 @@ def register_findings_tools(mcp: FastMCP) -> None:
                 limit=limit,
                 offset=offset,
             )
-        finally:
-            conn.close()
 
     @mcp.tool()
     def stats(group_by: str = "severity") -> dict[str, Any]:
@@ -157,31 +160,22 @@ def register_findings_tools(mcp: FastMCP) -> None:
         Args:
             group_by: Group by: severity, category, status, file, source
         """
-        conn = _conn()
-        try:
+        with _conn() as conn:
             return db.get_stats(conn, group_by=group_by)
-        finally:
-            conn.close()
 
     @mcp.tool()
     def summary() -> dict[str, Any]:
         """Dashboard overview — open/resolved counts, severity breakdown,
         top categories, hottest files. Start here for orientation."""
-        conn = _conn()
-        try:
+        with _conn() as conn:
             return db.get_summary(conn)
-        finally:
-            conn.close()
 
     @mcp.tool()
     def categories() -> list[dict[str, Any]]:
         """List all existing categories with counts.
         Call this before adding findings to reuse consistent category names."""
-        conn = _conn()
-        try:
+        with _conn() as conn:
             return db.get_categories(conn)
-        finally:
-            conn.close()
 
 
 def register_reqs_tools(mcp: FastMCP) -> None:
@@ -212,15 +206,12 @@ def register_reqs_tools(mcp: FastMCP) -> None:
             tags: Optional tags
             meta: Optional metadata
         """
-        conn = _conn()
-        try:
+        with _conn() as conn:
             return reqs.add_requirement(
                 conn, req_id=req_id, description=description, section=section,
                 priority=priority, status=status, source=source,
                 test_coverage=test_coverage, tags=tags, meta=meta,
             )
-        finally:
-            conn.close()
 
     @mcp.tool()
     def reqs_update(
@@ -245,15 +236,12 @@ def register_reqs_tools(mcp: FastMCP) -> None:
             tags: Replace tags
             meta_update: Merge metadata keys
         """
-        conn = _conn()
-        try:
+        with _conn() as conn:
             return reqs.update_requirement(
                 conn, req_id, status=status, description=description,
                 priority=priority, test_coverage=test_coverage,
                 notes=notes, tags=tags, meta_update=meta_update,
             )
-        finally:
-            conn.close()
 
     @mcp.tool()
     def reqs_query(
@@ -280,15 +268,12 @@ def register_reqs_tools(mcp: FastMCP) -> None:
             limit: Max results (default 100)
             offset: Pagination offset
         """
-        conn = _conn()
-        try:
+        with _conn() as conn:
             return reqs.query_requirements(
                 conn, status=status, priority=priority, section=section,
                 search=search, source=source, tag=tag,
                 group_by=group_by, limit=limit, offset=offset,
             )
-        finally:
-            conn.close()
 
     @mcp.tool()
     def reqs_stats(group_by: str = "status") -> dict[str, Any]:
@@ -297,21 +282,15 @@ def register_reqs_tools(mcp: FastMCP) -> None:
         Args:
             group_by: Group by: status, priority, section, source
         """
-        conn = _conn()
-        try:
+        with _conn() as conn:
             return reqs.get_reqs_stats(conn, group_by=group_by)
-        finally:
-            conn.close()
 
     @mcp.tool()
     def reqs_summary() -> dict[str, Any]:
         """Dashboard overview — status breakdown, priority split,
         section progress, requirements without tests. Start here."""
-        conn = _conn()
-        try:
+        with _conn() as conn:
             return reqs.get_reqs_summary(conn)
-        finally:
-            conn.close()
 
     @mcp.tool()
     def reqs_verify(
@@ -329,11 +308,8 @@ def register_reqs_tools(mcp: FastMCP) -> None:
             checks: List of checks to run (default: all). Options: tests, ids, status
             project_dir: Project root for test file verification (default: cwd)
         """
-        conn = _conn()
-        try:
+        with _conn() as conn:
             return reqs.verify_requirements(conn, project_dir=project_dir, checks=checks)
-        finally:
-            conn.close()
 
     @mcp.tool()
     def reqs_import(
@@ -349,11 +325,8 @@ def register_reqs_tools(mcp: FastMCP) -> None:
         Args:
             markdown_path: Path to the REQUIREMENTS.md file
         """
-        conn = _conn()
-        try:
+        with _conn() as conn:
             return reqs.import_markdown(conn, markdown_path)
-        finally:
-            conn.close()
 
     @mcp.tool()
     def reqs_embed(
@@ -369,11 +342,8 @@ def register_reqs_tools(mcp: FastMCP) -> None:
             req_id: Requirement ID
             embedding: Float vector (any dimensionality)
         """
-        conn = _conn()
-        try:
+        with _conn() as conn:
             return reqs.store_embedding(conn, req_id, embedding)
-        finally:
-            conn.close()
 
     @mcp.tool()
     def reqs_batch_embed(
@@ -384,11 +354,8 @@ def register_reqs_tools(mcp: FastMCP) -> None:
         Args:
             embeddings: Dict mapping requirement ID to float vector
         """
-        conn = _conn()
-        try:
+        with _conn() as conn:
             return reqs.batch_store_embeddings(conn, embeddings)
-        finally:
-            conn.close()
 
     @mcp.tool()
     def reqs_search_similar(
@@ -408,23 +375,129 @@ def register_reqs_tools(mcp: FastMCP) -> None:
             min_similarity: Minimum cosine similarity (default 0.3)
             status: Optional status filter
         """
-        conn = _conn()
-        try:
+        with _conn() as conn:
             return reqs.search_similar(
                 conn, query_embedding, limit=limit,
                 min_similarity=min_similarity, status=status,
             )
-        finally:
-            conn.close()
 
     @mcp.tool()
     def reqs_embedding_stats() -> dict[str, Any]:
         """Report on embedding coverage — how many requirements have embeddings."""
-        conn = _conn()
-        try:
+        with _conn() as conn:
             return reqs.embedding_stats(conn)
-        finally:
-            conn.close()
+
+
+def register_merge_tools(mcp: FastMCP) -> None:
+    """Register merge-coordination tools on the given MCP server."""
+
+    @mcp.tool()
+    def codemerge_start(
+        session_id: str,
+        branch: str,
+        description: str = "",
+        base_commit: str = "",
+        repo_root: str = "",
+        allow_restart: bool = False,
+    ) -> dict[str, Any]:
+        """Start a new merge session for a branch.
+
+        Args:
+            session_id: Unique identifier for this merge session
+            branch: Git branch name being merged
+            description: Human-readable description of the work
+            base_commit: Git commit SHA this branch diverged from
+            repo_root: Repo root path (default: cwd)
+            allow_restart: If True, restart an existing active session
+        """
+        from codebugs import merge
+        with _conn() as conn:
+            return merge.start_session(
+                conn,
+                session_id=session_id,
+                branch=branch,
+                description=description,
+                base_commit=base_commit,
+                repo_root=repo_root,
+                allow_restart=allow_restart,
+            )
+
+    @mcp.tool()
+    def codemerge_claim(
+        session_id: str,
+        file_path: str,
+    ) -> dict[str, Any]:
+        """Claim a file as being modified by this session.
+
+        Args:
+            session_id: The merge session ID
+            file_path: File path being modified (relative to repo root)
+        """
+        from codebugs import merge
+        with _conn() as conn:
+            return merge.add_claim(conn, session_id, file_path)
+
+    @mcp.tool()
+    def codemerge_check(
+        session_id: str,
+        main_changed_files: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Check for overlapping file claims with other sessions.
+
+        Returns whether the session is clean to proceed, lists any conflicts,
+        and records the current main HEAD for CAS comparison at merge time.
+
+        Args:
+            session_id: The merge session ID
+            main_changed_files: Files changed on main since base (optional, for overlap check)
+        """
+        from codebugs import merge
+        with _conn() as conn:
+            return merge.check_overlaps(
+                conn,
+                session_id,
+                main_changed_files=main_changed_files,
+                current_main_head_fn=_get_main_head,
+            )
+
+    @mcp.tool()
+    def codemerge_merge(
+        session_id: str,
+        expected_main_head: str,
+    ) -> dict[str, Any]:
+        """Acquire the merge lock and proceed with merging.
+
+        Uses compare-and-swap on main HEAD to prevent races. If main has moved
+        since check, returns proceed=False with reason='main_moved'. If another
+        session holds the lock, returns proceed=False with reason='lock_held'.
+
+        Args:
+            session_id: The merge session ID
+            expected_main_head: The main HEAD SHA recorded during codemerge_check
+        """
+        from codebugs import merge
+        with _conn() as conn:
+            return merge.merge(
+                conn,
+                session_id,
+                expected_main_head=expected_main_head,
+                current_main_head_fn=_get_main_head,
+            )
+
+    @mcp.tool()
+    def codemerge_finish(
+        session_id: str,
+        success: bool = True,
+    ) -> dict[str, Any]:
+        """Finish a merge session and release the lock.
+
+        Args:
+            session_id: The merge session ID
+            success: True if merge succeeded (status→done), False if it failed (status→abandoned)
+        """
+        from codebugs import merge
+        with _conn() as conn:
+            return merge.finish(conn, session_id, success=success)
 
 
 def main():
@@ -432,23 +505,23 @@ def main():
     parser = argparse.ArgumentParser(description="Codebugs MCP server")
     parser.add_argument(
         "--mode",
-        choices=["findings", "reqs", "all"],
+        choices=["findings", "reqs", "merge", "all"],
         default="all",
-        help="Which tools to expose: findings, reqs, or all (default: all)",
+        help="Which tools to expose: findings, reqs, merge, or all (default: all)",
     )
     args = parser.parse_args()
 
-    name = {"findings": "codebugs", "reqs": "codereqs", "all": "codebugs"}[args.mode]
+    name = {"findings": "codebugs", "reqs": "codereqs", "merge": "codemerge", "all": "codebugs"}[args.mode]
     server = FastMCP(name, json_response=True)
 
     if args.mode in ("findings", "all"):
         register_findings_tools(server)
     if args.mode in ("reqs", "all"):
         register_reqs_tools(server)
+    if args.mode in ("merge", "all"):
+        register_merge_tools(server)
 
     server.run()
-
-
 
 
 if __name__ == "__main__":
