@@ -414,3 +414,74 @@ class TestVisibility:
         assert result["merging_sessions"] == 1
         assert result["total_claims"] == 1
         assert result["lock_holder"] == "s1"
+
+
+class TestConcurrentMergeScenario:
+    """End-to-end test: two sessions racing to merge."""
+
+    def test_second_session_blocked_by_cas(self, conn):
+        """Simulates the race from the design doc:
+        A checks, B merges first, A's CAS fails, A re-checks and retries."""
+        merge.start_session(conn, session_id="A", branch="feature/a", description="A")
+        merge.start_session(conn, session_id="B", branch="feature/b", description="B")
+        merge.add_claim(conn, "A", "src/foo.py")
+        merge.add_claim(conn, "B", "src/bar.py")
+
+        # Both check — both see clean
+        check_a = merge.check_overlaps(conn, "A", current_main_head_fn=lambda: "v1")
+        check_b = merge.check_overlaps(conn, "B", current_main_head_fn=lambda: "v1")
+        assert check_a["clean"] is True
+        assert check_b["clean"] is True
+
+        # B merges first
+        result_b = merge.merge(
+            conn, "B", expected_main_head="v1", current_main_head_fn=lambda: "v1",
+        )
+        assert result_b["proceed"] is True
+
+        # A tries to merge — lock held by B
+        result_a = merge.merge(
+            conn, "A", expected_main_head="v1", current_main_head_fn=lambda: "v1",
+        )
+        assert result_a["proceed"] is False
+        assert result_a["reason"] == "lock_held"
+
+        # B finishes, main moves to v2
+        merge.finish(conn, "B", success=True)
+
+        # A retries with stale head — CAS rejects
+        result_a2 = merge.merge(
+            conn, "A", expected_main_head="v1", current_main_head_fn=lambda: "v2",
+        )
+        assert result_a2["proceed"] is False
+        assert result_a2["reason"] == "main_moved"
+
+        # A re-checks with updated main
+        check_a2 = merge.check_overlaps(
+            conn, "A", current_main_head_fn=lambda: "v2",
+        )
+        assert check_a2["main_head"] == "v2"
+
+        # A merges with correct head
+        result_a3 = merge.merge(
+            conn, "A", expected_main_head="v2", current_main_head_fn=lambda: "v2",
+        )
+        assert result_a3["proceed"] is True
+        merge.finish(conn, "A", success=True)
+
+        # Both done
+        sessions = merge.get_sessions(conn, status="done")
+        assert len(sessions) == 2
+
+    def test_overlapping_files_detected(self, conn):
+        """Two sessions editing the same file — dirty path required."""
+        merge.start_session(conn, session_id="A", branch="feature/a", description="A")
+        merge.start_session(conn, session_id="B", branch="feature/b", description="B")
+        merge.add_claim(conn, "A", "src/shared.py")
+        merge.add_claim(conn, "B", "src/shared.py")
+
+        check = merge.check_overlaps(conn, "A")
+        assert check["clean"] is False
+        assert check["recommendation"] == "dirty"
+        assert check["conflicts"][0]["file"] == "src/shared.py"
+        assert check["conflicts"][0]["blocking_session"] == "B"
