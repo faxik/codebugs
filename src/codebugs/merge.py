@@ -62,3 +62,107 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "VALUES (1, NULL, NULL, NULL)"
     )
     conn.commit()
+
+
+def start_session(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str,
+    branch: str,
+    description: str = "",
+    base_commit: str = "",
+    repo_root: str = "",
+    allow_restart: bool = False,
+) -> dict[str, Any]:
+    """Register a new working session."""
+    now = _now()
+    if allow_restart:
+        existing = conn.execute(
+            "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if existing and existing["status"] in ("abandoned", "done"):
+            conn.execute(
+                """UPDATE codemerge_sessions
+                   SET branch=?, description=?, base_commit=?, repo_root=?,
+                       started_at=?, last_activity=?, status='active', finished_at=NULL
+                   WHERE session_id=?""",
+                (branch, description, base_commit, repo_root, now, now, session_id),
+            )
+            conn.execute("DELETE FROM codemerge_claims WHERE session_id = ?", (session_id,))
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            return dict(row)
+
+    conn.execute(
+        """INSERT INTO codemerge_sessions
+           (session_id, branch, description, base_commit, repo_root, started_at, last_activity)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (session_id, branch, description, base_commit, repo_root, now, now),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    return dict(row)
+
+
+def abandon_session(conn: sqlite3.Connection, session_id: str) -> dict[str, Any]:
+    """Mark a session as abandoned, releasing claims and lock."""
+    row = conn.execute(
+        "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    if not row:
+        raise KeyError(f"Session not found: {session_id}")
+
+    now = _now()
+    conn.execute(
+        "UPDATE codemerge_sessions SET status='abandoned', finished_at=?, last_activity=? "
+        "WHERE session_id=?",
+        (now, now, session_id),
+    )
+    conn.execute(
+        "UPDATE codemerge_locks SET session_id=NULL, acquired_at=NULL, expires_at=NULL "
+        "WHERE session_id=?",
+        (session_id,),
+    )
+    conn.commit()
+    return dict(conn.execute(
+        "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
+    ).fetchone())
+
+
+def finish(
+    conn: sqlite3.Connection,
+    session_id: str,
+    *,
+    success: bool,
+) -> dict[str, Any]:
+    """Release lock and mark session done (success) or revert to active (failure)."""
+    row = conn.execute(
+        "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    if not row:
+        raise KeyError(f"Session not found: {session_id}")
+    if row["status"] != "merging":
+        raise ValueError(f"Session '{session_id}' is not in 'merging' state (is '{row['status']}')")
+
+    now = _now()
+    new_status = "done" if success else "active"
+    finished_at = now if success else None
+
+    conn.execute(
+        "UPDATE codemerge_sessions SET status=?, finished_at=?, last_activity=? "
+        "WHERE session_id=?",
+        (new_status, finished_at, now, session_id),
+    )
+    conn.execute(
+        "UPDATE codemerge_locks SET session_id=NULL, acquired_at=NULL, expires_at=NULL "
+        "WHERE id=1 AND session_id=?",
+        (session_id,),
+    )
+    conn.commit()
+    return dict(conn.execute(
+        "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
+    ).fetchone())
