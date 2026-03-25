@@ -50,13 +50,22 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _get_session(conn: sqlite3.Connection, session_id: str) -> sqlite3.Row:
+    """Fetch a session row or raise KeyError."""
+    row = conn.execute(
+        "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    if not row:
+        raise KeyError(f"Session not found: {session_id}")
+    return row
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """Create the codemerge tables if they don't exist."""
     for stmt in MERGE_SCHEMA.split(";"):
         stmt = stmt.strip()
         if stmt:
             conn.execute(stmt)
-    # Initialize singleton lock row
     conn.execute(
         "INSERT OR IGNORE INTO codemerge_locks (id, session_id, acquired_at, expires_at) "
         "VALUES (1, NULL, NULL, NULL)"
@@ -110,11 +119,7 @@ def start_session(
 
 def abandon_session(conn: sqlite3.Connection, session_id: str) -> dict[str, Any]:
     """Mark a session as abandoned, releasing claims and lock."""
-    row = conn.execute(
-        "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
-    ).fetchone()
-    if not row:
-        raise KeyError(f"Session not found: {session_id}")
+    _get_session(conn, session_id)
 
     now = _now()
     conn.execute(
@@ -124,7 +129,7 @@ def abandon_session(conn: sqlite3.Connection, session_id: str) -> dict[str, Any]
     )
     conn.execute(
         "UPDATE codemerge_locks SET session_id=NULL, acquired_at=NULL, expires_at=NULL "
-        "WHERE session_id=?",
+        "WHERE id=1 AND session_id=?",
         (session_id,),
     )
     conn.commit()
@@ -140,11 +145,7 @@ def finish(
     success: bool,
 ) -> dict[str, Any]:
     """Release lock and mark session done (success) or revert to active (failure)."""
-    row = conn.execute(
-        "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
-    ).fetchone()
-    if not row:
-        raise KeyError(f"Session not found: {session_id}")
+    row = _get_session(conn, session_id)
     if row["status"] != "merging":
         raise ValueError(f"Session '{session_id}' is not in 'merging' state (is '{row['status']}')")
 
@@ -174,11 +175,7 @@ def add_claim(
     file_path: str,
 ) -> dict[str, Any]:
     """Record that a session has modified a file. Idempotent."""
-    row = conn.execute(
-        "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
-    ).fetchone()
-    if not row:
-        raise KeyError(f"Session not found: {session_id}")
+    row = _get_session(conn, session_id)
     if row["status"] not in ("active", "merging"):
         raise ValueError(f"Session '{session_id}' is not active (is '{row['status']}')")
 
@@ -218,11 +215,7 @@ def merge(
     Returns:
         {proceed: True} or {proceed: False, reason: "...", ...}
     """
-    row = conn.execute(
-        "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
-    ).fetchone()
-    if not row:
-        raise KeyError(f"Session not found: {session_id}")
+    row = _get_session(conn, session_id)
 
     # Idempotent: already merging with lock held
     if row["status"] == "merging":
@@ -235,8 +228,8 @@ def merge(
             f"Session '{session_id}' is not in 'active' state (is '{row['status']}')"
         )
 
-    now = _now()
     now_dt = datetime.now(timezone.utc)
+    now = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     expires = (now_dt + timedelta(seconds=LOCK_TTL_SECONDS)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # BEGIN IMMEDIATE acquires a RESERVED lock on the database file,
@@ -273,7 +266,6 @@ def merge(
                     (now, lock["session_id"]),
                 )
 
-            # CAS check: verify main hasn't moved
             actual_head = current_main_head_fn()
             if actual_head != expected_main_head:
                 conn.execute("ROLLBACK")
@@ -284,7 +276,6 @@ def merge(
                     "current_head": actual_head,
                 }
 
-            # Acquire lock + transition to merging
             conn.execute(
                 "UPDATE codemerge_locks SET session_id=?, acquired_at=?, expires_at=? WHERE id=1",
                 (session_id, now, expires),
@@ -322,11 +313,7 @@ def check_overlaps(
     Returns:
         {clean: bool, conflicts: [...], main_head: "...", recommendation: "clean"|"dirty"}
     """
-    row = conn.execute(
-        "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
-    ).fetchone()
-    if not row:
-        raise KeyError(f"Session not found: {session_id}")
+    _get_session(conn, session_id)
 
     my_claims = conn.execute(
         "SELECT file_path FROM codemerge_claims WHERE session_id = ?", (session_id,)
@@ -335,27 +322,24 @@ def check_overlaps(
 
     conflicts: list[dict[str, str]] = []
 
-    # Check against other active/merging sessions
-    others = conn.execute(
-        "SELECT session_id, branch FROM codemerge_sessions "
-        "WHERE session_id != ? AND status IN ('active', 'merging')",
-        (session_id,),
+    # Single query for all overlapping claims from other active/merging sessions
+    overlapping = conn.execute(
+        """SELECT c.file_path, s.session_id, s.branch
+           FROM codemerge_claims c
+           JOIN codemerge_sessions s ON c.session_id = s.session_id
+           WHERE s.session_id != ? AND s.status IN ('active', 'merging')
+             AND c.file_path IN (SELECT file_path FROM codemerge_claims WHERE session_id = ?)""",
+        (session_id, session_id),
     ).fetchall()
 
-    for other in others:
-        other_claims = conn.execute(
-            "SELECT file_path FROM codemerge_claims WHERE session_id = ?",
-            (other["session_id"],),
-        ).fetchall()
-        other_files = {r["file_path"] for r in other_claims}
-        overlap = my_files & other_files
-        for f in sorted(overlap):
-            conflicts.append({
-                "file": f,
-                "blocking_session": other["session_id"],
-                "blocking_branch": other["branch"],
-                "type": "parallel_session",
-            })
+    for row in overlapping:
+        conflicts.append({
+            "file": row["file_path"],
+            "blocking_session": row["session_id"],
+            "blocking_branch": row["branch"],
+            "type": "parallel_session",
+        })
+    conflicts.sort(key=lambda c: (c["file"], c["blocking_session"]))
 
     # Check main divergence
     if main_changed_files is not None:
