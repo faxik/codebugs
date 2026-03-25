@@ -198,3 +198,101 @@ class TestClaims:
             "SELECT last_activity FROM codemerge_sessions WHERE session_id='s1'"
         ).fetchone()[0]
         assert after >= before
+
+
+class TestMerge:
+    def _head_fn(self, sha="abc123"):
+        """Return a callable that returns a fixed main HEAD."""
+        return lambda: sha
+
+    def test_merge_clean(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        result = merge.merge(
+            conn, "s1", expected_main_head="abc123",
+            current_main_head_fn=self._head_fn("abc123"),
+        )
+        assert result["proceed"] is True
+        row = conn.execute(
+            "SELECT status FROM codemerge_sessions WHERE session_id='s1'"
+        ).fetchone()
+        assert row["status"] == "merging"
+        lock = conn.execute("SELECT * FROM codemerge_locks WHERE id=1").fetchone()
+        assert lock["session_id"] == "s1"
+
+    def test_merge_cas_rejects_stale_head(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        result = merge.merge(
+            conn, "s1", expected_main_head="abc123",
+            current_main_head_fn=self._head_fn("def456"),
+        )
+        assert result["proceed"] is False
+        assert result["reason"] == "main_moved"
+        assert result["current_head"] == "def456"
+        row = conn.execute(
+            "SELECT status FROM codemerge_sessions WHERE session_id='s1'"
+        ).fetchone()
+        assert row["status"] == "active"
+
+    def test_merge_lock_held_rejects(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        merge.start_session(conn, session_id="s2", branch="b2", description="d2")
+        merge.merge(
+            conn, "s1", expected_main_head="abc123",
+            current_main_head_fn=self._head_fn("abc123"),
+        )
+        result = merge.merge(
+            conn, "s2", expected_main_head="abc123",
+            current_main_head_fn=self._head_fn("abc123"),
+        )
+        assert result["proceed"] is False
+        assert result["reason"] == "lock_held"
+        assert result["holder"] == "s1"
+
+    def test_merge_expired_lock_reclaimed(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        merge.start_session(conn, session_id="s2", branch="b2", description="d2")
+        merge.merge(
+            conn, "s1", expected_main_head="abc123",
+            current_main_head_fn=self._head_fn("abc123"),
+        )
+        conn.execute(
+            "UPDATE codemerge_locks SET expires_at='2000-01-01T00:00:00Z' WHERE id=1"
+        )
+        conn.commit()
+        result = merge.merge(
+            conn, "s2", expected_main_head="abc123",
+            current_main_head_fn=self._head_fn("abc123"),
+        )
+        assert result["proceed"] is True
+
+    def test_merge_idempotent_if_already_merging(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        merge.merge(
+            conn, "s1", expected_main_head="abc123",
+            current_main_head_fn=self._head_fn("abc123"),
+        )
+        result = merge.merge(
+            conn, "s1", expected_main_head="abc123",
+            current_main_head_fn=self._head_fn("abc123"),
+        )
+        assert result["proceed"] is True
+
+    def test_merge_unknown_session_raises(self, conn):
+        with pytest.raises(KeyError, match="not found"):
+            merge.merge(
+                conn, "nope", expected_main_head="abc",
+                current_main_head_fn=self._head_fn("abc"),
+            )
+
+    def test_merge_done_session_rejects(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        merge.merge(
+            conn, "s1", expected_main_head="abc",
+            current_main_head_fn=self._head_fn("abc"),
+        )
+        merge.finish(conn, "s1", success=True)
+        with pytest.raises(ValueError, match="not in 'active' state"):
+            merge.merge(
+                conn, "s1", expected_main_head="abc",
+                current_main_head_fn=self._head_fn("abc"),
+            )

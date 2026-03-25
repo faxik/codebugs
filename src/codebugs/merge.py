@@ -196,6 +196,113 @@ def add_claim(
     return {"session_id": session_id, "file_path": file_path, "claimed_at": now}
 
 
+def merge(
+    conn: sqlite3.Connection,
+    session_id: str,
+    *,
+    expected_main_head: str,
+    current_main_head_fn: Callable[[], str],
+) -> dict[str, Any]:
+    """Acquire merge lock with CAS verification.
+
+    Uses BEGIN IMMEDIATE to acquire a SQLite write lock at transaction
+    start, preventing two concurrent processes from both reading the
+    singleton lock as free. This is the critical mutual exclusion point.
+
+    Args:
+        session_id: The session requesting merge.
+        expected_main_head: The main HEAD SHA the caller last checked against.
+        current_main_head_fn: Callable returning current main HEAD SHA.
+            Injected so core logic stays git-free and testable.
+
+    Returns:
+        {proceed: True} or {proceed: False, reason: "...", ...}
+    """
+    row = conn.execute(
+        "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    if not row:
+        raise KeyError(f"Session not found: {session_id}")
+
+    # Idempotent: already merging with lock held
+    if row["status"] == "merging":
+        lock = conn.execute("SELECT * FROM codemerge_locks WHERE id=1").fetchone()
+        if lock and lock["session_id"] == session_id:
+            return {"proceed": True, "session_id": session_id}
+
+    if row["status"] != "active":
+        raise ValueError(
+            f"Session '{session_id}' is not in 'active' state (is '{row['status']}')"
+        )
+
+    now = _now()
+    now_dt = datetime.now(timezone.utc)
+    expires = (now_dt + timedelta(seconds=LOCK_TTL_SECONDS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # BEGIN IMMEDIATE acquires a RESERVED lock on the database file,
+    # blocking other IMMEDIATE/EXCLUSIVE transactions from starting.
+    # This prevents the race where two processes both read the lock as free.
+    #
+    # We must disable Python's implicit transaction management to issue
+    # BEGIN IMMEDIATE ourselves. Save and restore isolation_level around
+    # the critical section.
+    saved_isolation = conn.isolation_level
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            lock = conn.execute("SELECT * FROM codemerge_locks WHERE id=1").fetchone()
+
+            if lock["session_id"] is not None:
+                # Check if lock is expired (ISO 8601 string comparison is safe
+                # because format is fixed-width: YYYY-MM-DDTHH:MM:SSZ)
+                if lock["expires_at"] and lock["expires_at"] > now:
+                    # Lock is held and not expired — rollback and report
+                    conn.execute("ROLLBACK")
+                    return {
+                        "proceed": False,
+                        "reason": "lock_held",
+                        "holder": lock["session_id"],
+                        "held_since": lock["acquired_at"],
+                        "expires_at": lock["expires_at"],
+                    }
+                # Lock expired — mark the holder's session as abandoned
+                conn.execute(
+                    "UPDATE codemerge_sessions SET status='abandoned', last_activity=? "
+                    "WHERE session_id=? AND status='merging'",
+                    (now, lock["session_id"]),
+                )
+
+            # CAS check: verify main hasn't moved
+            actual_head = current_main_head_fn()
+            if actual_head != expected_main_head:
+                conn.execute("ROLLBACK")
+                return {
+                    "proceed": False,
+                    "reason": "main_moved",
+                    "expected_head": expected_main_head,
+                    "current_head": actual_head,
+                }
+
+            # Acquire lock + transition to merging
+            conn.execute(
+                "UPDATE codemerge_locks SET session_id=?, acquired_at=?, expires_at=? WHERE id=1",
+                (session_id, now, expires),
+            )
+            conn.execute(
+                "UPDATE codemerge_sessions SET status='merging', last_activity=? WHERE session_id=?",
+                (now, session_id),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.isolation_level = saved_isolation
+
+    return {"proceed": True, "session_id": session_id}
+
+
 def get_claims(
     conn: sqlite3.Connection,
     session_id: str,
