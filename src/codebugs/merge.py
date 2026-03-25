@@ -380,6 +380,58 @@ def check_overlaps(
     return result
 
 
+def get_sessions(
+    conn: sqlite3.Connection,
+    *,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    """List sessions with claim counts."""
+    conditions = []
+    params: list[Any] = []
+    if status:
+        conditions.append("s.status = ?")
+        params.append(status)
+
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    rows = conn.execute(
+        f"""SELECT s.*, COUNT(c.id) as claim_count
+            FROM codemerge_sessions s
+            LEFT JOIN codemerge_claims c ON s.session_id = c.session_id
+            {where}
+            GROUP BY s.session_id
+            ORDER BY s.started_at DESC""",
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_status(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Dashboard summary."""
+    counts = {}
+    for r in conn.execute(
+        "SELECT status, COUNT(*) as c FROM codemerge_sessions GROUP BY status"
+    ):
+        counts[r["status"]] = r["c"]
+
+    total_claims = conn.execute(
+        "SELECT COUNT(*) as c FROM codemerge_claims cc "
+        "JOIN codemerge_sessions cs ON cc.session_id = cs.session_id "
+        "WHERE cs.status IN ('active', 'merging')"
+    ).fetchone()["c"]
+
+    lock = conn.execute("SELECT session_id FROM codemerge_locks WHERE id=1").fetchone()
+
+    return {
+        "active_sessions": counts.get("active", 0),
+        "merging_sessions": counts.get("merging", 0),
+        "done_sessions": counts.get("done", 0),
+        "abandoned_sessions": counts.get("abandoned", 0),
+        "total_claims": total_claims,
+        "lock_holder": lock["session_id"] if lock else None,
+    }
+
+
 def get_claims(
     conn: sqlite3.Connection,
     session_id: str,

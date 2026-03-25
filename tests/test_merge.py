@@ -361,3 +361,42 @@ class TestCheckOverlaps:
     def test_unknown_session_raises(self, conn):
         with pytest.raises(KeyError, match="not found"):
             merge.check_overlaps(conn, "nope")
+
+
+class TestVisibility:
+    def test_get_sessions_all(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        merge.start_session(conn, session_id="s2", branch="b2", description="d2")
+        result = merge.get_sessions(conn)
+        assert len(result) == 2
+
+    def test_get_sessions_filter_status(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        merge.start_session(conn, session_id="s2", branch="b2", description="d2")
+        merge.abandon_session(conn, "s2")
+        result = merge.get_sessions(conn, status="active")
+        assert len(result) == 1
+        assert result[0]["session_id"] == "s1"
+
+    def test_get_sessions_includes_claim_count(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        merge.add_claim(conn, "s1", "src/foo.py")
+        merge.add_claim(conn, "s1", "src/bar.py")
+        result = merge.get_sessions(conn)
+        assert result[0]["claim_count"] == 2
+
+    def test_get_status_empty(self, conn):
+        result = merge.get_status(conn)
+        assert result["active_sessions"] == 0
+        assert result["total_claims"] == 0
+        assert result["lock_holder"] is None
+
+    def test_get_status_with_data(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        merge.add_claim(conn, "s1", "src/foo.py")
+        merge.merge(conn, "s1", expected_main_head="abc", current_main_head_fn=lambda: "abc")
+        result = merge.get_status(conn)
+        assert result["active_sessions"] == 0  # s1 is now merging
+        assert result["merging_sessions"] == 1
+        assert result["total_claims"] == 1
+        assert result["lock_holder"] == "s1"
