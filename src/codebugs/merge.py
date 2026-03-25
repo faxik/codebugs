@@ -166,3 +166,44 @@ def finish(
     return dict(conn.execute(
         "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
     ).fetchone())
+
+
+def add_claim(
+    conn: sqlite3.Connection,
+    session_id: str,
+    file_path: str,
+) -> dict[str, Any]:
+    """Record that a session has modified a file. Idempotent."""
+    row = conn.execute(
+        "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    if not row:
+        raise KeyError(f"Session not found: {session_id}")
+    if row["status"] not in ("active", "merging"):
+        raise ValueError(f"Session '{session_id}' is not active (is '{row['status']}')")
+
+    now = _now()
+    conn.execute(
+        "INSERT OR IGNORE INTO codemerge_claims (session_id, file_path, claimed_at) "
+        "VALUES (?, ?, ?)",
+        (session_id, file_path, now),
+    )
+    conn.execute(
+        "UPDATE codemerge_sessions SET last_activity=? WHERE session_id=?",
+        (now, session_id),
+    )
+    conn.commit()
+    return {"session_id": session_id, "file_path": file_path, "claimed_at": now}
+
+
+def get_claims(
+    conn: sqlite3.Connection,
+    session_id: str,
+) -> list[dict[str, Any]]:
+    """List all claimed files for a session."""
+    rows = conn.execute(
+        "SELECT session_id, file_path, claimed_at FROM codemerge_claims "
+        "WHERE session_id = ? ORDER BY claimed_at",
+        (session_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]

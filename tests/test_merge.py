@@ -149,3 +149,52 @@ class TestAbandonSession:
         merge.abandon_session(conn, "s1")
         result = merge.abandon_session(conn, "s1")
         assert result["status"] == "abandoned"
+
+
+class TestClaims:
+    def test_add_claim(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        result = merge.add_claim(conn, "s1", "src/foo.py")
+        assert result["file_path"] == "src/foo.py"
+        assert result["session_id"] == "s1"
+
+    def test_add_claim_idempotent(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        merge.add_claim(conn, "s1", "src/foo.py")
+        merge.add_claim(conn, "s1", "src/foo.py")  # no error
+        claims = merge.get_claims(conn, "s1")
+        assert len(claims) == 1
+
+    def test_add_claim_unknown_session_raises(self, conn):
+        with pytest.raises(KeyError, match="not found"):
+            merge.add_claim(conn, "nonexistent", "src/foo.py")
+
+    def test_add_claim_done_session_raises(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        _force_merging(conn, "s1")
+        merge.finish(conn, "s1", success=True)
+        with pytest.raises(ValueError, match="not active"):
+            merge.add_claim(conn, "s1", "src/foo.py")
+
+    def test_get_claims_empty(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        assert merge.get_claims(conn, "s1") == []
+
+    def test_get_claims_multiple(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        merge.add_claim(conn, "s1", "src/foo.py")
+        merge.add_claim(conn, "s1", "src/bar.py")
+        claims = merge.get_claims(conn, "s1")
+        paths = {c["file_path"] for c in claims}
+        assert paths == {"src/foo.py", "src/bar.py"}
+
+    def test_claims_updates_last_activity(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1", description="d1")
+        before = conn.execute(
+            "SELECT last_activity FROM codemerge_sessions WHERE session_id='s1'"
+        ).fetchone()[0]
+        merge.add_claim(conn, "s1", "src/foo.py")
+        after = conn.execute(
+            "SELECT last_activity FROM codemerge_sessions WHERE session_id='s1'"
+        ).fetchone()[0]
+        assert after >= before
