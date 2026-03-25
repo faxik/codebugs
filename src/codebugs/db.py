@@ -95,6 +95,8 @@ def connect(project_dir: str | None = None) -> sqlite3.Connection:
     # Initialize requirements schema (same DB)
     from codebugs import reqs
     reqs.ensure_schema(conn)
+    from codebugs import merge
+    merge.ensure_schema(conn)
     return conn
 
 

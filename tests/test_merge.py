@@ -363,6 +363,20 @@ class TestCheckOverlaps:
             merge.check_overlaps(conn, "nope")
 
 
+class TestIntegration:
+    def test_db_connect_creates_merge_schema(self, tmp_path):
+        """db.connect() should initialize merge tables too."""
+        from codebugs import db
+        c = db.connect(str(tmp_path))
+        tables = {r[0] for r in c.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        assert "codemerge_sessions" in tables
+        assert "codemerge_claims" in tables
+        assert "codemerge_locks" in tables
+        c.close()
+
+
 class TestVisibility:
     def test_get_sessions_all(self, conn):
         merge.start_session(conn, session_id="s1", branch="b1", description="d1")
