@@ -40,6 +40,25 @@ Add to `~/.claude.json` (global) or `.mcp.json` (per-project):
 
 The database lives at `.codebugs/findings.db` in the current working directory — each project gets its own. Add `.codebugs/` to your `.gitignore`.
 
+### Running Modules Independently
+
+Use `--mode` to load only the tools you need:
+
+```json
+{
+  "mcpServers": {
+    "codebugs": {
+      "command": "codebugs-mcp",
+      "args": ["--mode", "findings"]
+    }
+  }
+}
+```
+
+Available modes: `findings` (7 tools), `reqs` (11 tools), `all` (18 tools, default).
+
+The CLI supports the same flag: `codebugs --mode findings summary`.
+
 ### Other MCP Clients
 
 Any MCP-compatible client can connect to `codebugs-mcp` via stdio transport.

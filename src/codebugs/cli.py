@@ -410,14 +410,8 @@ def cmd_reqs_export(args: argparse.Namespace) -> None:
         print(md)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="codebugs — AI-native code finding & requirements tracker",
-        prog="codebugs",
-    )
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    # add
+def _register_findings_subcommands(sub, commands):
+    """Register findings CLI subcommands."""
     p = sub.add_parser("add", help="Add a finding")
     p.add_argument("-s", "--severity", required=True, help="critical|high|medium|low")
     p.add_argument("-c", "--category", required=True, help="Finding category")
@@ -428,13 +422,11 @@ def main() -> None:
     p.add_argument("--tags", help="Comma-separated tags")
     p.add_argument("--meta", help="JSON metadata string")
 
-    # update
     p = sub.add_parser("update", help="Update a finding")
     p.add_argument("id", help="Finding ID")
     p.add_argument("--status", help="New status")
     p.add_argument("--notes", help="Notes")
 
-    # query
     p = sub.add_parser("query", help="Search findings")
     p.add_argument("--status", help="Filter by status")
     p.add_argument("--severity", "-s", help="Filter by severity")
@@ -444,27 +436,32 @@ def main() -> None:
     p.add_argument("--group-by", help="Group by: file|category|severity|status|source")
     p.add_argument("--limit", type=int, help="Max results")
 
-    # stats
     p = sub.add_parser("stats", help="Cross-tabulated summary")
     p.add_argument("--by", help="Group by: severity|category|status|file|source")
 
-    # summary
     sub.add_parser("summary", help="Dashboard overview")
-
-    # categories
     sub.add_parser("categories", help="List all categories with counts")
 
-    # import-csv
     p = sub.add_parser("import-csv", help="Import findings from CSV")
     p.add_argument("file", help="CSV file path")
 
-    # export-csv
     p = sub.add_parser("export-csv", help="Export findings to CSV")
     p.add_argument("file", nargs="?", help="Output file (default: codebugs_export.csv)")
 
-    # --- Requirements subcommands ---
+    commands.update({
+        "add": cmd_add,
+        "update": cmd_update,
+        "query": cmd_query,
+        "stats": cmd_stats,
+        "summary": cmd_summary,
+        "categories": cmd_categories,
+        "import-csv": cmd_import_csv,
+        "export-csv": cmd_export_csv,
+    })
 
-    # reqs-add
+
+def _register_reqs_subcommands(sub, commands):
+    """Register requirements CLI subcommands."""
     p = sub.add_parser("reqs-add", help="Add a requirement")
     p.add_argument("id", help="Requirement ID (e.g. FR-001)")
     p.add_argument("-d", "--description", required=True, help="Description")
@@ -475,7 +472,6 @@ def main() -> None:
     p.add_argument("--test-coverage", help="Test file name(s)")
     p.add_argument("--tags", help="Comma-separated tags")
 
-    # reqs-update
     p = sub.add_parser("reqs-update", help="Update a requirement")
     p.add_argument("id", help="Requirement ID")
     p.add_argument("--status", help="New status")
@@ -484,7 +480,6 @@ def main() -> None:
     p.add_argument("--test-coverage", help="Updated test coverage")
     p.add_argument("--notes", help="Notes")
 
-    # reqs-query
     p = sub.add_parser("reqs-query", help="Search requirements")
     p.add_argument("--status", help="Filter by status")
     p.add_argument("--priority", help="Filter by priority")
@@ -493,36 +488,22 @@ def main() -> None:
     p.add_argument("--group-by", help="Group by: section|status|priority|source")
     p.add_argument("--limit", type=int, help="Max results")
 
-    # reqs-stats
     p = sub.add_parser("reqs-stats", help="Requirements cross-tab")
     p.add_argument("--by", help="Group by: status|priority|section|source")
 
-    # reqs-summary
     sub.add_parser("reqs-summary", help="Requirements dashboard")
 
-    # reqs-verify
     p = sub.add_parser("reqs-verify", help="Verify requirements for issues")
     p.add_argument("--checks", help="Comma-separated: tests,ids,status (default: all)")
     p.add_argument("--project-dir", help="Project root for test file checks")
 
-    # reqs-import
     p = sub.add_parser("reqs-import", help="Import from REQUIREMENTS.md")
     p.add_argument("file", help="Markdown file path")
 
-    # reqs-export
     p = sub.add_parser("reqs-export", help="Export as markdown")
     p.add_argument("file", nargs="?", help="Output file (default: stdout)")
 
-    args = parser.parse_args()
-    commands = {
-        "add": cmd_add,
-        "update": cmd_update,
-        "query": cmd_query,
-        "stats": cmd_stats,
-        "summary": cmd_summary,
-        "categories": cmd_categories,
-        "import-csv": cmd_import_csv,
-        "export-csv": cmd_export_csv,
+    commands.update({
         "reqs-add": cmd_reqs_add,
         "reqs-update": cmd_reqs_update,
         "reqs-query": cmd_reqs_query,
@@ -531,7 +512,43 @@ def main() -> None:
         "reqs-verify": cmd_reqs_verify,
         "reqs-import": cmd_reqs_import,
         "reqs-export": cmd_reqs_export,
-    }
+    })
+
+
+def _peek_mode() -> str:
+    """Extract --mode value from sys.argv before argparse runs."""
+    import sys
+    args = sys.argv[1:]
+    for i, arg in enumerate(args):
+        if arg == "--mode" and i + 1 < len(args):
+            return args[i + 1]
+        if arg.startswith("--mode="):
+            return arg.split("=", 1)[1]
+    return "all"
+
+
+def main() -> None:
+    mode = _peek_mode()
+
+    parser = argparse.ArgumentParser(
+        description="codebugs — AI-native code finding & requirements tracker",
+        prog="codebugs",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["findings", "reqs", "all"],
+        default="all",
+        help="Which commands to enable: findings, reqs, or all (default: all)",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    commands = {}
+    if mode in ("findings", "all"):
+        _register_findings_subcommands(sub, commands)
+    if mode in ("reqs", "all"):
+        _register_reqs_subcommands(sub, commands)
+
+    args = parser.parse_args()
     commands[args.command](args)
 
 
