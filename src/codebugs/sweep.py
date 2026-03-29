@@ -258,3 +258,95 @@ def mark_items(
     )
     conn.commit()
     return {"sweep_id": sweep_id, "updated": updated}
+
+
+def get_status(
+    conn: sqlite3.Connection,
+    sweep_ref: str,
+) -> dict[str, Any]:
+    """Return sweep overview with progress and per-tag breakdown."""
+    sweep_id = _resolve_sweep(conn, sweep_ref)
+    sw = conn.execute(
+        "SELECT * FROM codesweep_sweeps WHERE sweep_id = ?", (sweep_id,),
+    ).fetchone()
+
+    total = conn.execute(
+        "SELECT COUNT(*) as c FROM codesweep_items WHERE sweep_id = ?",
+        (sweep_id,),
+    ).fetchone()["c"]
+    processed = conn.execute(
+        "SELECT COUNT(*) as c FROM codesweep_items WHERE sweep_id = ? AND processed = 1",
+        (sweep_id,),
+    ).fetchone()["c"]
+
+    # Per-tag breakdown
+    tag_rows = conn.execute(
+        """SELECT jt.value as tag,
+                  COUNT(*) as total,
+                  SUM(CASE WHEN processed = 1 THEN 1 ELSE 0 END) as done
+           FROM codesweep_items, json_each(tags) as jt
+           WHERE sweep_id = ?
+           GROUP BY jt.value""",
+        (sweep_id,),
+    ).fetchall()
+    by_tag = {
+        r["tag"]: {"total": r["total"], "processed": r["done"]}
+        for r in tag_rows
+    }
+
+    return {
+        "sweep_id": sweep_id,
+        "name": sw["name"],
+        "status": sw["status"],
+        "default_batch_size": sw["default_batch_size"],
+        "total": total,
+        "processed": processed,
+        "remaining": total - processed,
+        "by_tag": by_tag,
+    }
+
+
+def archive_sweep(
+    conn: sqlite3.Connection,
+    sweep_ref: str,
+) -> dict[str, Any]:
+    """Archive a sweep."""
+    sweep_id = _resolve_sweep(conn, sweep_ref)
+    conn.execute(
+        "UPDATE codesweep_sweeps SET status = 'archived', updated_at = ? WHERE sweep_id = ?",
+        (_now(), sweep_id),
+    )
+    conn.commit()
+    return {"sweep_id": sweep_id, "status": "archived"}
+
+
+def list_sweeps(
+    conn: sqlite3.Connection,
+    *,
+    include_archived: bool = False,
+) -> dict[str, Any]:
+    """List all sweeps with summary counts."""
+    condition = "" if include_archived else "WHERE s.status = 'active'"
+    rows = conn.execute(
+        f"""SELECT s.sweep_id, s.name, s.status, s.default_batch_size,
+                   COUNT(i.id) as total,
+                   SUM(CASE WHEN i.processed = 1 THEN 1 ELSE 0 END) as processed
+            FROM codesweep_sweeps s
+            LEFT JOIN codesweep_items i ON s.sweep_id = i.sweep_id
+            {condition}
+            GROUP BY s.sweep_id
+            ORDER BY s.id""",
+    ).fetchall()
+    sweeps = []
+    for r in rows:
+        total = r["total"] or 0
+        processed = r["processed"] or 0
+        sweeps.append({
+            "sweep_id": r["sweep_id"],
+            "name": r["name"],
+            "status": r["status"],
+            "total": total,
+            "processed": processed,
+            "remaining": total - processed,
+        })
+    return {"sweeps": sweeps}

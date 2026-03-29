@@ -209,3 +209,87 @@ class TestMarkItems:
         sweep.add_items(self.conn, "named", ["x.py"])
         result = sweep.mark_items(self.conn, "named", ["x.py"])
         assert result["updated"] == 1
+
+
+class TestGetStatus:
+    def test_status_counts(self, conn):
+        sw = sweep.create_sweep(conn, name="test")
+        sweep.add_items(conn, sw["sweep_id"], ["a.py", "b.py", "c.py"])
+        sweep.mark_items(conn, sw["sweep_id"], ["a.py"])
+        result = sweep.get_status(conn, sw["sweep_id"])
+        assert result["sweep_id"] == sw["sweep_id"]
+        assert result["name"] == "test"
+        assert result["total"] == 3
+        assert result["processed"] == 1
+        assert result["remaining"] == 2
+
+    def test_status_by_tag(self, conn):
+        sw = sweep.create_sweep(conn)
+        sweep.add_items(conn, sw["sweep_id"], ["a.py", "b.py"], tags=["critical"])
+        sweep.add_items(conn, sw["sweep_id"], ["c.py"], tags=["low"])
+        sweep.mark_items(conn, sw["sweep_id"], ["a.py"])
+        result = sweep.get_status(conn, sw["sweep_id"])
+        assert result["by_tag"]["critical"]["total"] == 2
+        assert result["by_tag"]["critical"]["processed"] == 1
+        assert result["by_tag"]["low"]["total"] == 1
+        assert result["by_tag"]["low"]["processed"] == 0
+
+    def test_status_empty_sweep(self, conn):
+        sw = sweep.create_sweep(conn)
+        result = sweep.get_status(conn, sw["sweep_id"])
+        assert result["total"] == 0
+        assert result["processed"] == 0
+        assert result["remaining"] == 0
+        assert result["by_tag"] == {}
+
+    def test_status_by_name(self, conn):
+        sweep.create_sweep(conn, name="named")
+        result = sweep.get_status(conn, "named")
+        assert result["name"] == "named"
+
+
+class TestArchiveSweep:
+    def test_archive(self, conn):
+        sw = sweep.create_sweep(conn)
+        result = sweep.archive_sweep(conn, sw["sweep_id"])
+        assert result["status"] == "archived"
+
+    def test_archive_by_name(self, conn):
+        sweep.create_sweep(conn, name="old")
+        result = sweep.archive_sweep(conn, "old")
+        assert result["status"] == "archived"
+
+    def test_archive_not_found(self, conn):
+        with pytest.raises(ValueError, match="not found"):
+            sweep.archive_sweep(conn, "SW-999")
+
+
+class TestListSweeps:
+    def test_list_active_only(self, conn):
+        sweep.create_sweep(conn, name="active1")
+        sw2 = sweep.create_sweep(conn, name="archived1")
+        sweep.archive_sweep(conn, sw2["sweep_id"])
+        result = sweep.list_sweeps(conn)
+        assert len(result["sweeps"]) == 1
+        assert result["sweeps"][0]["name"] == "active1"
+
+    def test_list_include_archived(self, conn):
+        sweep.create_sweep(conn, name="a")
+        sw2 = sweep.create_sweep(conn, name="b")
+        sweep.archive_sweep(conn, sw2["sweep_id"])
+        result = sweep.list_sweeps(conn, include_archived=True)
+        assert len(result["sweeps"]) == 2
+
+    def test_list_with_counts(self, conn):
+        sw = sweep.create_sweep(conn)
+        sweep.add_items(conn, sw["sweep_id"], ["a.py", "b.py", "c.py"])
+        sweep.mark_items(conn, sw["sweep_id"], ["a.py"])
+        result = sweep.list_sweeps(conn)
+        s = result["sweeps"][0]
+        assert s["total"] == 3
+        assert s["processed"] == 1
+        assert s["remaining"] == 2
+
+    def test_list_empty(self, conn):
+        result = sweep.list_sweeps(conn)
+        assert result["sweeps"] == []
