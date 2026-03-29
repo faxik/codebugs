@@ -495,6 +495,137 @@ def _register_merge_subcommands(sub, commands):
     })
 
 
+# --- Sweep CLI commands ---
+
+
+def cmd_sweep_create(args: argparse.Namespace) -> None:
+    conn = db.connect()
+    from codebugs import sweep
+    result = sweep.create_sweep(
+        conn, name=args.name, description=args.description or "",
+        default_batch_size=args.batch_size or 10,
+    )
+    conn.close()
+    print(f"Created: {result['sweep_id']}" + (f" ({result['name']})" if result["name"] else ""))
+
+
+def cmd_sweep_add(args: argparse.Namespace) -> None:
+    conn = db.connect()
+    from codebugs import sweep
+    tags = [t.strip() for t in args.tags.split(",")] if args.tags else None
+    result = sweep.add_items(conn, args.sweep, args.items, tags=tags)
+    conn.close()
+    print(f"Added {result['added']} items, {result['duplicates_skipped']} duplicates skipped.")
+
+
+def cmd_sweep_next(args: argparse.Namespace) -> None:
+    conn = db.connect()
+    from codebugs import sweep
+    tags = [t.strip() for t in args.tags.split(",")] if args.tags else None
+    result = sweep.next_batch(conn, args.sweep, limit=args.limit, tags=tags)
+    conn.close()
+    if not result["items"]:
+        print("(no unprocessed items)")
+        return
+    data = [{"item": i["item"], "tags": ",".join(i["tags"])} for i in result["items"]]
+    print(_format_table(data, ["item", "tags"], max_widths={"item": 60}))
+    print(f"\n{result['remaining']} remaining.")
+
+
+def cmd_sweep_mark(args: argparse.Namespace) -> None:
+    conn = db.connect()
+    from codebugs import sweep
+    result = sweep.mark_items(conn, args.sweep, args.items, processed=not args.undo)
+    conn.close()
+    action = "Unmarked" if args.undo else "Marked"
+    print(f"{action} {result['updated']} items.")
+
+
+def cmd_sweep_status(args: argparse.Namespace) -> None:
+    conn = db.connect()
+    from codebugs import sweep
+    s = sweep.get_status(conn, args.sweep)
+    conn.close()
+    print(f"Sweep: {s['sweep_id']}" + (f" ({s['name']})" if s["name"] else ""))
+    print(f"Status: {s['status']}")
+    print(f"Items:  {s['processed']}/{s['total']} processed, {s['remaining']} remaining")
+    if s["by_tag"]:
+        print("\nBy tag:")
+        for tag, counts in sorted(s["by_tag"].items()):
+            print(f"  {tag:20s}  {counts['processed']}/{counts['total']}")
+
+
+def cmd_sweep_archive(args: argparse.Namespace) -> None:
+    conn = db.connect()
+    from codebugs import sweep
+    result = sweep.archive_sweep(conn, args.sweep)
+    conn.close()
+    print(f"Archived: {result['sweep_id']}")
+
+
+def cmd_sweep_list(args: argparse.Namespace) -> None:
+    conn = db.connect()
+    from codebugs import sweep
+    result = sweep.list_sweeps(conn, include_archived=args.all)
+    conn.close()
+    if not result["sweeps"]:
+        print("(no sweeps)")
+        return
+    data = [
+        {
+            "sweep_id": s["sweep_id"],
+            "name": s["name"] or "",
+            "status": s["status"],
+            "progress": f"{s['processed']}/{s['total']}",
+            "remaining": str(s["remaining"]),
+        }
+        for s in result["sweeps"]
+    ]
+    print(_format_table(data, ["sweep_id", "name", "status", "progress", "remaining"]))
+
+
+def _register_sweep_subcommands(sub, commands):
+    """Register sweep CLI subcommands."""
+    p = sub.add_parser("sweep-create", help="Create a new sweep")
+    p.add_argument("--name", help="Optional sweep name")
+    p.add_argument("--description", help="Sweep description")
+    p.add_argument("--batch-size", type=int, help="Default batch size (default: 10)")
+
+    p = sub.add_parser("sweep-add", help="Add items to a sweep")
+    p.add_argument("sweep", help="Sweep ID (SW-N) or name")
+    p.add_argument("items", nargs="+", help="Items to add")
+    p.add_argument("--tags", help="Comma-separated tags")
+
+    p = sub.add_parser("sweep-next", help="Get next batch of unprocessed items")
+    p.add_argument("sweep", help="Sweep ID (SW-N) or name")
+    p.add_argument("--limit", type=int, help="Batch size override")
+    p.add_argument("--tags", help="Filter by tags (comma-separated)")
+
+    p = sub.add_parser("sweep-mark", help="Mark items as processed")
+    p.add_argument("sweep", help="Sweep ID (SW-N) or name")
+    p.add_argument("items", nargs="+", help="Items to mark")
+    p.add_argument("--undo", action="store_true", help="Unmark items instead")
+
+    p = sub.add_parser("sweep-status", help="Sweep progress overview")
+    p.add_argument("sweep", help="Sweep ID (SW-N) or name")
+
+    p = sub.add_parser("sweep-archive", help="Archive a sweep")
+    p.add_argument("sweep", help="Sweep ID (SW-N) or name")
+
+    p = sub.add_parser("sweep-list", help="List sweeps")
+    p.add_argument("--all", action="store_true", help="Include archived sweeps")
+
+    commands.update({
+        "sweep-create": cmd_sweep_create,
+        "sweep-add": cmd_sweep_add,
+        "sweep-next": cmd_sweep_next,
+        "sweep-mark": cmd_sweep_mark,
+        "sweep-status": cmd_sweep_status,
+        "sweep-archive": cmd_sweep_archive,
+        "sweep-list": cmd_sweep_list,
+    })
+
+
 def _register_findings_subcommands(sub, commands):
     """Register findings CLI subcommands."""
     p = sub.add_parser("add", help="Add a finding")
@@ -604,7 +735,7 @@ def main() -> None:
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument(
         "--mode",
-        choices=["findings", "reqs", "merge", "all"],
+        choices=["findings", "reqs", "merge", "sweep", "all"],
         default="all",
     )
     pre_args, _ = pre_parser.parse_known_args()
@@ -623,6 +754,8 @@ def main() -> None:
         _register_reqs_subcommands(sub, commands)
     if pre_args.mode in ("merge", "all"):
         _register_merge_subcommands(sub, commands)
+    if pre_args.mode in ("sweep", "all"):
+        _register_sweep_subcommands(sub, commands)
 
     args = parser.parse_args()
     commands[args.command](args)
