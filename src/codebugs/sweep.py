@@ -116,3 +116,55 @@ def _sweep_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+def _next_position(conn: sqlite3.Connection, sweep_id: str) -> int:
+    """Return the next insertion position for a sweep."""
+    row = conn.execute(
+        "SELECT MAX(position) as max_pos FROM codesweep_items WHERE sweep_id = ?",
+        (sweep_id,),
+    ).fetchone()
+    return (row["max_pos"] + 1) if row["max_pos"] is not None else 0
+
+
+def add_items(
+    conn: sqlite3.Connection,
+    sweep_ref: str,
+    items: list[str],
+    *,
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Add items to a sweep. Duplicates are silently skipped."""
+    sweep_id = _resolve_sweep(conn, sweep_ref)
+
+    status = conn.execute(
+        "SELECT status FROM codesweep_sweeps WHERE sweep_id = ?", (sweep_id,),
+    ).fetchone()["status"]
+    if status == "archived":
+        raise ValueError(f"Cannot add items to archived sweep: {sweep_id}")
+
+    now = _now()
+    tags_json = json.dumps(tags or [])
+    pos = _next_position(conn, sweep_id)
+    added = 0
+    duplicates = 0
+
+    for item in items:
+        try:
+            conn.execute(
+                """INSERT INTO codesweep_items
+                   (sweep_id, item, tags, processed, position, created_at)
+                   VALUES (?, ?, ?, 0, ?, ?)""",
+                (sweep_id, item, tags_json, pos, now),
+            )
+            pos += 1
+            added += 1
+        except sqlite3.IntegrityError:
+            duplicates += 1
+
+    conn.execute(
+        "UPDATE codesweep_sweeps SET updated_at = ? WHERE sweep_id = ?",
+        (_now(), sweep_id),
+    )
+    conn.commit()
+    return {"sweep_id": sweep_id, "added": added, "duplicates_skipped": duplicates}
