@@ -293,3 +293,87 @@ class TestListSweeps:
     def test_list_empty(self, conn):
         result = sweep.list_sweeps(conn)
         assert result["sweeps"] == []
+
+
+class TestFullWorkflow:
+    """End-to-end test simulating a real sweep pass."""
+
+    def test_complete_sweep_lifecycle(self, conn):
+        # Create
+        sw = sweep.create_sweep(conn, name="lint-pass", default_batch_size=2)
+        assert sw["sweep_id"] == "SW-1"
+
+        # Add items in two batches
+        sweep.add_items(conn, "lint-pass", ["a.py", "b.py", "c.py"], tags=["src"])
+        sweep.add_items(conn, "lint-pass", ["test_a.py", "test_b.py"], tags=["test"])
+
+        # Check status
+        status = sweep.get_status(conn, "lint-pass")
+        assert status["total"] == 5
+        assert status["processed"] == 0
+        assert status["by_tag"]["src"]["total"] == 3
+        assert status["by_tag"]["test"]["total"] == 2
+
+        # Iterate: batch 1
+        batch1 = sweep.next_batch(conn, "lint-pass")
+        assert len(batch1["items"]) == 2
+        assert batch1["items"][0]["item"] == "a.py"
+        assert batch1["remaining"] == 3
+        sweep.mark_items(conn, "lint-pass", [i["item"] for i in batch1["items"]])
+
+        # Iterate: batch 2
+        batch2 = sweep.next_batch(conn, "lint-pass")
+        assert len(batch2["items"]) == 2
+        assert batch2["items"][0]["item"] == "c.py"
+        sweep.mark_items(conn, "lint-pass", [i["item"] for i in batch2["items"]])
+
+        # Iterate: batch 3 (last item)
+        batch3 = sweep.next_batch(conn, "lint-pass")
+        assert len(batch3["items"]) == 1
+        assert batch3["items"][0]["item"] == "test_b.py"
+        assert batch3["remaining"] == 0
+        sweep.mark_items(conn, "lint-pass", [i["item"] for i in batch3["items"]])
+
+        # All done
+        batch4 = sweep.next_batch(conn, "lint-pass")
+        assert batch4["items"] == []
+
+        # Status shows complete
+        final = sweep.get_status(conn, "lint-pass")
+        assert final["processed"] == 5
+        assert final["remaining"] == 0
+
+        # Archive
+        sweep.archive_sweep(conn, "lint-pass")
+        sweeps = sweep.list_sweeps(conn)
+        assert len(sweeps["sweeps"]) == 0
+        sweeps_all = sweep.list_sweeps(conn, include_archived=True)
+        assert len(sweeps_all["sweeps"]) == 1
+
+    def test_tag_filtered_sweep(self, conn):
+        sw = sweep.create_sweep(conn, default_batch_size=10)
+        sweep.add_items(conn, sw["sweep_id"], ["a.py", "b.py"], tags=["critical"])
+        sweep.add_items(conn, sw["sweep_id"], ["c.py", "d.py", "e.py"], tags=["low"])
+
+        # Only process critical items
+        batch = sweep.next_batch(conn, sw["sweep_id"], tags=["critical"])
+        assert len(batch["items"]) == 2
+        sweep.mark_items(conn, sw["sweep_id"], [i["item"] for i in batch["items"]])
+
+        # Status shows 2 processed total, critical fully done
+        status = sweep.get_status(conn, sw["sweep_id"])
+        assert status["processed"] == 2
+        assert status["remaining"] == 3
+        assert status["by_tag"]["critical"]["processed"] == 2
+
+    def test_unmark_and_reprocess(self, conn):
+        sw = sweep.create_sweep(conn, default_batch_size=10)
+        sweep.add_items(conn, sw["sweep_id"], ["a.py", "b.py", "c.py"])
+        sweep.mark_items(conn, sw["sweep_id"], ["a.py", "b.py", "c.py"])
+
+        # Oops, b.py needs reprocessing
+        sweep.mark_items(conn, sw["sweep_id"], ["b.py"], processed=False)
+
+        batch = sweep.next_batch(conn, sw["sweep_id"])
+        assert len(batch["items"]) == 1
+        assert batch["items"][0]["item"] == "b.py"
