@@ -21,6 +21,18 @@ def conn():
     c.close()
 
 
+def _import_md(conn, md_text: str) -> dict:
+    """Write markdown to a temp file, import it, and clean up."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+        f.write(md_text)
+        f.flush()
+        path = f.name
+    try:
+        return reqs.import_markdown(conn, path)
+    finally:
+        os.unlink(path)
+
+
 @pytest.fixture
 def populated(conn):
     """Database with sample requirements."""
@@ -235,11 +247,7 @@ class TestMarkdownImportExport:
 | FR-001 | System shall ingest PDFs | Must | Implemented | R&A | test_core.py |
 | FR-002 | System shall track duplicates | Should | Planned | R&A | -- |
 """
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-            f.write(md)
-            f.flush()
-            result = reqs.import_markdown(conn, f.name)
-        os.unlink(f.name)
+        result = _import_md(conn, md)
 
         assert result["imported"] == 2
         row = conn.execute("SELECT * FROM requirements WHERE id = 'FR-001'").fetchone()
@@ -261,15 +269,112 @@ class TestMarkdownImportExport:
 |----|-------------|----------|--------|--------|---------------|
 | FR-001 | Test | should | implemented | -- | -- |
 """
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-            f.write(md)
-            f.flush()
-            reqs.import_markdown(conn, f.name)
-        os.unlink(f.name)
+        _import_md(conn, md)
 
         row = conn.execute("SELECT * FROM requirements WHERE id = 'FR-001'").fetchone()
         assert row["status"] == "Implemented"
         assert row["priority"] == "Should"
+
+
+class TestImportNFRRows:
+    """CB-2: NFR-xxx IDs should be imported, not silently dropped."""
+
+    def test_import_nfr_rows(self, conn):
+        md = """# Requirements
+
+### 1.1 Non-Functional (NFR-001 -- NFR-002)
+
+| ID | Requirement | Priority | Status | Source | Test Coverage |
+|----|-------------|----------|--------|--------|---------------|
+| NFR-001 | System shall respond within 200ms | Must | Planned | Arch | -- |
+| NFR-002 | System shall handle 1000 concurrent users | Should | Planned | Arch | -- |
+"""
+        result = _import_md(conn, md)
+
+        assert result["imported"] == 2
+        row = conn.execute("SELECT * FROM requirements WHERE id = 'NFR-001'").fetchone()
+        assert row is not None
+        assert row["priority"] == "Must"
+        assert row["description"] == "System shall respond within 200ms"
+
+    def test_import_mixed_fr_and_nfr(self, conn):
+        md = """# Requirements
+
+### 1.1 Mixed (FR-001 -- FR-001)
+
+| ID | Requirement | Priority | Status | Source | Test Coverage |
+|----|-------------|----------|--------|--------|---------------|
+| FR-001 | Functional req | Must | Planned | R&A | -- |
+| NFR-001 | Non-functional req | Should | Planned | Arch | -- |
+"""
+        result = _import_md(conn, md)
+
+        assert result["imported"] == 2
+        assert conn.execute("SELECT COUNT(*) as c FROM requirements").fetchone()["c"] == 2
+
+
+class TestImportUnnumberedSections:
+    """CB-3: Unnumbered ### headings should create their own sections."""
+
+    def test_unnumbered_section_heading(self, conn):
+        md = """# Requirements
+
+### Plugin Architecture (FR-101 -- FR-102)
+
+| ID | Requirement | Priority | Status | Source | Test Coverage |
+|----|-------------|----------|--------|--------|---------------|
+| FR-101 | Plugins shall load dynamically | Must | Planned | Arch | -- |
+| FR-102 | Plugins shall be sandboxed | Should | Planned | Arch | -- |
+"""
+        result = _import_md(conn, md)
+
+        assert result["imported"] == 2
+        row = conn.execute("SELECT * FROM requirements WHERE id = 'FR-101'").fetchone()
+        assert row is not None
+        assert row["section"] == "Plugin Architecture"
+
+    def test_unnumbered_does_not_merge_into_previous(self, conn):
+        md = """# Requirements
+
+### 1.81 Archive Extract-and-Ingest (FR-001 -- FR-002)
+
+| ID | Requirement | Priority | Status | Source | Test Coverage |
+|----|-------------|----------|--------|--------|---------------|
+| FR-001 | Extract archives | Must | Planned | R&A | -- |
+| FR-002 | Detect format | Should | Planned | R&A | -- |
+
+### Plugin Architecture (FR-003 -- FR-004)
+
+| ID | Requirement | Priority | Status | Source | Test Coverage |
+|----|-------------|----------|--------|--------|---------------|
+| FR-003 | Load plugins | Must | Planned | Arch | -- |
+| FR-004 | Sandbox plugins | Should | Planned | Arch | -- |
+"""
+        result = _import_md(conn, md)
+
+        assert result["imported"] == 4
+        row_001 = conn.execute("SELECT section FROM requirements WHERE id = 'FR-001'").fetchone()
+        row_003 = conn.execute("SELECT section FROM requirements WHERE id = 'FR-003'").fetchone()
+        assert row_001["section"] == "1.81 Archive Extract-and-Ingest"
+        assert row_003["section"] == "Plugin Architecture"
+        assert row_001["section"] != row_003["section"]
+
+    def test_unnumbered_section_with_nfr(self, conn):
+        md = """# Requirements
+
+### Performance Targets (NFR-001 -- NFR-002)
+
+| ID | Requirement | Priority | Status | Source | Test Coverage |
+|----|-------------|----------|--------|--------|---------------|
+| NFR-001 | Response time < 200ms | Must | Planned | Arch | -- |
+| NFR-002 | Uptime 99.9% | Must | Planned | Arch | -- |
+"""
+        result = _import_md(conn, md)
+
+        assert result["imported"] == 2
+        row = conn.execute("SELECT * FROM requirements WHERE id = 'NFR-001'").fetchone()
+        assert row is not None
+        assert row["section"] == "Performance Targets"
 
 
 class TestEmbeddings:

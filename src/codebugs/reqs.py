@@ -413,8 +413,8 @@ def verify_requirements(
 
 # --- Markdown import/export ---
 
-_SECTION_RE = re.compile(r"^###\s+(\d+\.\d+\w*)\s+(.+?)\s*\(FR-\d+")
-_ROW_RE = re.compile(r"^\|\s*(FR-\d+\w*)\s*\|")
+_SECTION_RE = re.compile(r"^###\s+(?:(\d+\.\d+\w*)\s+)?(.+?)\s*\(N?FR-\d+")
+_ROW_RE = re.compile(r"^\|\s*(N?FR-\d+\w*)\s*\|")
 
 
 def import_markdown(
@@ -442,7 +442,7 @@ def import_markdown(
         if sm:
             section_num = sm.group(1)
             section_title = sm.group(2).strip()
-            current_section = f"{section_num} {section_title}"
+            current_section = f"{section_num} {section_title}" if section_num else section_title
             continue
 
         # Table row
