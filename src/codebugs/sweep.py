@@ -168,3 +168,93 @@ def add_items(
     )
     conn.commit()
     return {"sweep_id": sweep_id, "added": added, "duplicates_skipped": duplicates}
+
+
+def next_batch(
+    conn: sqlite3.Connection,
+    sweep_ref: str,
+    *,
+    limit: int | None = None,
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Return the next batch of unprocessed items in insertion order."""
+    sweep_id = _resolve_sweep(conn, sweep_ref)
+
+    row = conn.execute(
+        "SELECT default_batch_size FROM codesweep_sweeps WHERE sweep_id = ?",
+        (sweep_id,),
+    ).fetchone()
+    batch_size = limit if limit is not None else row["default_batch_size"]
+
+    conditions = ["sweep_id = ?", "processed = 0"]
+    params: list[Any] = [sweep_id]
+
+    if tags:
+        tag_conditions = []
+        for tag in tags:
+            tag_conditions.append(
+                "EXISTS (SELECT 1 FROM json_each(tags) WHERE json_each.value = ?)"
+            )
+            params.append(tag)
+        conditions.append(f"({' OR '.join(tag_conditions)})")
+
+    where = f"WHERE {' AND '.join(conditions)}"
+
+    rows = conn.execute(
+        f"SELECT item, tags, position FROM codesweep_items {where} ORDER BY position LIMIT ?",
+        params + [batch_size],
+    ).fetchall()
+
+    items = [
+        {"item": r["item"], "tags": json.loads(r["tags"]), "position": r["position"]}
+        for r in rows
+    ]
+
+    # Count total remaining unprocessed (with same tag filter) minus what we just returned
+    total_unprocessed = conn.execute(
+        f"SELECT COUNT(*) as c FROM codesweep_items {where}",
+        params,
+    ).fetchone()["c"]
+    remaining = total_unprocessed - len(items)
+
+    return {"sweep_id": sweep_id, "items": items, "remaining": remaining}
+
+
+def mark_items(
+    conn: sqlite3.Connection,
+    sweep_ref: str,
+    items: list[str],
+    *,
+    processed: bool = True,
+) -> dict[str, Any]:
+    """Mark items as processed or unprocessed."""
+    sweep_id = _resolve_sweep(conn, sweep_ref)
+    now = _now()
+    updated = 0
+
+    for item in items:
+        row = conn.execute(
+            "SELECT id FROM codesweep_items WHERE sweep_id = ? AND item = ?",
+            (sweep_id, item),
+        ).fetchone()
+        if not row:
+            raise KeyError(f"Item not found in sweep {sweep_id}: {item}")
+
+        if processed:
+            conn.execute(
+                "UPDATE codesweep_items SET processed = 1, processed_at = ? WHERE id = ?",
+                (now, row["id"]),
+            )
+        else:
+            conn.execute(
+                "UPDATE codesweep_items SET processed = 0, processed_at = NULL WHERE id = ?",
+                (row["id"],),
+            )
+        updated += 1
+
+    conn.execute(
+        "UPDATE codesweep_sweeps SET updated_at = ? WHERE sweep_id = ?",
+        (_now(), sweep_id),
+    )
+    conn.commit()
+    return {"sweep_id": sweep_id, "updated": updated}

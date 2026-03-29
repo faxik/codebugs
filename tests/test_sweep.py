@@ -106,3 +106,106 @@ class TestAddItems:
     def test_add_to_nonexistent_raises(self, conn):
         with pytest.raises(ValueError, match="not found"):
             sweep.add_items(conn, "SW-999", ["a.py"])
+
+
+class TestNextBatch:
+    @pytest.fixture(autouse=True)
+    def setup(self, conn):
+        self.conn = conn
+        sw = sweep.create_sweep(conn, default_batch_size=2)
+        self.sweep_id = sw["sweep_id"]
+        sweep.add_items(conn, self.sweep_id, ["a.py", "b.py", "c.py", "d.py", "e.py"])
+
+    def test_returns_default_batch_size(self):
+        result = sweep.next_batch(self.conn, self.sweep_id)
+        assert len(result["items"]) == 2
+        assert result["items"][0]["item"] == "a.py"
+        assert result["items"][1]["item"] == "b.py"
+
+    def test_override_limit(self):
+        result = sweep.next_batch(self.conn, self.sweep_id, limit=3)
+        assert len(result["items"]) == 3
+
+    def test_remaining_count(self):
+        result = sweep.next_batch(self.conn, self.sweep_id)
+        # remaining = total unprocessed - items in this batch
+        assert result["remaining"] == 3  # 5 unprocessed - 2 returned
+
+    def test_skips_processed_items(self):
+        sweep.mark_items(self.conn, self.sweep_id, ["a.py", "b.py"])
+        result = sweep.next_batch(self.conn, self.sweep_id)
+        assert result["items"][0]["item"] == "c.py"
+
+    def test_empty_when_all_processed(self):
+        sweep.mark_items(self.conn, self.sweep_id, ["a.py", "b.py", "c.py", "d.py", "e.py"])
+        result = sweep.next_batch(self.conn, self.sweep_id)
+        assert result["items"] == []
+        assert result["remaining"] == 0
+
+    def test_tag_filtering(self):
+        sw = sweep.create_sweep(self.conn, default_batch_size=10)
+        sweep.add_items(self.conn, sw["sweep_id"], ["x.py", "y.py"], tags=["critical"])
+        sweep.add_items(self.conn, sw["sweep_id"], ["z.py"], tags=["low"])
+        result = sweep.next_batch(self.conn, sw["sweep_id"], tags=["critical"])
+        assert len(result["items"]) == 2
+        assert {i["item"] for i in result["items"]} == {"x.py", "y.py"}
+
+    def test_tag_filtering_any_match(self):
+        sw = sweep.create_sweep(self.conn, default_batch_size=10)
+        sweep.add_items(self.conn, sw["sweep_id"], ["x.py"], tags=["critical"])
+        sweep.add_items(self.conn, sw["sweep_id"], ["y.py"], tags=["low"])
+        sweep.add_items(self.conn, sw["sweep_id"], ["z.py"], tags=["medium"])
+        result = sweep.next_batch(self.conn, sw["sweep_id"], tags=["critical", "low"])
+        assert len(result["items"]) == 2
+
+    def test_items_include_position_and_tags(self):
+        result = sweep.next_batch(self.conn, self.sweep_id)
+        item = result["items"][0]
+        assert "item" in item
+        assert "tags" in item
+        assert "position" in item
+        assert isinstance(item["tags"], list)
+
+    def test_by_name(self):
+        sw = sweep.create_sweep(self.conn, name="named", default_batch_size=10)
+        sweep.add_items(self.conn, "named", ["f.py"])
+        result = sweep.next_batch(self.conn, "named")
+        assert len(result["items"]) == 1
+
+
+class TestMarkItems:
+    @pytest.fixture(autouse=True)
+    def setup(self, conn):
+        self.conn = conn
+        sw = sweep.create_sweep(conn)
+        self.sweep_id = sw["sweep_id"]
+        sweep.add_items(conn, self.sweep_id, ["a.py", "b.py", "c.py"])
+
+    def test_mark_processed(self):
+        result = sweep.mark_items(self.conn, self.sweep_id, ["a.py", "b.py"])
+        assert result["updated"] == 2
+        row = self.conn.execute(
+            "SELECT processed, processed_at FROM codesweep_items WHERE item = 'a.py'"
+        ).fetchone()
+        assert row["processed"] == 1
+        assert row["processed_at"] is not None
+
+    def test_unmark(self):
+        sweep.mark_items(self.conn, self.sweep_id, ["a.py"])
+        result = sweep.mark_items(self.conn, self.sweep_id, ["a.py"], processed=False)
+        assert result["updated"] == 1
+        row = self.conn.execute(
+            "SELECT processed, processed_at FROM codesweep_items WHERE item = 'a.py'"
+        ).fetchone()
+        assert row["processed"] == 0
+        assert row["processed_at"] is None
+
+    def test_mark_nonexistent_raises(self):
+        with pytest.raises(KeyError, match="not found"):
+            sweep.mark_items(self.conn, self.sweep_id, ["nonexistent.py"])
+
+    def test_mark_by_name(self):
+        sw = sweep.create_sweep(self.conn, name="named")
+        sweep.add_items(self.conn, "named", ["x.py"])
+        result = sweep.mark_items(self.conn, "named", ["x.py"])
+        assert result["updated"] == 1
