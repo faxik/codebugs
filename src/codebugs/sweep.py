@@ -164,7 +164,7 @@ def add_items(
 
     conn.execute(
         "UPDATE codesweep_sweeps SET updated_at = ? WHERE sweep_id = ?",
-        (_now(), sweep_id),
+        (now, sweep_id),
     )
     conn.commit()
     return {"sweep_id": sweep_id, "added": added, "duplicates_skipped": duplicates}
@@ -230,34 +230,27 @@ def mark_items(
     """Mark items as processed or unprocessed."""
     sweep_id = _resolve_sweep(conn, sweep_ref)
     now = _now()
-    updated = 0
 
     for item in items:
-        row = conn.execute(
-            "SELECT id FROM codesweep_items WHERE sweep_id = ? AND item = ?",
-            (sweep_id, item),
-        ).fetchone()
-        if not row:
-            raise KeyError(f"Item not found in sweep {sweep_id}: {item}")
-
         if processed:
-            conn.execute(
-                "UPDATE codesweep_items SET processed = 1, processed_at = ? WHERE id = ?",
-                (now, row["id"]),
+            cursor = conn.execute(
+                "UPDATE codesweep_items SET processed = 1, processed_at = ? WHERE sweep_id = ? AND item = ?",
+                (now, sweep_id, item),
             )
         else:
-            conn.execute(
-                "UPDATE codesweep_items SET processed = 0, processed_at = NULL WHERE id = ?",
-                (row["id"],),
+            cursor = conn.execute(
+                "UPDATE codesweep_items SET processed = 0, processed_at = NULL WHERE sweep_id = ? AND item = ?",
+                (sweep_id, item),
             )
-        updated += 1
+        if cursor.rowcount == 0:
+            raise KeyError(f"Item not found in sweep {sweep_id}: {item}")
 
     conn.execute(
         "UPDATE codesweep_sweeps SET updated_at = ? WHERE sweep_id = ?",
-        (_now(), sweep_id),
+        (now, sweep_id),
     )
     conn.commit()
-    return {"sweep_id": sweep_id, "updated": updated}
+    return {"sweep_id": sweep_id, "updated": len(items)}
 
 
 def get_status(
@@ -270,14 +263,14 @@ def get_status(
         "SELECT * FROM codesweep_sweeps WHERE sweep_id = ?", (sweep_id,),
     ).fetchone()
 
-    total = conn.execute(
-        "SELECT COUNT(*) as c FROM codesweep_items WHERE sweep_id = ?",
+    counts = conn.execute(
+        """SELECT COUNT(*) as total,
+                  SUM(CASE WHEN processed = 1 THEN 1 ELSE 0 END) as processed
+           FROM codesweep_items WHERE sweep_id = ?""",
         (sweep_id,),
-    ).fetchone()["c"]
-    processed = conn.execute(
-        "SELECT COUNT(*) as c FROM codesweep_items WHERE sweep_id = ? AND processed = 1",
-        (sweep_id,),
-    ).fetchone()["c"]
+    ).fetchone()
+    total = counts["total"]
+    processed = counts["processed"] or 0
 
     # Per-tag breakdown
     tag_rows = conn.execute(

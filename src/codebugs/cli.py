@@ -498,14 +498,23 @@ def _register_merge_subcommands(sub, commands):
 # --- Sweep CLI commands ---
 
 
+def _parse_tags(args: argparse.Namespace) -> list[str] | None:
+    """Parse comma-separated --tags argument."""
+    return [t.strip() for t in args.tags.split(",")] if args.tags else None
+
+
 def cmd_sweep_create(args: argparse.Namespace) -> None:
     conn = db.connect()
     from codebugs import sweep
+    kwargs: dict = {}
+    if args.name:
+        kwargs["name"] = args.name
+    if args.description:
+        kwargs["description"] = args.description
+    if args.batch_size:
+        kwargs["default_batch_size"] = args.batch_size
     try:
-        result = sweep.create_sweep(
-            conn, name=args.name, description=args.description or "",
-            default_batch_size=args.batch_size or 10,
-        )
+        result = sweep.create_sweep(conn, **kwargs)
         print(f"Created: {result['sweep_id']}" + (f" ({result['name']})" if result["name"] else ""))
     except ValueError as e:
         print(str(e), file=sys.stderr)
@@ -518,8 +527,7 @@ def cmd_sweep_add(args: argparse.Namespace) -> None:
     conn = db.connect()
     from codebugs import sweep
     try:
-        tags = [t.strip() for t in args.tags.split(",")] if args.tags else None
-        result = sweep.add_items(conn, args.sweep, args.items, tags=tags)
+        result = sweep.add_items(conn, args.sweep, args.items, tags=_parse_tags(args))
         print(f"Added {result['added']} items, {result['duplicates_skipped']} duplicates skipped.")
     except ValueError as e:
         print(str(e), file=sys.stderr)
@@ -532,8 +540,7 @@ def cmd_sweep_next(args: argparse.Namespace) -> None:
     conn = db.connect()
     from codebugs import sweep
     try:
-        tags = [t.strip() for t in args.tags.split(",")] if args.tags else None
-        result = sweep.next_batch(conn, args.sweep, limit=args.limit, tags=tags)
+        result = sweep.next_batch(conn, args.sweep, limit=args.limit, tags=_parse_tags(args))
         if not result["items"]:
             print("(no unprocessed items)")
             return
