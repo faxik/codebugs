@@ -501,87 +501,119 @@ def _register_merge_subcommands(sub, commands):
 def cmd_sweep_create(args: argparse.Namespace) -> None:
     conn = db.connect()
     from codebugs import sweep
-    result = sweep.create_sweep(
-        conn, name=args.name, description=args.description or "",
-        default_batch_size=args.batch_size or 10,
-    )
-    conn.close()
-    print(f"Created: {result['sweep_id']}" + (f" ({result['name']})" if result["name"] else ""))
+    try:
+        result = sweep.create_sweep(
+            conn, name=args.name, description=args.description or "",
+            default_batch_size=args.batch_size or 10,
+        )
+        print(f"Created: {result['sweep_id']}" + (f" ({result['name']})" if result["name"] else ""))
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
 
 
 def cmd_sweep_add(args: argparse.Namespace) -> None:
     conn = db.connect()
     from codebugs import sweep
-    tags = [t.strip() for t in args.tags.split(",")] if args.tags else None
-    result = sweep.add_items(conn, args.sweep, args.items, tags=tags)
-    conn.close()
-    print(f"Added {result['added']} items, {result['duplicates_skipped']} duplicates skipped.")
+    try:
+        tags = [t.strip() for t in args.tags.split(",")] if args.tags else None
+        result = sweep.add_items(conn, args.sweep, args.items, tags=tags)
+        print(f"Added {result['added']} items, {result['duplicates_skipped']} duplicates skipped.")
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
 
 
 def cmd_sweep_next(args: argparse.Namespace) -> None:
     conn = db.connect()
     from codebugs import sweep
-    tags = [t.strip() for t in args.tags.split(",")] if args.tags else None
-    result = sweep.next_batch(conn, args.sweep, limit=args.limit, tags=tags)
-    conn.close()
-    if not result["items"]:
-        print("(no unprocessed items)")
-        return
-    data = [{"item": i["item"], "tags": ",".join(i["tags"])} for i in result["items"]]
-    print(_format_table(data, ["item", "tags"], max_widths={"item": 60}))
-    print(f"\n{result['remaining']} remaining.")
+    try:
+        tags = [t.strip() for t in args.tags.split(",")] if args.tags else None
+        result = sweep.next_batch(conn, args.sweep, limit=args.limit, tags=tags)
+        if not result["items"]:
+            print("(no unprocessed items)")
+            return
+        data = [{"item": i["item"], "tags": ",".join(i["tags"])} for i in result["items"]]
+        print(_format_table(data, ["item", "tags"], max_widths={"item": 60}))
+        print(f"\n{result['remaining']} remaining.")
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
 
 
 def cmd_sweep_mark(args: argparse.Namespace) -> None:
     conn = db.connect()
     from codebugs import sweep
-    result = sweep.mark_items(conn, args.sweep, args.items, processed=not args.undo)
-    conn.close()
-    action = "Unmarked" if args.undo else "Marked"
-    print(f"{action} {result['updated']} items.")
+    try:
+        result = sweep.mark_items(conn, args.sweep, args.items, processed=not args.undo)
+        action = "Unmarked" if args.undo else "Marked"
+        print(f"{action} {result['updated']} items.")
+    except (ValueError, KeyError) as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
 
 
 def cmd_sweep_status(args: argparse.Namespace) -> None:
     conn = db.connect()
     from codebugs import sweep
-    s = sweep.get_status(conn, args.sweep)
-    conn.close()
-    print(f"Sweep: {s['sweep_id']}" + (f" ({s['name']})" if s["name"] else ""))
-    print(f"Status: {s['status']}")
-    print(f"Items:  {s['processed']}/{s['total']} processed, {s['remaining']} remaining")
-    if s["by_tag"]:
-        print("\nBy tag:")
-        for tag, counts in sorted(s["by_tag"].items()):
-            print(f"  {tag:20s}  {counts['processed']}/{counts['total']}")
+    try:
+        s = sweep.get_status(conn, args.sweep)
+        print(f"Sweep: {s['sweep_id']}" + (f" ({s['name']})" if s["name"] else ""))
+        print(f"Status: {s['status']}")
+        print(f"Items:  {s['processed']}/{s['total']} processed, {s['remaining']} remaining")
+        if s["by_tag"]:
+            print("\nBy tag:")
+            for tag, counts in sorted(s["by_tag"].items()):
+                print(f"  {tag:20s}  {counts['processed']}/{counts['total']}")
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
 
 
 def cmd_sweep_archive(args: argparse.Namespace) -> None:
     conn = db.connect()
     from codebugs import sweep
-    result = sweep.archive_sweep(conn, args.sweep)
-    conn.close()
-    print(f"Archived: {result['sweep_id']}")
+    try:
+        result = sweep.archive_sweep(conn, args.sweep)
+        print(f"Archived: {result['sweep_id']}")
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
 
 
 def cmd_sweep_list(args: argparse.Namespace) -> None:
     conn = db.connect()
     from codebugs import sweep
-    result = sweep.list_sweeps(conn, include_archived=args.all)
-    conn.close()
-    if not result["sweeps"]:
-        print("(no sweeps)")
-        return
-    data = [
-        {
-            "sweep_id": s["sweep_id"],
-            "name": s["name"] or "",
-            "status": s["status"],
-            "progress": f"{s['processed']}/{s['total']}",
-            "remaining": str(s["remaining"]),
-        }
-        for s in result["sweeps"]
-    ]
-    print(_format_table(data, ["sweep_id", "name", "status", "progress", "remaining"]))
+    try:
+        result = sweep.list_sweeps(conn, include_archived=args.all)
+        if not result["sweeps"]:
+            print("(no sweeps)")
+            return
+        data = [
+            {
+                "sweep_id": s["sweep_id"],
+                "name": s["name"] or "",
+                "status": s["status"],
+                "progress": f"{s['processed']}/{s['total']}",
+                "remaining": str(s["remaining"]),
+            }
+            for s in result["sweeps"]
+        ]
+        print(_format_table(data, ["sweep_id", "name", "status", "progress", "remaining"]))
+    finally:
+        conn.close()
 
 
 def _register_sweep_subcommands(sub, commands):
