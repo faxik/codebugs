@@ -500,18 +500,132 @@ def register_merge_tools(mcp: FastMCP) -> None:
             return merge.finish(conn, session_id, success=success)
 
 
+def register_sweep_tools(mcp: FastMCP) -> None:
+    """Register sweep batch-iteration tools on the given MCP server."""
+
+    @mcp.tool()
+    def codesweep_create(
+        name: str | None = None,
+        description: str = "",
+        default_batch_size: int = 10,
+    ) -> dict[str, Any]:
+        """Create a new sweep for batch iteration over items.
+
+        Args:
+            name: Optional human-readable name (must be unique)
+            description: What this sweep is for
+            default_batch_size: Default items per batch (default: 10)
+        """
+        from codebugs import sweep
+        with _conn() as conn:
+            return sweep.create_sweep(
+                conn, name=name, description=description,
+                default_batch_size=default_batch_size,
+            )
+
+    @mcp.tool()
+    def codesweep_add(
+        sweep_ref: str,
+        items: list[str],
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Add items to a sweep. Duplicates are silently skipped.
+
+        Args:
+            sweep_ref: Sweep ID (SW-N) or name
+            items: Item identifiers to add
+            tags: Optional tags applied to all items in this batch
+        """
+        from codebugs import sweep
+        with _conn() as conn:
+            return sweep.add_items(conn, sweep_ref, items, tags=tags)
+
+    @mcp.tool()
+    def codesweep_next(
+        sweep_ref: str,
+        limit: int | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Get next batch of unprocessed items in insertion order.
+
+        Args:
+            sweep_ref: Sweep ID (SW-N) or name
+            limit: Batch size (overrides sweep default)
+            tags: Filter to items matching any of these tags
+        """
+        from codebugs import sweep
+        with _conn() as conn:
+            return sweep.next_batch(conn, sweep_ref, limit=limit, tags=tags)
+
+    @mcp.tool()
+    def codesweep_mark(
+        sweep_ref: str,
+        items: list[str],
+        processed: bool = True,
+    ) -> dict[str, Any]:
+        """Mark items as processed or unprocessed.
+
+        Args:
+            sweep_ref: Sweep ID (SW-N) or name
+            items: Item identifiers to mark
+            processed: True to mark processed (default), False to unmark
+        """
+        from codebugs import sweep
+        with _conn() as conn:
+            return sweep.mark_items(conn, sweep_ref, items, processed=processed)
+
+    @mcp.tool()
+    def codesweep_status(
+        sweep_ref: str,
+    ) -> dict[str, Any]:
+        """Sweep overview — total, processed, remaining counts, per-tag breakdown.
+
+        Args:
+            sweep_ref: Sweep ID (SW-N) or name
+        """
+        from codebugs import sweep
+        with _conn() as conn:
+            return sweep.get_status(conn, sweep_ref)
+
+    @mcp.tool()
+    def codesweep_archive(
+        sweep_ref: str,
+    ) -> dict[str, Any]:
+        """Archive a sweep. Archived sweeps are excluded from codesweep_list by default.
+
+        Args:
+            sweep_ref: Sweep ID (SW-N) or name
+        """
+        from codebugs import sweep
+        with _conn() as conn:
+            return sweep.archive_sweep(conn, sweep_ref)
+
+    @mcp.tool()
+    def codesweep_list(
+        include_archived: bool = False,
+    ) -> dict[str, Any]:
+        """List all sweeps with summary counts.
+
+        Args:
+            include_archived: Include archived sweeps (default: false)
+        """
+        from codebugs import sweep
+        with _conn() as conn:
+            return sweep.list_sweeps(conn, include_archived=include_archived)
+
+
 def main():
     """Run the MCP server with optional mode selection."""
     parser = argparse.ArgumentParser(description="Codebugs MCP server")
     parser.add_argument(
         "--mode",
-        choices=["findings", "reqs", "merge", "all"],
+        choices=["findings", "reqs", "merge", "sweep", "all"],
         default="all",
-        help="Which tools to expose: findings, reqs, merge, or all (default: all)",
+        help="Which tools to expose: findings, reqs, merge, sweep, or all (default: all)",
     )
     args = parser.parse_args()
 
-    name = {"findings": "codebugs", "reqs": "codereqs", "merge": "codemerge", "all": "codebugs"}[args.mode]
+    name = {"findings": "codebugs", "reqs": "codereqs", "merge": "codemerge", "sweep": "codesweep", "all": "codebugs"}[args.mode]
     server = FastMCP(name, json_response=True)
 
     if args.mode in ("findings", "all"):
@@ -520,6 +634,8 @@ def main():
         register_reqs_tools(server)
     if args.mode in ("merge", "all"):
         register_merge_tools(server)
+    if args.mode in ("sweep", "all"):
+        register_sweep_tools(server)
 
     server.run()
 
