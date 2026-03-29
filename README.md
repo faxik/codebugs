@@ -55,7 +55,7 @@ Use `--mode` to load only the tools you need:
 }
 ```
 
-Available modes: `findings` (7 tools), `reqs` (11 tools), `all` (18 tools, default).
+Available modes: `findings` (7 tools), `reqs` (11 tools), `sweep` (7 tools), `all` (25 tools, default).
 
 The CLI supports the same flag: `codebugs --mode findings summary`.
 
@@ -94,6 +94,18 @@ Any MCP-compatible client can connect to `codebugs-mcp` via stdio transport.
 | `reqs_batch_embed` | Store embeddings for multiple requirements |
 | `reqs_search_similar` | Semantic search across requirements by cosine similarity |
 | `reqs_embedding_stats` | Report on embedding coverage |
+
+**Sweeps** (batch iteration over files/items):
+
+| Tool | Purpose |
+|------|---------|
+| `codesweep_create` | Create a new sweep with optional name and batch size |
+| `codesweep_add` | Add items to a sweep (with optional tags) |
+| `codesweep_next` | Get next batch of unprocessed items (with tag filtering) |
+| `codesweep_mark` | Mark items as processed or unprocessed |
+| `codesweep_status` | Sweep progress — total, processed, remaining, per-tag breakdown |
+| `codesweep_archive` | Archive a completed sweep |
+| `codesweep_list` | List all sweeps with summary counts |
 
 ### CLI (for humans)
 
@@ -149,6 +161,37 @@ codebugs reqs-add FR-700 -d "System shall support licensing" --section "1.72 Lic
 codebugs reqs-export REQUIREMENTS.md
 ```
 
+**Sweeps:**
+
+```bash
+# Create a sweep
+codebugs sweep-create --name lint-pass --batch-size 5
+
+# Add items (with optional tags)
+codebugs sweep-add lint-pass src/*.py --tags critical
+codebugs sweep-add lint-pass tests/*.py --tags test
+
+# Iterate in batches
+codebugs sweep-next lint-pass
+codebugs sweep-next lint-pass --limit 10 --tags critical
+
+# Mark items as processed
+codebugs sweep-mark lint-pass src/api.py src/db.py
+
+# Undo a mark
+codebugs sweep-mark lint-pass src/api.py --undo
+
+# Check progress
+codebugs sweep-status lint-pass
+
+# Archive when done
+codebugs sweep-archive lint-pass
+
+# List active sweeps
+codebugs sweep-list
+codebugs sweep-list --all  # include archived
+```
+
 ## How It Works
 
 ### The Problem
@@ -202,6 +245,25 @@ Both tables share the same SQLite database (`.codebugs/findings.db`) with flexib
 | `embedding` | blob | Optional float32 vector for semantic search |
 | `tags` | json | Array of strings |
 | `meta` | json | Anything else: `notes`, `superseded_by`, ... |
+
+### Sweeps
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `sweep_id` | text | Auto-generated (`SW-1`, `SW-2`, ...) |
+| `name` | text | Optional human-readable name (unique) |
+| `description` | text | What this sweep is for |
+| `default_batch_size` | int | Default items per batch (default: 10) |
+| `status` | text | `active`, `archived` |
+
+**Sweep items:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `item` | text | Arbitrary string identifier (file path, finding ID, URL, ...) |
+| `tags` | json | Array of strings for filtering |
+| `processed` | int | 0 or 1 |
+| `position` | int | Insertion order within the sweep |
 
 ## Pattern Detection
 
