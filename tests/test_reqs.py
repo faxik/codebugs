@@ -377,6 +377,87 @@ class TestImportUnnumberedSections:
         assert row["section"] == "Performance Targets"
 
 
+class TestImportLevel2SectionHeadings:
+    """CB-808: ## level-2 headings should be recognized as section boundaries."""
+
+    def test_l2_heading_resets_section(self, conn):
+        md = """# Requirements
+
+### 1.98 Search Quality Benchmark (FR-001 -- FR-001)
+
+| ID | Requirement | Priority | Status | Source | Test Coverage |
+|----|-------------|----------|--------|--------|---------------|
+| FR-001 | Search benchmark | Must | Planned | Arch | -- |
+
+## 2. Non-Functional Requirements
+
+### Performance Targets (NFR-001 -- NFR-002)
+
+| ID | Requirement | Priority | Status | Source | Test Coverage |
+|----|-------------|----------|--------|--------|---------------|
+| NFR-001 | Response time < 200ms | Must | Planned | Arch | -- |
+| NFR-002 | Uptime 99.9% | Must | Planned | Arch | -- |
+"""
+        result = _import_md(conn, md)
+
+        assert result["imported"] == 3
+        row_fr = conn.execute("SELECT section FROM requirements WHERE id = 'FR-001'").fetchone()
+        row_nfr = conn.execute("SELECT section FROM requirements WHERE id = 'NFR-001'").fetchone()
+        assert row_fr["section"] == "1.98 Search Quality Benchmark"
+        assert row_nfr["section"] == "Performance Targets"
+
+    def test_l2_heading_without_number(self, conn):
+        md = """## Non-Functional Requirements
+
+| ID | Requirement | Priority | Status | Source | Test Coverage |
+|----|-------------|----------|--------|--------|---------------|
+| NFR-001 | Latency < 200ms | Must | Planned | Arch | -- |
+"""
+        _import_md(conn, md)
+
+        row = conn.execute("SELECT section FROM requirements WHERE id = 'NFR-001'").fetchone()
+        assert row["section"] == "Non-Functional Requirements"
+
+    def test_l2_heading_with_number(self, conn):
+        md = """## 2. Non-Functional Requirements
+
+| ID | Requirement | Priority | Status | Source | Test Coverage |
+|----|-------------|----------|--------|--------|---------------|
+| NFR-001 | Latency < 200ms | Must | Planned | Arch | -- |
+"""
+        _import_md(conn, md)
+
+        row = conn.execute("SELECT section FROM requirements WHERE id = 'NFR-001'").fetchone()
+        assert row["section"] == "2. Non-Functional Requirements"
+
+    def test_l2_does_not_capture_l3(self, conn):
+        """Ensure ### headings still take priority over ## for their own rows."""
+        md = """## 1. Functional Requirements
+
+### 1.1 Ingestion (FR-001 -- FR-001)
+
+| ID | Requirement | Priority | Status | Source | Test Coverage |
+|----|-------------|----------|--------|--------|---------------|
+| FR-001 | Ingest PDFs | Must | Planned | R&A | -- |
+"""
+        _import_md(conn, md)
+
+        row = conn.execute("SELECT section FROM requirements WHERE id = 'FR-001'").fetchone()
+        assert row["section"] == "1.1 Ingestion"
+
+
+class TestUpdateSection:
+    """CB-808: reqs_update should support the section field."""
+
+    def test_update_section(self, populated):
+        result = reqs.update_requirement(populated, "FR-001", section="2. Non-Functional Requirements")
+        assert result["section"] == "2. Non-Functional Requirements"
+
+    def test_update_section_to_empty(self, populated):
+        result = reqs.update_requirement(populated, "FR-001", section="")
+        assert result["section"] == ""
+
+
 class TestEmbeddings:
     def test_store_and_retrieve(self, conn):
         reqs.add_requirement(conn, req_id="FR-001", description="Ingest documents")

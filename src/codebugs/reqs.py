@@ -141,6 +141,7 @@ def update_requirement(
     status: str | None = None,
     description: str | None = None,
     priority: str | None = None,
+    section: str | None = None,
     test_coverage: str | None = None,
     notes: str | None = None,
     tags: list[str] | None = None,
@@ -154,6 +155,9 @@ def update_requirement(
     updates = []
     params: list[Any] = []
 
+    if section is not None:
+        updates.append("section = ?")
+        params.append(section)
     if status is not None:
         if status not in VALID_STATUSES:
             raise ValueError(f"Invalid status: {status}. Must be one of {VALID_STATUSES}")
@@ -414,6 +418,7 @@ def verify_requirements(
 # --- Markdown import/export ---
 
 _SECTION_RE = re.compile(r"^###\s+(?:(\d+\.\d+\w*)\s+)?(.+?)\s*\(N?FR-\d+")
+_SECTION_L2_RE = re.compile(r"^##(?!#)\s+(?:(\d+)\.\s+)?(.+)$")
 _ROW_RE = re.compile(r"^\|\s*(N?FR-\d+\w*)\s*\|")
 
 
@@ -437,12 +442,20 @@ def import_markdown(
     for line in lines:
         line = line.rstrip()
 
-        # Section header
+        # Section header: ### (level-3, most sections)
         sm = _SECTION_RE.match(line)
         if sm:
             section_num = sm.group(1)
             section_title = sm.group(2).strip()
             current_section = f"{section_num} {section_title}" if section_num else section_title
+            continue
+
+        # Section header: ## (level-2, e.g. "## 2. Non-Functional Requirements")
+        sm2 = _SECTION_L2_RE.match(line)
+        if sm2:
+            section_num = sm2.group(1)
+            section_title = sm2.group(2).strip()
+            current_section = f"{section_num}. {section_title}" if section_num else section_title
             continue
 
         # Table row

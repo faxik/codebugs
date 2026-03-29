@@ -219,6 +219,7 @@ def register_reqs_tools(mcp: FastMCP) -> None:
         status: str | None = None,
         description: str | None = None,
         priority: str | None = None,
+        section: str | None = None,
         test_coverage: str | None = None,
         notes: str | None = None,
         tags: list[str] | None = None,
@@ -231,6 +232,7 @@ def register_reqs_tools(mcp: FastMCP) -> None:
             status: New status: Planned, Partial, Implemented, Verified, Superseded, Obsolete
             description: Updated description
             priority: Updated priority: Must, Should, Could
+            section: Updated section name
             test_coverage: Updated test file reference
             notes: Notes (stored in meta.notes)
             tags: Replace tags
@@ -239,7 +241,7 @@ def register_reqs_tools(mcp: FastMCP) -> None:
         with _conn() as conn:
             return reqs.update_requirement(
                 conn, req_id, status=status, description=description,
-                priority=priority, test_coverage=test_coverage,
+                priority=priority, section=section, test_coverage=test_coverage,
                 notes=notes, tags=tags, meta_update=meta_update,
             )
 
