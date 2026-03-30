@@ -8,7 +8,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from codebugs import db, reqs
+from codebugs import db, reqs, bench
 
 
 @contextmanager
@@ -616,18 +616,140 @@ def register_sweep_tools(mcp: FastMCP) -> None:
             return sweep.list_sweeps(conn, include_archived=include_archived)
 
 
+def register_bench_tools(mcp: FastMCP) -> None:
+    """Register benchmark result tools on the given MCP server."""
+
+    @mcp.tool()
+    def codebench_import(
+        benchmark: str,
+        csv_data: str | None = None,
+        json_data: str | None = None,
+        date: str | None = None,
+        tags: list[str] | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Import benchmark results from CSV or JSON.
+
+        CSV convention: first column is the row label, remaining columns are
+        metric names with numeric values.
+
+        JSON convention: array of objects, first key is the row label, rest
+        are metric keys with numeric values.
+
+        Args:
+            benchmark: Benchmark name (e.g. "search-perf")
+            csv_data: CSV string (header + data rows). Provide csv_data OR json_data.
+            json_data: JSON array string. Provide csv_data OR json_data.
+            date: Run date (default: today, ISO format YYYY-MM-DD)
+            tags: Optional tags (e.g. ["nightly", "v2.1"])
+            meta: Optional metadata (e.g. {"git_sha": "abc123", "ci_url": "..."})
+        """
+        if not csv_data and not json_data:
+            raise ValueError("Provide either csv_data or json_data")
+        if csv_data and json_data:
+            raise ValueError("Provide csv_data or json_data, not both")
+        with _conn() as conn:
+            if csv_data:
+                return bench.import_csv(
+                    conn, benchmark=benchmark, csv_data=csv_data,
+                    date=date, tags=tags, meta=meta,
+                )
+            return bench.import_json(
+                conn, benchmark=benchmark, json_data=json_data,
+                date=date, tags=tags, meta=meta,
+            )
+
+    @mcp.tool()
+    def codebench_query(
+        benchmark: str,
+        runs: list[str] | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        metrics: list[str] | None = None,
+        rows: list[str] | None = None,
+        group_by: str = "row",
+        last_n: int | None = None,
+        format: str = "json",
+    ) -> dict[str, Any]:
+        """Query and pivot benchmark results.
+
+        group_by="row": original table shape (row_labels as rows, metrics as
+        columns). Returns one table per run.
+
+        group_by="run": trend view (runs as rows, metrics as columns).
+        Returns one table per row_label.
+
+        Args:
+            benchmark: Benchmark name to query
+            runs: Specific run IDs (default: all matching)
+            date_from: Start date filter (inclusive, YYYY-MM-DD)
+            date_to: End date filter (inclusive, YYYY-MM-DD)
+            metrics: Which metrics to include (default: all)
+            rows: Which row_labels to include (default: all)
+            group_by: Pivot axis — "row" or "run"
+            last_n: Limit to last N runs by date
+            format: Output — "json" or "csv"
+        """
+        with _conn() as conn:
+            return bench.query(
+                conn, benchmark=benchmark, runs=runs,
+                date_from=date_from, date_to=date_to,
+                metrics=metrics, rows=rows, group_by=group_by,
+                last_n=last_n, format=format,
+            )
+
+    @mcp.tool()
+    def codebench_list(
+        benchmark: str | None = None,
+        last_n: int | None = None,
+    ) -> dict[str, Any]:
+        """List benchmarks or runs.
+
+        Without benchmark: lists all benchmark names with run counts.
+        With benchmark: lists runs for that benchmark.
+
+        Args:
+            benchmark: If provided, list runs for this benchmark
+            last_n: Limit to last N runs (only when benchmark is provided)
+        """
+        with _conn() as conn:
+            if benchmark:
+                return bench.list_runs(conn, benchmark=benchmark, last_n=last_n)
+            return bench.list_benchmarks(conn)
+
+    @mcp.tool()
+    def codebench_delete(
+        run_id: str | None = None,
+        benchmark: str | None = None,
+    ) -> dict[str, Any]:
+        """Delete a single run or all runs for a benchmark.
+
+        Args:
+            run_id: Delete a specific run (e.g. "BE-1")
+            benchmark: Delete all runs for a benchmark name
+        """
+        if not run_id and not benchmark:
+            raise ValueError("Provide run_id or benchmark")
+        if run_id and benchmark:
+            raise ValueError("Provide run_id or benchmark, not both")
+        with _conn() as conn:
+            if run_id:
+                return bench.delete_run(conn, run_id)
+            return bench.delete_benchmark(conn, benchmark)
+
+
 def main():
     """Run the MCP server with optional mode selection."""
     parser = argparse.ArgumentParser(description="Codebugs MCP server")
     parser.add_argument(
         "--mode",
-        choices=["findings", "reqs", "merge", "sweep", "all"],
+        choices=["findings", "reqs", "merge", "sweep", "bench", "all"],
         default="all",
-        help="Which tools to expose: findings, reqs, merge, sweep, or all (default: all)",
+        help="Which tools to expose: findings, reqs, merge, sweep, bench, or all (default: all)",
     )
     args = parser.parse_args()
 
-    name = {"findings": "codebugs", "reqs": "codereqs", "merge": "codemerge", "sweep": "codesweep", "all": "codebugs"}[args.mode]
+    name = {"findings": "codebugs", "reqs": "codereqs", "merge": "codemerge", "sweep": "codesweep", "bench": "codebench", "all": "codebugs"}[args.mode]
     server = FastMCP(name, json_response=True)
 
     if args.mode in ("findings", "all"):
@@ -638,6 +760,8 @@ def main():
         register_merge_tools(server)
     if args.mode in ("sweep", "all"):
         register_sweep_tools(server)
+    if args.mode in ("bench", "all"):
+        register_bench_tools(server)
 
     server.run()
 

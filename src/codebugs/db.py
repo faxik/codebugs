@@ -99,6 +99,8 @@ def connect(project_dir: str | None = None) -> sqlite3.Connection:
     merge.ensure_schema(conn)
     from codebugs import sweep
     sweep.ensure_schema(conn)
+    from codebugs import bench
+    bench.ensure_schema(conn)
     return conn
 
 
