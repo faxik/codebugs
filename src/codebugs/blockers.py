@@ -32,9 +32,14 @@ CREATE INDEX IF NOT EXISTS idx_blockers_blocked_by ON blockers(blocked_by);
 CREATE INDEX IF NOT EXISTS idx_blockers_trigger ON blockers(trigger_type, trigger_at);
 """
 
+ENTITY_FINDING = "finding"
+ENTITY_REQUIREMENT = "requirement"
+
+ENTITY_TABLES = {ENTITY_FINDING: "findings", ENTITY_REQUIREMENT: "requirements"}
+
 TERMINAL_STATUSES: dict[str, set[str]] = {
-    "finding": {"fixed", "not_a_bug", "wont_fix"},
-    "requirement": {"Implemented", "Verified", "Superseded", "Obsolete"},
+    ENTITY_FINDING: {"fixed", "not_a_bug", "wont_fix"},
+    ENTITY_REQUIREMENT: {"Implemented", "Verified", "Superseded", "Obsolete"},
 }
 
 VALID_TRIGGER_TYPES = ("entity_resolved", "date", "manual")
@@ -56,41 +61,35 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 def _detect_entity_type(entity_id: str) -> str:
     """Infer entity type from ID prefix."""
     if re.match(r"^CB-\d+", entity_id):
-        return "finding"
+        return ENTITY_FINDING
     if re.match(r"^N?FR-\d+", entity_id):
-        return "requirement"
+        return ENTITY_REQUIREMENT
     raise ValueError(
         f"Unknown entity ID format: {entity_id}. Expected CB-N, FR-N, or NFR-N."
     )
 
 
+def _get_entity_field(
+    conn: sqlite3.Connection, entity_id: str, entity_type: str, field: str
+) -> Any | None:
+    """Look up a single field from a finding or requirement by ID."""
+    table = ENTITY_TABLES[entity_type]
+    row = conn.execute(
+        f"SELECT {field} FROM {table} WHERE id = ?", (entity_id,)
+    ).fetchone()
+    return row[field] if row else None
+
+
 def _entity_exists(conn: sqlite3.Connection, entity_id: str, entity_type: str) -> bool:
-    """Check if an entity exists in its table."""
-    table = "findings" if entity_type == "finding" else "requirements"
-    row = conn.execute(f"SELECT 1 FROM {table} WHERE id = ?", (entity_id,)).fetchone()
-    return row is not None
+    return _get_entity_field(conn, entity_id, entity_type, "id") is not None
 
 
-def _get_entity_status(
-    conn: sqlite3.Connection, entity_id: str, entity_type: str
-) -> str | None:
-    """Look up current status of a finding or requirement by ID."""
-    table = "findings" if entity_type == "finding" else "requirements"
-    row = conn.execute(
-        f"SELECT status FROM {table} WHERE id = ?", (entity_id,)
-    ).fetchone()
-    return row["status"] if row else None
+def _get_entity_status(conn: sqlite3.Connection, entity_id: str, entity_type: str) -> str | None:
+    return _get_entity_field(conn, entity_id, entity_type, "status")
 
 
-def _get_entity_description(
-    conn: sqlite3.Connection, entity_id: str, entity_type: str
-) -> str | None:
-    """Look up description of a finding or requirement."""
-    table = "findings" if entity_type == "finding" else "requirements"
-    row = conn.execute(
-        f"SELECT description FROM {table} WHERE id = ?", (entity_id,)
-    ).fetchone()
-    return row["description"] if row else None
+def _get_entity_description(conn: sqlite3.Connection, entity_id: str, entity_type: str) -> str | None:
+    return _get_entity_field(conn, entity_id, entity_type, "description")
 
 
 def _normalize_trigger_at(value: str) -> str:
@@ -281,8 +280,10 @@ def check_blockers(conn: sqlite3.Connection) -> dict[str, Any]:
         "SELECT * FROM blockers WHERE cancelled_at IS NULL ORDER BY item_id"
     ).fetchall()
 
-    # Group by item
+    now = _now()
     items: dict[str, dict[str, Any]] = {}
+    overdue = []
+
     for row in rows:
         b = _evaluate_blocker(conn, row)
         key = b["item_id"]
@@ -298,6 +299,14 @@ def check_blockers(conn: sqlite3.Connection) -> dict[str, Any]:
             items[key]["satisfied"].append(b)
         else:
             items[key]["remaining"].append(b)
+
+        if b["trigger_type"] == "date" and b["trigger_at"] and b["trigger_at"] <= now:
+            overdue.append({
+                "id": b["id"],
+                "item_id": b["item_id"],
+                "trigger_at": b["trigger_at"],
+                "reason": b["reason"],
+            })
 
     actionable = []
     partially_unblocked = []
@@ -317,21 +326,6 @@ def check_blockers(conn: sqlite3.Connection) -> dict[str, Any]:
                 "remaining": len(item["remaining"]),
                 "satisfied": len(item["satisfied"]),
                 "remaining_blockers": item["remaining"],
-            })
-
-    # Overdue date triggers (active, past due)
-    overdue = []
-    now = _now()
-    for row in conn.execute(
-        "SELECT * FROM blockers WHERE trigger_type = 'date' AND cancelled_at IS NULL"
-    ).fetchall():
-        b = _row_to_dict(row)
-        if b["trigger_at"] and b["trigger_at"] <= now:
-            overdue.append({
-                "id": b["id"],
-                "item_id": b["item_id"],
-                "trigger_at": b["trigger_at"],
-                "reason": b["reason"],
             })
 
     return {
@@ -447,37 +441,81 @@ def get_unblocked_by(
     return results
 
 
-def get_deferred_item_ids(
+def _get_active_blockers_by_type(
     conn: sqlite3.Connection, entity_type: str
-) -> set[str]:
-    """Return set of item IDs that have active blockers of given entity type."""
+) -> list[dict[str, Any]]:
+    """Fetch and evaluate all non-cancelled blockers for an entity type."""
     rows = conn.execute(
         "SELECT * FROM blockers WHERE item_type = ? AND cancelled_at IS NULL",
         (entity_type,),
     ).fetchall()
+    return [_evaluate_blocker(conn, row) for row in rows]
 
-    deferred: set[str] = set()
-    for row in rows:
-        b = _evaluate_blocker(conn, row)
+
+def query_deferred_entities(
+    conn: sqlite3.Connection,
+    entity_type: str,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Query entities that have active blockers, with blocker counts.
+
+    Encapsulates the SQL + serialization so server.py doesn't need to reach
+    into db._row_to_dict or reqs._row_to_dict.
+    """
+    evaluated = _get_active_blockers_by_type(conn, entity_type)
+
+    # Build blocker counts per item from already-evaluated data
+    active_counts: dict[str, int] = {}
+    for b in evaluated:
         if b["is_active"]:
-            deferred.add(b["item_id"])
-    return deferred
+            active_counts[b["item_id"]] = active_counts.get(b["item_id"], 0) + 1
+
+    if not active_counts:
+        key = "findings" if entity_type == ENTITY_FINDING else "requirements"
+        return {"grouped": False, "total": 0, "limit": limit, "offset": offset, key: []}
+
+    table = ENTITY_TABLES[entity_type]
+    sort_col = "severity" if entity_type == ENTITY_FINDING else "priority"
+    key = "findings" if entity_type == ENTITY_FINDING else "requirements"
+
+    ids_list = sorted(active_counts)
+    placeholders = ",".join("?" for _ in ids_list)
+    rows = conn.execute(
+        f"SELECT * FROM {table} WHERE id IN ({placeholders}) ORDER BY {sort_col}, created_at DESC LIMIT ? OFFSET ?",
+        ids_list + [limit, offset],
+    ).fetchall()
+
+    # Serialize rows using the appropriate module's pattern
+    if entity_type == ENTITY_FINDING:
+        from codebugs import db
+        entities = [db._row_to_dict(r) for r in rows]
+    else:
+        from codebugs import reqs
+        entities = [reqs._row_to_dict(r) for r in rows]
+
+    for e in entities:
+        e["blocker_count"] = active_counts.get(e["id"], 0)
+
+    return {"grouped": False, "total": len(ids_list), "limit": limit, "offset": offset, key: entities}
+
+
+def get_deferred_item_ids(
+    conn: sqlite3.Connection, entity_type: str
+) -> set[str]:
+    """Return set of item IDs that have active blockers of given entity type."""
+    return {b["item_id"] for b in _get_active_blockers_by_type(conn, entity_type) if b["is_active"]}
 
 
 def get_deferred_counts(
     conn: sqlite3.Connection, entity_type: str
 ) -> dict[str, int]:
     """Return deferred/overdue/unblocked counts for an entity type."""
-    rows = conn.execute(
-        "SELECT * FROM blockers WHERE item_type = ? AND cancelled_at IS NULL",
-        (entity_type,),
-    ).fetchall()
+    evaluated = _get_active_blockers_by_type(conn, entity_type)
 
     now = _now()
-    # Group by item
     items: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        b = _evaluate_blocker(conn, row)
+    for b in evaluated:
         items.setdefault(b["item_id"], []).append(b)
 
     deferred_count = 0
@@ -492,7 +530,6 @@ def get_deferred_counts(
                 if b["trigger_type"] == "date" and b["trigger_at"] and b["trigger_at"] <= now:
                     overdue_items.add(item_id)
         else:
-            # All blockers satisfied — currently unblocked
             currently_unblocked_count += 1
 
     return {

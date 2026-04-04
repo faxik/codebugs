@@ -107,8 +107,8 @@ def register_findings_tools(mcp: FastMCP) -> None:
                 tags=tags,
                 meta_update=meta_update,
             )
-            if status and result.get("status") in blockers.TERMINAL_STATUSES.get("finding", set()):
-                unblocked = blockers.get_unblocked_by(conn, finding_id, "finding")
+            if status and result.get("status") in blockers.TERMINAL_STATUSES.get(blockers.ENTITY_FINDING, set()):
+                unblocked = blockers.get_unblocked_by(conn, finding_id, blockers.ENTITY_FINDING)
                 if unblocked:
                     result["unblocked_items"] = unblocked
             return result
@@ -145,22 +145,7 @@ def register_findings_tools(mcp: FastMCP) -> None:
         """
         with _conn() as conn:
             if status == "deferred":
-                deferred_ids = blockers.get_deferred_item_ids(conn, "finding")
-                if not deferred_ids:
-                    return {"grouped": False, "total": 0, "limit": limit, "offset": offset, "findings": []}
-                placeholders = ",".join("?" for _ in deferred_ids)
-                ids_list = sorted(deferred_ids)
-                count = len(ids_list)
-                rows = conn.execute(
-                    f"SELECT * FROM findings WHERE id IN ({placeholders}) ORDER BY severity, created_at DESC LIMIT ? OFFSET ?",
-                    ids_list + [limit, offset],
-                ).fetchall()
-                findings = [db._row_to_dict(r) for r in rows]
-                for f in findings:
-                    f["blocker_count"] = len([
-                        b for b in blockers.query_blockers(conn, item_id=f["id"])["blockers"]
-                    ])
-                return {"grouped": False, "total": count, "limit": limit, "offset": offset, "findings": findings}
+                return blockers.query_deferred_entities(conn, blockers.ENTITY_FINDING, limit=limit, offset=offset)
             return db.query_findings(
                 conn,
                 status=status,
@@ -192,7 +177,7 @@ def register_findings_tools(mcp: FastMCP) -> None:
         top categories, hottest files, deferred counts. Start here for orientation."""
         with _conn() as conn:
             result = db.get_summary(conn)
-            result.update(blockers.get_deferred_counts(conn, "finding"))
+            result.update(blockers.get_deferred_counts(conn, blockers.ENTITY_FINDING))
             return result
 
     @mcp.tool()
@@ -269,8 +254,8 @@ def register_reqs_tools(mcp: FastMCP) -> None:
                 priority=priority, section=section, test_coverage=test_coverage,
                 notes=notes, tags=tags, meta_update=meta_update,
             )
-            if status and result.get("status") in blockers.TERMINAL_STATUSES.get("requirement", set()):
-                unblocked = blockers.get_unblocked_by(conn, req_id, "requirement")
+            if status and result.get("status") in blockers.TERMINAL_STATUSES.get(blockers.ENTITY_REQUIREMENT, set()):
+                unblocked = blockers.get_unblocked_by(conn, req_id, blockers.ENTITY_REQUIREMENT)
                 if unblocked:
                     result["unblocked_items"] = unblocked
             return result
@@ -303,22 +288,7 @@ def register_reqs_tools(mcp: FastMCP) -> None:
         """
         with _conn() as conn:
             if status == "deferred":
-                deferred_ids = blockers.get_deferred_item_ids(conn, "requirement")
-                if not deferred_ids:
-                    return {"grouped": False, "total": 0, "limit": limit, "offset": offset, "requirements": []}
-                placeholders = ",".join("?" for _ in deferred_ids)
-                ids_list = sorted(deferred_ids)
-                count = len(ids_list)
-                rows = conn.execute(
-                    f"SELECT * FROM requirements WHERE id IN ({placeholders}) ORDER BY priority, created_at DESC LIMIT ? OFFSET ?",
-                    ids_list + [limit, offset],
-                ).fetchall()
-                requirements = [reqs._row_to_dict(r) for r in rows]
-                for r in requirements:
-                    r["blocker_count"] = len([
-                        b for b in blockers.query_blockers(conn, item_id=r["id"])["blockers"]
-                    ])
-                return {"grouped": False, "total": count, "limit": limit, "offset": offset, "requirements": requirements}
+                return blockers.query_deferred_entities(conn, blockers.ENTITY_REQUIREMENT, limit=limit, offset=offset)
             return reqs.query_requirements(
                 conn, status=status, priority=priority, section=section,
                 search=search, source=source, tag=tag,
@@ -341,7 +311,7 @@ def register_reqs_tools(mcp: FastMCP) -> None:
         section progress, requirements without tests, deferred counts. Start here."""
         with _conn() as conn:
             result = reqs.get_reqs_summary(conn)
-            result.update(blockers.get_deferred_counts(conn, "requirement"))
+            result.update(blockers.get_deferred_counts(conn, blockers.ENTITY_REQUIREMENT))
             return result
 
     @mcp.tool()
