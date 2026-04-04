@@ -101,6 +101,8 @@ def connect(project_dir: str | None = None) -> sqlite3.Connection:
     sweep.ensure_schema(conn)
     from codebugs import bench
     bench.ensure_schema(conn)
+    from codebugs import blockers
+    blockers.ensure_schema(conn)
     return conn
 
 

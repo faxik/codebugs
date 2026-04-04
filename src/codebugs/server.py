@@ -8,7 +8,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from codebugs import db, reqs, bench
+from codebugs import db, reqs, bench, blockers
 
 
 @contextmanager
@@ -99,7 +99,7 @@ def register_findings_tools(mcp: FastMCP) -> None:
             meta_update: Merge additional metadata keys
         """
         with _conn() as conn:
-            return db.update_finding(
+            result = db.update_finding(
                 conn,
                 finding_id,
                 status=status,
@@ -107,6 +107,11 @@ def register_findings_tools(mcp: FastMCP) -> None:
                 tags=tags,
                 meta_update=meta_update,
             )
+            if status and result.get("status") in blockers.TERMINAL_STATUSES.get("finding", set()):
+                unblocked = blockers.get_unblocked_by(conn, finding_id, "finding")
+                if unblocked:
+                    result["unblocked_items"] = unblocked
+            return result
 
     @mcp.tool()
     def query(
@@ -125,7 +130,8 @@ def register_findings_tools(mcp: FastMCP) -> None:
         """Search and filter findings. Returns structured results.
 
         Args:
-            status: Filter by status (open, in_progress, fixed, not_a_bug, wont_fix, stale). Aliases accepted.
+            status: Filter by status (open, in_progress, fixed, not_a_bug, wont_fix, stale, deferred). Aliases accepted.
+                    Use 'deferred' to find items with active blockers.
             severity: Filter by severity (critical, high, medium, low)
             category: Filter by exact category
             file: Filter by file path (substring match)
@@ -138,6 +144,23 @@ def register_findings_tools(mcp: FastMCP) -> None:
             offset: Pagination offset
         """
         with _conn() as conn:
+            if status == "deferred":
+                deferred_ids = blockers.get_deferred_item_ids(conn, "finding")
+                if not deferred_ids:
+                    return {"grouped": False, "total": 0, "limit": limit, "offset": offset, "findings": []}
+                placeholders = ",".join("?" for _ in deferred_ids)
+                ids_list = sorted(deferred_ids)
+                count = len(ids_list)
+                rows = conn.execute(
+                    f"SELECT * FROM findings WHERE id IN ({placeholders}) ORDER BY severity, created_at DESC LIMIT ? OFFSET ?",
+                    ids_list + [limit, offset],
+                ).fetchall()
+                findings = [db._row_to_dict(r) for r in rows]
+                for f in findings:
+                    f["blocker_count"] = len([
+                        b for b in blockers.query_blockers(conn, item_id=f["id"])["blockers"]
+                    ])
+                return {"grouped": False, "total": count, "limit": limit, "offset": offset, "findings": findings}
             return db.query_findings(
                 conn,
                 status=status,
@@ -166,9 +189,11 @@ def register_findings_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     def summary() -> dict[str, Any]:
         """Dashboard overview — open/resolved counts, severity breakdown,
-        top categories, hottest files. Start here for orientation."""
+        top categories, hottest files, deferred counts. Start here for orientation."""
         with _conn() as conn:
-            return db.get_summary(conn)
+            result = db.get_summary(conn)
+            result.update(blockers.get_deferred_counts(conn, "finding"))
+            return result
 
     @mcp.tool()
     def categories() -> list[dict[str, Any]]:
@@ -239,11 +264,16 @@ def register_reqs_tools(mcp: FastMCP) -> None:
             meta_update: Merge metadata keys
         """
         with _conn() as conn:
-            return reqs.update_requirement(
+            result = reqs.update_requirement(
                 conn, req_id, status=status, description=description,
                 priority=priority, section=section, test_coverage=test_coverage,
                 notes=notes, tags=tags, meta_update=meta_update,
             )
+            if status and result.get("status") in blockers.TERMINAL_STATUSES.get("requirement", set()):
+                unblocked = blockers.get_unblocked_by(conn, req_id, "requirement")
+                if unblocked:
+                    result["unblocked_items"] = unblocked
+            return result
 
     @mcp.tool()
     def reqs_query(
@@ -260,7 +290,8 @@ def register_reqs_tools(mcp: FastMCP) -> None:
         """Search and filter requirements.
 
         Args:
-            status: Filter by status (Planned, Partial, Implemented, Verified, Superseded, Obsolete)
+            status: Filter by status (Planned, Partial, Implemented, Verified, Superseded, Obsolete, deferred).
+                    Use 'deferred' to find requirements with active blockers.
             priority: Filter by priority (Must, Should, Could)
             section: Filter by section (substring match)
             search: Search in description and ID
@@ -271,6 +302,23 @@ def register_reqs_tools(mcp: FastMCP) -> None:
             offset: Pagination offset
         """
         with _conn() as conn:
+            if status == "deferred":
+                deferred_ids = blockers.get_deferred_item_ids(conn, "requirement")
+                if not deferred_ids:
+                    return {"grouped": False, "total": 0, "limit": limit, "offset": offset, "requirements": []}
+                placeholders = ",".join("?" for _ in deferred_ids)
+                ids_list = sorted(deferred_ids)
+                count = len(ids_list)
+                rows = conn.execute(
+                    f"SELECT * FROM requirements WHERE id IN ({placeholders}) ORDER BY priority, created_at DESC LIMIT ? OFFSET ?",
+                    ids_list + [limit, offset],
+                ).fetchall()
+                requirements = [reqs._row_to_dict(r) for r in rows]
+                for r in requirements:
+                    r["blocker_count"] = len([
+                        b for b in blockers.query_blockers(conn, item_id=r["id"])["blockers"]
+                    ])
+                return {"grouped": False, "total": count, "limit": limit, "offset": offset, "requirements": requirements}
             return reqs.query_requirements(
                 conn, status=status, priority=priority, section=section,
                 search=search, source=source, tag=tag,
@@ -290,9 +338,11 @@ def register_reqs_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     def reqs_summary() -> dict[str, Any]:
         """Dashboard overview — status breakdown, priority split,
-        section progress, requirements without tests. Start here."""
+        section progress, requirements without tests, deferred counts. Start here."""
         with _conn() as conn:
-            return reqs.get_reqs_summary(conn)
+            result = reqs.get_reqs_summary(conn)
+            result.update(blockers.get_deferred_counts(conn, "requirement"))
+            return result
 
     @mcp.tool()
     def reqs_verify(
@@ -738,18 +788,91 @@ def register_bench_tools(mcp: FastMCP) -> None:
             return bench.delete_benchmark(conn, benchmark)
 
 
+def register_blockers_tools(mcp: FastMCP) -> None:
+    """Register blocker/dependency tools on the given MCP server."""
+
+    @mcp.tool()
+    def blockers_add(
+        item_id: str,
+        reason: str,
+        blocked_by: str | None = None,
+        trigger_type: str | None = None,
+        trigger_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Defer an item by adding a blocker.
+
+        Args:
+            item_id: The blocked entity (e.g. "CB-5", "FR-012")
+            reason: Why it's blocked
+            blocked_by: Dependency entity (e.g. "CB-3"). Required for entity_resolved triggers.
+            trigger_type: entity_resolved, date, or manual.
+                          Defaults to entity_resolved if blocked_by provided, manual otherwise.
+            trigger_at: Date/datetime for date triggers (e.g. "2026-04-10"). Normalized to UTC.
+        """
+        with _conn() as conn:
+            return blockers.add_blocker(
+                conn, item_id=item_id, reason=reason, blocked_by=blocked_by,
+                trigger_type=trigger_type, trigger_at=trigger_at,
+            )
+
+    @mcp.tool()
+    def blockers_query(
+        item_id: str | None = None,
+        blocked_by: str | None = None,
+        trigger_type: str | None = None,
+        active_only: bool = True,
+    ) -> dict[str, Any]:
+        """List blockers with filters. Each result includes computed satisfaction state.
+
+        Args:
+            item_id: Filter by blocked item (e.g. "CB-5")
+            blocked_by: Filter by dependency ("what does CB-3 unblock?")
+            trigger_type: Filter by trigger type (entity_resolved, date, manual)
+            active_only: Only unsatisfied, uncancelled blockers (default: true)
+        """
+        with _conn() as conn:
+            return blockers.query_blockers(
+                conn, item_id=item_id, blocked_by=blocked_by,
+                trigger_type=trigger_type, active_only=active_only,
+            )
+
+    @mcp.tool()
+    def blockers_check() -> dict[str, Any]:
+        """Scan for currently actionable items — items whose blockers are all satisfied.
+
+        Returns actionable items (all blockers met), partially unblocked items
+        (some blockers met), and overdue date triggers.
+        """
+        with _conn() as conn:
+            return blockers.check_blockers(conn)
+
+    @mcp.tool()
+    def blockers_resolve(
+        blocker_id: int,
+        action: str,
+    ) -> dict[str, Any]:
+        """Cancel or manually resolve a blocker.
+
+        Args:
+            blocker_id: The blocker row ID
+            action: 'cancel' (any trigger type) or 'resolve' (manual triggers only)
+        """
+        with _conn() as conn:
+            return blockers.resolve_blocker(conn, blocker_id=blocker_id, action=action)
+
+
 def main():
     """Run the MCP server with optional mode selection."""
     parser = argparse.ArgumentParser(description="Codebugs MCP server")
     parser.add_argument(
         "--mode",
-        choices=["findings", "reqs", "merge", "sweep", "bench", "all"],
+        choices=["findings", "reqs", "merge", "sweep", "bench", "blockers", "all"],
         default="all",
-        help="Which tools to expose: findings, reqs, merge, sweep, bench, or all (default: all)",
+        help="Which tools to expose: findings, reqs, merge, sweep, bench, blockers, or all (default: all)",
     )
     args = parser.parse_args()
 
-    name = {"findings": "codebugs", "reqs": "codereqs", "merge": "codemerge", "sweep": "codesweep", "bench": "codebench", "all": "codebugs"}[args.mode]
+    name = {"findings": "codebugs", "reqs": "codereqs", "merge": "codemerge", "sweep": "codesweep", "bench": "codebench", "blockers": "codeblockers", "all": "codebugs"}[args.mode]
     server = FastMCP(name, json_response=True)
 
     if args.mode in ("findings", "all"):
@@ -762,6 +885,8 @@ def main():
         register_sweep_tools(server)
     if args.mode in ("bench", "all"):
         register_bench_tools(server)
+    if args.mode in ("blockers", "all"):
+        register_blockers_tools(server)
 
     server.run()
 
