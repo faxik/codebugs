@@ -32,8 +32,8 @@ a week of testing."
 
 ### Data Model
 
-A single `blockers` table in the shared `findings.db`. Each row represents one
-dependency edge: "item X is blocked because of Y."
+A single `blockers` table in the shared `.codebugs/findings.db` database. Each row
+represents one dependency edge: "item X is blocked because of Y."
 
 ```sql
 CREATE TABLE IF NOT EXISTS blockers (
@@ -95,12 +95,30 @@ A blocker is **cancelled** when `cancelled_at IS NOT NULL` (permanent, does not 
 A blocker is **active** = not cancelled AND not satisfied.
 
 **Terminal statuses:**
-- Findings: `fixed`, `not_a_bug`, `wont_fix`
-- Requirements: `Implemented`, `Verified`, `Superseded`, `Obsolete`
+- Findings: `fixed`, `not_a_bug`, `wont_fix` (lower_snake_case)
+- Requirements: `Implemented`, `Verified`, `Superseded`, `Obsolete` (Title Case)
+
+Note: findings and requirements use different casing conventions. The
+`TERMINAL_STATUSES` dict maps each entity type to its terminal set with the correct
+casing. `_get_entity_status` returns raw status values without normalization.
 
 Note: `stale` (findings) is deliberately not terminal — stale items may return.
 
-**Evaluation helper:**
+**Cross-module entity lookup** (defined in `blockers.py`):
+
+```python
+def _get_entity_status(conn, entity_id, entity_type):
+    """Look up current status of a finding or requirement by ID.
+
+    Returns the raw status string (preserving original casing) or None
+    if the entity does not exist.
+    """
+    table = "findings" if entity_type == "finding" else "requirements"
+    row = conn.execute(f"SELECT status FROM {table} WHERE id = ?", (entity_id,)).fetchone()
+    return row["status"] if row else None
+```
+
+**Evaluation helper** (defined in `blockers.py`):
 
 ```python
 TERMINAL_STATUSES = {
@@ -125,10 +143,20 @@ def is_blocker_satisfied(conn, blocker) -> bool:
 
 Entity type is inferred from ID prefix, following existing codebugs conventions:
 
-| Prefix | Type |
-|---|---|
-| `CB-` | finding |
-| `FR-`, `NFR-` | requirement |
+| Prefix | Regex | Type |
+|---|---|---|
+| `CB-` | `r"^CB-\d+"` | finding |
+| `FR-`, `NFR-` | `r"^N?FR-\d+"` | requirement |
+
+```python
+def _detect_entity_type(entity_id: str) -> str:
+    """Infer entity type from ID prefix. Raises ValueError for unknown prefixes."""
+    if re.match(r"^CB-\d+", entity_id):
+        return "finding"
+    if re.match(r"^N?FR-\d+", entity_id):
+        return "requirement"
+    raise ValueError(f"Unknown entity ID format: {entity_id}. Expected CB-N, FR-N, or NFR-N.")
+```
 
 This avoids requiring the caller to specify `item_type` — it's derived automatically.
 
@@ -146,7 +174,9 @@ Add a blocker to defer an item.
 - `blocked_by` (str, optional) — dependency entity (e.g., "CB-3")
 - `trigger_type` (str, optional) — `entity_resolved` | `date` | `manual`.
   Defaults to `entity_resolved` if `blocked_by` is provided, `manual` otherwise.
-- `trigger_at` (str, optional) — ISO 8601 date for `date` triggers
+- `trigger_at` (str, optional) — date/datetime for `date` triggers. Normalized to
+  `YYYY-MM-DDTHH:MM:SSZ` (UTC) on storage. Date-only inputs (e.g., `"2026-04-10"`)
+  are interpreted as midnight UTC.
 
 **Validation:**
 - Both `item_id` and `blocked_by` (if provided) must exist in their respective tables.
@@ -173,12 +203,12 @@ List blockers with filters. Each result includes computed `is_satisfied` and `is
 
 #### `blockers_check`
 
-Scan for newly actionable items. No args required.
+Scan for currently actionable items. No args required.
 
 **Logic:**
 1. Fetch all active blockers, evaluate each.
 2. Group by `item_id`.
-3. For each item: if ALL blockers are satisfied, it's **newly actionable**.
+3. For each item: if ALL blockers are satisfied, it's **currently actionable**.
 4. Items with some satisfied and some still active get reported with remaining blockers.
 
 **Returns:**
@@ -217,7 +247,13 @@ Cancel or manually resolve a blocker.
 
 #### Response augmentation on status change
 
-When `update_finding` or `reqs_update` changes an entity to a terminal status:
+Augmentation happens in the **MCP tool wrappers** in `server.py` (the `update` and
+`reqs_update` tool functions), NOT in `db.py` or `reqs.py`. After calling the
+underlying `db.update_finding()` or `reqs.update_requirement()`, the wrapper queries
+blockers and merges `unblocked_items` into the returned dict. This avoids circular
+imports (`blockers.py` imports from `db` and `reqs`; `server.py` imports from all three).
+
+When a tool wrapper detects the new status is terminal:
 
 1. Query `blockers WHERE blocked_by = <entity_id> AND cancelled_at IS NULL`.
 2. Evaluate each blocker — report any that just became satisfied.
@@ -241,9 +277,18 @@ Response shape (appended to existing return dict):
 
 #### Query augmentation
 
-`query_findings` and `reqs_query` gain:
-- Pseudo-status `"deferred"`: returns only items with at least one active blocker.
-- Each result annotated with `blocker_count` (number of active blockers, 0 if none).
+`query_findings` and `reqs_query` gain deferred-awareness via their **MCP tool
+wrappers** in `server.py`. The pseudo-status `"deferred"` is intercepted in the
+wrapper **before** it reaches `resolve_status()` or the underlying query function
+(which would reject it as an unknown status). The wrapper:
+
+1. Detects `status="deferred"` and strips it from the query args.
+2. Calls `blockers.get_deferred_item_ids(conn, entity_type)` to get the set of
+   item IDs that have active blockers.
+3. Passes these IDs as an `id IN (...)` filter to the underlying query function.
+
+Additionally:
+- Each result is annotated with `blocker_count` (number of active blockers, 0 if none).
 
 #### Summary augmentation
 
@@ -262,10 +307,13 @@ Follows existing patterns:
 - `_now()` for ISO 8601 timestamps
 - `_detect_entity_type(entity_id)` for prefix-based type inference
 
-Registration in `server.py`:
-- New mode `blockers` with 4 tools
-- Included in `all` mode
-- `ensure_schema` called in `db.connect()` alongside other modules
+Registration in `server.py` (three touch points, following existing module pattern):
+1. Add `"blockers"` to argparse `choices` list (~line 748)
+2. Add entry to the mode name map dict (~line 752)
+3. Add conditional block: `if args.mode in ("blockers", "all"):` with 4 tool registrations
+
+Schema initialization: `blockers.ensure_schema(conn)` called in `db.connect()` alongside
+other modules.
 
 ### Testing Strategy
 
@@ -293,3 +341,29 @@ Registration in `server.py`:
    - `update_finding(id="CB-1", status="fixed")` → response includes `unblocked_items: [CB-2]`
    - `blockers_check()` → CB-2 is actionable
    - Reopen CB-1: `update_finding(id="CB-1", status="open")` → CB-2 is deferred again
+
+---
+
+## Appendix: Adversarial Review Corrections
+
+**Review date:** 2026-04-04 | **Design health score:** 7/10
+
+The following issues were found during adversarial review and corrected in this spec:
+
+| # | Finding | Severity | Fix Applied |
+|---|---------|----------|-------------|
+| 1 | `resolve_status()` crashes on `"deferred"` pseudo-status | SERIOUS | Deferred interception defined at server.py wrapper layer |
+| 2 | `_get_entity_status()` was referenced but undefined | SERIOUS | Function signature and implementation specified in blockers.py |
+| 3 | Status casing asymmetry (findings vs requirements) undocumented | SERIOUS | Asymmetry noted under Terminal statuses section |
+| 4 | Response augmentation integration point unspecified | WEAKNESS | server.py wrappers named as the augmentation layer |
+| 5 | Mode registration touch points hand-waved | WEAKNESS | Three server.py touch points listed explicitly |
+| 6 | `trigger_at` format not normalized | WEAKNESS | UTC normalization on write, date-only → midnight UTC |
+| 7 | "Newly actionable" misleading (no last-checked state) | WEAKNESS | Renamed to "currently actionable" |
+| 8 | ID detection regex unspecified | NITPICK | Regex patterns and `_detect_entity_type` function added |
+| 9 | DB path said "findings.db" not ".codebugs/findings.db" | NITPICK | Path corrected |
+
+**Dismissed findings (8):** entity existence validation (already specified), summary
+backward compat (additive keys are safe), unresolve contradiction (data model vs API),
+O(N*M) perf (small N, in-process SQLite), cross-type semantics (handled by dispatch),
+chain limits (no transitive eval), cancelled=satisfied naming (intentional), trigger_at
+naming (consistent with *_at convention).
