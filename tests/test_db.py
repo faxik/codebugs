@@ -499,3 +499,50 @@ class TestProvenance:
         assert results[0]["reported_at_ref"] == "v1.0"
         assert results[1]["reported_at_commit"] is None
         assert results[1]["reported_at_ref"] is None
+
+    def test_query_by_commit_prefix(self, conn):
+        sha = "a1b2c3d4e5" + "0" * 30
+        db.add_finding(
+            conn, severity="high", category="bug", file="a.py",
+            description="d", reported_at_commit=sha,
+        )
+        db.add_finding(
+            conn, severity="low", category="style", file="b.py",
+            description="d2",
+        )
+        result = db.query_findings(conn, commit="a1b2c3d4e5")
+        assert result["total"] == 1
+        assert result["findings"][0]["reported_at_commit"] == sha
+
+    def test_query_by_commit_rejects_non_hex(self, conn):
+        with pytest.raises(ValueError, match="hex"):
+            db.query_findings(conn, commit="not-hex!")
+
+    def test_query_by_ref(self, conn):
+        db.add_finding(
+            conn, severity="high", category="bug", file="a.py",
+            description="d", reported_at_ref="v2.1.0",
+        )
+        db.add_finding(
+            conn, severity="low", category="style", file="b.py",
+            description="d2", reported_at_ref="v3.0.0",
+        )
+        result = db.query_findings(conn, ref="v2.1.0")
+        assert result["total"] == 1
+        assert result["findings"][0]["reported_at_ref"] == "v2.1.0"
+
+    def test_update_reported_at_ref(self, conn):
+        f = db.add_finding(
+            conn, severity="high", category="bug", file="a.py", description="d",
+        )
+        updated = db.update_finding(conn, f["id"], reported_at_ref="v2.0")
+        assert updated["reported_at_ref"] == "v2.0"
+
+    def test_update_does_not_accept_reported_at_commit(self, conn):
+        """reported_at_commit is immutable — not a parameter of update_finding."""
+        f = db.add_finding(
+            conn, severity="high", category="bug", file="a.py", description="d",
+            reported_at_commit="a" * 40,
+        )
+        with pytest.raises(TypeError):
+            db.update_finding(conn, f["id"], reported_at_commit="b" * 40)

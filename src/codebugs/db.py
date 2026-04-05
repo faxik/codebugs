@@ -270,8 +270,12 @@ def update_finding(
     notes: str | None = None,
     tags: list[str] | None = None,
     meta_update: dict[str, Any] | None = None,
+    reported_at_ref: str | None = None,
 ) -> dict[str, Any]:
-    """Update a finding. Returns updated finding."""
+    """Update a finding. Returns updated finding.
+
+    Note: reported_at_commit is intentionally excluded — it is immutable after insert.
+    """
     row = conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
     if not row:
         raise KeyError(f"Finding not found: {finding_id}")
@@ -300,6 +304,10 @@ def update_finding(
         updates.append("meta = ?")
         params.append(json.dumps(existing_meta))
 
+    if reported_at_ref is not None:
+        updates.append("reported_at_ref = ?")
+        params.append(reported_at_ref)
+
     if not updates:
         return _row_to_dict(row)
 
@@ -323,6 +331,8 @@ def query_findings(
     tag: str | None = None,
     meta_key: str | None = None,
     meta_value: str | None = None,
+    commit: str | None = None,
+    ref: str | None = None,
     group_by: str | None = None,
     limit: int = 100,
     offset: int = 0,
@@ -356,6 +366,14 @@ def query_findings(
     elif meta_key:
         conditions.append("json_extract(meta, ?) IS NOT NULL")
         params.append(f"$.{meta_key}")
+    if commit:
+        if not re.fullmatch(r"[0-9a-fA-F]+", commit):
+            raise ValueError(f"commit filter must be hex, got: {commit!r}")
+        conditions.append("reported_at_commit LIKE ? || '%'")
+        params.append(commit.lower())
+    if ref:
+        conditions.append("reported_at_ref = ?")
+        params.append(ref)
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
