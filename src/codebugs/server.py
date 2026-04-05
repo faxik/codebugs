@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from contextlib import contextmanager
 from typing import Any
 
@@ -39,6 +40,80 @@ def _get_head_sha() -> str | None:
         ).strip()
     except (subprocess.SubprocessError, FileNotFoundError):
         return None
+
+
+def _check_file_staleness(
+    file_path: str,
+    reported_at_commit: str | None,
+    project_dir: str | None = None,
+) -> dict[str, Any]:
+    """Check staleness of a single file against a commit. Returns file_status dict."""
+    import subprocess
+
+    cwd = project_dir or os.getcwd()
+
+    if not reported_at_commit:
+        return {"file_status": "unknown", "reason": "no_provenance"}
+
+    # Check if the commit is reachable
+    try:
+        subprocess.check_output(
+            ["git", "cat-file", "-t", reported_at_commit],
+            cwd=cwd, text=True, timeout=10, stderr=subprocess.DEVNULL,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return {"file_status": "unknown", "reason": "unreachable_commit"}
+
+    # Check if file was modified since the commit
+    try:
+        log_output = subprocess.check_output(
+            ["git", "log", "--oneline", f"{reported_at_commit}..HEAD", "--", file_path],
+            cwd=cwd, text=True, timeout=10, stderr=subprocess.DEVNULL,
+        ).strip()
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return {"file_status": "unknown", "reason": "git_error"}
+
+    if not log_output:
+        return {"file_status": "current", "reason": f"{file_path} unchanged since {reported_at_commit[:12]}"}
+
+    commit_count = len(log_output.splitlines())
+
+    # File was changed — check if it still exists at HEAD
+    file_exists = os.path.isfile(os.path.join(cwd, file_path))
+
+    if file_exists:
+        s = "commit" if commit_count == 1 else "commits"
+        return {
+            "file_status": "modified",
+            "reason": f"{file_path} modified in {commit_count} {s} since {reported_at_commit[:12]}",
+        }
+
+    # File doesn't exist — check for rename via git diff (not git log,
+    # because log --diff-filter=R -- <old_path> won't match after rename)
+    try:
+        rename_output = subprocess.check_output(
+            ["git", "diff", "--diff-filter=R", "-M", "--name-status",
+             f"{reported_at_commit}..HEAD"],
+            cwd=cwd, text=True, timeout=10, stderr=subprocess.DEVNULL,
+        ).strip()
+    except (subprocess.SubprocessError, FileNotFoundError):
+        rename_output = ""
+
+    if rename_output:
+        # Parse rename: "R100\told_path\tnew_path"
+        for line in rename_output.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 3 and parts[1] == file_path:
+                new_path = parts[2]
+                return {
+                    "file_status": "renamed",
+                    "reason": f"{file_path} renamed to {new_path}",
+                }
+
+    return {
+        "file_status": "deleted",
+        "reason": f"{file_path} deleted since {reported_at_commit[:12]}",
+    }
 
 
 def register_findings_tools(mcp: FastMCP) -> None:
