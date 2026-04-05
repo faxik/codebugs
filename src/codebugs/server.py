@@ -22,7 +22,7 @@ def _conn():
         conn.close()
 
 
-def _git_rev_parse(ref: str, *, silent: bool = False) -> str | None:
+def _git_rev_parse(ref: str, *, silent: bool = False, cwd: str | None = None) -> str | None:
     """Run git rev-parse for a ref. Returns SHA or None if silent and git unavailable."""
     import subprocess
     try:
@@ -30,6 +30,7 @@ def _git_rev_parse(ref: str, *, silent: bool = False) -> str | None:
             ["git", "rev-parse", ref],
             text=True, timeout=10,
             stderr=subprocess.DEVNULL if silent else None,
+            cwd=cwd,
         ).strip()
     except (subprocess.SubprocessError, FileNotFoundError):
         if silent:
@@ -132,11 +133,8 @@ def _staleness_check_impl(
     file: str | None = None,
 ) -> dict[str, Any]:
     """Core staleness check logic. Separated for testability."""
-    import subprocess
-
     cwd = project_dir or os.getcwd()
 
-    # Build query to get relevant findings
     if finding_id:
         row = conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
         if not row:
@@ -155,26 +153,18 @@ def _staleness_check_impl(
         result = db.query_findings(conn, **query_kwargs)
         findings_list = result["findings"]
 
-    # Get current HEAD
-    try:
-        current_head = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=cwd, text=True, timeout=10,
-            stderr=subprocess.DEVNULL,
-        ).strip()
-    except (subprocess.SubprocessError, FileNotFoundError):
-        current_head = None
+    current_head = _git_rev_parse("HEAD", silent=True, cwd=cwd)
 
-    # Batch by (file, reported_at_commit) to avoid redundant git calls
-    staleness_cache: dict[tuple[str, str | None], dict[str, Any]] = {}
+    staleness_by_key: dict[tuple[str, str | None], dict[str, Any]] = {}
     results = []
 
     for f in findings_list:
         cache_key = (f["file"], f.get("reported_at_commit"))
-        if cache_key not in staleness_cache:
-            staleness_cache[cache_key] = _check_file_staleness(
+        if cache_key not in staleness_by_key:
+            staleness_by_key[cache_key] = _check_file_staleness(
                 f["file"], f.get("reported_at_commit"), cwd,
             )
-        staleness = staleness_cache[cache_key]
+        staleness = staleness_by_key[cache_key]
         results.append({
             "finding_id": f["id"],
             "file": f["file"],
