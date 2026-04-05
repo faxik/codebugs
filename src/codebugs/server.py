@@ -29,6 +29,18 @@ def _get_main_head() -> str:
     ).strip()
 
 
+def _get_head_sha() -> str | None:
+    """Get current HEAD SHA for provenance auto-population. Returns None if git unavailable."""
+    import subprocess
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            text=True, timeout=10, stderr=subprocess.DEVNULL,
+        ).strip()
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+
+
 def register_findings_tools(mcp: FastMCP) -> None:
     """Register finding-tracker tools on the given MCP server."""
 
@@ -41,6 +53,8 @@ def register_findings_tools(mcp: FastMCP) -> None:
         source: str = "claude",
         tags: list[str] | None = None,
         meta: dict[str, Any] | None = None,
+        reported_at_commit: str | None = None,
+        reported_at_ref: str | None = None,
     ) -> dict[str, Any]:
         """Add a code finding.
 
@@ -53,7 +67,11 @@ def register_findings_tools(mcp: FastMCP) -> None:
             source: Who created this finding (default: claude)
             tags: Optional tags for grouping
             meta: Optional JSON metadata (lines, module, rule_code, etc.)
+            reported_at_commit: Git SHA when finding was created (auto-detected from HEAD if omitted)
+            reported_at_ref: Version/tag label (e.g. "v2.1.0"), always caller-supplied
         """
+        if reported_at_commit is None:
+            reported_at_commit = _get_head_sha()
         with _conn() as conn:
             return db.add_finding(
                 conn,
@@ -64,17 +82,33 @@ def register_findings_tools(mcp: FastMCP) -> None:
                 source=source,
                 tags=tags,
                 meta=meta,
+                reported_at_commit=reported_at_commit,
+                reported_at_ref=reported_at_ref,
             )
 
     @mcp.tool()
-    def batch_add(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def batch_add(
+        findings: list[dict[str, Any]],
+        reported_at_commit: str | None = None,
+        reported_at_ref: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Add multiple findings at once.
 
         Args:
             findings: List of finding objects, each with keys:
                 severity, category, file, description, and optionally:
-                source, tags, meta
+                source, tags, meta, reported_at_commit, reported_at_ref
+            reported_at_commit: Default commit SHA for all findings (auto-detected if omitted).
+                                Per-finding values override this.
+            reported_at_ref: Default version label for all findings.
+                             Per-finding values override this.
         """
+        default_commit = reported_at_commit if reported_at_commit is not None else _get_head_sha()
+        for f in findings:
+            if "reported_at_commit" not in f:
+                f["reported_at_commit"] = default_commit
+            if "reported_at_ref" not in f and reported_at_ref is not None:
+                f["reported_at_ref"] = reported_at_ref
         with _conn() as conn:
             return db.batch_add_findings(conn, findings)
 
@@ -85,6 +119,7 @@ def register_findings_tools(mcp: FastMCP) -> None:
         notes: str | None = None,
         tags: list[str] | None = None,
         meta_update: dict[str, Any] | None = None,
+        reported_at_ref: str | None = None,
     ) -> dict[str, Any]:
         """Update a finding's status, notes, tags, or metadata.
 
@@ -97,6 +132,7 @@ def register_findings_tools(mcp: FastMCP) -> None:
             notes: Add/update notes (stored in meta.notes)
             tags: Replace tags list
             meta_update: Merge additional metadata keys
+            reported_at_ref: Update version/tag label (e.g. "v2.1.0")
         """
         with _conn() as conn:
             result = db.update_finding(
@@ -106,6 +142,7 @@ def register_findings_tools(mcp: FastMCP) -> None:
                 notes=notes,
                 tags=tags,
                 meta_update=meta_update,
+                reported_at_ref=reported_at_ref,
             )
             if status and result.get("status") in blockers.TERMINAL_STATUSES.get(blockers.ENTITY_FINDING, set()):
                 unblocked = blockers.get_unblocked_by(conn, finding_id, blockers.ENTITY_FINDING)
@@ -123,6 +160,8 @@ def register_findings_tools(mcp: FastMCP) -> None:
         tag: str | None = None,
         meta_key: str | None = None,
         meta_value: str | None = None,
+        commit: str | None = None,
+        ref: str | None = None,
         group_by: str | None = None,
         limit: int = 100,
         offset: int = 0,
@@ -139,6 +178,8 @@ def register_findings_tools(mcp: FastMCP) -> None:
             tag: Filter by tag (finds findings containing this tag)
             meta_key: Filter by metadata key existence
             meta_value: Filter by metadata value (requires meta_key)
+            commit: Filter by reported_at_commit (prefix match, hex validated)
+            ref: Filter by reported_at_ref (exact match)
             group_by: Group results by: file, category, severity, status, source
             limit: Max results (default 100)
             offset: Pagination offset
@@ -156,6 +197,8 @@ def register_findings_tools(mcp: FastMCP) -> None:
                 tag=tag,
                 meta_key=meta_key,
                 meta_value=meta_value,
+                commit=commit,
+                ref=ref,
                 group_by=group_by,
                 limit=limit,
                 offset=offset,
