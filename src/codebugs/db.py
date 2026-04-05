@@ -192,6 +192,8 @@ def add_finding(
     tags: list[str] | None = None,
     meta: dict[str, Any] | None = None,
     finding_id: str | None = None,
+    reported_at_commit: str | None = None,
+    reported_at_ref: str | None = None,
 ) -> dict[str, Any]:
     """Add a single finding. Returns the created finding as a dict."""
     if severity not in VALID_SEVERITIES:
@@ -204,9 +206,10 @@ def add_finding(
 
     conn.execute(
         """INSERT INTO findings (id, severity, category, file, status, description,
-           source, tags, meta, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)""",
-        (fid, severity, category, file, description, source, tags_json, meta_json, now, now),
+           source, tags, meta, reported_at_commit, reported_at_ref, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (fid, severity, category, file, description, source, tags_json, meta_json,
+         reported_at_commit, reported_at_ref, now, now),
     )
     conn.commit()
     return _row_to_dict(conn.execute("SELECT * FROM findings WHERE id = ?", (fid,)).fetchone())
@@ -227,11 +230,13 @@ def batch_add_findings(
         fid = f.get("id") or _next_id(conn)
         tags_json = json.dumps(f.get("tags", []))
         meta_json = json.dumps(f.get("meta", {}))
+        reported_at_commit = f.get("reported_at_commit")
+        reported_at_ref = f.get("reported_at_ref")
 
         conn.execute(
             """INSERT INTO findings (id, severity, category, file, status, description,
-               source, tags, meta, created_at, updated_at)
-               VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)""",
+               source, tags, meta, reported_at_commit, reported_at_ref, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 fid,
                 severity,
@@ -241,6 +246,8 @@ def batch_add_findings(
                 f.get("source", "human"),
                 tags_json,
                 meta_json,
+                reported_at_commit,
+                reported_at_ref,
                 now,
                 now,
             ),

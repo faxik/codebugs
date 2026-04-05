@@ -463,3 +463,39 @@ class TestProvenance:
         row = conn2.execute("SELECT * FROM findings WHERE id = 'CB-1'").fetchone()
         assert row is not None
         conn2.close()
+
+    def test_add_with_explicit_provenance(self, conn):
+        result = db.add_finding(
+            conn, severity="high", category="bug", file="a.py",
+            description="test",
+            reported_at_commit="a" * 40,
+            reported_at_ref="v2.1.0",
+        )
+        assert result["reported_at_commit"] == "a" * 40
+        assert result["reported_at_ref"] == "v2.1.0"
+
+    def test_add_without_provenance_defaults_none(self, conn):
+        result = db.add_finding(
+            conn, severity="high", category="bug", file="a.py",
+            description="test",
+        )
+        assert result["reported_at_commit"] is None
+        assert result["reported_at_ref"] is None
+
+    def test_batch_add_with_provenance(self, conn):
+        results = db.batch_add_findings(conn, [
+            {
+                "severity": "high", "category": "bug", "file": "a.py",
+                "description": "d1",
+                "reported_at_commit": "b" * 40,
+                "reported_at_ref": "v1.0",
+            },
+            {
+                "severity": "low", "category": "style", "file": "b.py",
+                "description": "d2",
+            },
+        ])
+        assert results[0]["reported_at_commit"] == "b" * 40
+        assert results[0]["reported_at_ref"] == "v1.0"
+        assert results[1]["reported_at_commit"] is None
+        assert results[1]["reported_at_ref"] is None
