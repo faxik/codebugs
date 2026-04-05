@@ -21,25 +21,31 @@ def _conn():
         conn.close()
 
 
+def _git_rev_parse(ref: str, *, silent: bool = False) -> str | None:
+    """Run git rev-parse for a ref. Returns SHA or None if silent and git unavailable."""
+    import subprocess
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", ref],
+            text=True, timeout=10,
+            stderr=subprocess.DEVNULL if silent else None,
+        ).strip()
+    except (subprocess.SubprocessError, FileNotFoundError):
+        if silent:
+            return None
+        raise
+
+
 def _get_main_head() -> str:
     """Get current main branch HEAD SHA. Used by merge tools that need git."""
-    import subprocess
-    return subprocess.check_output(
-        ["git", "rev-parse", "main"],
-        text=True, timeout=10,
-    ).strip()
+    result = _git_rev_parse("main")
+    assert result is not None
+    return result
 
 
 def _get_head_sha() -> str | None:
     """Get current HEAD SHA for provenance auto-population. Returns None if git unavailable."""
-    import subprocess
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            text=True, timeout=10, stderr=subprocess.DEVNULL,
-        ).strip()
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return None
+    return _git_rev_parse("HEAD", silent=True)
 
 
 def _check_file_staleness(
@@ -100,7 +106,6 @@ def _check_file_staleness(
         rename_output = ""
 
     if rename_output:
-        # Parse rename: "R100\told_path\tnew_path"
         for line in rename_output.splitlines():
             parts = line.split("\t")
             if len(parts) >= 3 and parts[1] == file_path:
@@ -179,13 +184,16 @@ def register_findings_tools(mcp: FastMCP) -> None:
                              Per-finding values override this.
         """
         default_commit = reported_at_commit if reported_at_commit is not None else _get_head_sha()
+        enriched = []
         for f in findings:
+            f = {**f}
             if "reported_at_commit" not in f:
                 f["reported_at_commit"] = default_commit
             if "reported_at_ref" not in f and reported_at_ref is not None:
                 f["reported_at_ref"] = reported_at_ref
+            enriched.append(f)
         with _conn() as conn:
-            return db.batch_add_findings(conn, findings)
+            return db.batch_add_findings(conn, enriched)
 
     @mcp.tool()
     def update(
