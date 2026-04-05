@@ -452,3 +452,14 @@ class TestProvenance:
         assert row["reported_at_commit"] is None
         assert row["reported_at_ref"] is None
         conn.close()
+
+    def test_migrate_provenance_idempotent(self, tmp_project):
+        """Calling connect() twice on the same DB should not error."""
+        conn1 = db.connect(tmp_project)
+        db.add_finding(conn1, severity="low", category="test", file="a.py", description="d")
+        conn1.close()
+
+        conn2 = db.connect(tmp_project)
+        row = conn2.execute("SELECT * FROM findings WHERE id = 'CB-1'").fetchone()
+        assert row is not None
+        conn2.close()

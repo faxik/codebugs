@@ -164,7 +164,7 @@ def _migrate_provenance(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE findings ADD COLUMN reported_at_commit TEXT")
     if "reported_at_ref" not in cols:
         conn.execute("ALTER TABLE findings ADD COLUMN reported_at_ref TEXT")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_reported_at_ref ON findings(reported_at_ref)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_reported_at_ref ON findings(reported_at_ref)")
     conn.commit()
 
 
