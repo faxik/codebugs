@@ -97,3 +97,51 @@ class TestCheckFileStaleness:
         from codebugs.server import _check_file_staleness
         result = _check_file_staleness("src/auth.py", "deadbeef" * 5, project)
         assert result["file_status"] == "unknown"
+
+
+class TestStalenessCheckTool:
+    """Test the staleness_check MCP tool end-to-end."""
+
+    def test_staleness_check_single_finding(self, git_project, conn):
+        project, initial_sha = git_project
+        db.add_finding(
+            conn, severity="high", category="bug", file="src/auth.py",
+            description="auth bug", reported_at_commit=initial_sha,
+        )
+
+        from codebugs.server import _staleness_check_impl
+        result = _staleness_check_impl(conn, project, finding_id="CB-1")
+        assert len(result["findings"]) == 1
+        assert result["findings"][0]["file_status"] == "current"
+
+    def test_staleness_check_filters_by_status(self, git_project, conn):
+        project, initial_sha = git_project
+        db.add_finding(
+            conn, severity="high", category="bug", file="src/auth.py",
+            description="open bug", reported_at_commit=initial_sha,
+        )
+        db.update_finding(conn, "CB-1", status="fixed")
+        db.add_finding(
+            conn, severity="low", category="style", file="src/auth.py",
+            description="open style", reported_at_commit=initial_sha,
+        )
+
+        from codebugs.server import _staleness_check_impl
+        result = _staleness_check_impl(conn, project, status="open")
+        assert len(result["findings"]) == 1
+        assert result["findings"][0]["finding_id"] == "CB-2"
+
+    def test_staleness_check_batches_by_file(self, git_project, conn):
+        """Multiple findings on the same file should not cause redundant git calls."""
+        project, initial_sha = git_project
+        for i in range(3):
+            db.add_finding(
+                conn, severity="high", category="bug", file="src/auth.py",
+                description=f"bug {i}", reported_at_commit=initial_sha,
+            )
+
+        from codebugs.server import _staleness_check_impl
+        result = _staleness_check_impl(conn, project)
+        assert len(result["findings"]) == 3
+        statuses = {f["file_status"] for f in result["findings"]}
+        assert statuses == {"current"}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sqlite3
 from contextlib import contextmanager
 from typing import Any
 
@@ -119,6 +120,71 @@ def _check_file_staleness(
         "file_status": "deleted",
         "reason": f"{file_path} deleted since {reported_at_commit[:12]}",
     }
+
+
+def _staleness_check_impl(
+    conn: sqlite3.Connection,
+    project_dir: str | None,
+    *,
+    finding_id: str | None = None,
+    status: str | None = None,
+    category: str | None = None,
+    file: str | None = None,
+) -> dict[str, Any]:
+    """Core staleness check logic. Separated for testability."""
+    import subprocess
+
+    cwd = project_dir or os.getcwd()
+
+    # Build query to get relevant findings
+    if finding_id:
+        row = conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
+        if not row:
+            raise KeyError(f"Finding not found: {finding_id}")
+        findings_list = [db._row_to_dict(row)]
+    else:
+        query_kwargs: dict[str, Any] = {"limit": 10000}
+        if status:
+            query_kwargs["status"] = status
+        else:
+            query_kwargs["status"] = "open"
+        if category:
+            query_kwargs["category"] = category
+        if file:
+            query_kwargs["file"] = file
+        result = db.query_findings(conn, **query_kwargs)
+        findings_list = result["findings"]
+
+    # Get current HEAD
+    try:
+        current_head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=cwd, text=True, timeout=10,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (subprocess.SubprocessError, FileNotFoundError):
+        current_head = None
+
+    # Batch by (file, reported_at_commit) to avoid redundant git calls
+    staleness_cache: dict[tuple[str, str | None], dict[str, Any]] = {}
+    results = []
+
+    for f in findings_list:
+        cache_key = (f["file"], f.get("reported_at_commit"))
+        if cache_key not in staleness_cache:
+            staleness_cache[cache_key] = _check_file_staleness(
+                f["file"], f.get("reported_at_commit"), cwd,
+            )
+        staleness = staleness_cache[cache_key]
+        results.append({
+            "finding_id": f["id"],
+            "file": f["file"],
+            "file_status": staleness["file_status"],
+            "reason": staleness["reason"],
+            "reported_at_commit": f.get("reported_at_commit"),
+            "current_head": current_head,
+        })
+
+    return {"findings": results, "total": len(results)}
 
 
 def register_findings_tools(mcp: FastMCP) -> None:
@@ -312,6 +378,32 @@ def register_findings_tools(mcp: FastMCP) -> None:
         Call this before adding findings to reuse consistent category names."""
         with _conn() as conn:
             return db.get_categories(conn)
+
+    @mcp.tool()
+    def staleness_check(
+        finding_id: str | None = None,
+        status: str | None = None,
+        category: str | None = None,
+        file: str | None = None,
+    ) -> dict[str, Any]:
+        """Check if findings are stale by comparing against git history.
+
+        Returns file_status for each finding:
+        - current: file unchanged since finding was reported
+        - modified: file changed but still exists
+        - renamed: file was renamed/moved
+        - deleted: file no longer exists
+        - unknown: can't determine (no provenance data, unreachable commit)
+
+        Args:
+            finding_id: Check a single finding (e.g. CB-1)
+            status: Filter by finding status (default: open)
+            category: Filter by category
+            file: Filter by file path (substring match)
+        """
+        with _conn() as conn:
+            return _staleness_check_impl(conn, None, finding_id=finding_id,
+                                          status=status, category=category, file=file)
 
 
 def register_reqs_tools(mcp: FastMCP) -> None:
