@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS findings (
     source TEXT NOT NULL DEFAULT 'human',
     tags TEXT NOT NULL DEFAULT '[]',
     meta TEXT NOT NULL DEFAULT '{}',
+    reported_at_commit TEXT,
+    reported_at_ref TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -92,6 +94,7 @@ def connect(project_dir: str | None = None) -> sqlite3.Connection:
             conn.execute(stmt)
     conn.commit()
     _migrate_statuses(conn)
+    _migrate_provenance(conn)
     # Initialize requirements schema (same DB)
     from codebugs import reqs
     reqs.ensure_schema(conn)
@@ -130,11 +133,18 @@ def _migrate_statuses(conn: sqlite3.Connection) -> None:
             source TEXT NOT NULL DEFAULT 'human',
             tags TEXT NOT NULL DEFAULT '[]',
             meta TEXT NOT NULL DEFAULT '{}',
+            reported_at_commit TEXT,
+            reported_at_ref TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )"""
     )
-    conn.execute("INSERT INTO findings_new SELECT * FROM findings")
+    conn.execute(
+        """INSERT INTO findings_new
+           (id, severity, category, file, status, description, source, tags, meta, created_at, updated_at)
+           SELECT id, severity, category, file, status, description, source, tags, meta, created_at, updated_at
+           FROM findings"""
+    )
     conn.execute("DROP TABLE findings")
     conn.execute("ALTER TABLE findings_new RENAME TO findings")
     # Re-create indexes
@@ -142,7 +152,19 @@ def _migrate_statuses(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings(severity)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_file ON findings(file)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_category ON findings(category)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_reported_at_ref ON findings(reported_at_ref)")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.commit()
+
+
+def _migrate_provenance(conn: sqlite3.Connection) -> None:
+    """Add provenance columns to existing databases that already passed status migration."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(findings)").fetchall()}
+    if "reported_at_commit" not in cols:
+        conn.execute("ALTER TABLE findings ADD COLUMN reported_at_commit TEXT")
+    if "reported_at_ref" not in cols:
+        conn.execute("ALTER TABLE findings ADD COLUMN reported_at_ref TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_findings_reported_at_ref ON findings(reported_at_ref)")
     conn.commit()
 
 

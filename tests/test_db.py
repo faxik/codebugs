@@ -2,6 +2,7 @@
 
 import json
 import os
+import sqlite3
 
 import pytest
 
@@ -394,3 +395,60 @@ class TestConnect:
         result = db.query_findings(c2)
         assert result["total"] == 1
         c2.close()
+
+
+class TestProvenance:
+    def test_fresh_db_has_provenance_columns(self, conn):
+        cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(findings)").fetchall()
+        }
+        assert "reported_at_commit" in cols
+        assert "reported_at_ref" in cols
+
+    def test_provenance_columns_nullable(self, conn):
+        result = db.add_finding(
+            conn, severity="high", category="test", file="a.py",
+            description="no provenance",
+        )
+        assert result.get("reported_at_commit") is None
+        assert result.get("reported_at_ref") is None
+
+    def test_migrate_adds_provenance_to_existing_db(self, tmp_project):
+        """Simulate a DB created before provenance columns existed."""
+        path = os.path.join(tmp_project, db.DB_DIR, db.DB_FILE)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        old_conn = sqlite3.connect(path)
+        old_conn.execute("""CREATE TABLE findings (
+            id TEXT PRIMARY KEY,
+            severity TEXT NOT NULL,
+            category TEXT NOT NULL,
+            file TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open'
+                CHECK(status IN ('open', 'in_progress', 'fixed', 'not_a_bug', 'wont_fix', 'stale')),
+            description TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'human',
+            tags TEXT NOT NULL DEFAULT '[]',
+            meta TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )""")
+        old_conn.execute(
+            "INSERT INTO findings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("CB-1", "high", "bug", "x.py", "open", "old bug", "human", "[]", "{}", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+        )
+        old_conn.commit()
+        old_conn.close()
+
+        # Re-open via connect() which triggers migration
+        conn = db.connect(tmp_project)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(findings)").fetchall()}
+        assert "reported_at_commit" in cols
+        assert "reported_at_ref" in cols
+
+        # Old data survives
+        row = conn.execute("SELECT * FROM findings WHERE id = 'CB-1'").fetchone()
+        assert row is not None
+        assert row["reported_at_commit"] is None
+        assert row["reported_at_ref"] is None
+        conn.close()
