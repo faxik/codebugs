@@ -345,7 +345,7 @@ def list_sweeps(
     return {"sweeps": sweeps}
 
 
-from codebugs.db import register_schema, register_tool_provider  # noqa: E402
+from codebugs.db import register_schema, register_tool_provider, register_cli_provider  # noqa: E402
 
 register_schema("sweep", ensure_schema)
 
@@ -458,3 +458,166 @@ def register_tools(mcp, conn_factory) -> None:
 
 
 register_tool_provider("sweep", register_tools)
+
+
+# --- CLI ---
+
+def register_cli(sub, commands) -> None:
+    """Register sweep CLI subcommands."""
+    import argparse
+    import sys
+    from codebugs import db
+    from codebugs.fmt import format_table
+
+    def _parse_tags(args: argparse.Namespace) -> list[str] | None:
+        """Parse comma-separated --tags argument."""
+        return [t.strip() for t in args.tags.split(",")] if args.tags else None
+
+    def _cmd_sweep_create(args: argparse.Namespace) -> None:
+        conn = db.connect()
+        kwargs: dict = {}
+        if args.name:
+            kwargs["name"] = args.name
+        if args.description:
+            kwargs["description"] = args.description
+        if args.batch_size:
+            kwargs["default_batch_size"] = args.batch_size
+        try:
+            result = create_sweep(conn, **kwargs)
+            print(f"Created: {result['sweep_id']}" + (f" ({result['name']})" if result["name"] else ""))
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
+
+    def _cmd_sweep_add(args: argparse.Namespace) -> None:
+        conn = db.connect()
+        try:
+            result = add_items(conn, args.sweep, args.items, tags=_parse_tags(args))
+            print(f"Added {result['added']} items, {result['duplicates_skipped']} duplicates skipped.")
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
+
+    def _cmd_sweep_next(args: argparse.Namespace) -> None:
+        conn = db.connect()
+        try:
+            result = next_batch(conn, args.sweep, limit=args.limit, tags=_parse_tags(args))
+            if not result["items"]:
+                print("(no unprocessed items)")
+                return
+            data = [{"item": i["item"], "tags": ",".join(i["tags"])} for i in result["items"]]
+            print(format_table(data, ["item", "tags"], max_widths={"item": 60}))
+            print(f"\n{result['remaining']} remaining.")
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
+
+    def _cmd_sweep_mark(args: argparse.Namespace) -> None:
+        conn = db.connect()
+        try:
+            result = mark_items(conn, args.sweep, args.items, processed=not args.undo)
+            action = "Unmarked" if args.undo else "Marked"
+            print(f"{action} {result['updated']} items.")
+        except (ValueError, KeyError) as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
+
+    def _cmd_sweep_status(args: argparse.Namespace) -> None:
+        conn = db.connect()
+        try:
+            s = get_status(conn, args.sweep)
+            print(f"Sweep: {s['sweep_id']}" + (f" ({s['name']})" if s["name"] else ""))
+            print(f"Status: {s['status']}")
+            print(f"Items:  {s['processed']}/{s['total']} processed, {s['remaining']} remaining")
+            if s["by_tag"]:
+                print("\nBy tag:")
+                for tag, counts in sorted(s["by_tag"].items()):
+                    print(f"  {tag:20s}  {counts['processed']}/{counts['total']}")
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
+
+    def _cmd_sweep_archive(args: argparse.Namespace) -> None:
+        conn = db.connect()
+        try:
+            result = archive_sweep(conn, args.sweep)
+            print(f"Archived: {result['sweep_id']}")
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
+
+    def _cmd_sweep_list(args: argparse.Namespace) -> None:
+        conn = db.connect()
+        try:
+            result = list_sweeps(conn, include_archived=args.all)
+            if not result["sweeps"]:
+                print("(no sweeps)")
+                return
+            data = [
+                {
+                    "sweep_id": s["sweep_id"],
+                    "name": s["name"] or "",
+                    "status": s["status"],
+                    "progress": f"{s['processed']}/{s['total']}",
+                    "remaining": str(s["remaining"]),
+                }
+                for s in result["sweeps"]
+            ]
+            print(format_table(data, ["sweep_id", "name", "status", "progress", "remaining"]))
+        finally:
+            conn.close()
+
+    # Argparse setup
+    p = sub.add_parser("sweep-create", help="Create a new sweep")
+    p.add_argument("--name", help="Optional sweep name")
+    p.add_argument("--description", help="Sweep description")
+    p.add_argument("--batch-size", type=int, help="Default batch size (default: 10)")
+
+    p = sub.add_parser("sweep-add", help="Add items to a sweep")
+    p.add_argument("sweep", help="Sweep ID (SW-N) or name")
+    p.add_argument("items", nargs="+", help="Items to add")
+    p.add_argument("--tags", help="Comma-separated tags")
+
+    p = sub.add_parser("sweep-next", help="Get next batch of unprocessed items")
+    p.add_argument("sweep", help="Sweep ID (SW-N) or name")
+    p.add_argument("--limit", type=int, help="Batch size override")
+    p.add_argument("--tags", help="Filter by tags (comma-separated)")
+
+    p = sub.add_parser("sweep-mark", help="Mark items as processed")
+    p.add_argument("sweep", help="Sweep ID (SW-N) or name")
+    p.add_argument("items", nargs="+", help="Items to mark")
+    p.add_argument("--undo", action="store_true", help="Unmark items instead")
+
+    p = sub.add_parser("sweep-status", help="Sweep progress overview")
+    p.add_argument("sweep", help="Sweep ID (SW-N) or name")
+
+    p = sub.add_parser("sweep-archive", help="Archive a sweep")
+    p.add_argument("sweep", help="Sweep ID (SW-N) or name")
+
+    p = sub.add_parser("sweep-list", help="List sweeps")
+    p.add_argument("--all", action="store_true", help="Include archived sweeps")
+
+    commands.update({
+        "sweep-create": _cmd_sweep_create,
+        "sweep-add": _cmd_sweep_add,
+        "sweep-next": _cmd_sweep_next,
+        "sweep-mark": _cmd_sweep_mark,
+        "sweep-status": _cmd_sweep_status,
+        "sweep-archive": _cmd_sweep_archive,
+        "sweep-list": _cmd_sweep_list,
+    })
+
+
+register_cli_provider("sweep", register_cli)
