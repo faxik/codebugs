@@ -668,3 +668,9 @@ def embedding_stats(conn: sqlite3.Connection) -> dict[str, Any]:
         "missing": total - embedded,
         "missing_ids": [{"id": r["id"], "section": r["section"]} for r in missing[:20]],
     }
+
+
+# --- Schema registry (ARCH-001) ---
+from codebugs.db import register_schema  # noqa: E402
+
+register_schema("reqs", ensure_schema)

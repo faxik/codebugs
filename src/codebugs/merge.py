@@ -427,3 +427,9 @@ def get_claims(
         (session_id,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# --- Schema registry (ARCH-001) ---
+from codebugs.db import register_schema  # noqa: E402
+
+register_schema("merge", ensure_schema)

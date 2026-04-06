@@ -537,3 +537,9 @@ def get_deferred_counts(
         "overdue_count": len(overdue_items),
         "currently_unblocked_count": currently_unblocked_count,
     }
+
+
+# --- Schema registry (ARCH-001) ---
+from codebugs.db import register_schema  # noqa: E402
+
+register_schema("blockers", ensure_schema, depends_on=("db", "reqs"))

@@ -101,3 +101,30 @@ class TestDbSelfRegistration:
         ).fetchall()]
         assert "findings" in tables
         conn.close()
+
+
+class TestAllModulesRegistered:
+    """All domain modules must be registered after import."""
+
+    @pytest.fixture(autouse=True)
+    def _import_all(self):
+        """Ensure all domain modules are imported."""
+        import codebugs.reqs  # noqa: F401
+        import codebugs.merge  # noqa: F401
+        import codebugs.sweep  # noqa: F401
+        import codebugs.bench  # noqa: F401
+        import codebugs.blockers  # noqa: F401
+
+    def test_all_modules_registered(self):
+        names = {e.name for e in _schema_registry}
+        assert names >= {"db", "reqs", "merge", "sweep", "bench", "blockers"}
+
+    def test_blockers_depends_on_db_and_reqs(self):
+        entry = next(e for e in _schema_registry if e.name == "blockers")
+        assert "db" in entry.depends_on
+        assert "reqs" in entry.depends_on
+
+    def test_resolve_order_puts_blockers_after_deps(self):
+        order = [e.name for e in _resolve_order()]
+        assert order.index("db") < order.index("blockers")
+        assert order.index("reqs") < order.index("blockers")
