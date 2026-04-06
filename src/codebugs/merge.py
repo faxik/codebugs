@@ -562,8 +562,10 @@ def register_cli(sub, commands) -> None:
 
     def _cmd_merge_sessions(args: argparse.Namespace) -> None:
         conn = db.connect()
-        sessions = get_sessions(conn, status=args.status)
-        conn.close()
+        try:
+            sessions = get_sessions(conn, status=args.status)
+        finally:
+            conn.close()
         if not sessions:
             print("(no sessions)")
             return
@@ -584,8 +586,10 @@ def register_cli(sub, commands) -> None:
 
     def _cmd_merge_status(args: argparse.Namespace) -> None:
         conn = db.connect()
-        s = get_status(conn)
-        conn.close()
+        try:
+            s = get_status(conn)
+        finally:
+            conn.close()
         print("Codemerge Status")
         print("=" * 40)
         print(f"Active sessions:    {s['active_sessions']}")
@@ -608,8 +612,10 @@ def register_cli(sub, commands) -> None:
 
     def _cmd_merge_claims(args: argparse.Namespace) -> None:
         conn = db.connect()
-        claims = get_claims(conn, args.session_id)
-        conn.close()
+        try:
+            claims = get_claims(conn, args.session_id)
+        finally:
+            conn.close()
         if not claims:
             print("(no claims)")
             return
