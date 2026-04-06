@@ -411,89 +411,6 @@ def cmd_reqs_export(args: argparse.Namespace) -> None:
         print(md)
 
 
-def cmd_merge_sessions(args: argparse.Namespace) -> None:
-    conn = db.connect()
-    from codebugs import merge
-    sessions = merge.get_sessions(conn, status=args.status)
-    conn.close()
-    if not sessions:
-        print("(no sessions)")
-        return
-    data = [
-        {
-            "session_id": s["session_id"],
-            "branch": s["branch"],
-            "status": s["status"],
-            "claims": str(s["claim_count"]),
-            "description": s["description"],
-        }
-        for s in sessions
-    ]
-    print(_format_table(
-        data, ["session_id", "branch", "status", "claims", "description"],
-        max_widths={"description": 40, "branch": 30},
-    ))
-
-
-def cmd_merge_status(args: argparse.Namespace) -> None:
-    conn = db.connect()
-    from codebugs import merge
-    s = merge.get_status(conn)
-    conn.close()
-    print("Codemerge Status")
-    print("=" * 40)
-    print(f"Active sessions:    {s['active_sessions']}")
-    print(f"Merging sessions:   {s['merging_sessions']}")
-    print(f"Done sessions:      {s['done_sessions']}")
-    print(f"Abandoned sessions: {s['abandoned_sessions']}")
-    print(f"Total claims:       {s['total_claims']}")
-    print(f"Lock holder:        {s['lock_holder'] or '(none)'}")
-
-
-def cmd_merge_abandon(args: argparse.Namespace) -> None:
-    conn = db.connect()
-    from codebugs import merge
-    try:
-        result = merge.abandon_session(conn, args.session_id)
-        print(f"Abandoned: {result['session_id']}")
-    except KeyError as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
-    finally:
-        conn.close()
-
-
-def cmd_merge_claims(args: argparse.Namespace) -> None:
-    conn = db.connect()
-    from codebugs import merge
-    claims = merge.get_claims(conn, args.session_id)
-    conn.close()
-    if not claims:
-        print("(no claims)")
-        return
-    data = [{"file": c["file_path"], "claimed_at": c["claimed_at"]} for c in claims]
-    print(_format_table(data, ["file", "claimed_at"]))
-
-
-def _register_merge_subcommands(sub, commands):
-    """Register merge CLI subcommands."""
-    p = sub.add_parser("merge-sessions", help="List merge sessions")
-    p.add_argument("--status", help="Filter: active|merging|done|abandoned")
-
-    sub.add_parser("merge-status", help="Merge coordination dashboard")
-
-    p = sub.add_parser("merge-abandon", help="Abandon a stale session")
-    p.add_argument("session_id", help="Session ID to abandon")
-
-    p = sub.add_parser("merge-claims", help="List claimed files for a session")
-    p.add_argument("session_id", help="Session ID")
-
-    commands.update({
-        "merge-sessions": cmd_merge_sessions,
-        "merge-status": cmd_merge_status,
-        "merge-abandon": cmd_merge_abandon,
-        "merge-claims": cmd_merge_claims,
-    })
 
 
 
@@ -627,7 +544,8 @@ def main() -> None:
     if pre_args.mode in ("reqs", "all"):
         _register_reqs_subcommands(sub, commands)
     if pre_args.mode in ("merge", "all"):
-        _register_merge_subcommands(sub, commands)
+        from codebugs.merge import register_cli as merge_cli
+        merge_cli(sub, commands)
     if pre_args.mode in ("sweep", "all"):
         from codebugs.sweep import register_cli as sweep_cli
         sweep_cli(sub, commands)

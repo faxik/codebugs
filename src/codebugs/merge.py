@@ -428,7 +428,7 @@ def get_claims(
     return [dict(r) for r in rows]
 
 
-from codebugs.db import register_schema, register_tool_provider  # noqa: E402
+from codebugs.db import register_schema, register_tool_provider, register_cli_provider  # noqa: E402
 
 register_schema("merge", ensure_schema)
 
@@ -549,3 +549,91 @@ def register_tools(mcp, conn_factory) -> None:
 
 
 register_tool_provider("merge", register_tools)
+
+
+# --- CLI ---
+
+def register_cli(sub, commands) -> None:
+    """Register merge CLI subcommands."""
+    import argparse
+    import sys
+    from codebugs import db
+    from codebugs.fmt import format_table
+
+    def _cmd_merge_sessions(args: argparse.Namespace) -> None:
+        conn = db.connect()
+        sessions = get_sessions(conn, status=args.status)
+        conn.close()
+        if not sessions:
+            print("(no sessions)")
+            return
+        data = [
+            {
+                "session_id": s["session_id"],
+                "branch": s["branch"],
+                "status": s["status"],
+                "claims": str(s["claim_count"]),
+                "description": s["description"],
+            }
+            for s in sessions
+        ]
+        print(format_table(
+            data, ["session_id", "branch", "status", "claims", "description"],
+            max_widths={"description": 40, "branch": 30},
+        ))
+
+    def _cmd_merge_status(args: argparse.Namespace) -> None:
+        conn = db.connect()
+        s = get_status(conn)
+        conn.close()
+        print("Codemerge Status")
+        print("=" * 40)
+        print(f"Active sessions:    {s['active_sessions']}")
+        print(f"Merging sessions:   {s['merging_sessions']}")
+        print(f"Done sessions:      {s['done_sessions']}")
+        print(f"Abandoned sessions: {s['abandoned_sessions']}")
+        print(f"Total claims:       {s['total_claims']}")
+        print(f"Lock holder:        {s['lock_holder'] or '(none)'}")
+
+    def _cmd_merge_abandon(args: argparse.Namespace) -> None:
+        conn = db.connect()
+        try:
+            result = abandon_session(conn, args.session_id)
+            print(f"Abandoned: {result['session_id']}")
+        except KeyError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
+
+    def _cmd_merge_claims(args: argparse.Namespace) -> None:
+        conn = db.connect()
+        claims = get_claims(conn, args.session_id)
+        conn.close()
+        if not claims:
+            print("(no claims)")
+            return
+        data = [{"file": c["file_path"], "claimed_at": c["claimed_at"]} for c in claims]
+        print(format_table(data, ["file", "claimed_at"]))
+
+    # Argparse setup
+    p = sub.add_parser("merge-sessions", help="List merge sessions")
+    p.add_argument("--status", help="Filter: active|merging|done|abandoned")
+
+    sub.add_parser("merge-status", help="Merge coordination dashboard")
+
+    p = sub.add_parser("merge-abandon", help="Abandon a stale session")
+    p.add_argument("session_id", help="Session ID to abandon")
+
+    p = sub.add_parser("merge-claims", help="List claimed files for a session")
+    p.add_argument("session_id", help="Session ID")
+
+    commands.update({
+        "merge-sessions": _cmd_merge_sessions,
+        "merge-status": _cmd_merge_status,
+        "merge-abandon": _cmd_merge_abandon,
+        "merge-claims": _cmd_merge_claims,
+    })
+
+
+register_cli_provider("merge", register_cli)
