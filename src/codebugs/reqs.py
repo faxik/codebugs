@@ -1043,7 +1043,7 @@ def register_cli(sub, commands) -> None:
         if s["implemented_without_tests"]:
             print(f"\nImplemented without tests: {s['implemented_without_tests']}")
         if s["sections"]:
-            print(f"\nSection progress:")
+            print("\nSection progress:")
             for sec in s["sections"]:
                 pct = (sec["done"] / sec["total"] * 100) if sec["total"] else 0
                 print(f"  {sec['section']:40s}  {sec['done']}/{sec['total']} ({pct:.0f}%)")

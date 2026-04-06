@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import re
@@ -559,6 +560,276 @@ def register_tools(mcp, conn_factory) -> None:
 
 
 register_tool_provider("findings", register_tools)
+
+
+# --- CLI ---
+
+def register_cli(sub, commands) -> None:
+    """Register findings CLI subcommands."""
+    import argparse
+    import sys
+    from codebugs.fmt import format_table
+
+    def _cmd_add(args: argparse.Namespace) -> None:
+        conn = connect()
+        meta = {}
+        if args.lines:
+            meta["lines"] = args.lines
+        if args.meta:
+            meta.update(json.loads(args.meta))
+
+        tags = [t.strip() for t in args.tags.split(",")] if args.tags else []
+
+        result = add_finding(
+            conn,
+            severity=args.severity,
+            category=args.category,
+            file=args.file,
+            description=args.description,
+            source=args.source or "human",
+            tags=tags,
+            meta=meta or None,
+        )
+        conn.close()
+        print(f"Added: {result['id']}")
+
+    def _cmd_update(args: argparse.Namespace) -> None:
+        conn = connect()
+        try:
+            result = update_finding(
+                conn,
+                args.id,
+                status=args.status,
+                notes=args.notes,
+            )
+            print(f"Updated: {result['id']} (status={result['status']})")
+        except KeyError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
+
+    def _cmd_query(args: argparse.Namespace) -> None:
+        conn = connect()
+        result = query_findings(
+            conn,
+            status=args.status,
+            severity=args.severity,
+            category=args.category,
+            file=args.file,
+            source=args.source,
+            group_by=args.group_by,
+            limit=args.limit or 100,
+        )
+        conn.close()
+
+        if result.get("grouped"):
+            data = [{"group": r["group_key"], "count": str(r["count"])} for r in result["groups"]]
+            print(format_table(data, ["group", "count"]))
+        else:
+            findings = result["findings"]
+            if not findings:
+                print("(no findings match)")
+                return
+            data = [
+                {
+                    "id": f["id"],
+                    "sev": f["severity"],
+                    "category": f["category"],
+                    "file": f["file"],
+                    "status": f["status"],
+                    "description": f["description"],
+                }
+                for f in findings
+            ]
+            print(
+                format_table(
+                    data,
+                    ["id", "sev", "category", "file", "status", "description"],
+                    max_widths={"description": 60, "file": 40, "category": 25},
+                )
+            )
+            print(f"\n{result['total']} finding(s) total.")
+
+    def _cmd_stats(args: argparse.Namespace) -> None:
+        conn = connect()
+        result = get_stats(conn, group_by=args.by or "severity")
+        conn.close()
+
+        groups = result["groups"]
+        if not groups:
+            print("(no findings)")
+            return
+
+        header = f"{'':30s} {'critical':>8s} {'high':>8s} {'medium':>8s} {'low':>8s} {'total':>8s}"
+        print(header)
+        print("-" * len(header))
+        totals = {"critical": 0, "high": 0, "medium": 0, "low": 0, "total": 0}
+        for grp in sorted(groups):
+            d = groups[grp]
+            print(
+                f"{grp:30s} {d['critical']:>8d} {d['high']:>8d} {d['medium']:>8d} {d['low']:>8d} {d['total']:>8d}"
+            )
+            for k in totals:
+                totals[k] += d[k]
+        print("-" * len(header))
+        print(
+            f"{'TOTAL':30s} {totals['critical']:>8d} {totals['high']:>8d} {totals['medium']:>8d} {totals['low']:>8d} {totals['total']:>8d}"
+        )
+
+    def _cmd_summary(args: argparse.Namespace) -> None:
+        conn = connect()
+        s = get_summary(conn)
+        conn.close()
+
+        print("Codebugs Summary")
+        print("=" * 50)
+        print(f"Findings:  {s['open']} open / {s['resolved']} resolved / {s['total']} total")
+        print()
+        print("Open by severity:")
+        for sev in ("critical", "high", "medium", "low"):
+            c = s["open_by_severity"].get(sev, 0)
+            bar = "#" * min(c, 40)
+            print(f"  {sev:10s}  {c:>4d}  {bar}")
+        if s["top_categories"]:
+            print()
+            print("Top categories:")
+            for cat in s["top_categories"]:
+                print(f"  {cat['category']:30s}  {cat['count']:>4d}")
+        if s["hottest_files"]:
+            print()
+            print("Hottest files:")
+            for f in s["hottest_files"]:
+                print(f"  {f['file']:50s}  {f['critical_high']} crit/high, {f['open']} open")
+
+    def _cmd_categories(args: argparse.Namespace) -> None:
+        conn = connect()
+        cats = get_categories(conn)
+        conn.close()
+
+        if not cats:
+            print("(no categories yet)")
+            return
+        data = [
+            {
+                "category": c["category"],
+                "total": str(c["total"]),
+                "open": str(c["open_count"]),
+                "fixed": str(c["fixed_count"]),
+            }
+            for c in cats
+        ]
+        print(format_table(data, ["category", "total", "open", "fixed"]))
+
+    def _cmd_import_csv(args: argparse.Namespace) -> None:
+        conn = connect()
+        imported = 0
+        with open(args.file, newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                severity = (row.get("severity") or row.get("Severity") or "medium").strip().lower()
+                category = (row.get("category") or row.get("Category") or "").strip()
+                filepath = (row.get("file") or row.get("File") or "").strip()
+                description = (row.get("description") or row.get("Description") or "").strip()
+                source = (row.get("source") or row.get("Source") or "import").strip()
+
+                if not filepath or not description or not category:
+                    continue
+
+                meta = {}
+                lines = (row.get("lines") or row.get("Lines") or "").strip()
+                if lines:
+                    meta["lines"] = lines
+
+                add_finding(
+                    conn,
+                    severity=severity,
+                    category=category,
+                    file=filepath,
+                    description=description,
+                    source=source,
+                    meta=meta or None,
+                )
+                imported += 1
+
+        conn.close()
+        print(f"Imported {imported} findings.")
+
+    def _cmd_export_csv(args: argparse.Namespace) -> None:
+        conn = connect()
+        result = query_findings(conn, limit=100000)
+        conn.close()
+
+        output = args.file or "codebugs_export.csv"
+        with open(output, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["id", "severity", "category", "file", "status", "description", "source", "tags", "meta", "created_at", "updated_at"])
+            for finding in result["findings"]:
+                writer.writerow([
+                    finding["id"],
+                    finding["severity"],
+                    finding["category"],
+                    finding["file"],
+                    finding["status"],
+                    finding["description"],
+                    finding["source"],
+                    json.dumps(finding["tags"]),
+                    json.dumps(finding["meta"]),
+                    finding["created_at"],
+                    finding["updated_at"],
+                ])
+        print(f"Exported {len(result['findings'])} findings to {output}")
+
+    # Argparse setup
+    p = sub.add_parser("add", help="Add a finding")
+    p.add_argument("-s", "--severity", required=True, help="critical|high|medium|low")
+    p.add_argument("-c", "--category", required=True, help="Finding category")
+    p.add_argument("-f", "--file", required=True, help="File path")
+    p.add_argument("-d", "--description", required=True, help="Description")
+    p.add_argument("-l", "--lines", help="Line range (stored in meta)")
+    p.add_argument("--source", help="Source (default: human)")
+    p.add_argument("--tags", help="Comma-separated tags")
+    p.add_argument("--meta", help="JSON metadata string")
+
+    p = sub.add_parser("update", help="Update a finding")
+    p.add_argument("id", help="Finding ID")
+    p.add_argument("--status", help="New status")
+    p.add_argument("--notes", help="Notes")
+
+    p = sub.add_parser("query", help="Search findings")
+    p.add_argument("--status", help="Filter by status")
+    p.add_argument("--severity", "-s", help="Filter by severity")
+    p.add_argument("--category", "-c", help="Filter by category")
+    p.add_argument("--file", "-f", help="Filter by file (substring)")
+    p.add_argument("--source", help="Filter by source")
+    p.add_argument("--group-by", help="Group by: file|category|severity|status|source")
+    p.add_argument("--limit", type=int, help="Max results")
+
+    p = sub.add_parser("stats", help="Cross-tabulated summary")
+    p.add_argument("--by", help="Group by: severity|category|status|file|source")
+
+    sub.add_parser("summary", help="Dashboard overview")
+    sub.add_parser("categories", help="List all categories with counts")
+
+    p = sub.add_parser("import-csv", help="Import findings from CSV")
+    p.add_argument("file", help="CSV file path")
+
+    p = sub.add_parser("export-csv", help="Export findings to CSV")
+    p.add_argument("file", nargs="?", help="Output file (default: codebugs_export.csv)")
+
+    commands.update({
+        "add": _cmd_add,
+        "update": _cmd_update,
+        "query": _cmd_query,
+        "stats": _cmd_stats,
+        "summary": _cmd_summary,
+        "categories": _cmd_categories,
+        "import-csv": _cmd_import_csv,
+        "export-csv": _cmd_export_csv,
+    })
+
+
+register_cli_provider("findings", register_cli)
 
 
 _modules_loaded = False
