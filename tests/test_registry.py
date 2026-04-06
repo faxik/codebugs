@@ -211,6 +211,13 @@ class TestBenchToolProvider:
         assert mock_mcp.tool.call_count == 4
 
 
+class TestSweepToolProvider:
+    def test_sweep_provider_registered(self):
+        import codebugs.sweep  # noqa: F401
+        names = {p.name for p in _tool_providers}
+        assert "sweep" in names
+
+
 class TestEnsureModulesLoaded:
     def test_idempotent(self):
         """Calling _ensure_modules_loaded() twice doesn't re-import or crash."""

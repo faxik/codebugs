@@ -345,6 +345,116 @@ def list_sweeps(
     return {"sweeps": sweeps}
 
 
-from codebugs.db import register_schema  # noqa: E402
+from codebugs.db import register_schema, register_tool_provider  # noqa: E402
 
 register_schema("sweep", ensure_schema)
+
+
+def register_tools(mcp, conn_factory) -> None:
+    """Register sweep batch-iteration tools on the given MCP server."""
+
+    @mcp.tool()
+    def codesweep_create(
+        name: str | None = None,
+        description: str = "",
+        default_batch_size: int = 10,
+    ) -> dict[str, Any]:
+        """Create a new sweep for batch iteration over items.
+
+        Args:
+            name: Optional human-readable name (must be unique)
+            description: What this sweep is for
+            default_batch_size: Default items per batch (default: 10)
+        """
+        with conn_factory() as conn:
+            return create_sweep(
+                conn, name=name, description=description,
+                default_batch_size=default_batch_size,
+            )
+
+    @mcp.tool()
+    def codesweep_add(
+        sweep_ref: str,
+        items: list[str],
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Add items to a sweep. Duplicates are silently skipped.
+
+        Args:
+            sweep_ref: Sweep ID (SW-N) or name
+            items: Item identifiers to add
+            tags: Optional tags applied to all items in this batch
+        """
+        with conn_factory() as conn:
+            return add_items(conn, sweep_ref, items, tags=tags)
+
+    @mcp.tool()
+    def codesweep_next(
+        sweep_ref: str,
+        limit: int | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Get next batch of unprocessed items in insertion order.
+
+        Args:
+            sweep_ref: Sweep ID (SW-N) or name
+            limit: Batch size (overrides sweep default)
+            tags: Filter to items matching any of these tags
+        """
+        with conn_factory() as conn:
+            return next_batch(conn, sweep_ref, limit=limit, tags=tags)
+
+    @mcp.tool()
+    def codesweep_mark(
+        sweep_ref: str,
+        items: list[str],
+        processed: bool = True,
+    ) -> dict[str, Any]:
+        """Mark items as processed or unprocessed.
+
+        Args:
+            sweep_ref: Sweep ID (SW-N) or name
+            items: Item identifiers to mark
+            processed: True to mark processed (default), False to unmark
+        """
+        with conn_factory() as conn:
+            return mark_items(conn, sweep_ref, items, processed=processed)
+
+    @mcp.tool()
+    def codesweep_status(
+        sweep_ref: str,
+    ) -> dict[str, Any]:
+        """Sweep overview — total, processed, remaining counts, per-tag breakdown.
+
+        Args:
+            sweep_ref: Sweep ID (SW-N) or name
+        """
+        with conn_factory() as conn:
+            return get_status(conn, sweep_ref)
+
+    @mcp.tool()
+    def codesweep_archive(
+        sweep_ref: str,
+    ) -> dict[str, Any]:
+        """Archive a sweep. Archived sweeps are excluded from codesweep_list by default.
+
+        Args:
+            sweep_ref: Sweep ID (SW-N) or name
+        """
+        with conn_factory() as conn:
+            return archive_sweep(conn, sweep_ref)
+
+    @mcp.tool()
+    def codesweep_list(
+        include_archived: bool = False,
+    ) -> dict[str, Any]:
+        """List all sweeps with summary counts.
+
+        Args:
+            include_archived: Include archived sweeps (default: false)
+        """
+        with conn_factory() as conn:
+            return list_sweeps(conn, include_archived=include_archived)
+
+
+register_tool_provider("sweep", register_tools)
