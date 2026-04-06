@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from unittest.mock import MagicMock
 
 import pytest
 
 from codebugs import db
-from codebugs.db import SchemaEntry, register_schema, _schema_registry, _resolve_order
+from codebugs.db import register_schema, _schema_registry, _resolve_order
 
 
 class TestRegisterSchema:
@@ -156,3 +155,14 @@ class TestConnectUsesRegistry:
         conn1.close()
         conn2 = db.connect(str(tmp_path))
         conn2.close()
+
+
+class TestEnsureModulesLoaded:
+    def test_idempotent(self):
+        """Calling _ensure_modules_loaded() twice doesn't re-import or crash."""
+        from codebugs.db import _ensure_modules_loaded
+        _ensure_modules_loaded()
+        _ensure_modules_loaded()
+        # No error = success. Registry should not have duplicates.
+        names = [e.name for e in _schema_registry]
+        assert len(names) == len(set(names))
