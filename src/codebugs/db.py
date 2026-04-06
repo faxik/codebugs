@@ -8,6 +8,7 @@ import re
 import sqlite3
 import threading
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from graphlib import CycleError
 from datetime import datetime, timezone
@@ -40,6 +41,36 @@ def register_schema(
     if any(e.name == name for e in _schema_registry):
         raise ValueError(f"Schema '{name}' is already registered")
     _schema_registry.append(SchemaEntry(name, ensure_fn, depends_on))
+
+
+# Type alias for the connection factory passed to tool providers
+ConnFactory = Callable[[], AbstractContextManager[sqlite3.Connection]]
+
+
+@dataclass
+class ToolProvider:
+    """A registered tool provider with domain metadata."""
+    name: str
+    register_fn: Callable  # Callable[[FastMCP, ConnFactory], None]
+    depends_on: tuple[str, ...] = ()
+
+
+_tool_providers: list[ToolProvider] = []
+
+
+def register_tool_provider(
+    name: str,
+    register_fn: Callable,
+    *,
+    depends_on: tuple[str, ...] = (),
+) -> None:
+    """Register a tool provider. Called at module level by domain modules.
+
+    Raises ValueError if name is already registered.
+    """
+    if any(p.name == name for p in _tool_providers):
+        raise ValueError(f"Tool provider '{name}' is already registered")
+    _tool_providers.append(ToolProvider(name, register_fn, depends_on))
 
 
 def _resolve_order() -> list[SchemaEntry]:

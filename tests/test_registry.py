@@ -8,7 +8,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from codebugs import db
-from codebugs.db import register_schema, _schema_registry, _resolve_order
+from codebugs.db import (
+    register_schema, _schema_registry, _resolve_order,
+    ToolProvider, register_tool_provider, _tool_providers,  # noqa: F401
+    ConnFactory,  # noqa: F401
+)
 
 
 @pytest.fixture()
@@ -156,6 +160,29 @@ class TestConnectUsesRegistry:
         conn1.close()
         conn2 = db.connect(str(tmp_path))
         conn2.close()
+
+
+class TestToolProviderRegistry:
+    @pytest.fixture(autouse=True)
+    def _clean_providers(self):
+        original = _tool_providers.copy()
+        _tool_providers.clear()
+        yield
+        _tool_providers.clear()
+        _tool_providers.extend(original)
+
+    def test_register_adds_provider(self):
+        fn = MagicMock()
+        register_tool_provider("test_domain", fn)
+        assert len(_tool_providers) == 1
+        assert _tool_providers[0].name == "test_domain"
+        assert _tool_providers[0].register_fn is fn
+
+    def test_duplicate_name_raises(self):
+        fn = MagicMock()
+        register_tool_provider("dup", fn)
+        with pytest.raises(ValueError, match="already registered"):
+            register_tool_provider("dup", fn)
 
 
 class TestEnsureModulesLoaded:
