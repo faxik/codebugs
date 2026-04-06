@@ -53,7 +53,6 @@ class ToolProvider:
     """A registered tool provider with domain metadata."""
     name: str
     register_fn: Callable  # Callable[[FastMCP, ConnFactory], None]
-    depends_on: tuple[str, ...] = ()
 
 
 _tool_providers: list[ToolProvider] = []
@@ -62,8 +61,6 @@ _tool_providers: list[ToolProvider] = []
 def register_tool_provider(
     name: str,
     register_fn: Callable,
-    *,
-    depends_on: tuple[str, ...] = (),
 ) -> None:
     """Register a tool provider. Called at module level by domain modules.
 
@@ -71,7 +68,15 @@ def register_tool_provider(
     """
     if any(p.name == name for p in _tool_providers):
         raise ValueError(f"Tool provider '{name}' is already registered")
-    _tool_providers.append(ToolProvider(name, register_fn, depends_on))
+    _tool_providers.append(ToolProvider(name, register_fn))
+
+
+def get_tool_providers(*, mode: str = "all") -> list[ToolProvider]:
+    """Return registered tool providers, optionally filtered by mode."""
+    _ensure_modules_loaded()
+    if mode == "all":
+        return list(_tool_providers)
+    return [p for p in _tool_providers if p.name == mode]
 
 
 def _resolve_order() -> list[SchemaEntry]:

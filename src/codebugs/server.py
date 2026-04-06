@@ -43,10 +43,8 @@ def main():
 
     server = FastMCP(SERVER_NAMES[args.mode], json_response=True)
 
-    db._ensure_modules_loaded()
-    for provider in db._tool_providers:
-        if args.mode == "all" or provider.name == args.mode:
-            provider.register_fn(server, _conn)
+    for provider in db.get_tool_providers(mode=args.mode):
+        provider.register_fn(server, _conn)
 
     server.run()
 
