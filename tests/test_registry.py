@@ -291,3 +291,17 @@ class TestCliProviderRegistry:
         register_cli_provider("dup", fn)
         with pytest.raises(ValueError, match="already registered"):
             register_cli_provider("dup", fn)
+
+
+class TestAllCliProvidersRegistered:
+    @pytest.fixture(autouse=True)
+    def _import_all(self):
+        import codebugs.reqs  # noqa: F401
+        import codebugs.merge  # noqa: F401
+        import codebugs.sweep  # noqa: F401
+        import codebugs.bench  # noqa: F401
+        import codebugs.blockers  # noqa: F401
+
+    def test_all_cli_providers_registered(self):
+        names = {p.name for p in _cli_providers}
+        assert names >= {"findings", "reqs", "merge", "sweep", "bench", "blockers"}

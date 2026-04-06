@@ -7,16 +7,16 @@ AI-native code finding & requirements tracker. SQLite-backed, exposed via MCP se
 - **Domain modules** (`src/codebugs/`): `db.py` (findings + shared infra), `reqs.py`, `bench.py`, `blockers.py`, `merge.py`, `sweep.py`
 - **Shared types** (`types.py`): Entity constants (statuses, priorities, severities), resolver functions, terminal states. Zero-dependency — safe to import from anywhere
 - **MCP server** (`server.py`): Thin FastMCP orchestrator (~48 lines). Discovers tool providers via registry, filters by `--mode` flag
-- **CLI** (`cli.py`): argparse-based, calls domain modules directly
+- **CLI** (`cli.py`): Thin argparse orchestrator (~40 lines). Discovers CLI providers via registry, filters by `--mode` flag
+- **Formatting** (`fmt.py`): Shared CLI output utilities (ASCII table formatting)
 - **Storage**: Single SQLite DB at `.codebugs/findings.db`; each domain module owns its schema via `ensure_schema(conn)`
 
 ### Known architectural debt
 
 - **Staleness/provenance logic** (~130 lines) now lives in `db.py` alongside findings. Extraction to a dedicated `provenance.py` is planned.
-- **`db.connect()` import trigger**: `_ensure_modules_loaded()` still imports all known domain modules so their `register_schema()` and `register_tool_provider()` calls execute. Both registries use topological sort (ARCH-001 + ARCH-002 complete). This trigger will be replaced by auto-discovery.
+- **`db.connect()` import trigger**: `_ensure_modules_loaded()` still imports all known domain modules so their `register_schema()`, `register_tool_provider()`, and `register_cli_provider()` calls execute. All three registries are complete (ARCH-001 + ARCH-002 + ARCH-004). This trigger will be replaced by auto-discovery.
 - **`blockers.py` cross-module reach**: calls `db._row_to_dict()` and `reqs._row_to_dict()` — private functions across module boundaries. These should be made public or replaced with a shared utility.
-- **Findings naming exception**: The findings domain predates the naming conventions. Its CLI handlers (`cmd_add`, `cmd_query`, etc.) and MCP tools (`add`, `query`, `stats`, etc.) lack the domain prefix that all other modules use (`cmd_reqs_add`, `reqs_add`). Renaming MCP tools is a breaking change for clients.
-- **No blockers CLI**: `blockers` has MCP tools but no CLI subcommands. All other domains have both.
+- **Findings naming exception**: The findings domain predates the naming conventions. Its MCP tools (`add`, `query`, `stats`, etc.) lack the domain prefix that all other modules use (`reqs_add`, `codebench_import`). Renaming MCP tools is a breaking change for clients.
 
 ## Code rules
 
@@ -60,16 +60,17 @@ AI-native code finding & requirements tracker. SQLite-backed, exposed via MCP se
 - New modules: define `register_tools(mcp, conn_factory)`, call `register_tool_provider("name", register_tools)` at module level.
 
 ### CLI
-- CLI commands are registered in `_register_*_subcommands()` functions in `cli.py`.
-- Handlers are named `cmd_<domain>_<action>()`.
+- Each domain module defines `register_cli(sub, commands)` and calls `register_cli_provider()` at module level.
+- `cli.py` discovers providers via the registry and filters by `--mode` flag.
+- New modules: define `register_cli(sub, commands)`, call `register_cli_provider("name", register_cli)` at module level.
 
 ## Architecture migration (in progress)
 
 We are migrating toward a plugin architecture in phases. Query with `reqs_query --section "Architecture Migration"` or MCP tool `reqs_query(section="Architecture Migration")` for the full plan (ARCH-001 through ARCH-005).
 
-**Phase order**: schema registry (ARCH-001 done) -> tool registration (ARCH-002 done) -> entity types (ARCH-003) -> CLI unification (ARCH-004) -> embedding separation (ARCH-005).
+**Phase order**: schema registry (ARCH-001 done) -> tool registration (ARCH-002 done) -> entity types (ARCH-003 done) -> CLI unification (ARCH-004 done) -> embedding separation (ARCH-005).
 
 **Current rules for new code:**
-- New domain modules must call `register_schema()` and `register_tool_provider()` at module level — do NOT edit `db.connect()` or `server.py`.
+- New domain modules must call `register_schema()`, `register_tool_provider()`, and `register_cli_provider()` at module level — do NOT edit `db.connect()`, `server.py`, or `cli.py`.
 - Add the new module import to `_ensure_modules_loaded()` in `db.py` (temporary, until auto-discovery).
 - Prefer self-contained modules that register themselves over central wiring.

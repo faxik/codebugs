@@ -1,11 +1,15 @@
-"""Codebugs CLI — thin wrapper over the database layer."""
+"""Codebugs CLI — thin orchestrator over domain modules."""
 
 from __future__ import annotations
 
 import argparse
+import sys
+
+from codebugs import db
 
 
 def main() -> None:
+    """CLI entry point with mode-based command discovery."""
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument(
         "--mode",
@@ -19,29 +23,16 @@ def main() -> None:
         prog="codebugs",
         parents=[pre_parser],
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
+    commands: dict = {}
 
-    commands = {}
-    if pre_args.mode in ("findings", "all"):
-        from codebugs.db import register_cli as findings_cli
-        findings_cli(sub, commands)
-    if pre_args.mode in ("reqs", "all"):
-        from codebugs.reqs import register_cli as reqs_cli
-        reqs_cli(sub, commands)
-    if pre_args.mode in ("merge", "all"):
-        from codebugs.merge import register_cli as merge_cli
-        merge_cli(sub, commands)
-    if pre_args.mode in ("sweep", "all"):
-        from codebugs.sweep import register_cli as sweep_cli
-        sweep_cli(sub, commands)
-    if pre_args.mode in ("bench", "all"):
-        from codebugs.bench import register_cli as bench_cli
-        bench_cli(sub, commands)
-    if pre_args.mode in ("blockers", "all"):
-        from codebugs.blockers import register_cli as blockers_cli
-        blockers_cli(sub, commands)
+    for provider in db.get_cli_providers(mode=pre_args.mode):
+        provider.register_fn(sub, commands)
 
     args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
     commands[args.command](args)
 
 
