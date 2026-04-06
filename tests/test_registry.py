@@ -245,6 +245,20 @@ class TestBlockersToolProvider:
         assert "blockers" in names
 
 
+class TestAllToolProvidersRegistered:
+    @pytest.fixture(autouse=True)
+    def _import_all(self):
+        import codebugs.reqs  # noqa: F401
+        import codebugs.merge  # noqa: F401
+        import codebugs.sweep  # noqa: F401
+        import codebugs.bench  # noqa: F401
+        import codebugs.blockers  # noqa: F401
+
+    def test_all_providers_registered(self):
+        names = {p.name for p in _tool_providers}
+        assert names >= {"findings", "reqs", "merge", "sweep", "bench", "blockers"}
+
+
 class TestEnsureModulesLoaded:
     def test_idempotent(self):
         """Calling _ensure_modules_loaded() twice doesn't re-import or crash."""
