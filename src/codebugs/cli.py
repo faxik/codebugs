@@ -265,8 +265,8 @@ def cmd_reqs_add(args: argparse.Namespace) -> None:
     tags = [t.strip() for t in args.tags.split(",")] if args.tags else []
     result = reqs.add_requirement(
         conn, req_id=args.id, description=args.description,
-        section=args.section or "", priority=args.priority or "Should",
-        status=args.status or "Planned", source=args.source or "",
+        section=args.section or "", priority=args.priority or "should",
+        status=args.status or "planned", source=args.source or "",
         test_coverage=args.test_coverage or "", tags=tags,
     )
     conn.close()
@@ -331,17 +331,17 @@ def cmd_reqs_stats(args: argparse.Namespace) -> None:
         print("(no requirements)")
         return
 
-    header = f"{'':30s} {'Must':>8s} {'Should':>8s} {'Could':>8s} {'total':>8s}"
+    header = f"{'':30s} {'must':>8s} {'should':>8s} {'could':>8s} {'total':>8s}"
     print(header)
     print("-" * len(header))
-    totals = {"Must": 0, "Should": 0, "Could": 0, "total": 0}
+    totals = {"must": 0, "should": 0, "could": 0, "total": 0}
     for grp in sorted(groups):
         d = groups[grp]
-        print(f"{grp:30s} {d['Must']:>8d} {d['Should']:>8d} {d['Could']:>8d} {d['total']:>8d}")
+        print(f"{grp:30s} {d['must']:>8d} {d['should']:>8d} {d['could']:>8d} {d['total']:>8d}")
         for k in totals:
             totals[k] += d[k]
     print("-" * len(header))
-    print(f"{'TOTAL':30s} {totals['Must']:>8d} {totals['Should']:>8d} {totals['Could']:>8d} {totals['total']:>8d}")
+    print(f"{'TOTAL':30s} {totals['must']:>8d} {totals['should']:>8d} {totals['could']:>8d} {totals['total']:>8d}")
 
 
 def cmd_reqs_summary(args: argparse.Namespace) -> None:
@@ -354,13 +354,14 @@ def cmd_reqs_summary(args: argparse.Namespace) -> None:
     print(f"Total: {s['total']}")
     print()
     print("By status:")
-    for status in reqs.VALID_STATUSES:
+    from codebugs.types import REQUIREMENT_STATUSES, PRIORITIES
+    for status in REQUIREMENT_STATUSES:
         c = s["by_status"].get(status, 0)
         bar = "#" * min(c, 40)
         print(f"  {status:12s}  {c:>4d}  {bar}")
     print()
     print("By priority:")
-    for p in reqs.VALID_PRIORITIES:
+    for p in PRIORITIES:
         print(f"  {p:12s}  {s['by_priority'].get(p, 0):>4d}")
     if s["implemented_without_tests"]:
         print(f"\nImplemented without tests: {s['implemented_without_tests']}")

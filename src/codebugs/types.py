@@ -58,26 +58,31 @@ TRIGGER_TYPES = ("entity_resolved", "date", "manual")
 
 # --- Resolvers ---
 
+def _resolve(
+    value: str,
+    valid: tuple[str, ...],
+    aliases: dict[str, str] | None,
+    label: str,
+) -> str:
+    """Normalize a value to canonical lowercase form with optional alias lookup."""
+    v = value.lower().strip()
+    if aliases:
+        v = aliases.get(v, v)
+    if v not in valid:
+        raise ValueError(f"Invalid {label}: {value!r}")
+    return v
+
+
 def resolve_finding_status(status: str) -> str:
     """Normalize a finding status input to canonical lowercase form."""
-    s = status.lower().strip()
-    s = FINDING_STATUS_ALIASES.get(s, s)
-    if s not in FINDING_STATUSES:
-        raise ValueError(f"Invalid finding status: {status!r}")
-    return s
+    return _resolve(status, FINDING_STATUSES, FINDING_STATUS_ALIASES, "finding status")
 
 
 def resolve_requirement_status(status: str) -> str:
     """Normalize a requirement status input to canonical lowercase form."""
-    s = status.lower().strip()
-    if s not in REQUIREMENT_STATUSES:
-        raise ValueError(f"Invalid requirement status: {status!r}")
-    return s
+    return _resolve(status, REQUIREMENT_STATUSES, None, "requirement status")
 
 
 def resolve_priority(priority: str) -> str:
     """Normalize a priority input to canonical lowercase form."""
-    p = priority.lower().strip()
-    if p not in PRIORITIES:
-        raise ValueError(f"Invalid priority: {priority!r}")
-    return p
+    return _resolve(priority, PRIORITIES, None, "priority")
