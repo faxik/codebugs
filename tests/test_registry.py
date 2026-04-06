@@ -186,6 +186,12 @@ class TestToolProviderRegistry:
             register_tool_provider("dup", fn)
 
 
+class TestFindingsToolProvider:
+    def test_findings_provider_registered(self):
+        names = {p.name for p in _tool_providers}
+        assert "findings" in names
+
+
 class TestBenchToolProvider:
     def test_bench_provider_registered(self):
         import codebugs.bench  # noqa: F401

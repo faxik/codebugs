@@ -45,7 +45,7 @@ class TestCheckFileStaleness:
 
     def test_current_file(self, git_project):
         project, initial_sha = git_project
-        from codebugs.server import _check_file_staleness
+        from codebugs.db import _check_file_staleness
         result = _check_file_staleness("src/auth.py", initial_sha, project)
         assert result["file_status"] == "current"
 
@@ -56,7 +56,7 @@ class TestCheckFileStaleness:
         subprocess.run(["git", "add", "."], cwd=project, check=True, capture_output=True)
         subprocess.run(["git", "commit", "-m", "add login"], cwd=project, check=True, capture_output=True)
 
-        from codebugs.server import _check_file_staleness
+        from codebugs.db import _check_file_staleness
         result = _check_file_staleness("src/auth.py", initial_sha, project)
         assert result["file_status"] == "modified"
         assert "1 commit" in result["reason"]
@@ -67,7 +67,7 @@ class TestCheckFileStaleness:
         subprocess.run(["git", "add", "."], cwd=project, check=True, capture_output=True)
         subprocess.run(["git", "commit", "-m", "remove auth"], cwd=project, check=True, capture_output=True)
 
-        from codebugs.server import _check_file_staleness
+        from codebugs.db import _check_file_staleness
         result = _check_file_staleness("src/auth.py", initial_sha, project)
         assert result["file_status"] == "deleted"
 
@@ -80,21 +80,21 @@ class TestCheckFileStaleness:
         subprocess.run(["git", "add", "."], cwd=project, check=True, capture_output=True)
         subprocess.run(["git", "commit", "-m", "rename auth"], cwd=project, check=True, capture_output=True)
 
-        from codebugs.server import _check_file_staleness
+        from codebugs.db import _check_file_staleness
         result = _check_file_staleness("src/auth.py", initial_sha, project)
         assert result["file_status"] == "renamed"
         assert "authentication.py" in result["reason"]
 
     def test_unknown_no_commit(self, git_project):
         project, _ = git_project
-        from codebugs.server import _check_file_staleness
+        from codebugs.db import _check_file_staleness
         result = _check_file_staleness("src/auth.py", None, project)
         assert result["file_status"] == "unknown"
         assert result["reason"] == "no_provenance"
 
     def test_unknown_bad_commit(self, git_project):
         project, _ = git_project
-        from codebugs.server import _check_file_staleness
+        from codebugs.db import _check_file_staleness
         result = _check_file_staleness("src/auth.py", "deadbeef" * 5, project)
         assert result["file_status"] == "unknown"
 
@@ -109,7 +109,7 @@ class TestStalenessCheckTool:
             description="auth bug", reported_at_commit=initial_sha,
         )
 
-        from codebugs.server import _staleness_check_impl
+        from codebugs.db import _staleness_check_impl
         result = _staleness_check_impl(conn, project, finding_id="CB-1")
         assert len(result["findings"]) == 1
         assert result["findings"][0]["file_status"] == "current"
@@ -126,7 +126,7 @@ class TestStalenessCheckTool:
             description="open style", reported_at_commit=initial_sha,
         )
 
-        from codebugs.server import _staleness_check_impl
+        from codebugs.db import _staleness_check_impl
         result = _staleness_check_impl(conn, project, status="open")
         assert len(result["findings"]) == 1
         assert result["findings"][0]["finding_id"] == "CB-2"
@@ -140,7 +140,7 @@ class TestStalenessCheckTool:
                 description=f"bug {i}", reported_at_commit=initial_sha,
             )
 
-        from codebugs.server import _staleness_check_impl
+        from codebugs.db import _staleness_check_impl
         result = _staleness_check_impl(conn, project)
         assert len(result["findings"]) == 3
         statuses = {f["file_status"] for f in result["findings"]}

@@ -436,7 +436,7 @@ register_schema("merge", ensure_schema)
 
 def _get_main_head() -> str:
     """Get current main branch HEAD SHA. Used by merge tools that need git."""
-    from codebugs.server import _git_rev_parse
+    from codebugs.db import _git_rev_parse
     result = _git_rev_parse("main")
     assert result is not None
     return result
