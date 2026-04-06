@@ -42,7 +42,6 @@ CREATE INDEX IF NOT EXISTS idx_codemerge_claims_session ON codemerge_claims(sess
 CREATE INDEX IF NOT EXISTS idx_codemerge_sessions_status ON codemerge_sessions(status)
 """
 
-VALID_STATUSES = ("active", "merging", "done", "abandoned")
 LOCK_TTL_SECONDS = 300  # 5 minutes
 
 
