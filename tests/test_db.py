@@ -175,7 +175,7 @@ class TestUpdateFinding:
 
     def test_update_invalid_status_raises(self, conn):
         db.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
-        with pytest.raises(ValueError, match="Invalid status"):
+        with pytest.raises(ValueError, match="Invalid finding status"):
             db.update_finding(conn, "CB-1", status="deleted")
 
     def test_update_noop(self, conn):
@@ -186,16 +186,16 @@ class TestUpdateFinding:
 
 class TestResolveStatus:
     def test_canonical_passthrough(self):
-        for s in db.VALID_STATUSES:
-            assert db.resolve_status(s) == s
+        for s in db.FINDING_STATUSES:
+            assert db.resolve_finding_status(s) == s
 
     def test_all_aliases_resolve(self):
-        for alias, canonical in db.STATUS_ALIASES.items():
-            assert db.resolve_status(alias) == canonical
+        for alias, canonical in db.FINDING_STATUS_ALIASES.items():
+            assert db.resolve_finding_status(alias) == canonical
 
     def test_unknown_raises(self):
-        with pytest.raises(ValueError, match="Invalid status"):
-            db.resolve_status("banana")
+        with pytest.raises(ValueError, match="Invalid finding status"):
+            db.resolve_finding_status("banana")
 
 
 class TestQueryFindings:

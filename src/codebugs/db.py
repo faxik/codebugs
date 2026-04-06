@@ -15,6 +15,8 @@ from graphlib import CycleError
 from datetime import datetime, timezone
 from typing import Any
 
+from codebugs.types import FINDING_STATUSES, SEVERITIES, FINDING_STATUS_ALIASES, resolve_finding_status  # noqa: F401
+
 DB_DIR = ".codebugs"
 
 
@@ -287,42 +289,6 @@ CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings(severity);
 CREATE INDEX IF NOT EXISTS idx_findings_file ON findings(file);
 CREATE INDEX IF NOT EXISTS idx_findings_category ON findings(category);
 """
-
-VALID_SEVERITIES = ("critical", "high", "medium", "low")
-VALID_STATUSES = ("open", "in_progress", "fixed", "not_a_bug", "wont_fix", "stale")
-
-# Common aliases → canonical status.  Checked case-insensitively.
-STATUS_ALIASES: dict[str, str] = {
-    "done": "fixed",
-    "resolved": "fixed",
-    "implemented": "fixed",
-    "closed": "fixed",
-    "wontfix": "wont_fix",
-    "won't_fix": "wont_fix",
-    "invalid": "not_a_bug",
-    "in-progress": "in_progress",
-    "active": "in_progress",
-    "working": "in_progress",
-}
-
-
-def resolve_status(status: str) -> str:
-    """Resolve a status string to its canonical form.
-
-    Accepts canonical statuses as-is, or maps known aliases.
-    Raises ValueError for unrecognised values.
-    """
-    if status in VALID_STATUSES:
-        return status
-    canonical = STATUS_ALIASES.get(status.lower().replace(" ", "_"))
-    if canonical:
-        return canonical
-    raise ValueError(
-        f"Invalid status: {status}. "
-        f"Must be one of {VALID_STATUSES} "
-        f"(aliases: {', '.join(sorted(STATUS_ALIASES))})"
-    )
-
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -688,8 +654,8 @@ def add_finding(
     reported_at_ref: str | None = None,
 ) -> dict[str, Any]:
     """Add a single finding. Returns the created finding as a dict."""
-    if severity not in VALID_SEVERITIES:
-        raise ValueError(f"Invalid severity: {severity}. Must be one of {VALID_SEVERITIES}")
+    if severity not in SEVERITIES:
+        raise ValueError(f"Invalid severity: {severity}. Must be one of {SEVERITIES}")
 
     fid = finding_id or _next_id(conn)
     now = _now()
@@ -716,7 +682,7 @@ def batch_add_findings(
     results = []
     for f in findings:
         severity = f.get("severity", "medium")
-        if severity not in VALID_SEVERITIES:
+        if severity not in SEVERITIES:
             raise ValueError(f"Invalid severity: {severity}")
 
         fid = f.get("id") or _next_id(conn)
@@ -776,7 +742,7 @@ def update_finding(
     params: list[Any] = []
 
     if status is not None:
-        status = resolve_status(status)
+        status = resolve_finding_status(status)
         updates.append("status = ?")
         params.append(status)
 
@@ -835,7 +801,7 @@ def query_findings(
 
     if status:
         conditions.append("status = ?")
-        params.append(resolve_status(status))
+        params.append(resolve_finding_status(status))
     if severity:
         conditions.append("severity = ?")
         params.append(severity)
