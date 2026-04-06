@@ -539,7 +539,6 @@ def get_deferred_counts(
     }
 
 
-# --- Schema registry (ARCH-001) ---
 from codebugs.db import register_schema  # noqa: E402
 
 register_schema("blockers", ensure_schema, depends_on=("db", "reqs"))

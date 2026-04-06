@@ -9,6 +9,7 @@ import sqlite3
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from graphlib import CycleError
 from datetime import datetime, timezone
 from typing import Any
 
@@ -42,42 +43,42 @@ def register_schema(
 
 
 def _resolve_order() -> list[SchemaEntry]:
-    """Topological sort of registered schemas using Kahn's algorithm.
+    """Topological sort of registered schemas.
 
     Raises ValueError on cycles or missing dependencies.
     """
+    from graphlib import TopologicalSorter
+
     entries = {e.name: e for e in _schema_registry}
+    graph = {e.name: set(e.depends_on) for e in _schema_registry}
+
     # Validate all dependencies exist
-    for e in _schema_registry:
-        for dep in e.depends_on:
+    for name, deps in graph.items():
+        for dep in deps:
             if dep not in entries:
                 raise ValueError(
-                    f"Schema '{e.name}' depends on '{dep}' which is not registered"
+                    f"Schema '{name}' depends on '{dep}' which is not registered"
                 )
 
-    # Kahn's algorithm
-    in_degree: dict[str, int] = {name: 0 for name in entries}
-    for e in _schema_registry:
-        for dep in e.depends_on:
-            in_degree[e.name] += 1
+    try:
+        order = list(TopologicalSorter(graph).static_order())
+    except CycleError as exc:
+        raise ValueError(f"Cycle detected among schemas: {exc}") from exc
 
-    queue = [name for name, deg in in_degree.items() if deg == 0]
-    result: list[SchemaEntry] = []
+    return [entries[name] for name in order]
 
-    while queue:
-        name = queue.pop(0)
-        result.append(entries[name])
-        for e in _schema_registry:
-            if name in e.depends_on:
-                in_degree[e.name] -= 1
-                if in_degree[e.name] == 0:
-                    queue.append(e.name)
 
-    if len(result) != len(entries):
-        remaining = set(entries) - {e.name for e in result}
-        raise ValueError(f"Cycle detected among schemas: {remaining}")
+_cached_order: list[SchemaEntry] | None = None
 
-    return result
+
+def _resolved_order() -> list[SchemaEntry]:
+    """Return cached topological order, computing on first call."""
+    global _cached_order
+    if _cached_order is None:
+        _cached_order = _resolve_order()
+    return _cached_order
+
+
 DB_FILE = "findings.db"
 
 SCHEMA = """\
@@ -175,8 +176,8 @@ def _ensure_modules_loaded() -> None:
     with _modules_lock:
         if _modules_loaded:
             return
-        _modules_loaded = True
         from codebugs import reqs, merge, sweep, bench, blockers  # noqa: F401
+        _modules_loaded = True
 
 
 def connect(project_dir: str | None = None) -> sqlite3.Connection:
@@ -188,7 +189,7 @@ def connect(project_dir: str | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
 
     _ensure_modules_loaded()
-    for entry in _resolve_order():
+    for entry in _resolved_order():
         entry.ensure_fn(conn)
 
     return conn

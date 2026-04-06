@@ -517,7 +517,6 @@ def delete_benchmark(
     }
 
 
-# --- Schema registry (ARCH-001) ---
 from codebugs.db import register_schema  # noqa: E402
 
 register_schema("bench", ensure_schema)

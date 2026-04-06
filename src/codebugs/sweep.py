@@ -345,7 +345,6 @@ def list_sweeps(
     return {"sweeps": sweeps}
 
 
-# --- Schema registry (ARCH-001) ---
 from codebugs.db import register_schema  # noqa: E402
 
 register_schema("sweep", ensure_schema)

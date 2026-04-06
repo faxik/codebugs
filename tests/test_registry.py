@@ -11,15 +11,20 @@ from codebugs import db
 from codebugs.db import register_schema, _schema_registry, _resolve_order
 
 
+@pytest.fixture()
+def clean_registry():
+    """Save and restore the global registry around a test."""
+    original = _schema_registry.copy()
+    _schema_registry.clear()
+    yield
+    _schema_registry.clear()
+    _schema_registry.extend(original)
+
+
 class TestRegisterSchema:
     @pytest.fixture(autouse=True)
-    def _clean_registry(self):
-        """Save and restore the global registry around each test."""
-        original = _schema_registry.copy()
-        _schema_registry.clear()
-        yield
-        _schema_registry.clear()
-        _schema_registry.extend(original)
+    def _clean(self, clean_registry):
+        pass
 
     def test_register_adds_entry(self):
         fn = MagicMock()
@@ -43,12 +48,8 @@ class TestRegisterSchema:
 
 class TestResolveOrder:
     @pytest.fixture(autouse=True)
-    def _clean_registry(self):
-        original = _schema_registry.copy()
-        _schema_registry.clear()
-        yield
-        _schema_registry.clear()
-        _schema_registry.extend(original)
+    def _clean(self, clean_registry):
+        pass
 
     def test_no_deps_preserves_registration_order(self):
         for name in ("a", "b", "c"):
