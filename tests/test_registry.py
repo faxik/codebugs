@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import pytest
@@ -183,6 +184,31 @@ class TestToolProviderRegistry:
         register_tool_provider("dup", fn)
         with pytest.raises(ValueError, match="already registered"):
             register_tool_provider("dup", fn)
+
+
+class TestBenchToolProvider:
+    def test_bench_provider_registered(self):
+        import codebugs.bench  # noqa: F401
+        names = {p.name for p in _tool_providers}
+        assert "bench" in names
+
+    def test_bench_register_tools_callable(self):
+        import codebugs.bench  # noqa: F401
+        provider = next(p for p in _tool_providers if p.name == "bench")
+        mock_mcp = MagicMock()
+
+        @contextmanager
+        def mock_conn():
+            conn = sqlite3.connect(":memory:")
+            from codebugs import bench as b
+            b.ensure_schema(conn)
+            try:
+                yield conn
+            finally:
+                conn.close()
+
+        provider.register_fn(mock_mcp, mock_conn)
+        assert mock_mcp.tool.call_count == 4
 
 
 class TestEnsureModulesLoaded:

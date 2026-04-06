@@ -517,6 +517,131 @@ def delete_benchmark(
     }
 
 
-from codebugs.db import register_schema  # noqa: E402
+from codebugs.db import register_schema, register_tool_provider  # noqa: E402
 
 register_schema("bench", ensure_schema)
+
+
+def register_tools(mcp, conn_factory) -> None:
+    """Register benchmark result tools on the given MCP server."""
+
+    @mcp.tool()
+    def codebench_import(
+        benchmark: str,
+        csv_data: str | None = None,
+        json_data: str | list | None = None,
+        date: str | None = None,
+        tags: list[str] | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Import benchmark results from CSV or JSON.
+
+        CSV convention: first column is the row label, remaining columns are
+        metric names with numeric values.
+
+        JSON convention: array of objects, first key is the row label, rest
+        are metric keys with numeric values.
+
+        Args:
+            benchmark: Benchmark name (e.g. "search-perf")
+            csv_data: CSV string (header + data rows). Provide csv_data OR json_data.
+            json_data: JSON array string. Provide csv_data OR json_data.
+            date: Run date (default: today, ISO format YYYY-MM-DD)
+            tags: Optional tags (e.g. ["nightly", "v2.1"])
+            meta: Optional metadata (e.g. {"git_sha": "abc123", "ci_url": "..."})
+        """
+        if csv_data is None and json_data is None:
+            raise ValueError("Provide either csv_data or json_data")
+        if csv_data is not None and json_data is not None:
+            raise ValueError("Provide csv_data or json_data, not both")
+        with conn_factory() as conn:
+            if csv_data:
+                return import_csv(
+                    conn, benchmark=benchmark, csv_data=csv_data,
+                    date=date, tags=tags, meta=meta,
+                )
+            return import_json(
+                conn, benchmark=benchmark, json_data=json_data,
+                date=date, tags=tags, meta=meta,
+            )
+
+    @mcp.tool()
+    def codebench_query(
+        benchmark: str,
+        runs: list[str] | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        metrics: list[str] | None = None,
+        rows: list[str] | None = None,
+        group_by: str = "row",
+        last_n: int | None = None,
+        format: str = "json",
+    ) -> dict[str, Any]:
+        """Query and pivot benchmark results.
+
+        group_by="row": original table shape (row_labels as rows, metrics as
+        columns). Returns one table per run.
+
+        group_by="run": trend view (runs as rows, metrics as columns).
+        Returns one table per row_label.
+
+        Args:
+            benchmark: Benchmark name to query
+            runs: Specific run IDs (default: all matching)
+            date_from: Start date filter (inclusive, YYYY-MM-DD)
+            date_to: End date filter (inclusive, YYYY-MM-DD)
+            metrics: Which metrics to include (default: all)
+            rows: Which row_labels to include (default: all)
+            group_by: Pivot axis — "row" or "run"
+            last_n: Limit to last N runs by date
+            format: Output — "json" or "csv"
+        """
+        with conn_factory() as conn:
+            return query(
+                conn, benchmark=benchmark, runs=runs,
+                date_from=date_from, date_to=date_to,
+                metrics=metrics, rows=rows, group_by=group_by,
+                last_n=last_n, format=format,
+            )
+
+    @mcp.tool()
+    def codebench_list(
+        benchmark: str | None = None,
+        last_n: int | None = None,
+    ) -> dict[str, Any]:
+        """List benchmarks or runs.
+
+        Without benchmark: lists all benchmark names with run counts.
+        With benchmark: lists runs for that benchmark.
+
+        Args:
+            benchmark: If provided, list runs for this benchmark
+            last_n: Limit to last N runs (only when benchmark is provided)
+        """
+        with conn_factory() as conn:
+            if benchmark:
+                return list_runs(conn, benchmark=benchmark, last_n=last_n)
+            return list_benchmarks(conn)
+
+    @mcp.tool()
+    def codebench_delete(
+        run_id: str | None = None,
+        benchmark: str | None = None,
+    ) -> dict[str, Any]:
+        """Delete a single run or all runs for a benchmark.
+
+        Args:
+            run_id: Delete a specific run (e.g. "BE-1")
+            benchmark: Delete all runs for a benchmark name
+        """
+        if not run_id and not benchmark:
+            raise ValueError("Provide run_id or benchmark")
+        if run_id and benchmark:
+            raise ValueError("Provide run_id or benchmark, not both")
+        with conn_factory() as conn:
+            if run_id:
+                return delete_run(conn, run_id)
+            return delete_benchmark(conn, benchmark)
+
+
+register_tool_provider("bench", register_tools)
