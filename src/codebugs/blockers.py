@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
-from codebugs.types import ENTITY_FINDING, ENTITY_REQUIREMENT, ENTITY_TABLES, TERMINAL_STATUSES, TRIGGER_TYPES
+from codebugs.types import ENTITY_FINDING, ENTITY_REQUIREMENT, ENTITY_TABLES, TERMINAL_STATUSES, TRIGGER_TYPES, utc_now
 
 
 BLOCKERS_SCHEMA = """\
@@ -34,10 +34,6 @@ CREATE INDEX IF NOT EXISTS idx_blockers_blocked_by ON blockers(blocked_by);
 CREATE INDEX IF NOT EXISTS idx_blockers_trigger ON blockers(trigger_type, trigger_at);
 """
 
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -112,7 +108,7 @@ def is_blocker_satisfied(conn: sqlite3.Connection, blocker: dict[str, Any]) -> b
             return False
         return status in TERMINAL_STATUSES[blocker["blocked_by_type"]]
     if blocker["trigger_type"] == "date":
-        return blocker["trigger_at"] <= _now()
+        return blocker["trigger_at"] <= utc_now()
     if blocker["trigger_type"] == "manual":
         return blocker["resolved_at"] is not None
     return False
@@ -196,7 +192,7 @@ def add_blocker(
                 f"Duplicate blocker: {item_id} already has a date trigger for {trigger_at}."
             )
 
-    now = _now()
+    now = utc_now()
     conn.execute(
         """INSERT INTO blockers
            (item_id, item_type, blocked_by, blocked_by_type, reason,
@@ -271,7 +267,7 @@ def check_blockers(conn: sqlite3.Connection) -> dict[str, Any]:
         "SELECT * FROM blockers WHERE cancelled_at IS NULL ORDER BY item_id"
     ).fetchall()
 
-    now = _now()
+    now = utc_now()
     items: dict[str, dict[str, Any]] = {}
     overdue = []
 
@@ -343,7 +339,7 @@ def resolve_blocker(
     if b["cancelled_at"]:
         raise ValueError(f"Blocker {blocker_id} is already cancelled.")
 
-    now = _now()
+    now = utc_now()
 
     if action == "cancel":
         conn.execute(
@@ -504,7 +500,7 @@ def get_deferred_counts(
     """Return deferred/overdue/unblocked counts for an entity type."""
     evaluated = _get_active_blockers_by_type(conn, entity_type)
 
-    now = _now()
+    now = utc_now()
     items: dict[str, list[dict[str, Any]]] = {}
     for b in evaluated:
         items.setdefault(b["item_id"], []).append(b)

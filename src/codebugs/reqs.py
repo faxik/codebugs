@@ -6,10 +6,9 @@ import json
 import os
 import re
 import sqlite3
-from datetime import datetime, timezone
 from typing import Any
 
-from codebugs.types import resolve_requirement_status, resolve_priority
+from codebugs.types import resolve_requirement_status, resolve_priority, utc_now
 
 
 REQS_SCHEMA = """\
@@ -34,10 +33,6 @@ CREATE INDEX IF NOT EXISTS idx_reqs_status ON requirements(status);
 CREATE INDEX IF NOT EXISTS idx_reqs_section ON requirements(section);
 CREATE INDEX IF NOT EXISTS idx_reqs_priority ON requirements(priority);
 """
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -116,7 +111,7 @@ def add_requirement(
     priority = resolve_priority(priority)
     status = resolve_requirement_status(status)
 
-    now = _now()
+    now = utc_now()
     conn.execute(
         """INSERT INTO requirements (id, section, description, priority, status,
            source, test_coverage, tags, meta, created_at, updated_at)
@@ -136,7 +131,7 @@ def batch_add_requirements(
     requirements: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Add multiple requirements. Returns list of created requirements."""
-    now = _now()
+    now = utc_now()
     ids = []
     for r in requirements:
         req_id = r["id"]
@@ -220,7 +215,7 @@ def update_requirement(
         return _row_to_dict(row)
 
     updates.append("updated_at = ?")
-    params.append(_now())
+    params.append(utc_now())
     params.append(req_id)
 
     conn.execute(f"UPDATE requirements SET {', '.join(updates)} WHERE id = ?", params)
@@ -465,7 +460,7 @@ def import_markdown(
     current_section = ""
     imported = 0
     skipped = 0
-    now = _now()
+    now = utc_now()
 
     for line in lines:
         line = line.rstrip()

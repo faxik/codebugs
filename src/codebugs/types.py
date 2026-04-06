@@ -6,6 +6,14 @@ from anywhere without circular import risk.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
+
+def utc_now() -> str:
+    """Current UTC timestamp in ISO format."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 # --- Finding statuses ---
 FINDING_STATUSES = ("open", "in_progress", "fixed", "not_a_bug", "wont_fix", "stale")
 

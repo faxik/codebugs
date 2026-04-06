@@ -14,8 +14,9 @@ import io
 import json
 import re
 import sqlite3
-from datetime import datetime, timezone
 from typing import Any
+
+from codebugs.types import utc_now
 
 
 SCHEMA = """\
@@ -56,10 +57,6 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         if stmt:
             conn.execute(stmt)
     conn.commit()
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _next_run_id(conn: sqlite3.Connection) -> str:
@@ -110,8 +107,8 @@ def import_csv(
         raise ValueError("CSV contains no data rows")
 
     rid = run_id or _next_run_id(conn)
-    run_date = date or _now()[:10]
-    now = _now()
+    run_date = date or utc_now()[:10]
+    now = utc_now()
 
     conn.execute(
         "INSERT INTO codebench_runs (run_id, benchmark, date, tags, meta, created_at) "

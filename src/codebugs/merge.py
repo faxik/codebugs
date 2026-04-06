@@ -7,6 +7,8 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from codebugs.types import utc_now
+
 
 MERGE_SCHEMA = """\
 CREATE TABLE IF NOT EXISTS codemerge_sessions (
@@ -45,10 +47,6 @@ CREATE INDEX IF NOT EXISTS idx_codemerge_sessions_status ON codemerge_sessions(s
 LOCK_TTL_SECONDS = 300  # 5 minutes
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 def _get_session(conn: sqlite3.Connection, session_id: str) -> sqlite3.Row:
     """Fetch a session row or raise KeyError."""
     row = conn.execute(
@@ -83,7 +81,7 @@ def start_session(
     allow_restart: bool = False,
 ) -> dict[str, Any]:
     """Register a new working session."""
-    now = _now()
+    now = utc_now()
     if allow_restart:
         existing = conn.execute(
             "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
@@ -120,7 +118,7 @@ def abandon_session(conn: sqlite3.Connection, session_id: str) -> dict[str, Any]
     """Mark a session as abandoned, releasing claims and lock."""
     _get_session(conn, session_id)
 
-    now = _now()
+    now = utc_now()
     conn.execute(
         "UPDATE codemerge_sessions SET status='abandoned', finished_at=?, last_activity=? "
         "WHERE session_id=?",
@@ -148,7 +146,7 @@ def finish(
     if row["status"] != "merging":
         raise ValueError(f"Session '{session_id}' is not in 'merging' state (is '{row['status']}')")
 
-    now = _now()
+    now = utc_now()
     new_status = "done" if success else "active"
     finished_at = now if success else None
 
@@ -178,7 +176,7 @@ def add_claim(
     if row["status"] not in ("active", "merging"):
         raise ValueError(f"Session '{session_id}' is not active (is '{row['status']}')")
 
-    now = _now()
+    now = utc_now()
     conn.execute(
         "INSERT OR IGNORE INTO codemerge_claims (session_id, file_path, claimed_at) "
         "VALUES (?, ?, ?)",

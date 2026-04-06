@@ -13,10 +13,9 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from graphlib import CycleError
-from datetime import datetime, timezone
 from typing import Any
 
-from codebugs.types import FINDING_STATUSES, SEVERITIES, FINDING_STATUS_ALIASES, resolve_finding_status  # noqa: F401
+from codebugs.types import FINDING_STATUSES, SEVERITIES, FINDING_STATUS_ALIASES, resolve_finding_status, utc_now  # noqa: F401
 
 DB_DIR = ".codebugs"
 
@@ -315,10 +314,6 @@ CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings(severity);
 CREATE INDEX IF NOT EXISTS idx_findings_file ON findings(file);
 CREATE INDEX IF NOT EXISTS idx_findings_category ON findings(category);
 """
-
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
 
 def _db_path(project_dir: str | None = None) -> str:
     root = project_dir or os.getcwd()
@@ -954,7 +949,7 @@ def add_finding(
         raise ValueError(f"Invalid severity: {severity}. Must be one of {SEVERITIES}")
 
     fid = finding_id or _next_id(conn)
-    now = _now()
+    now = utc_now()
     tags_json = json.dumps(tags or [])
     meta_json = json.dumps(meta or {})
 
@@ -974,7 +969,7 @@ def batch_add_findings(
     findings: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Add multiple findings at once. Returns list of created findings."""
-    now = _now()
+    now = utc_now()
     results = []
     for f in findings:
         severity = f.get("severity", "medium")
@@ -1066,7 +1061,7 @@ def update_finding(
         return _row_to_dict(row)
 
     updates.append("updated_at = ?")
-    params.append(_now())
+    params.append(utc_now())
     params.append(finding_id)
 
     conn.execute(f"UPDATE findings SET {', '.join(updates)} WHERE id = ?", params)

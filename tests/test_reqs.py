@@ -9,6 +9,7 @@ import tempfile
 import pytest
 
 from codebugs import reqs
+from codebugs.types import utc_now
 
 
 @pytest.fixture
@@ -36,7 +37,7 @@ def _import_md(conn, md_text: str) -> dict:
 @pytest.fixture
 def populated(conn):
     """Database with sample requirements."""
-    now = reqs._now()
+    now = utc_now()
     for i, (status, priority, section, tc) in enumerate([
         ("planned", "must", "1.1 Ingestion", ""),
         ("implemented", "must", "1.1 Ingestion", "test_core.py"),

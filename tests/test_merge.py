@@ -7,6 +7,7 @@ import sqlite3
 import pytest
 
 from codebugs import merge
+from codebugs.types import utc_now
 
 
 @pytest.fixture
@@ -44,7 +45,7 @@ class TestSchema:
 def _force_merging(conn, session_id):
     """Test helper: set session to 'merging' state and hold lock via direct SQL.
     This avoids depending on merge() which is implemented in a later task."""
-    now = merge._now()
+    now = utc_now()
     conn.execute(
         "UPDATE codemerge_sessions SET status='merging', last_activity=? WHERE session_id=?",
         (now, session_id),

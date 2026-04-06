@@ -6,12 +6,9 @@ import json
 import math
 import sqlite3
 import struct
-from datetime import datetime, timezone
 from typing import Any
 
-
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+from codebugs.types import utc_now
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -59,7 +56,7 @@ def store_embedding(
     blob = _pack_vector(embedding)
     conn.execute(
         "UPDATE requirements SET embedding = ?, updated_at = ? WHERE id = ?",
-        (blob, _now(), req_id),
+        (blob, utc_now(), req_id),
     )
     conn.commit()
     return {"id": req_id, "dimensions": len(embedding), "stored": True}
@@ -74,7 +71,7 @@ def batch_store_embeddings(
     Args:
         embeddings: Dict mapping req_id -> vector
     """
-    now = _now()
+    now = utc_now()
     stored = 0
     for req_id, vec in embeddings.items():
         blob = _pack_vector(vec)

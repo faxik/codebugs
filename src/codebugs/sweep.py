@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
 from typing import Any
+
+from codebugs.types import utc_now
 
 
 SCHEMA = """\
@@ -39,10 +40,6 @@ CREATE TABLE IF NOT EXISTS codesweep_items (
 CREATE INDEX IF NOT EXISTS idx_codesweep_items_next
     ON codesweep_items(sweep_id, processed, position);
 """
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -86,7 +83,7 @@ def create_sweep(
         if existing:
             raise ValueError(f"Sweep name already exists: {name}")
 
-    now = _now()
+    now = utc_now()
     cursor = conn.execute(
         """INSERT INTO codesweep_sweeps
            (sweep_id, name, description, default_batch_size, status, created_at, updated_at)
@@ -143,7 +140,7 @@ def add_items(
     if status == "archived":
         raise ValueError(f"Cannot add items to archived sweep: {sweep_id}")
 
-    now = _now()
+    now = utc_now()
     tags_json = json.dumps(tags or [])
     pos = _next_position(conn, sweep_id)
     added = 0
@@ -229,7 +226,7 @@ def mark_items(
 ) -> dict[str, Any]:
     """Mark items as processed or unprocessed."""
     sweep_id = _resolve_sweep(conn, sweep_ref)
-    now = _now()
+    now = utc_now()
 
     for item in items:
         if processed:
@@ -307,7 +304,7 @@ def archive_sweep(
     sweep_id = _resolve_sweep(conn, sweep_ref)
     conn.execute(
         "UPDATE codesweep_sweeps SET status = 'archived', updated_at = ? WHERE sweep_id = ?",
-        (_now(), sweep_id),
+        (utc_now(), sweep_id),
     )
     conn.commit()
     return {"sweep_id": sweep_id, "status": "archived"}
