@@ -9,7 +9,7 @@ def main() -> None:
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument(
         "--mode",
-        choices=["findings", "reqs", "merge", "sweep", "bench", "all"],
+        choices=["findings", "reqs", "merge", "sweep", "bench", "blockers", "all"],
         default="all",
     )
     pre_args, _ = pre_parser.parse_known_args()
@@ -37,6 +37,9 @@ def main() -> None:
     if pre_args.mode in ("bench", "all"):
         from codebugs.bench import register_cli as bench_cli
         bench_cli(sub, commands)
+    if pre_args.mode in ("blockers", "all"):
+        from codebugs.blockers import register_cli as blockers_cli
+        blockers_cli(sub, commands)
 
     args = parser.parse_args()
     commands[args.command](args)

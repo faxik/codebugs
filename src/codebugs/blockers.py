@@ -530,7 +530,9 @@ def get_deferred_counts(
     }
 
 
-from codebugs.db import register_schema, register_tool_provider  # noqa: E402
+import json  # noqa: E402
+
+from codebugs.db import register_schema, register_tool_provider, register_cli_provider  # noqa: E402
 
 register_schema("blockers", ensure_schema, depends_on=("db", "reqs"))
 
@@ -609,3 +611,79 @@ def register_tools(mcp, conn_factory) -> None:
 
 
 register_tool_provider("blockers", register_tools)
+
+
+def register_cli(sub, commands):
+    """Register blocker CLI subcommands."""
+    p = sub.add_parser("blockers-add", help="Defer an item by adding a blocker")
+    p.add_argument("item_id", help="The blocked entity (e.g. CB-5, FR-012)")
+    p.add_argument("reason", help="Why it's blocked")
+    p.add_argument("--blocked-by", help="Dependency entity")
+    p.add_argument("--trigger-type", choices=["entity_resolved", "date", "manual"])
+    p.add_argument("--trigger-at", help="Date for date triggers")
+    commands["blockers-add"] = _cmd_blockers_add
+
+    p = sub.add_parser("blockers-query", help="List blockers with filters")
+    p.add_argument("--item-id", help="Filter by blocked item")
+    p.add_argument("--blocked-by", help="Filter by dependency")
+    p.add_argument("--trigger-type", choices=["entity_resolved", "date", "manual"])
+    p.add_argument("--no-active-only", action="store_true", help="Include satisfied/cancelled")
+    commands["blockers-query"] = _cmd_blockers_query
+
+    p = sub.add_parser("blockers-check", help="Scan for actionable items")
+    commands["blockers-check"] = _cmd_blockers_check
+
+    p = sub.add_parser("blockers-resolve", help="Cancel or resolve a blocker")
+    p.add_argument("blocker_id", type=int, help="Blocker row ID")
+    p.add_argument("action", choices=["cancel", "resolve"])
+    commands["blockers-resolve"] = _cmd_blockers_resolve
+
+
+def _cmd_blockers_add(args):
+    from codebugs import db
+    conn = db.connect()
+    try:
+        result = add_blocker(
+            conn, item_id=args.item_id, reason=args.reason,
+            blocked_by=args.blocked_by, trigger_type=args.trigger_type,
+            trigger_at=args.trigger_at,
+        )
+        print(json.dumps(result, indent=2))
+    finally:
+        conn.close()
+
+
+def _cmd_blockers_query(args):
+    from codebugs import db
+    conn = db.connect()
+    try:
+        result = query_blockers(
+            conn, item_id=args.item_id, blocked_by=args.blocked_by,
+            trigger_type=args.trigger_type, active_only=not args.no_active_only,
+        )
+        print(json.dumps(result, indent=2))
+    finally:
+        conn.close()
+
+
+def _cmd_blockers_check(args):
+    from codebugs import db
+    conn = db.connect()
+    try:
+        result = check_blockers(conn)
+        print(json.dumps(result, indent=2))
+    finally:
+        conn.close()
+
+
+def _cmd_blockers_resolve(args):
+    from codebugs import db
+    conn = db.connect()
+    try:
+        result = resolve_blocker(conn, blocker_id=args.blocker_id, action=args.action)
+        print(json.dumps(result, indent=2))
+    finally:
+        conn.close()
+
+
+register_cli_provider("blockers", register_cli)
