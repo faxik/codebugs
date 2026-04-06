@@ -225,6 +225,13 @@ class TestMergeToolProvider:
         assert "merge" in names
 
 
+class TestBlockersToolProvider:
+    def test_blockers_provider_registered(self):
+        import codebugs.blockers  # noqa: F401
+        names = {p.name for p in _tool_providers}
+        assert "blockers" in names
+
+
 class TestEnsureModulesLoaded:
     def test_idempotent(self):
         """Calling _ensure_modules_loaded() twice doesn't re-import or crash."""

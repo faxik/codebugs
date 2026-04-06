@@ -611,79 +611,6 @@ def register_reqs_tools(mcp: FastMCP) -> None:
             return reqs.embedding_stats(conn)
 
 
-def register_blockers_tools(mcp: FastMCP) -> None:
-    """Register blocker/dependency tools on the given MCP server."""
-
-    @mcp.tool()
-    def blockers_add(
-        item_id: str,
-        reason: str,
-        blocked_by: str | None = None,
-        trigger_type: str | None = None,
-        trigger_at: str | None = None,
-    ) -> dict[str, Any]:
-        """Defer an item by adding a blocker.
-
-        Args:
-            item_id: The blocked entity (e.g. "CB-5", "FR-012")
-            reason: Why it's blocked
-            blocked_by: Dependency entity (e.g. "CB-3"). Required for entity_resolved triggers.
-            trigger_type: entity_resolved, date, or manual.
-                          Defaults to entity_resolved if blocked_by provided, manual otherwise.
-            trigger_at: Date/datetime for date triggers (e.g. "2026-04-10"). Normalized to UTC.
-        """
-        with _conn() as conn:
-            return blockers.add_blocker(
-                conn, item_id=item_id, reason=reason, blocked_by=blocked_by,
-                trigger_type=trigger_type, trigger_at=trigger_at,
-            )
-
-    @mcp.tool()
-    def blockers_query(
-        item_id: str | None = None,
-        blocked_by: str | None = None,
-        trigger_type: str | None = None,
-        active_only: bool = True,
-    ) -> dict[str, Any]:
-        """List blockers with filters. Each result includes computed satisfaction state.
-
-        Args:
-            item_id: Filter by blocked item (e.g. "CB-5")
-            blocked_by: Filter by dependency ("what does CB-3 unblock?")
-            trigger_type: Filter by trigger type (entity_resolved, date, manual)
-            active_only: Only unsatisfied, uncancelled blockers (default: true)
-        """
-        with _conn() as conn:
-            return blockers.query_blockers(
-                conn, item_id=item_id, blocked_by=blocked_by,
-                trigger_type=trigger_type, active_only=active_only,
-            )
-
-    @mcp.tool()
-    def blockers_check() -> dict[str, Any]:
-        """Scan for currently actionable items — items whose blockers are all satisfied.
-
-        Returns actionable items (all blockers met), partially unblocked items
-        (some blockers met), and overdue date triggers.
-        """
-        with _conn() as conn:
-            return blockers.check_blockers(conn)
-
-    @mcp.tool()
-    def blockers_resolve(
-        blocker_id: int,
-        action: str,
-    ) -> dict[str, Any]:
-        """Cancel or manually resolve a blocker.
-
-        Args:
-            blocker_id: The blocker row ID
-            action: 'cancel' (any trigger type) or 'resolve' (manual triggers only)
-        """
-        with _conn() as conn:
-            return blockers.resolve_blocker(conn, blocker_id=blocker_id, action=action)
-
-
 def main():
     """Run the MCP server with optional mode selection."""
     parser = argparse.ArgumentParser(description="Codebugs MCP server")
@@ -712,7 +639,8 @@ def main():
         from codebugs.bench import register_tools as bench_tools
         bench_tools(server, _conn)
     if args.mode in ("blockers", "all"):
-        register_blockers_tools(server)
+        from codebugs.blockers import register_tools as blockers_tools
+        blockers_tools(server, _conn)
 
     server.run()
 
