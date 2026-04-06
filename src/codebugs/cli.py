@@ -8,7 +8,7 @@ import json
 import sys
 from typing import Any
 
-from codebugs import db, reqs, bench
+from codebugs import db, reqs
 
 
 def _format_table(rows: list[dict], columns: list[str], max_widths: dict | None = None) -> str:
@@ -666,171 +666,6 @@ def _register_sweep_subcommands(sub, commands):
     })
 
 
-# --- Bench CLI commands ---
-
-
-def cmd_bench_import(args: argparse.Namespace) -> None:
-    conn = db.connect()
-    try:
-        if not args.file and not args.json_file:
-            print("Provide either a file path or --json-file", file=sys.stderr)
-            sys.exit(1)
-
-        kwargs: dict[str, Any] = {
-            "benchmark": args.benchmark,
-            "date": args.date,
-        }
-        if args.tags:
-            kwargs["tags"] = [t.strip() for t in args.tags.split(",")]
-        if args.meta:
-            kwargs["meta"] = json.loads(args.meta)
-
-        path = args.json_file or args.file
-        is_json = bool(args.json_file) or path.endswith(".json")
-        with open(path) as f:
-            data = f.read()
-        if is_json:
-            result = bench.import_json(conn, json_data=data, **kwargs)
-        else:
-            result = bench.import_csv(conn, csv_data=data, **kwargs)
-
-        print(f"Imported: {result['run_id']} ({result['rows']} rows, {result['results_stored']} values)")
-    except (ValueError, json.JSONDecodeError) as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
-    finally:
-        conn.close()
-
-
-def cmd_bench_query(args: argparse.Namespace) -> None:
-    conn = db.connect()
-    try:
-        kwargs: dict[str, Any] = {
-            "benchmark": args.benchmark,
-            "group_by": args.group_by or "row",
-            "format": args.format or "json",
-        }
-        if args.runs:
-            kwargs["runs"] = args.runs
-        if args.date_from:
-            kwargs["date_from"] = args.date_from
-        if args.date_to:
-            kwargs["date_to"] = args.date_to
-        if args.metrics:
-            kwargs["metrics"] = [m.strip() for m in args.metrics.split(",")]
-        if args.rows:
-            kwargs["rows"] = [r.strip() for r in args.rows.split(",")]
-        if args.last_n:
-            kwargs["last_n"] = args.last_n
-
-        result = bench.query(conn, **kwargs)
-
-        if result["runs_matched"] == 0:
-            print("(no matching runs)")
-            return
-
-        if result["format"] == "csv":
-            print(result["csv"])
-        else:
-            print(json.dumps(result["data"], indent=2))
-    except ValueError as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
-    finally:
-        conn.close()
-
-
-def cmd_bench_list(args: argparse.Namespace) -> None:
-    conn = db.connect()
-    try:
-        if args.benchmark:
-            result = bench.list_runs(conn, benchmark=args.benchmark, last_n=args.last_n)
-            if not result["runs"]:
-                print("(no runs)")
-                return
-            data = [
-                {
-                    "run_id": r["run_id"],
-                    "date": r["date"],
-                    "results": str(r["result_count"]),
-                    "tags": ",".join(r["tags"]),
-                }
-                for r in result["runs"]
-            ]
-            print(_format_table(data, ["run_id", "date", "results", "tags"]))
-        else:
-            result = bench.list_benchmarks(conn)
-            if not result["benchmarks"]:
-                print("(no benchmarks)")
-                return
-            data = [
-                {
-                    "benchmark": b["benchmark"],
-                    "runs": str(b["run_count"]),
-                    "first": b["first_date"],
-                    "last": b["last_date"],
-                }
-                for b in result["benchmarks"]
-            ]
-            print(_format_table(data, ["benchmark", "runs", "first", "last"]))
-    finally:
-        conn.close()
-
-
-def cmd_bench_delete(args: argparse.Namespace) -> None:
-    conn = db.connect()
-    try:
-        if args.run_id:
-            result = bench.delete_run(conn, args.run_id)
-            print(f"Deleted run {result['deleted']} ({result['results_removed']} results)")
-        elif args.benchmark:
-            result = bench.delete_benchmark(conn, args.benchmark)
-            print(f"Deleted benchmark {result['deleted_benchmark']} ({result['runs_removed']} runs, {result['results_removed']} results)")
-        else:
-            print("Provide --run-id or --benchmark", file=sys.stderr)
-            sys.exit(1)
-    except KeyError as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
-    finally:
-        conn.close()
-
-
-def _register_bench_subcommands(sub, commands):
-    """Register bench CLI subcommands."""
-    p = sub.add_parser("bench-import", help="Import benchmark results from CSV/JSON")
-    p.add_argument("file", nargs="?", help="CSV or JSON file path")
-    p.add_argument("--json-file", help="JSON benchmark file (always treated as JSON)")
-    p.add_argument("-b", "--benchmark", required=True, help="Benchmark name")
-    p.add_argument("--date", help="Run date (YYYY-MM-DD, default: today)")
-    p.add_argument("--tags", help="Comma-separated tags")
-    p.add_argument("--meta", help="JSON metadata string")
-
-    p = sub.add_parser("bench-query", help="Query and pivot benchmark results")
-    p.add_argument("benchmark", help="Benchmark name")
-    p.add_argument("--runs", nargs="+", help="Specific run IDs")
-    p.add_argument("--date-from", help="Start date (YYYY-MM-DD)")
-    p.add_argument("--date-to", help="End date (YYYY-MM-DD)")
-    p.add_argument("--metrics", help="Comma-separated metric names")
-    p.add_argument("--rows", help="Comma-separated row labels")
-    p.add_argument("--group-by", choices=["row", "run"], default="row", help="Pivot axis")
-    p.add_argument("--last-n", type=int, help="Last N runs only")
-    p.add_argument("--format", choices=["json", "csv"], default="json", help="Output format")
-
-    p = sub.add_parser("bench-list", help="List benchmarks or runs")
-    p.add_argument("benchmark", nargs="?", help="List runs for this benchmark")
-    p.add_argument("--last-n", type=int, help="Last N runs")
-
-    p = sub.add_parser("bench-delete", help="Delete a run or benchmark")
-    p.add_argument("--run-id", help="Delete a specific run (e.g. BE-1)")
-    p.add_argument("--benchmark", help="Delete all runs for a benchmark")
-
-    commands.update({
-        "bench-import": cmd_bench_import,
-        "bench-query": cmd_bench_query,
-        "bench-list": cmd_bench_list,
-        "bench-delete": cmd_bench_delete,
-    })
 
 
 def _register_findings_subcommands(sub, commands):
@@ -964,7 +799,8 @@ def main() -> None:
     if pre_args.mode in ("sweep", "all"):
         _register_sweep_subcommands(sub, commands)
     if pre_args.mode in ("bench", "all"):
-        _register_bench_subcommands(sub, commands)
+        from codebugs.bench import register_cli as bench_cli
+        bench_cli(sub, commands)
 
     args = parser.parse_args()
     commands[args.command](args)
