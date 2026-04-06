@@ -24,7 +24,7 @@ def _add_finding(conn, fid="CB-1", description="test finding", **kw):
 
 
 def _add_req(conn, rid="FR-001", description="test requirement", **kw):
-    defaults = dict(section="core", priority="Should", status="Planned")
+    defaults = dict(section="core", priority="should", status="planned")
     defaults.update(kw)
     return reqs.add_requirement(conn, req_id=rid, description=description, **defaults)
 
@@ -224,7 +224,7 @@ class TestDynamicEvaluation:
         _add_req(conn, "FR-002", "req2")
         blockers.add_blocker(conn, item_id="FR-002", reason="r", blocked_by="FR-001")
 
-        reqs.update_requirement(conn, "FR-001", status="Implemented")
+        reqs.update_requirement(conn, "FR-001", status="implemented")
         result = blockers.query_blockers(conn, item_id="FR-002", active_only=False)
         assert result["blockers"][0]["is_satisfied"] is True
 

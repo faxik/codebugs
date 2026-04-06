@@ -7,6 +7,8 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
+from codebugs.types import ENTITY_FINDING, ENTITY_REQUIREMENT, ENTITY_TABLES, TERMINAL_STATUSES, TRIGGER_TYPES
+
 
 BLOCKERS_SCHEMA = """\
 CREATE TABLE IF NOT EXISTS blockers (
@@ -32,17 +34,6 @@ CREATE INDEX IF NOT EXISTS idx_blockers_blocked_by ON blockers(blocked_by);
 CREATE INDEX IF NOT EXISTS idx_blockers_trigger ON blockers(trigger_type, trigger_at);
 """
 
-ENTITY_FINDING = "finding"
-ENTITY_REQUIREMENT = "requirement"
-
-ENTITY_TABLES = {ENTITY_FINDING: "findings", ENTITY_REQUIREMENT: "requirements"}
-
-TERMINAL_STATUSES: dict[str, set[str]] = {
-    ENTITY_FINDING: {"fixed", "not_a_bug", "wont_fix"},
-    ENTITY_REQUIREMENT: {"Implemented", "Verified", "Superseded", "Obsolete"},
-}
-
-VALID_TRIGGER_TYPES = ("entity_resolved", "date", "manual")
 
 
 def _now() -> str:
@@ -159,9 +150,9 @@ def add_blocker(
     if trigger_type is None:
         trigger_type = "entity_resolved" if blocked_by else "manual"
 
-    if trigger_type not in VALID_TRIGGER_TYPES:
+    if trigger_type not in TRIGGER_TYPES:
         raise ValueError(
-            f"Invalid trigger_type: {trigger_type}. Must be one of {VALID_TRIGGER_TYPES}"
+            f"Invalid trigger_type: {trigger_type}. Must be one of {TRIGGER_TYPES}"
         )
 
     # Validate blocked_by
@@ -244,9 +235,9 @@ def query_blockers(
         conditions.append("blocked_by = ?")
         params.append(blocked_by)
     if trigger_type:
-        if trigger_type not in VALID_TRIGGER_TYPES:
+        if trigger_type not in TRIGGER_TYPES:
             raise ValueError(
-                f"Invalid trigger_type: {trigger_type}. Must be one of {VALID_TRIGGER_TYPES}"
+                f"Invalid trigger_type: {trigger_type}. Must be one of {TRIGGER_TYPES}"
             )
         conditions.append("trigger_type = ?")
         params.append(trigger_type)

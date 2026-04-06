@@ -8,7 +8,7 @@ import tempfile
 
 import pytest
 
-from codebugs import db, reqs
+from codebugs import reqs
 
 
 @pytest.fixture
@@ -38,12 +38,12 @@ def populated(conn):
     """Database with sample requirements."""
     now = reqs._now()
     for i, (status, priority, section, tc) in enumerate([
-        ("Planned", "Must", "1.1 Ingestion", ""),
-        ("Implemented", "Must", "1.1 Ingestion", "test_core.py"),
-        ("Implemented", "Should", "1.2 Duplicate Detection", "test_dedup.py"),
-        ("Superseded", "Could", "1.3 Sorting", ""),
-        ("Partial", "Must", "1.2 Duplicate Detection", ""),
-        ("Implemented", "Must", "1.4 Classification", ""),  # no test but Must
+        ("planned", "must", "1.1 Ingestion", ""),
+        ("implemented", "must", "1.1 Ingestion", "test_core.py"),
+        ("implemented", "should", "1.2 Duplicate Detection", "test_dedup.py"),
+        ("superseded", "could", "1.3 Sorting", ""),
+        ("partial", "must", "1.2 Duplicate Detection", ""),
+        ("implemented", "must", "1.4 Classification", ""),  # no test but must
     ], start=1):
         conn.execute(
             """INSERT INTO requirements (id, section, description, priority, status,
@@ -60,19 +60,19 @@ class TestAddRequirement:
     def test_basic_add(self, conn):
         result = reqs.add_requirement(
             conn, req_id="FR-001", description="System shall ingest documents",
-            section="1.1 Ingestion", priority="Must", status="Planned",
+            section="1.1 Ingestion", priority="must", status="planned",
         )
         assert result["id"] == "FR-001"
-        assert result["status"] == "Planned"
-        assert result["priority"] == "Must"
+        assert result["status"] == "planned"
+        assert result["priority"] == "must"
         assert result["section"] == "1.1 Ingestion"
 
     def test_invalid_priority_raises(self, conn):
         with pytest.raises(ValueError, match="Invalid priority"):
-            reqs.add_requirement(conn, req_id="FR-001", description="test", priority="High")
+            reqs.add_requirement(conn, req_id="FR-001", description="test", priority="high")
 
     def test_invalid_status_raises(self, conn):
-        with pytest.raises(ValueError, match="Invalid status"):
+        with pytest.raises(ValueError, match="Invalid.*status"):
             reqs.add_requirement(conn, req_id="FR-001", description="test", status="done")
 
     def test_duplicate_id_raises(self, conn):
@@ -92,7 +92,7 @@ class TestAddRequirement:
 class TestBatchAdd:
     def test_batch_insert(self, conn):
         results = reqs.batch_add_requirements(conn, [
-            {"id": "FR-001", "description": "First", "priority": "Must"},
+            {"id": "FR-001", "description": "First", "priority": "must"},
             {"id": "FR-002", "description": "Second"},
         ])
         assert len(results) == 2
@@ -108,12 +108,12 @@ class TestBatchAdd:
 
 class TestUpdateRequirement:
     def test_update_status(self, populated):
-        result = reqs.update_requirement(populated, "FR-001", status="Implemented")
-        assert result["status"] == "Implemented"
+        result = reqs.update_requirement(populated, "FR-001", status="implemented")
+        assert result["status"] == "implemented"
 
     def test_update_not_found(self, conn):
         with pytest.raises(KeyError, match="not found"):
-            reqs.update_requirement(conn, "FR-999", status="Implemented")
+            reqs.update_requirement(conn, "FR-999", status="implemented")
 
     def test_update_notes(self, populated):
         result = reqs.update_requirement(populated, "FR-001", notes="Needs review")
@@ -134,11 +134,11 @@ class TestQueryRequirements:
         assert result["total"] == 6
 
     def test_filter_by_status(self, populated):
-        result = reqs.query_requirements(populated, status="Implemented")
+        result = reqs.query_requirements(populated, status="implemented")
         assert result["total"] == 3
 
     def test_filter_by_priority(self, populated):
-        result = reqs.query_requirements(populated, priority="Must")
+        result = reqs.query_requirements(populated, priority="must")
         assert result["total"] == 4
 
     def test_filter_by_section(self, populated):
@@ -154,7 +154,7 @@ class TestQueryRequirements:
         result = reqs.query_requirements(populated, group_by="status")
         assert result["grouped"] is True
         groups = {g["group_key"]: g["count"] for g in result["groups"]}
-        assert groups["Implemented"] == 3
+        assert groups["implemented"] == 3
 
     def test_pagination(self, populated):
         result = reqs.query_requirements(populated, limit=2, offset=0)
@@ -166,12 +166,12 @@ class TestStats:
     def test_stats_by_status(self, populated):
         result = reqs.get_reqs_stats(populated, group_by="status")
         groups = result["groups"]
-        assert groups["Implemented"]["total"] == 3
-        assert groups["Planned"]["Must"] == 1
+        assert groups["implemented"]["total"] == 3
+        assert groups["planned"]["must"] == 1
 
     def test_stats_by_priority(self, populated):
         result = reqs.get_reqs_stats(populated, group_by="priority")
-        assert "Must" in result["groups"]
+        assert "must" in result["groups"]
 
     def test_invalid_group_by(self, populated):
         with pytest.raises(ValueError, match="Invalid group_by"):
@@ -182,8 +182,8 @@ class TestSummary:
     def test_summary(self, populated):
         result = reqs.get_reqs_summary(populated)
         assert result["total"] == 6
-        assert result["by_status"]["Implemented"] == 3
-        assert result["implemented_without_tests"] == 1  # FR-006: Must, Implemented, no test
+        assert result["by_status"]["implemented"] == 3
+        assert result["implemented_without_tests"] == 1  # FR-006: must, implemented, no test
         assert len(result["sections"]) > 0
 
 
@@ -201,7 +201,7 @@ class TestVerify:
         reqs.add_requirement(
             conn, req_id="FR-001",
             description="Sorting (superseded by vault architecture)",
-            status="Planned",
+            status="planned",
         )
         result = reqs.verify_requirements(conn, checks=["status"])
         status_issues = [i for i in result["issues"] if i["check"] == "status"]
@@ -211,7 +211,7 @@ class TestVerify:
     def test_verify_missing_test_file(self, conn):
         reqs.add_requirement(
             conn, req_id="FR-001", description="test",
-            status="Implemented", test_coverage="test_nonexistent.py",
+            status="implemented", test_coverage="test_nonexistent.py",
         )
         result = reqs.verify_requirements(conn, checks=["tests"], project_dir="/tmp")
         test_issues = [i for i in result["issues"] if i["check"] == "tests"]
@@ -221,7 +221,7 @@ class TestVerify:
     def test_verify_must_without_test(self, conn):
         reqs.add_requirement(
             conn, req_id="FR-001", description="Critical feature",
-            status="Implemented", priority="Must",
+            status="implemented", priority="must",
         )
         result = reqs.verify_requirements(conn, checks=["status"])
         issues = [i for i in result["issues"] if "without test" in i["message"]]
@@ -230,7 +230,7 @@ class TestVerify:
     def test_verify_all_clean(self, conn):
         reqs.add_requirement(
             conn, req_id="FR-001", description="Good requirement",
-            status="Planned", priority="Should",
+            status="planned", priority="should",
         )
         result = reqs.verify_requirements(conn, checks=["status"])
         assert result["issues_found"] == 0
@@ -251,8 +251,8 @@ class TestMarkdownImportExport:
 
         assert result["imported"] == 2
         row = conn.execute("SELECT * FROM requirements WHERE id = 'FR-001'").fetchone()
-        assert row["priority"] == "Must"
-        assert row["status"] == "Implemented"
+        assert row["priority"] == "must"
+        assert row["status"] == "implemented"
         assert row["section"] == "1.1 Ingestion"
         assert row["test_coverage"] == "test_core.py"
 
@@ -272,8 +272,8 @@ class TestMarkdownImportExport:
         _import_md(conn, md)
 
         row = conn.execute("SELECT * FROM requirements WHERE id = 'FR-001'").fetchone()
-        assert row["status"] == "Implemented"
-        assert row["priority"] == "Should"
+        assert row["status"] == "implemented"
+        assert row["priority"] == "should"
 
 
 class TestImportNFRRows:
@@ -294,7 +294,7 @@ class TestImportNFRRows:
         assert result["imported"] == 2
         row = conn.execute("SELECT * FROM requirements WHERE id = 'NFR-001'").fetchone()
         assert row is not None
-        assert row["priority"] == "Must"
+        assert row["priority"] == "must"
         assert row["description"] == "System shall respond within 200ms"
 
     def test_import_mixed_fr_and_nfr(self, conn):
@@ -496,12 +496,12 @@ class TestEmbeddings:
         assert results[1]["similarity"] > 0.9
 
     def test_search_with_status_filter(self, conn):
-        reqs.add_requirement(conn, req_id="FR-001", description="a", status="Implemented")
-        reqs.add_requirement(conn, req_id="FR-002", description="b", status="Planned")
+        reqs.add_requirement(conn, req_id="FR-001", description="a", status="implemented")
+        reqs.add_requirement(conn, req_id="FR-002", description="b", status="planned")
         reqs.store_embedding(conn, "FR-001", [1.0, 0.0])
         reqs.store_embedding(conn, "FR-002", [0.9, 0.1])
 
-        results = reqs.search_similar(conn, [1.0, 0.0], status="Planned")
+        results = reqs.search_similar(conn, [1.0, 0.0], status="planned")
         assert len(results) == 1
         assert results[0]["id"] == "FR-002"
 

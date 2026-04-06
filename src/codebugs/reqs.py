@@ -11,16 +11,18 @@ import struct
 from datetime import datetime, timezone
 from typing import Any
 
+from codebugs.types import resolve_requirement_status, resolve_priority
+
 
 REQS_SCHEMA = """\
 CREATE TABLE IF NOT EXISTS requirements (
     id TEXT PRIMARY KEY,
     section TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL,
-    priority TEXT NOT NULL DEFAULT 'Should'
-        CHECK(priority IN ('Must', 'Should', 'Could')),
-    status TEXT NOT NULL DEFAULT 'Planned'
-        CHECK(status IN ('Planned', 'Partial', 'Implemented', 'Verified', 'Superseded', 'Obsolete')),
+    priority TEXT NOT NULL DEFAULT 'should'
+        CHECK(priority IN ('must', 'should', 'could')),
+    status TEXT NOT NULL DEFAULT 'planned'
+        CHECK(status IN ('planned', 'partial', 'implemented', 'verified', 'superseded', 'obsolete')),
     source TEXT NOT NULL DEFAULT '',
     test_coverage TEXT NOT NULL DEFAULT '',
     tags TEXT NOT NULL DEFAULT '[]',
@@ -34,9 +36,6 @@ CREATE INDEX IF NOT EXISTS idx_reqs_status ON requirements(status);
 CREATE INDEX IF NOT EXISTS idx_reqs_section ON requirements(section);
 CREATE INDEX IF NOT EXISTS idx_reqs_priority ON requirements(priority);
 """
-
-VALID_PRIORITIES = ("Must", "Should", "Could")
-VALID_STATUSES = ("Planned", "Partial", "Implemented", "Verified", "Superseded", "Obsolete")
 
 
 def _now() -> str:
@@ -54,6 +53,45 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     if "embedding" not in cols:
         conn.execute("ALTER TABLE requirements ADD COLUMN embedding BLOB")
     conn.commit()
+    _migrate_to_lowercase(conn)
+
+
+def _migrate_to_lowercase(conn: sqlite3.Connection) -> None:
+    """Migrate requirement statuses and priorities to lowercase."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='requirements'"
+    ).fetchone()
+    if row is None:
+        return
+    if "'planned'" in row[0].lower() and "'must'" in row[0].lower():
+        return
+    conn.executescript("""
+        CREATE TABLE requirements_new (
+            id TEXT PRIMARY KEY,
+            section TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL,
+            priority TEXT NOT NULL DEFAULT 'should'
+                CHECK(priority IN ('must', 'should', 'could')),
+            status TEXT NOT NULL DEFAULT 'planned'
+                CHECK(status IN ('planned', 'partial', 'implemented', 'verified', 'superseded', 'obsolete')),
+            source TEXT NOT NULL DEFAULT '',
+            test_coverage TEXT NOT NULL DEFAULT '',
+            tags TEXT NOT NULL DEFAULT '[]',
+            meta TEXT NOT NULL DEFAULT '{}',
+            embedding BLOB,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        INSERT INTO requirements_new
+            SELECT id, section, description, LOWER(priority), LOWER(status),
+                   source, test_coverage, tags, meta, embedding, created_at, updated_at
+            FROM requirements;
+        DROP TABLE requirements;
+        ALTER TABLE requirements_new RENAME TO requirements;
+        CREATE INDEX IF NOT EXISTS idx_reqs_status ON requirements(status);
+        CREATE INDEX IF NOT EXISTS idx_reqs_section ON requirements(section);
+        CREATE INDEX IF NOT EXISTS idx_reqs_priority ON requirements(priority);
+    """)
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -69,18 +107,16 @@ def add_requirement(
     req_id: str,
     description: str,
     section: str = "",
-    priority: str = "Should",
-    status: str = "Planned",
+    priority: str = "should",
+    status: str = "planned",
     source: str = "",
     test_coverage: str = "",
     tags: list[str] | None = None,
     meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Add a single requirement."""
-    if priority not in VALID_PRIORITIES:
-        raise ValueError(f"Invalid priority: {priority}. Must be one of {VALID_PRIORITIES}")
-    if status not in VALID_STATUSES:
-        raise ValueError(f"Invalid status: {status}. Must be one of {VALID_STATUSES}")
+    priority = resolve_priority(priority)
+    status = resolve_requirement_status(status)
 
     now = _now()
     conn.execute(
@@ -106,12 +142,8 @@ def batch_add_requirements(
     ids = []
     for r in requirements:
         req_id = r["id"]
-        priority = r.get("priority", "Should")
-        status = r.get("status", "Planned")
-        if priority not in VALID_PRIORITIES:
-            raise ValueError(f"Invalid priority: {priority}")
-        if status not in VALID_STATUSES:
-            raise ValueError(f"Invalid status: {status}")
+        priority = resolve_priority(r.get("priority", "should"))
+        status = resolve_requirement_status(r.get("status", "planned"))
 
         conn.execute(
             """INSERT OR REPLACE INTO requirements (id, section, description, priority, status,
@@ -159,16 +191,14 @@ def update_requirement(
         updates.append("section = ?")
         params.append(section)
     if status is not None:
-        if status not in VALID_STATUSES:
-            raise ValueError(f"Invalid status: {status}. Must be one of {VALID_STATUSES}")
+        status = resolve_requirement_status(status)
         updates.append("status = ?")
         params.append(status)
     if description is not None:
         updates.append("description = ?")
         params.append(description)
     if priority is not None:
-        if priority not in VALID_PRIORITIES:
-            raise ValueError(f"Invalid priority: {priority}. Must be one of {VALID_PRIORITIES}")
+        priority = resolve_priority(priority)
         updates.append("priority = ?")
         params.append(priority)
     if test_coverage is not None:
@@ -284,7 +314,7 @@ def get_reqs_stats(
     for r in rows:
         grp = r["grp"]
         if grp not in groups:
-            groups[grp] = {"Must": 0, "Should": 0, "Could": 0, "total": 0}
+            groups[grp] = {"must": 0, "should": 0, "could": 0, "total": 0}
         groups[grp][r["priority"]] = r["cnt"]
         groups[grp]["total"] += r["cnt"]
 
@@ -304,12 +334,12 @@ def get_reqs_summary(conn: sqlite3.Connection) -> dict[str, Any]:
 
     no_tests = conn.execute(
         """SELECT COUNT(*) as c FROM requirements
-           WHERE status = 'Implemented' AND (test_coverage = '' OR test_coverage = '--')"""
+           WHERE status = 'implemented' AND (test_coverage = '' OR test_coverage = '--')"""
     ).fetchone()["c"]
 
     sections = conn.execute(
         """SELECT section, COUNT(*) as total,
-                  SUM(CASE WHEN status IN ('Implemented', 'Verified') THEN 1 ELSE 0 END) as done
+                  SUM(CASE WHEN status IN ('implemented', 'verified') THEN 1 ELSE 0 END) as done
            FROM requirements WHERE section != ''
            GROUP BY section ORDER BY section"""
     ).fetchall()
@@ -393,20 +423,20 @@ def verify_requirements(
             status = r["status"]
 
             # "superseded" in description but not status
-            if "superseded" in desc_lower and status not in ("Superseded", "Obsolete"):
+            if "superseded" in desc_lower and status not in ("superseded", "obsolete"):
                 issues.append({"check": "status", "severity": "high", "id": r["id"],
                                "message": f"Description mentions 'superseded' but status is '{status}'"})
 
-            # "deprecated" in description but still Implemented
-            if "deprecated" in desc_lower and status == "Implemented":
+            # "deprecated" in description but still implemented
+            if "deprecated" in desc_lower and status == "implemented":
                 issues.append({"check": "status", "severity": "medium", "id": r["id"],
-                               "message": f"Description mentions 'deprecated' but status is 'Implemented'"})
+                               "message": "Description mentions 'deprecated' but status is 'implemented'"})
 
-            # Implemented but no test coverage (Must priority)
+            # Implemented but no test coverage (must priority)
             tc = r["test_coverage"].strip()
-            if status == "Implemented" and r["priority"] == "Must" and (not tc or tc == "--"):
+            if status == "implemented" and r["priority"] == "must" and (not tc or tc == "--"):
                 issues.append({"check": "status", "severity": "medium", "id": r["id"],
-                               "message": f"Must-priority requirement implemented without test coverage"})
+                               "message": "Must-priority requirement implemented without test coverage"})
 
     return {
         "total_requirements": len(reqs),
@@ -472,25 +502,21 @@ def import_markdown(
 
         req_id = cells[0]
         description = cells[1]
-        priority = cells[2] if len(cells) > 2 else "Should"
-        status = cells[3] if len(cells) > 3 else "Planned"
+        priority = cells[2] if len(cells) > 2 else "should"
+        status = cells[3] if len(cells) > 3 else "planned"
         source = cells[4] if len(cells) > 4 else ""
         test_coverage = cells[5] if len(cells) > 5 else ""
 
-        # Normalize status
-        status_map = {
-            "planned": "Planned", "partial": "Partial",
-            "implemented": "Implemented", "verified": "Verified",
-            "superseded": "Superseded", "obsolete": "Obsolete",
-        }
-        status = status_map.get(status.lower().strip(), status)
-        if status not in VALID_STATUSES:
-            status = "Planned"
+        # Normalize status and priority via resolvers
+        try:
+            status = resolve_requirement_status(status)
+        except ValueError:
+            status = "planned"
 
-        priority_map = {"must": "Must", "should": "Should", "could": "Could"}
-        priority = priority_map.get(priority.lower().strip(), priority)
-        if priority not in VALID_PRIORITIES:
-            priority = "Should"
+        try:
+            priority = resolve_priority(priority)
+        except ValueError:
+            priority = "should"
 
         try:
             conn.execute(
@@ -683,8 +709,8 @@ def register_tools(mcp, conn_factory):
         req_id: str,
         description: str,
         section: str = "",
-        priority: str = "Should",
-        status: str = "Planned",
+        priority: str = "should",
+        status: str = "planned",
         source: str = "",
         test_coverage: str = "",
         tags: list[str] | None = None,
@@ -696,8 +722,8 @@ def register_tools(mcp, conn_factory):
             req_id: Requirement ID (e.g. FR-001)
             description: What the system shall do
             section: Section name (e.g. "1.10 Document Sorting")
-            priority: Must, Should, or Could
-            status: Planned, Partial, Implemented, Verified, Superseded, Obsolete
+            priority: must, should, or could
+            status: planned, partial, implemented, verified, superseded, obsolete
             source: Where this requirement came from (e.g. Take 26, NEW)
             test_coverage: Test file name(s)
             tags: Optional tags
@@ -726,9 +752,9 @@ def register_tools(mcp, conn_factory):
 
         Args:
             req_id: Requirement ID (e.g. FR-001)
-            status: New status: Planned, Partial, Implemented, Verified, Superseded, Obsolete
+            status: New status: planned, partial, implemented, verified, superseded, obsolete
             description: Updated description
-            priority: Updated priority: Must, Should, Could
+            priority: Updated priority: must, should, could
             section: Updated section name
             test_coverage: Updated test file reference
             notes: Notes (stored in meta.notes)
@@ -764,9 +790,9 @@ def register_tools(mcp, conn_factory):
         """Search and filter requirements.
 
         Args:
-            status: Filter by status (Planned, Partial, Implemented, Verified, Superseded, Obsolete, deferred).
+            status: Filter by status (planned, partial, implemented, verified, superseded, obsolete, deferred).
                     Use 'deferred' to find requirements with active blockers.
-            priority: Filter by priority (Must, Should, Could)
+            priority: Filter by priority (must, should, could)
             section: Filter by section (substring match)
             search: Search in description and ID
             source: Filter by source (substring match)
@@ -817,7 +843,7 @@ def register_tools(mcp, conn_factory):
         Runs automated checks to find problems:
         - tests: do referenced test files actually exist?
         - ids: duplicate IDs, numbering gaps
-        - status: contradictions (description says superseded but status says Planned)
+        - status: contradictions (description says superseded but status says planned)
 
         Args:
             checks: List of checks to run (default: all). Options: tests, ids, status
