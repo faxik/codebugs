@@ -81,6 +81,31 @@ def get_tool_providers(*, mode: str = "all") -> list[ToolProvider]:
     return [p for p in _tool_providers if p.name == mode]
 
 
+@dataclass
+class CliProvider:
+    """A registered CLI command provider."""
+    name: str
+    register_fn: Callable  # Callable[[argparse subparser, dict], None]
+
+
+_cli_providers: list[CliProvider] = []
+
+
+def register_cli_provider(name: str, register_fn: Callable) -> None:
+    """Register a CLI command provider. Called at module level by domain modules."""
+    if any(p.name == name for p in _cli_providers):
+        raise ValueError(f"CLI provider '{name}' is already registered")
+    _cli_providers.append(CliProvider(name, register_fn))
+
+
+def get_cli_providers(*, mode: str = "all") -> list[CliProvider]:
+    """Return registered CLI providers, optionally filtered by mode."""
+    _ensure_modules_loaded()
+    if mode == "all":
+        return list(_cli_providers)
+    return [p for p in _cli_providers if p.name == mode]
+
+
 def _resolve_order() -> list[SchemaEntry]:
     """Topological sort of registered schemas.
 

@@ -13,6 +13,7 @@ from codebugs.db import (
     register_schema, _schema_registry, _resolve_order,
     ToolProvider, register_tool_provider, _tool_providers,  # noqa: F401
     ConnFactory,  # noqa: F401
+    CliProvider, register_cli_provider, _cli_providers,  # noqa: F401
 )
 
 
@@ -268,3 +269,25 @@ class TestEnsureModulesLoaded:
         # No error = success. Registry should not have duplicates.
         names = [e.name for e in _schema_registry]
         assert len(names) == len(set(names))
+
+
+class TestCliProviderRegistry:
+    @pytest.fixture(autouse=True)
+    def _clean_providers(self):
+        original = _cli_providers.copy()
+        _cli_providers.clear()
+        yield
+        _cli_providers.clear()
+        _cli_providers.extend(original)
+
+    def test_register_adds_provider(self):
+        fn = MagicMock()
+        register_cli_provider("test_domain", fn)
+        assert len(_cli_providers) == 1
+        assert _cli_providers[0].name == "test_domain"
+
+    def test_duplicate_name_raises(self):
+        fn = MagicMock()
+        register_cli_provider("dup", fn)
+        with pytest.raises(ValueError, match="already registered"):
+            register_cli_provider("dup", fn)
