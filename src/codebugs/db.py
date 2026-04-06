@@ -148,6 +148,20 @@ def _db_path(project_dir: str | None = None) -> str:
     return os.path.join(root, DB_DIR, DB_FILE)
 
 
+def _ensure_findings_schema(conn: sqlite3.Connection) -> None:
+    """Initialize the findings schema (tables, indexes, migrations)."""
+    for stmt in SCHEMA.split(";"):
+        stmt = stmt.strip()
+        if stmt:
+            conn.execute(stmt)
+    conn.commit()
+    _migrate_statuses(conn)
+    _migrate_provenance(conn)
+
+
+register_schema("db", _ensure_findings_schema)
+
+
 def connect(project_dir: str | None = None) -> sqlite3.Connection:
     """Open (and initialize) the codebugs database."""
     path = _db_path(project_dir)

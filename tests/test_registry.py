@@ -82,3 +82,22 @@ class TestResolveOrder:
         register_schema("orphan", MagicMock(), depends_on=("nonexistent",))
         with pytest.raises(ValueError, match="nonexistent"):
             _resolve_order()
+
+
+class TestDbSelfRegistration:
+    """Verify db.py registers its own findings schema."""
+
+    def test_db_schema_in_registry(self):
+        # db.py registers "db" at module load time — it should already be there
+        names = [e.name for e in _schema_registry]
+        assert "db" in names
+
+    def test_db_schema_creates_findings_table(self):
+        conn = sqlite3.connect(":memory:")
+        entry = next(e for e in _schema_registry if e.name == "db")
+        entry.ensure_fn(conn)
+        tables = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()]
+        assert "findings" in tables
+        conn.close()
