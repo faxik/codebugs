@@ -156,28 +156,33 @@ def import_json(
     conn: sqlite3.Connection,
     *,
     benchmark: str,
-    json_data: str,
+    json_data: str | list,
     date: str | None = None,
     tags: list[str] | None = None,
     meta: dict[str, Any] | None = None,
     run_id: str | None = None,
 ) -> dict[str, Any]:
-    """Import benchmark results from JSON string.
+    """Import benchmark results from JSON string or list.
 
     Expected format: list of objects, each with a row_label key (first key)
     and metric keys with numeric values.
 
     Args:
         benchmark: Benchmark name
-        json_data: JSON array string
+        json_data: JSON array string or pre-parsed list of dicts
         date: Run date (default: now)
         tags: Optional tags
         meta: Optional metadata
         run_id: Optional explicit run ID
     """
-    data = json.loads(json_data)
-    if not isinstance(data, list) or not data:
-        raise ValueError("JSON must be a non-empty array of objects")
+    if isinstance(json_data, list):
+        if not json_data:
+            raise ValueError("JSON must be a non-empty array of objects")
+        data = json_data
+    else:
+        data = json.loads(json_data)
+        if not isinstance(data, list) or not data:
+            raise ValueError("JSON must be a non-empty array of objects")
 
     # Convert JSON to CSV and delegate
     keys = list(data[0].keys())

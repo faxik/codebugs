@@ -671,8 +671,9 @@ def _register_sweep_subcommands(sub, commands):
 def cmd_bench_import(args: argparse.Namespace) -> None:
     conn = db.connect()
     try:
-        with open(args.file) as f:
-            data = f.read()
+        if not args.file and not args.json_file:
+            print("Provide either a file path or --json-file", file=sys.stderr)
+            sys.exit(1)
 
         kwargs: dict[str, Any] = {
             "benchmark": args.benchmark,
@@ -683,7 +684,11 @@ def cmd_bench_import(args: argparse.Namespace) -> None:
         if args.meta:
             kwargs["meta"] = json.loads(args.meta)
 
-        if args.file.endswith(".json"):
+        path = args.json_file or args.file
+        is_json = bool(args.json_file) or path.endswith(".json")
+        with open(path) as f:
+            data = f.read()
+        if is_json:
             result = bench.import_json(conn, json_data=data, **kwargs)
         else:
             result = bench.import_csv(conn, csv_data=data, **kwargs)
@@ -793,7 +798,8 @@ def cmd_bench_delete(args: argparse.Namespace) -> None:
 def _register_bench_subcommands(sub, commands):
     """Register bench CLI subcommands."""
     p = sub.add_parser("bench-import", help="Import benchmark results from CSV/JSON")
-    p.add_argument("file", help="CSV or JSON file path")
+    p.add_argument("file", nargs="?", help="CSV or JSON file path")
+    p.add_argument("--json-file", help="JSON benchmark file (always treated as JSON)")
     p.add_argument("-b", "--benchmark", required=True, help="Benchmark name")
     p.add_argument("--date", help="Run date (YYYY-MM-DD, default: today)")
     p.add_argument("--tags", help="Comma-separated tags")

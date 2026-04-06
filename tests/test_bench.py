@@ -117,6 +117,17 @@ class TestImportJson:
         with pytest.raises(ValueError, match="non-empty array"):
             bench.import_json(conn, benchmark="a", json_data="[]")
 
+    def test_import_list_directly(self, conn):
+        data = [{"method": "bm25", "P@5": 0.72, "MRR": 0.55},
+                {"method": "dense", "P@5": 0.81, "MRR": 0.63}]
+        result = bench.import_json(conn, benchmark="search-perf", json_data=data)
+        assert result["rows"] == 2
+        assert result["results_stored"] == 4
+
+    def test_empty_list_raises(self, conn):
+        with pytest.raises(ValueError, match="non-empty array"):
+            bench.import_json(conn, benchmark="a", json_data=[])
+
 
 class TestQuery:
     @pytest.fixture(autouse=True)

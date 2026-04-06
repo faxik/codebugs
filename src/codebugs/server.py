@@ -851,7 +851,7 @@ def register_bench_tools(mcp: FastMCP) -> None:
     def codebench_import(
         benchmark: str,
         csv_data: str | None = None,
-        json_data: str | None = None,
+        json_data: str | list | None = None,
         date: str | None = None,
         tags: list[str] | None = None,
         meta: dict[str, Any] | None = None,
@@ -872,9 +872,9 @@ def register_bench_tools(mcp: FastMCP) -> None:
             tags: Optional tags (e.g. ["nightly", "v2.1"])
             meta: Optional metadata (e.g. {"git_sha": "abc123", "ci_url": "..."})
         """
-        if not csv_data and not json_data:
+        if csv_data is None and json_data is None:
             raise ValueError("Provide either csv_data or json_data")
-        if csv_data and json_data:
+        if csv_data is not None and json_data is not None:
             raise ValueError("Provide csv_data or json_data, not both")
         with _conn() as conn:
             if csv_data:
