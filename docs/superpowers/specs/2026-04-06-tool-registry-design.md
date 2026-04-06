@@ -36,7 +36,7 @@ def register_tool_provider(
     ...
 ```
 
-`ConnFactory` is a type alias for a callable returning a context manager yielding a connection. This lets modules use `with conn_factory() as conn:` without importing server internals.
+`ConnFactory` is a type alias defined in `db.py` alongside `ToolProvider`. Domain modules can import it for type hints. It lets modules use `with conn_factory() as conn:` without importing server internals.
 
 ### Domain module convention
 
@@ -104,7 +104,7 @@ def _get_providers(mode: str) -> list[ToolProvider]:
 ```python
 def main():
     args = parse_args()
-    mcp = FastMCP(name=SERVER_NAMES.get(args.mode, "codebugs"))
+    mcp = FastMCP(name=SERVER_NAMES.get(args.mode, "codebugs"), json_response=True)
 
     @contextmanager
     def conn_factory():
@@ -155,22 +155,40 @@ All 305 tests must pass throughout. Tool behavior is unchanged — only the loca
 ### New tests
 
 1. **`test_registry.py` additions**: `TestToolProviderRegistration` — verify all 6 providers are registered, verify mode filtering
-2. **Per-domain tool tests**: Not strictly needed since tools are functionally identical, but a smoke test verifying each moved `register_tools()` can be called with a mock MCP would catch import errors
+2. **Per-domain smoke tests**: Each moved `register_tools()` must be callable with a mock FastMCP + mock conn_factory. This catches import errors and wiring mistakes that domain-level tests can't detect (existing tests test domain functions directly, not MCP tool wiring).
+
+### Migration cost per domain
+
+Each tool function changes `with _conn() as conn:` to `with conn_factory() as conn:`. This is a mechanical find-replace across all 39 tool functions. No logic changes.
 
 ### Migration safety
 
 Each domain can be migrated independently:
 1. Move `register_X_tools()` from server.py to domain module
-2. Add `register_tool_provider()` call
-3. Remove the function from server.py
-4. Run full test suite
+2. Rename to `register_tools(mcp, conn_factory)` and update internal `_conn()` calls to `conn_factory()`
+3. Add `register_tool_provider()` call at module level
+4. Remove the function from server.py
+5. Run full test suite + smoke test
 
 If any step breaks, only that domain's tools are affected — easy to revert.
 
+### db.py size concern
+
+Moving findings tools + staleness helpers to `db.py` would push it to ~800 lines. This is acceptable as a temporary state — provenance extraction (planned debt) will later pull staleness logic out. Alternatively, findings tools can go in a separate `findings_tools.py` if db.py growth becomes problematic during implementation.
+
 ## Execution order
 
-1. Add `ToolProvider` registry API to `db.py` (parallel to SchemaEntry)
+1. Add `ToolProvider` registry API + `ConnFactory` type alias to `db.py` (parallel to SchemaEntry)
 2. Move `_git_rev_parse` and git helpers to `db.py`
 3. Migrate one domain at a time (start with bench — simplest, 4 tools, no cross-domain logic)
-4. Update `server.py` main() to use the registry
+4. Update `server.py` main() to use the registry (preserve `json_response=True`)
 5. Clean up: remove empty register functions from server.py
+
+## Adversarial Review Corrections
+
+Reviewed 2026-04-06. Findings addressed:
+- SERIOUS: Added `json_response=True` to server.py example (was missing, critical for tool behavior)
+- SERIOUS: Documented migration cost (39 tool functions need `_conn()` → `conn_factory()` rename)
+- SERIOUS: Clarified `ConnFactory` lives in `db.py`
+- WEAKNESS: Documented db.py size concern with mitigation plan
+- WEAKNESS: Added smoke test requirement for each migrated domain
