@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -162,6 +163,22 @@ def _ensure_findings_schema(conn: sqlite3.Connection) -> None:
 register_schema("db", _ensure_findings_schema)
 
 
+_modules_loaded = False
+_modules_lock = threading.Lock()
+
+
+def _ensure_modules_loaded() -> None:
+    """Import all domain modules so their register_schema() calls execute."""
+    global _modules_loaded
+    if _modules_loaded:
+        return
+    with _modules_lock:
+        if _modules_loaded:
+            return
+        _modules_loaded = True
+        from codebugs import reqs, merge, sweep, bench, blockers  # noqa: F401
+
+
 def connect(project_dir: str | None = None) -> sqlite3.Connection:
     """Open (and initialize) the codebugs database."""
     path = _db_path(project_dir)
@@ -169,24 +186,11 @@ def connect(project_dir: str | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    for stmt in SCHEMA.split(";"):
-        stmt = stmt.strip()
-        if stmt:
-            conn.execute(stmt)
-    conn.commit()
-    _migrate_statuses(conn)
-    _migrate_provenance(conn)
-    # Initialize requirements schema (same DB)
-    from codebugs import reqs
-    reqs.ensure_schema(conn)
-    from codebugs import merge
-    merge.ensure_schema(conn)
-    from codebugs import sweep
-    sweep.ensure_schema(conn)
-    from codebugs import bench
-    bench.ensure_schema(conn)
-    from codebugs import blockers
-    blockers.ensure_schema(conn)
+
+    _ensure_modules_loaded()
+    for entry in _resolve_order():
+        entry.ensure_fn(conn)
+
     return conn
 
 

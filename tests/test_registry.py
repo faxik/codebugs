@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from unittest.mock import MagicMock
 
 import pytest
 
+from codebugs import db
 from codebugs.db import SchemaEntry, register_schema, _schema_registry, _resolve_order
 
 
@@ -128,3 +130,29 @@ class TestAllModulesRegistered:
         order = [e.name for e in _resolve_order()]
         assert order.index("db") < order.index("blockers")
         assert order.index("reqs") < order.index("blockers")
+
+
+class TestConnectUsesRegistry:
+    """db.connect() initializes all schemas via the registry."""
+
+    def test_connect_creates_all_tables(self, tmp_path):
+        conn = db.connect(str(tmp_path))
+        try:
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()}
+            assert "findings" in tables
+            assert "requirements" in tables
+            assert "codemerge_sessions" in tables
+            assert "codesweep_sweeps" in tables
+            assert "codebench_runs" in tables
+            assert "blockers" in tables
+        finally:
+            conn.close()
+
+    def test_connect_idempotent(self, tmp_path):
+        """Calling connect twice on same DB doesn't crash."""
+        conn1 = db.connect(str(tmp_path))
+        conn1.close()
+        conn2 = db.connect(str(tmp_path))
+        conn2.close()
