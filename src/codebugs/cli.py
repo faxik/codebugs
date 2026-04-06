@@ -8,7 +8,7 @@ import json
 import sys
 from typing import Any
 
-from codebugs import db, reqs
+from codebugs import db
 
 
 def _format_table(rows: list[dict], columns: list[str], max_widths: dict | None = None) -> str:
@@ -257,158 +257,6 @@ def cmd_export_csv(args: argparse.Namespace) -> None:
     print(f"Exported {len(result['findings'])} findings to {output}")
 
 
-# --- Requirements CLI commands ---
-
-
-def cmd_reqs_add(args: argparse.Namespace) -> None:
-    conn = db.connect()
-    tags = [t.strip() for t in args.tags.split(",")] if args.tags else []
-    result = reqs.add_requirement(
-        conn, req_id=args.id, description=args.description,
-        section=args.section or "", priority=args.priority or "should",
-        status=args.status or "planned", source=args.source or "",
-        test_coverage=args.test_coverage or "", tags=tags,
-    )
-    conn.close()
-    print(f"Added: {result['id']}")
-
-
-def cmd_reqs_update(args: argparse.Namespace) -> None:
-    conn = db.connect()
-    try:
-        result = reqs.update_requirement(
-            conn, args.id, status=args.status,
-            description=args.description, priority=args.priority,
-            test_coverage=args.test_coverage, notes=args.notes,
-        )
-        print(f"Updated: {result['id']} (status={result['status']})")
-    except KeyError as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
-    finally:
-        conn.close()
-
-
-def cmd_reqs_query(args: argparse.Namespace) -> None:
-    conn = db.connect()
-    result = reqs.query_requirements(
-        conn, status=args.status, priority=args.priority,
-        section=args.section, search=args.search,
-        group_by=args.group_by, limit=args.limit or 100,
-    )
-    conn.close()
-
-    if result.get("grouped"):
-        data = [{"group": r["group_key"], "count": str(r["count"])} for r in result["groups"]]
-        print(_format_table(data, ["group", "count"]))
-    else:
-        items = result["requirements"]
-        if not items:
-            print("(no requirements match)")
-            return
-        data = [
-            {
-                "id": r["id"], "priority": r["priority"],
-                "status": r["status"], "section": r["section"],
-                "description": r["description"],
-            }
-            for r in items
-        ]
-        print(_format_table(
-            data, ["id", "priority", "status", "section", "description"],
-            max_widths={"description": 60, "section": 30},
-        ))
-        print(f"\n{result['total']} requirement(s) total.")
-
-
-def cmd_reqs_stats(args: argparse.Namespace) -> None:
-    conn = db.connect()
-    result = reqs.get_reqs_stats(conn, group_by=args.by or "status")
-    conn.close()
-
-    groups = result["groups"]
-    if not groups:
-        print("(no requirements)")
-        return
-
-    header = f"{'':30s} {'must':>8s} {'should':>8s} {'could':>8s} {'total':>8s}"
-    print(header)
-    print("-" * len(header))
-    totals = {"must": 0, "should": 0, "could": 0, "total": 0}
-    for grp in sorted(groups):
-        d = groups[grp]
-        print(f"{grp:30s} {d['must']:>8d} {d['should']:>8d} {d['could']:>8d} {d['total']:>8d}")
-        for k in totals:
-            totals[k] += d[k]
-    print("-" * len(header))
-    print(f"{'TOTAL':30s} {totals['must']:>8d} {totals['should']:>8d} {totals['could']:>8d} {totals['total']:>8d}")
-
-
-def cmd_reqs_summary(args: argparse.Namespace) -> None:
-    conn = db.connect()
-    s = reqs.get_reqs_summary(conn)
-    conn.close()
-
-    print("Requirements Summary")
-    print("=" * 50)
-    print(f"Total: {s['total']}")
-    print()
-    print("By status:")
-    from codebugs.types import REQUIREMENT_STATUSES, PRIORITIES
-    for status in REQUIREMENT_STATUSES:
-        c = s["by_status"].get(status, 0)
-        bar = "#" * min(c, 40)
-        print(f"  {status:12s}  {c:>4d}  {bar}")
-    print()
-    print("By priority:")
-    for p in PRIORITIES:
-        print(f"  {p:12s}  {s['by_priority'].get(p, 0):>4d}")
-    if s["implemented_without_tests"]:
-        print(f"\nImplemented without tests: {s['implemented_without_tests']}")
-    if s["sections"]:
-        print(f"\nSection progress:")
-        for sec in s["sections"]:
-            pct = (sec["done"] / sec["total"] * 100) if sec["total"] else 0
-            print(f"  {sec['section']:40s}  {sec['done']}/{sec['total']} ({pct:.0f}%)")
-
-
-def cmd_reqs_verify(args: argparse.Namespace) -> None:
-    conn = db.connect()
-    checks = args.checks.split(",") if args.checks else None
-    result = reqs.verify_requirements(conn, project_dir=args.project_dir, checks=checks)
-    conn.close()
-
-    print(f"Verified {result['total_requirements']} requirements.")
-    if not result["issues"]:
-        print("No issues found.")
-        return
-
-    print(f"\n{result['issues_found']} issue(s) found:\n")
-    data = [
-        {"check": i["check"], "sev": i["severity"], "id": i["id"], "message": i["message"]}
-        for i in result["issues"]
-    ]
-    print(_format_table(data, ["check", "sev", "id", "message"], max_widths={"message": 70}))
-
-
-def cmd_reqs_import(args: argparse.Namespace) -> None:
-    conn = db.connect()
-    result = reqs.import_markdown(conn, args.file)
-    conn.close()
-    print(f"Imported {result['imported']} requirements, skipped {result['skipped']}.")
-
-
-def cmd_reqs_export(args: argparse.Namespace) -> None:
-    conn = db.connect()
-    md = reqs.export_markdown(conn)
-    conn.close()
-
-    if args.file:
-        with open(args.file, "w") as f:
-            f.write(md)
-        print(f"Exported to {args.file}")
-    else:
-        print(md)
 
 
 
@@ -467,61 +315,6 @@ def _register_findings_subcommands(sub, commands):
     })
 
 
-def _register_reqs_subcommands(sub, commands):
-    """Register requirements CLI subcommands."""
-    p = sub.add_parser("reqs-add", help="Add a requirement")
-    p.add_argument("id", help="Requirement ID (e.g. FR-001)")
-    p.add_argument("-d", "--description", required=True, help="Description")
-    p.add_argument("--section", help="Section name")
-    p.add_argument("--priority", help="Must|Should|Could")
-    p.add_argument("--status", help="Planned|Partial|Implemented|Verified|Superseded|Obsolete")
-    p.add_argument("--source", help="Source reference")
-    p.add_argument("--test-coverage", help="Test file name(s)")
-    p.add_argument("--tags", help="Comma-separated tags")
-
-    p = sub.add_parser("reqs-update", help="Update a requirement")
-    p.add_argument("id", help="Requirement ID")
-    p.add_argument("--status", help="New status")
-    p.add_argument("--description", help="Updated description")
-    p.add_argument("--priority", help="Updated priority")
-    p.add_argument("--test-coverage", help="Updated test coverage")
-    p.add_argument("--notes", help="Notes")
-
-    p = sub.add_parser("reqs-query", help="Search requirements")
-    p.add_argument("--status", help="Filter by status")
-    p.add_argument("--priority", help="Filter by priority")
-    p.add_argument("--section", help="Filter by section (substring)")
-    p.add_argument("--search", help="Search in description/ID")
-    p.add_argument("--group-by", help="Group by: section|status|priority|source")
-    p.add_argument("--limit", type=int, help="Max results")
-
-    p = sub.add_parser("reqs-stats", help="Requirements cross-tab")
-    p.add_argument("--by", help="Group by: status|priority|section|source")
-
-    sub.add_parser("reqs-summary", help="Requirements dashboard")
-
-    p = sub.add_parser("reqs-verify", help="Verify requirements for issues")
-    p.add_argument("--checks", help="Comma-separated: tests,ids,status (default: all)")
-    p.add_argument("--project-dir", help="Project root for test file checks")
-
-    p = sub.add_parser("reqs-import", help="Import from REQUIREMENTS.md")
-    p.add_argument("file", help="Markdown file path")
-
-    p = sub.add_parser("reqs-export", help="Export as markdown")
-    p.add_argument("file", nargs="?", help="Output file (default: stdout)")
-
-    commands.update({
-        "reqs-add": cmd_reqs_add,
-        "reqs-update": cmd_reqs_update,
-        "reqs-query": cmd_reqs_query,
-        "reqs-stats": cmd_reqs_stats,
-        "reqs-summary": cmd_reqs_summary,
-        "reqs-verify": cmd_reqs_verify,
-        "reqs-import": cmd_reqs_import,
-        "reqs-export": cmd_reqs_export,
-    })
-
-
 def main() -> None:
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument(
@@ -542,7 +335,8 @@ def main() -> None:
     if pre_args.mode in ("findings", "all"):
         _register_findings_subcommands(sub, commands)
     if pre_args.mode in ("reqs", "all"):
-        _register_reqs_subcommands(sub, commands)
+        from codebugs.reqs import register_cli as reqs_cli
+        reqs_cli(sub, commands)
     if pre_args.mode in ("merge", "all"):
         from codebugs.merge import register_cli as merge_cli
         merge_cli(sub, commands)
