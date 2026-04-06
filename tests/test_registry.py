@@ -218,6 +218,13 @@ class TestSweepToolProvider:
         assert "sweep" in names
 
 
+class TestMergeToolProvider:
+    def test_merge_provider_registered(self):
+        import codebugs.merge  # noqa: F401
+        names = {p.name for p in _tool_providers}
+        assert "merge" in names
+
+
 class TestEnsureModulesLoaded:
     def test_idempotent(self):
         """Calling _ensure_modules_loaded() twice doesn't re-import or crash."""

@@ -429,6 +429,124 @@ def get_claims(
     return [dict(r) for r in rows]
 
 
-from codebugs.db import register_schema  # noqa: E402
+from codebugs.db import register_schema, register_tool_provider  # noqa: E402
 
 register_schema("merge", ensure_schema)
+
+
+def _get_main_head() -> str:
+    """Get current main branch HEAD SHA. Used by merge tools that need git."""
+    from codebugs.server import _git_rev_parse
+    result = _git_rev_parse("main")
+    assert result is not None
+    return result
+
+
+def register_tools(mcp, conn_factory) -> None:
+    """Register merge-coordination tools on the given MCP server."""
+
+    @mcp.tool()
+    def codemerge_start(
+        session_id: str,
+        branch: str,
+        description: str = "",
+        base_commit: str = "",
+        repo_root: str = "",
+        allow_restart: bool = False,
+    ) -> dict[str, Any]:
+        """Start a new merge session for a branch.
+
+        Args:
+            session_id: Unique identifier for this merge session
+            branch: Git branch name being merged
+            description: Human-readable description of the work
+            base_commit: Git commit SHA this branch diverged from
+            repo_root: Repo root path (default: cwd)
+            allow_restart: If True, restart an existing active session
+        """
+        with conn_factory() as conn:
+            return start_session(
+                conn,
+                session_id=session_id,
+                branch=branch,
+                description=description,
+                base_commit=base_commit,
+                repo_root=repo_root,
+                allow_restart=allow_restart,
+            )
+
+    @mcp.tool()
+    def codemerge_claim(
+        session_id: str,
+        file_path: str,
+    ) -> dict[str, Any]:
+        """Claim a file as being modified by this session.
+
+        Args:
+            session_id: The merge session ID
+            file_path: File path being modified (relative to repo root)
+        """
+        with conn_factory() as conn:
+            return add_claim(conn, session_id, file_path)
+
+    @mcp.tool()
+    def codemerge_check(
+        session_id: str,
+        main_changed_files: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Check for overlapping file claims with other sessions.
+
+        Returns whether the session is clean to proceed, lists any conflicts,
+        and records the current main HEAD for CAS comparison at merge time.
+
+        Args:
+            session_id: The merge session ID
+            main_changed_files: Files changed on main since base (optional, for overlap check)
+        """
+        with conn_factory() as conn:
+            return check_overlaps(
+                conn,
+                session_id,
+                main_changed_files=main_changed_files,
+                current_main_head_fn=_get_main_head,
+            )
+
+    @mcp.tool()
+    def codemerge_merge(
+        session_id: str,
+        expected_main_head: str,
+    ) -> dict[str, Any]:
+        """Acquire the merge lock and proceed with merging.
+
+        Uses compare-and-swap on main HEAD to prevent races. If main has moved
+        since check, returns proceed=False with reason='main_moved'. If another
+        session holds the lock, returns proceed=False with reason='lock_held'.
+
+        Args:
+            session_id: The merge session ID
+            expected_main_head: The main HEAD SHA recorded during codemerge_check
+        """
+        with conn_factory() as conn:
+            return merge(
+                conn,
+                session_id,
+                expected_main_head=expected_main_head,
+                current_main_head_fn=_get_main_head,
+            )
+
+    @mcp.tool()
+    def codemerge_finish(
+        session_id: str,
+        success: bool = True,
+    ) -> dict[str, Any]:
+        """Finish a merge session and release the lock.
+
+        Args:
+            session_id: The merge session ID
+            success: True if merge succeeded (status→done), False if it failed (status→abandoned)
+        """
+        with conn_factory() as conn:
+            return finish(conn, session_id, success=success)
+
+
+register_tool_provider("merge", register_tools)

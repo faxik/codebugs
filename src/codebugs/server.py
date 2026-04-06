@@ -38,13 +38,6 @@ def _git_rev_parse(ref: str, *, silent: bool = False, cwd: str | None = None) ->
         raise
 
 
-def _get_main_head() -> str:
-    """Get current main branch HEAD SHA. Used by merge tools that need git."""
-    result = _git_rev_parse("main")
-    assert result is not None
-    return result
-
-
 def _get_head_sha() -> str | None:
     """Get current HEAD SHA for provenance auto-population. Returns None if git unavailable."""
     return _git_rev_parse("HEAD", silent=True)
@@ -618,118 +611,6 @@ def register_reqs_tools(mcp: FastMCP) -> None:
             return reqs.embedding_stats(conn)
 
 
-def register_merge_tools(mcp: FastMCP) -> None:
-    """Register merge-coordination tools on the given MCP server."""
-
-    @mcp.tool()
-    def codemerge_start(
-        session_id: str,
-        branch: str,
-        description: str = "",
-        base_commit: str = "",
-        repo_root: str = "",
-        allow_restart: bool = False,
-    ) -> dict[str, Any]:
-        """Start a new merge session for a branch.
-
-        Args:
-            session_id: Unique identifier for this merge session
-            branch: Git branch name being merged
-            description: Human-readable description of the work
-            base_commit: Git commit SHA this branch diverged from
-            repo_root: Repo root path (default: cwd)
-            allow_restart: If True, restart an existing active session
-        """
-        from codebugs import merge
-        with _conn() as conn:
-            return merge.start_session(
-                conn,
-                session_id=session_id,
-                branch=branch,
-                description=description,
-                base_commit=base_commit,
-                repo_root=repo_root,
-                allow_restart=allow_restart,
-            )
-
-    @mcp.tool()
-    def codemerge_claim(
-        session_id: str,
-        file_path: str,
-    ) -> dict[str, Any]:
-        """Claim a file as being modified by this session.
-
-        Args:
-            session_id: The merge session ID
-            file_path: File path being modified (relative to repo root)
-        """
-        from codebugs import merge
-        with _conn() as conn:
-            return merge.add_claim(conn, session_id, file_path)
-
-    @mcp.tool()
-    def codemerge_check(
-        session_id: str,
-        main_changed_files: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """Check for overlapping file claims with other sessions.
-
-        Returns whether the session is clean to proceed, lists any conflicts,
-        and records the current main HEAD for CAS comparison at merge time.
-
-        Args:
-            session_id: The merge session ID
-            main_changed_files: Files changed on main since base (optional, for overlap check)
-        """
-        from codebugs import merge
-        with _conn() as conn:
-            return merge.check_overlaps(
-                conn,
-                session_id,
-                main_changed_files=main_changed_files,
-                current_main_head_fn=_get_main_head,
-            )
-
-    @mcp.tool()
-    def codemerge_merge(
-        session_id: str,
-        expected_main_head: str,
-    ) -> dict[str, Any]:
-        """Acquire the merge lock and proceed with merging.
-
-        Uses compare-and-swap on main HEAD to prevent races. If main has moved
-        since check, returns proceed=False with reason='main_moved'. If another
-        session holds the lock, returns proceed=False with reason='lock_held'.
-
-        Args:
-            session_id: The merge session ID
-            expected_main_head: The main HEAD SHA recorded during codemerge_check
-        """
-        from codebugs import merge
-        with _conn() as conn:
-            return merge.merge(
-                conn,
-                session_id,
-                expected_main_head=expected_main_head,
-                current_main_head_fn=_get_main_head,
-            )
-
-    @mcp.tool()
-    def codemerge_finish(
-        session_id: str,
-        success: bool = True,
-    ) -> dict[str, Any]:
-        """Finish a merge session and release the lock.
-
-        Args:
-            session_id: The merge session ID
-            success: True if merge succeeded (status→done), False if it failed (status→abandoned)
-        """
-        from codebugs import merge
-        with _conn() as conn:
-            return merge.finish(conn, session_id, success=success)
-
-
 def register_blockers_tools(mcp: FastMCP) -> None:
     """Register blocker/dependency tools on the given MCP server."""
 
@@ -822,7 +703,8 @@ def main():
     if args.mode in ("reqs", "all"):
         register_reqs_tools(server)
     if args.mode in ("merge", "all"):
-        register_merge_tools(server)
+        from codebugs.merge import register_tools as merge_tools
+        merge_tools(server, _conn)
     if args.mode in ("sweep", "all"):
         from codebugs.sweep import register_tools as sweep_tools
         sweep_tools(server, _conn)
