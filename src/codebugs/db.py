@@ -6,10 +6,77 @@ import json
 import os
 import re
 import sqlite3
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 DB_DIR = ".codebugs"
+
+
+@dataclass
+class SchemaEntry:
+    """A registered schema initializer with dependency metadata."""
+    name: str
+    ensure_fn: Callable[[sqlite3.Connection], None]
+    depends_on: tuple[str, ...] = ()
+
+
+_schema_registry: list[SchemaEntry] = []
+
+
+def register_schema(
+    name: str,
+    ensure_fn: Callable[[sqlite3.Connection], None],
+    *,
+    depends_on: tuple[str, ...] = (),
+) -> None:
+    """Register a schema initializer. Called at module level by domain modules.
+
+    Raises ValueError if name is already registered.
+    """
+    if any(e.name == name for e in _schema_registry):
+        raise ValueError(f"Schema '{name}' is already registered")
+    _schema_registry.append(SchemaEntry(name, ensure_fn, depends_on))
+
+
+def _resolve_order() -> list[SchemaEntry]:
+    """Topological sort of registered schemas using Kahn's algorithm.
+
+    Raises ValueError on cycles or missing dependencies.
+    """
+    entries = {e.name: e for e in _schema_registry}
+    # Validate all dependencies exist
+    for e in _schema_registry:
+        for dep in e.depends_on:
+            if dep not in entries:
+                raise ValueError(
+                    f"Schema '{e.name}' depends on '{dep}' which is not registered"
+                )
+
+    # Kahn's algorithm
+    in_degree: dict[str, int] = {name: 0 for name in entries}
+    for e in _schema_registry:
+        for dep in e.depends_on:
+            in_degree[e.name] += 1
+
+    queue = [name for name, deg in in_degree.items() if deg == 0]
+    result: list[SchemaEntry] = []
+
+    while queue:
+        name = queue.pop(0)
+        result.append(entries[name])
+        for e in _schema_registry:
+            if name in e.depends_on:
+                in_degree[e.name] -= 1
+                if in_degree[e.name] == 0:
+                    queue.append(e.name)
+
+    if len(result) != len(entries):
+        remaining = set(entries) - {e.name for e in result}
+        raise ValueError(f"Cycle detected among schemas: {remaining}")
+
+    return result
 DB_FILE = "findings.db"
 
 SCHEMA = """\
