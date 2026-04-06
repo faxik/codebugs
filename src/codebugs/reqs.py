@@ -670,6 +670,237 @@ def embedding_stats(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
-from codebugs.db import register_schema  # noqa: E402
+from codebugs.db import register_schema, register_tool_provider  # noqa: E402
 
 register_schema("reqs", ensure_schema)
+
+
+def register_tools(mcp, conn_factory):
+    """Register requirements-tracker tools on the given MCP server."""
+
+    @mcp.tool()
+    def reqs_add(
+        req_id: str,
+        description: str,
+        section: str = "",
+        priority: str = "Should",
+        status: str = "Planned",
+        source: str = "",
+        test_coverage: str = "",
+        tags: list[str] | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Add a requirement.
+
+        Args:
+            req_id: Requirement ID (e.g. FR-001)
+            description: What the system shall do
+            section: Section name (e.g. "1.10 Document Sorting")
+            priority: Must, Should, or Could
+            status: Planned, Partial, Implemented, Verified, Superseded, Obsolete
+            source: Where this requirement came from (e.g. Take 26, NEW)
+            test_coverage: Test file name(s)
+            tags: Optional tags
+            meta: Optional metadata
+        """
+        with conn_factory() as conn:
+            return add_requirement(
+                conn, req_id=req_id, description=description, section=section,
+                priority=priority, status=status, source=source,
+                test_coverage=test_coverage, tags=tags, meta=meta,
+            )
+
+    @mcp.tool()
+    def reqs_update(
+        req_id: str,
+        status: str | None = None,
+        description: str | None = None,
+        priority: str | None = None,
+        section: str | None = None,
+        test_coverage: str | None = None,
+        notes: str | None = None,
+        tags: list[str] | None = None,
+        meta_update: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Update a requirement's status, description, or metadata.
+
+        Args:
+            req_id: Requirement ID (e.g. FR-001)
+            status: New status: Planned, Partial, Implemented, Verified, Superseded, Obsolete
+            description: Updated description
+            priority: Updated priority: Must, Should, Could
+            section: Updated section name
+            test_coverage: Updated test file reference
+            notes: Notes (stored in meta.notes)
+            tags: Replace tags
+            meta_update: Merge metadata keys
+        """
+        from codebugs import blockers
+
+        with conn_factory() as conn:
+            result = update_requirement(
+                conn, req_id, status=status, description=description,
+                priority=priority, section=section, test_coverage=test_coverage,
+                notes=notes, tags=tags, meta_update=meta_update,
+            )
+            if status and result.get("status") in blockers.TERMINAL_STATUSES.get(blockers.ENTITY_REQUIREMENT, set()):
+                unblocked = blockers.get_unblocked_by(conn, req_id, blockers.ENTITY_REQUIREMENT)
+                if unblocked:
+                    result["unblocked_items"] = unblocked
+            return result
+
+    @mcp.tool()
+    def reqs_query(
+        status: str | None = None,
+        priority: str | None = None,
+        section: str | None = None,
+        search: str | None = None,
+        source: str | None = None,
+        tag: str | None = None,
+        group_by: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Search and filter requirements.
+
+        Args:
+            status: Filter by status (Planned, Partial, Implemented, Verified, Superseded, Obsolete, deferred).
+                    Use 'deferred' to find requirements with active blockers.
+            priority: Filter by priority (Must, Should, Could)
+            section: Filter by section (substring match)
+            search: Search in description and ID
+            source: Filter by source (substring match)
+            tag: Filter by tag
+            group_by: Group by: section, status, priority, source
+            limit: Max results (default 100)
+            offset: Pagination offset
+        """
+        from codebugs import blockers
+
+        with conn_factory() as conn:
+            if status == "deferred":
+                return blockers.query_deferred_entities(conn, blockers.ENTITY_REQUIREMENT, limit=limit, offset=offset)
+            return query_requirements(
+                conn, status=status, priority=priority, section=section,
+                search=search, source=source, tag=tag,
+                group_by=group_by, limit=limit, offset=offset,
+            )
+
+    @mcp.tool()
+    def reqs_stats(group_by: str = "status") -> dict[str, Any]:
+        """Aggregated requirement counts by status x priority.
+
+        Args:
+            group_by: Group by: status, priority, section, source
+        """
+        with conn_factory() as conn:
+            return get_reqs_stats(conn, group_by=group_by)
+
+    @mcp.tool()
+    def reqs_summary() -> dict[str, Any]:
+        """Dashboard overview --- status breakdown, priority split,
+        section progress, requirements without tests, deferred counts. Start here."""
+        from codebugs import blockers
+
+        with conn_factory() as conn:
+            result = get_reqs_summary(conn)
+            result.update(blockers.get_deferred_counts(conn, blockers.ENTITY_REQUIREMENT))
+            return result
+
+    @mcp.tool()
+    def reqs_verify(
+        checks: list[str] | None = None,
+        project_dir: str | None = None,
+    ) -> dict[str, Any]:
+        """Verify requirements for issues.
+
+        Runs automated checks to find problems:
+        - tests: do referenced test files actually exist?
+        - ids: duplicate IDs, numbering gaps
+        - status: contradictions (description says superseded but status says Planned)
+
+        Args:
+            checks: List of checks to run (default: all). Options: tests, ids, status
+            project_dir: Project root for test file verification (default: cwd)
+        """
+        with conn_factory() as conn:
+            return verify_requirements(conn, project_dir=project_dir, checks=checks)
+
+    @mcp.tool()
+    def reqs_import(
+        markdown_path: str,
+    ) -> dict[str, Any]:
+        """Import requirements from a REQUIREMENTS.md file.
+
+        Parses markdown tables with columns:
+        | ID | Requirement | Priority | Status | Source | Test Coverage |
+
+        Uses INSERT OR REPLACE, so re-importing updates existing entries.
+
+        Args:
+            markdown_path: Path to the REQUIREMENTS.md file
+        """
+        with conn_factory() as conn:
+            return import_markdown(conn, markdown_path)
+
+    @mcp.tool()
+    def reqs_embed(
+        req_id: str,
+        embedding: list[float],
+    ) -> dict[str, Any]:
+        """Store an embedding vector for a requirement.
+
+        The caller generates the embedding (e.g. via an embedding API).
+        Enables semantic search across requirements via reqs_search_similar.
+
+        Args:
+            req_id: Requirement ID
+            embedding: Float vector (any dimensionality)
+        """
+        with conn_factory() as conn:
+            return store_embedding(conn, req_id, embedding)
+
+    @mcp.tool()
+    def reqs_batch_embed(
+        embeddings: dict[str, list[float]],
+    ) -> dict[str, Any]:
+        """Store embeddings for multiple requirements at once.
+
+        Args:
+            embeddings: Dict mapping requirement ID to float vector
+        """
+        with conn_factory() as conn:
+            return batch_store_embeddings(conn, embeddings)
+
+    @mcp.tool()
+    def reqs_search_similar(
+        query_embedding: list[float],
+        limit: int = 10,
+        min_similarity: float = 0.3,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Find requirements semantically similar to a query.
+
+        Pass a query embedding (from the same model used to embed requirements).
+        Returns requirements ranked by cosine similarity.
+
+        Args:
+            query_embedding: Query vector
+            limit: Max results (default 10)
+            min_similarity: Minimum cosine similarity (default 0.3)
+            status: Optional status filter
+        """
+        with conn_factory() as conn:
+            return search_similar(
+                conn, query_embedding, limit=limit,
+                min_similarity=min_similarity, status=status,
+            )
+
+    @mcp.tool()
+    def reqs_embedding_stats() -> dict[str, Any]:
+        """Report on embedding coverage --- how many requirements have embeddings."""
+        with conn_factory() as conn:
+            return embedding_stats(conn)
+
+
+register_tool_provider("reqs", register_tools)

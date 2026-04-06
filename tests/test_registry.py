@@ -225,6 +225,13 @@ class TestMergeToolProvider:
         assert "merge" in names
 
 
+class TestReqsToolProvider:
+    def test_reqs_provider_registered(self):
+        import codebugs.reqs  # noqa: F401
+        names = {p.name for p in _tool_providers}
+        assert "reqs" in names
+
+
 class TestBlockersToolProvider:
     def test_blockers_provider_registered(self):
         import codebugs.blockers  # noqa: F401
