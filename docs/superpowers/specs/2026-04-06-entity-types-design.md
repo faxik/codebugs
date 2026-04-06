@@ -43,18 +43,14 @@ FINDING_STATUS_ALIASES: dict[str, str] = {
     "working": "in_progress",
 }
 
-FINDING_TERMINAL = frozenset({"fixed", "not_a_bug", "wont_fix", "stale"})
+FINDING_TERMINAL = frozenset({"fixed", "not_a_bug", "wont_fix"})
 
 # --- Requirement statuses ---
 REQUIREMENT_STATUSES = ("planned", "partial", "implemented", "verified", "superseded", "obsolete")
 
 REQUIREMENT_STATUS_ALIASES: dict[str, str] = {
-    "Planned": "planned",
-    "Partial": "partial",
-    "Implemented": "implemented",
-    "Verified": "verified",
-    "Superseded": "superseded",
-    "Obsolete": "obsolete",
+    # TitleCase aliases (lowercased by resolver before lookup)
+    # No entries needed — lowercase of TitleCase matches canonical values directly
 }
 
 REQUIREMENT_TERMINAL = frozenset({"implemented", "verified", "superseded", "obsolete"})
@@ -69,9 +65,8 @@ SEVERITIES = ("critical", "high", "medium", "low")
 PRIORITIES = ("must", "should", "could")
 
 PRIORITY_ALIASES: dict[str, str] = {
-    "Must": "must",
-    "Should": "should",
-    "Could": "could",
+    # TitleCase aliases (lowercased by resolver before lookup)
+    # No entries needed — lowercase of TitleCase matches canonical values directly
 }
 
 # --- Entity types (used by blockers) ---
@@ -105,14 +100,16 @@ def resolve_finding_status(status: str) -> str:
 
 def resolve_requirement_status(status: str) -> str:
     """Normalize a requirement status input to canonical form."""
-    s = REQUIREMENT_STATUS_ALIASES.get(status, status.lower().strip())
+    s = status.lower().strip()
+    s = REQUIREMENT_STATUS_ALIASES.get(s, s)
     if s not in REQUIREMENT_STATUSES:
         raise ValueError(f"Invalid requirement status: {status!r}")
     return s
 
 def resolve_priority(priority: str) -> str:
     """Normalize a priority input to canonical form."""
-    p = PRIORITY_ALIASES.get(priority, priority.lower().strip())
+    p = priority.lower().strip()
+    p = PRIORITY_ALIASES.get(p, p)
     if p not in PRIORITIES:
         raise ValueError(f"Invalid priority: {priority!r}")
     return p
@@ -124,37 +121,45 @@ def resolve_priority(priority: str) -> str:
 - Remove: `VALID_SEVERITIES`, `VALID_STATUSES`, `STATUS_ALIASES`, `resolve_status()`
 - Import from `types.py`: `FINDING_STATUSES`, `SEVERITIES`, `resolve_finding_status`
 - Update `add_finding()` and `update_finding()` to call `resolve_finding_status()`
-- Update SQL CHECK constraint: The CHECK in the schema string uses hardcoded values. Keep the CHECK as-is (it's a safety net), but validation happens in Python before the INSERT.
+- SQL CHECK constraint: findings schema already uses lowercase values — no change needed
 
 #### `reqs.py` (requirements)
 - Remove: `VALID_STATUSES`, `VALID_PRIORITIES`
 - Import from `types.py`: `REQUIREMENT_STATUSES`, `PRIORITIES`, `resolve_requirement_status`, `resolve_priority`
 - Update `add_requirement()` and `update_requirement()` to use resolvers
-- TitleCase inputs like `"Planned"` are accepted via aliases and stored as `"planned"`
+- **SQL CHECK constraint migration (CRITICAL):** `REQS_SCHEMA` has `CHECK(status IN ('Planned', 'Partial', ...))` and `CHECK(priority IN ('Must', 'Should', 'Could'))`. These must be rebuilt with lowercase values using the same table-rebuild pattern as `_migrate_statuses` in db.py. Add `_migrate_to_lowercase(conn)` in `reqs.py`.
+- **Hardcoded TitleCase queries:** Several functions in reqs.py contain hardcoded TitleCase status references in SQL queries and in-code logic (e.g., `verify_requirements` checks for `"Implemented"`, `"Superseded"`). All must be updated to lowercase.
+- **`import_requirements_md()`:** Contains an inverse normalization map that converts statuses BACK to TitleCase. This must be removed — imported values go through the resolver and are stored as lowercase.
+- **Default parameter values:** Function signatures with defaults like `status="Planned"`, `priority="Should"` must be changed to `status="planned"`, `priority="should"`.
+- TitleCase inputs from MCP clients are accepted via `resolve_requirement_status()` which lowercases then validates.
 
 #### `blockers.py`
 - Remove: `ENTITY_FINDING`, `ENTITY_REQUIREMENT`, `ENTITY_TABLES`, `TERMINAL_STATUSES`, `VALID_TRIGGER_TYPES`
 - Import all from `types.py`
 - Logic stays the same — just the constant source changes
+- Note: `FINDING_TERMINAL` intentionally excludes `"stale"` to match current behavior (stale findings do NOT unblock blockers)
 
 #### `merge.py`
 - Remove: `VALID_STATUSES`
 - Import `MERGE_STATUSES` from `types.py`
-- Minimal change — merge statuses are domain-internal
+- Minimal change — merge statuses are domain-internal, already lowercase
 
 ### Breaking change: requirement status case
 
 Requirements currently store TitleCase (`"Planned"`, `"Implemented"`). After ARCH-003, they store lowercase (`"planned"`, `"implemented"`). This requires:
 
-1. A **data migration** function that updates existing rows: `UPDATE requirements SET status = LOWER(status), priority = LOWER(priority)`
-2. The `reqs.ensure_schema()` function runs this migration once (same pattern as `_migrate_statuses` in db.py)
-3. MCP clients that send TitleCase values continue to work via aliases — no breaking change to the API
+1. A **table-rebuild migration** (`_migrate_to_lowercase`) that:
+   - Creates a new table with lowercase CHECK constraints
+   - Copies data with `LOWER(status)` and `LOWER(priority)`
+   - Drops old table, renames new
+   - Same proven pattern as `_migrate_statuses` in db.py (lines 604-649)
+2. The `reqs.ensure_schema()` function runs this migration once
+3. MCP clients that send TitleCase values continue to work via resolvers — no breaking change to the API
 
 ### What does NOT change
 
-- SQL table structures (no column additions/removals)
 - MCP tool signatures and parameter names
-- Tool docstrings
+- Tool docstrings (update valid values in docstrings to show lowercase)
 - Number of tools or CLI commands
 - Database file path or format
 
@@ -166,12 +171,27 @@ Requirements currently store TitleCase (`"Planned"`, `"Implemented"`). After ARC
 2. Constants: all terminal statuses are subsets of their domain's status set
 3. Alias coverage: every TitleCase value in REQUIREMENT_STATUS_ALIASES maps correctly
 
-### Existing tests (must all pass)
+### Existing test updates
 
-All 315 tests. The data migration means tests that assert TitleCase requirement statuses need updating to expect lowercase.
+All 315 tests must pass. Significant test updates required:
+- **`test_reqs.py`**: ~40+ assertions check TitleCase statuses/priorities — all must be updated to lowercase
+- **`test_blockers.py`**: Tests that seed requirement data with TitleCase must be updated
+- **CLI tests** (if any): Output that displays statuses will show lowercase
 
 ### Migration safety
 
 - `types.py` is pure constants + functions with no imports from codebugs — zero circular import risk
-- Each domain module can be migrated independently
-- The requirement data migration is idempotent (LOWER on already-lowercase is a no-op)
+- The table-rebuild migration follows the proven `_migrate_statuses` pattern already in db.py
+- The migration is idempotent (LOWER on already-lowercase is a no-op)
+- Each domain module can be migrated independently, but reqs.py is the most complex due to the data migration
+
+## Adversarial Review Corrections
+
+Reviewed 2026-04-06. Findings addressed:
+- FATAL: Added table-rebuild migration for SQL CHECK constraints (was "keep CHECK as-is" — would reject all lowercase data)
+- SERIOUS: Documented hardcoded TitleCase queries in reqs.py that need updating
+- SERIOUS: Documented import_requirements_md() inverse normalization map that must be removed
+- SERIOUS: Made all resolver functions use consistent lowercase-first lookup order
+- WEAKNESS: Removed "stale" from FINDING_TERMINAL to match current blockers behavior (not a refactor concern)
+- WEAKNESS: Documented default parameter value changes needed in function signatures
+- WEAKNESS: Updated test impact estimate to ~40+ assertions
