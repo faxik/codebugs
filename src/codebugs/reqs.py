@@ -50,14 +50,21 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_to_lowercase(conn: sqlite3.Connection) -> None:
-    """Migrate requirement statuses and priorities to lowercase."""
+    """Rebuild legacy CHECK constraints from capitalized to lowercase.
+
+    Guard must be case-sensitive: lowercasing the stored SQL first would make
+    legacy ``'Must'`` match ``'must'`` and skip the migration (CB-1038).
+    """
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='requirements'"
     ).fetchone()
     if row is None:
         return
-    if "'planned'" in row[0].lower() and "'must'" in row[0].lower():
+    sql = row[0]
+    if "'planned'" in sql and "'must'" in sql:
         return
+    # Drop any orphan requirements_new left by a prior aborted migration.
+    conn.execute("DROP TABLE IF EXISTS requirements_new")
     conn.executescript("""
         CREATE TABLE requirements_new (
             id TEXT PRIMARY KEY,

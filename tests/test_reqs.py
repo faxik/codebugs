@@ -457,3 +457,118 @@ class TestUpdateSection:
     def test_update_section_to_empty(self, populated):
         result = reqs.update_requirement(populated, "FR-001", section="")
         assert result["section"] == ""
+
+
+# Regression: CB-1038 — legacy CHECK constraint migration
+
+_LEGACY_SCHEMA = """
+CREATE TABLE requirements (
+    id TEXT PRIMARY KEY,
+    section TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'Should'
+        CHECK(priority IN ('Must', 'Should', 'Could')),
+    status TEXT NOT NULL DEFAULT 'Planned'
+        CHECK(status IN ('Planned', 'Partial', 'Implemented', 'Verified', 'Superseded', 'Obsolete')),
+    source TEXT NOT NULL DEFAULT '',
+    test_coverage TEXT NOT NULL DEFAULT '',
+    tags TEXT NOT NULL DEFAULT '[]',
+    meta TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+
+
+@pytest.fixture
+def legacy_conn():
+    """In-memory DB preloaded with the pre-migration capitalized schema.
+
+    Mirrors the on-disk shape of real DBs created before the lowercase
+    refactor: capitalized CHECK constraints on priority/status, and no
+    embedding column (it was added later via an ALTER in ensure_schema).
+    """
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    c.executescript(_LEGACY_SCHEMA)
+    now = utc_now()
+    c.execute(
+        """INSERT INTO requirements
+           (id, section, description, priority, status, source, test_coverage,
+            tags, meta, created_at, updated_at)
+           VALUES (?, '', ?, 'Must', 'Planned', '', '', '[]', '{}', ?, ?)""",
+        ("FR-LEGACY-1", "legacy row", now, now),
+    )
+    c.commit()
+    yield c
+    c.close()
+
+
+class TestLowercaseMigration:
+    def test_ensure_schema_rewrites_legacy_check_constraint(self, legacy_conn):
+        reqs.ensure_schema(legacy_conn)
+        schema_sql = legacy_conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='requirements'"
+        ).fetchone()[0]
+        # New CHECK must use lowercase literals, old capitalized ones must be gone.
+        assert "'must'" in schema_sql
+        assert "'should'" in schema_sql
+        assert "'could'" in schema_sql
+        assert "'planned'" in schema_sql
+        assert "'Must'" not in schema_sql
+        assert "'Planned'" not in schema_sql
+
+    def test_ensure_schema_lowercases_existing_rows(self, legacy_conn):
+        reqs.ensure_schema(legacy_conn)
+        row = legacy_conn.execute(
+            "SELECT priority, status FROM requirements WHERE id=?",
+            ("FR-LEGACY-1",),
+        ).fetchone()
+        assert row["priority"] == "must"
+        assert row["status"] == "planned"
+
+    def test_add_requirement_accepts_capitalized_input_after_migration(
+        self, legacy_conn
+    ):
+        reqs.ensure_schema(legacy_conn)
+        # This is the exact failure mode reported in CB-1038.
+        result = reqs.add_requirement(
+            legacy_conn,
+            req_id="FR-NEW-1",
+            description="post-migration insert",
+            priority="Must",
+            status="planned",
+        )
+        assert result["priority"] == "must"
+        assert result["status"] == "planned"
+
+    def test_ensure_schema_is_idempotent_on_new_db(self, conn):
+        # conn fixture already ran ensure_schema once. A second call must be
+        # a no-op — no table rebuild, no data loss, no exception.
+        before_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='requirements'"
+        ).fetchone()[0]
+        reqs.ensure_schema(conn)
+        after_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='requirements'"
+        ).fetchone()[0]
+        assert before_sql == after_sql
+
+    def test_migration_recovers_from_orphan_requirements_new(self, legacy_conn):
+        # Simulate a prior aborted migration that left requirements_new behind.
+        legacy_conn.execute("CREATE TABLE requirements_new (id TEXT PRIMARY KEY)")
+        legacy_conn.commit()
+        reqs.ensure_schema(legacy_conn)
+        # Migration should have dropped the orphan, rebuilt, and renamed.
+        tables = {
+            r[0]
+            for r in legacy_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "requirements" in tables
+        assert "requirements_new" not in tables
+        row = legacy_conn.execute(
+            "SELECT priority FROM requirements WHERE id=?", ("FR-LEGACY-1",)
+        ).fetchone()
+        assert row["priority"] == "must"
