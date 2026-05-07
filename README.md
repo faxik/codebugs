@@ -55,7 +55,7 @@ Use `--mode` to load only the tools you need:
 }
 ```
 
-Available modes: `findings` (7 tools), `reqs` (11 tools), `sweep` (7 tools), `all` (25 tools, default).
+Available modes: `findings` (7 tools), `reqs` (11 tools), `sweep` (9 tools), `all` (27 tools, default).
 
 The CLI supports the same flag: `codebugs --mode findings summary`.
 
@@ -95,16 +95,18 @@ Any MCP-compatible client can connect to `codebugs-mcp` via stdio transport.
 | `reqs_search_similar` | Semantic search across requirements by cosine similarity |
 | `reqs_embedding_stats` | Report on embedding coverage |
 
-**Sweeps** (batch iteration over files/items):
+**Sweeps** (batch iteration with recurrence-aware lifecycle tracking):
 
 | Tool | Purpose |
 |------|---------|
-| `codesweep_create` | Create a new sweep with optional name and batch size |
-| `codesweep_add` | Add items to a sweep (with optional tags) |
-| `codesweep_next` | Get next batch of unprocessed items (with tag filtering) |
-| `codesweep_mark` | Mark items as processed or unprocessed |
-| `codesweep_status` | Sweep progress — total, processed, remaining, per-tag breakdown |
-| `codesweep_archive` | Archive a completed sweep |
+| `codesweep_create` | Create a new sweep. Optional `lifecycle=[...]`, `terminal_states=[...]`, `transitions={state: [allowed_next, ...]}` for state-machine sweeps (defaults to `["pending","done"]`) |
+| `codesweep_add` | Add items. **Atomic upsert**: existing items have `recurrence_count` bumped, `last_seen` refreshed, `archived_at` cleared (re-detection un-archives) |
+| `codesweep_next` | Get next batch of unprocessed (non-terminal, non-archived) items |
+| `codesweep_mark` | Mark items by state. Legacy `processed=True/False` still works; `state="..."` for explicit transitions, validated against the lifecycle DAG |
+| `codesweep_status` | Progress overview — total, processed, remaining, archived, per-tag and per-state breakdowns |
+| `codesweep_archive` | Archive an entire sweep |
+| `codesweep_archive_items` | Selectively archive entries (soft-delete) by `items=`, `where_status=`, or `older_than="30d"`. Re-adding an archived entry un-archives it with recurrence carried forward |
+| `codesweep_list_items` | List entries in a sweep, filterable by state/tag/archived |
 | `codesweep_list` | List all sweeps with summary counts |
 
 ### CLI (for humans)
@@ -192,6 +194,30 @@ codebugs sweep-list
 codebugs sweep-list --all  # include archived
 ```
 
+**Sweeps with custom lifecycle (e.g. retro findings):**
+
+```bash
+# Create a sweep with a state-machine lifecycle
+codebugs sweep-create --name retro-findings \
+    --lifecycle DETECTED,CONFIRMED,ESCALATED,RESOLVED,DROPPED \
+    --terminal-states RESOLVED,DROPPED
+
+# Add a finding (re-adding bumps recurrence_count)
+codebugs sweep-add retro-findings finding-2026-04-todo-bypassed --tags silent_abandonment
+
+# Transition state explicitly
+codebugs sweep-mark retro-findings finding-2026-04-todo-bypassed --state CONFIRMED
+codebugs sweep-mark retro-findings finding-2026-04-todo-bypassed --state RESOLVED
+
+# Selectively archive resolved findings older than 30 days (soft-delete —
+# re-detection in a future retro un-archives the entry with recurrence carried forward)
+codebugs sweep-archive-items retro-findings --state RESOLVED --older-than 30d
+
+# Inspect entries (filter by state/tag, include archived)
+codebugs sweep-list-items retro-findings --state RESOLVED
+codebugs sweep-list-items retro-findings --archived-only
+```
+
 ## How It Works
 
 ### The Problem
@@ -255,14 +281,21 @@ Both tables share the same SQLite database (`.codebugs/findings.db`) with flexib
 | `description` | text | What this sweep is for |
 | `default_batch_size` | int | Default items per batch (default: 10) |
 | `status` | text | `active`, `archived` |
+| `lifecycle` | json | Ordered list of allowed entry states (default `["pending","done"]`) |
+| `terminal_states` | json | States that count as "processed" (default `["done"]`) |
+| `transitions` | json | Optional `{state: [allowed_next, ...]}` DAG. `null` = unconstrained |
 
 **Sweep items:**
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `item` | text | Arbitrary string identifier (file path, finding ID, URL, ...) |
+| `item` | text | Arbitrary string identifier — also the stable key. Re-adding bumps recurrence |
 | `tags` | json | Array of strings for filtering |
-| `processed` | int | 0 or 1 |
+| `state` | text | Current state (must be in the sweep's `lifecycle`) |
+| `processed` | int | 0 or 1, mirrors `state IN terminal_states` |
+| `recurrence_count` | int | Bumped atomically on every re-add (R2) |
+| `first_seen` / `last_seen` | text | Timestamps; `last_seen` updates on each re-add |
+| `archived_at` / `archive_reason` | text | Soft-delete metadata. Archived entries are excluded from `next_batch`/`status` but still match on `add` for un-archive (R5) |
 | `position` | int | Insertion order within the sweep |
 
 ## Pattern Detection
