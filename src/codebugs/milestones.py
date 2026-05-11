@@ -1652,12 +1652,59 @@ def register_cli(sub, commands) -> None:
     p = sub.add_parser("wip-status", help="Show agent capacity snapshot")
     p.add_argument("--agent", help="Filter by agent id (default: all)")
 
+    def _cmd_milestone_mark_branch(args: argparse.Namespace) -> None:
+        from codebugs.db import connect
+        conn = connect()
+        try:
+            item = mark_branch_only(
+                conn, item_ref=args.item_ref, branch_name=args.branch,
+            )
+        except KeyError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
+        print(f"branch-only: {item['item_ref']} @ {args.branch}")
+
+    def _cmd_milestone_mark_integrated(args: argparse.Namespace) -> None:
+        from codebugs.db import connect
+        conn = connect()
+        try:
+            item = mark_integrated(
+                conn, item_ref=args.item_ref, commit=args.commit,
+            )
+        except KeyError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
+        print(f"integrated: {item['item_ref']} @ {item['done_commit']}")
+
+    p = sub.add_parser(
+        "milestone-mark-branch",
+        help="Flag an item as living on a feature branch (not yet integrated)",
+    )
+    p.add_argument("item_ref", help="Item id (e.g. CB-1234)")
+    p.add_argument("branch", help="Git branch name holding the work")
+
+    p = sub.add_parser(
+        "milestone-mark-integrated",
+        help="Mark an item as merged to main; clears branch-only, records done_commit",
+    )
+    p.add_argument("item_ref", help="Item id (e.g. CB-1234)")
+    p.add_argument("commit", help="Commit SHA where the work landed on main")
+
     commands.update({
         "milestone-list": _cmd_milestone_list,
         "milestone-status": _cmd_milestone_status,
         "milestone-audit": _cmd_milestone_audit,
         "triage-inbox": _cmd_triage_inbox,
         "wip-status": _cmd_wip_status,
+        "milestone-mark-branch": _cmd_milestone_mark_branch,
+        "milestone-mark-integrated": _cmd_milestone_mark_integrated,
     })
 
 
