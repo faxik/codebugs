@@ -4,7 +4,7 @@ AI-native code finding & requirements tracker. SQLite-backed, exposed via MCP se
 
 ## Architecture
 
-- **Domain modules** (`src/codebugs/`): `db.py` (findings + shared infra), `reqs.py`, `bench.py`, `blockers.py`, `merge.py`, `sweep.py`, `embeddings.py` (vector storage/similarity search, delegates from reqs)
+- **Domain modules** (`src/codebugs/`): `db.py` (findings + shared infra), `reqs.py`, `bench.py`, `blockers.py`, `merge.py`, `sweep.py`, `embeddings.py` (vector storage/similarity search, delegates from reqs), `milestones.py` (releases / streams / capacity-aware pull)
 - **Shared types** (`types.py`): Entity constants (statuses, priorities, severities), resolver functions, terminal states. Zero-dependency — safe to import from anywhere
 - **MCP server** (`server.py`): Thin FastMCP orchestrator (~48 lines). Discovers tool providers via registry, filters by `--mode` flag
 - **CLI** (`cli.py`): Thin argparse orchestrator (~40 lines). Discovers CLI providers via registry, filters by `--mode` flag
@@ -17,6 +17,8 @@ AI-native code finding & requirements tracker. SQLite-backed, exposed via MCP se
 - **`db.connect()` import trigger**: `_ensure_modules_loaded()` still imports all known domain modules so their `register_schema()`, `register_tool_provider()`, and `register_cli_provider()` calls execute. All three registries are complete (ARCH-001 + ARCH-002 + ARCH-004). This trigger will be replaced by auto-discovery.
 - **`blockers.py` cross-module reach**: calls `db._row_to_dict()` and `reqs._row_to_dict()` — private functions across module boundaries. These should be made public or replaced with a shared utility.
 - **Findings naming exception**: The findings domain predates the naming conventions. Its MCP tools (`add`, `query`, `stats`, etc.) lack the domain prefix that all other modules use (`reqs_add`, `codebench_import`). Renaming MCP tools is a breaking change for clients.
+- **Milestones naming exception**: The milestones spec mandates spec-canonical tool names (`pull_next`, `release_item`, `triage_dismiss`, `mark_branch_only`, `wip_status`). These are kept verbatim because external consumers (autosorter's `worktree-setup.sh` / `worktree-finish.sh`) call them by name. Milestone management tools (`milestone_create`, `milestone_status`, `milestone_close`, ...) do carry the domain prefix.
+- **Post-add hook**: `db.register_post_add_hook(name, fn)` is the extension point that lets `milestones.auto_route_finding` run inside `add_finding` / `batch_add_findings` before the final commit, so the finding and its `stream/triage` link land atomically. Other modules may register additional hooks.
 
 ## Code rules
 
@@ -73,4 +75,17 @@ We are migrating toward a plugin architecture in phases. Query with `reqs_query 
 **Current rules for new code:**
 - New domain modules must call `register_schema()`, `register_tool_provider()`, and `register_cli_provider()` at module level — do NOT edit `db.connect()`, `server.py`, or `cli.py`.
 - Add the new module import to `_ensure_modules_loaded()` in `db.py` (temporary, until auto-discovery).
+- Add the new module's mode slug to `SERVER_NAMES` (`server.py`) and to the `--mode` allowlist (`cli.py`) so it can be loaded in isolation.
 - Prefer self-contained modules that register themselves over central wiring.
+
+## Milestones module
+
+Releases ("release/1.1") and standing streams ("stream/triage", "stream/maintenance", "stream/security") give parallel-agent work a durable bucket. `milestones.py` owns four tables (`milestones`, `milestone_items`, `milestone_audit`, `agent_capacity`) and 20 MCP tools across three phases:
+
+1. **Foundation** — milestone & item CRUD, audit log, auto-routing every new finding into `stream/triage` (or `stream/security` for `severity=critical && category.startswith("security:")`).
+2. **Triage + pull** — `triage_inbox` / `triage_dismiss` / `triage_promote`, plus `pull_next(agent_id, capacity)` which atomically claims the highest-priority eligible item for the calling agent. Concurrency is enforced via `BEGIN IMMEDIATE` following the `merge.py:239-289` save/restore pattern.
+3. **Close gate + branch tracking** — `mark_branch_only(item, branch)` / `mark_integrated(item, commit)` keep the release container honest. `milestone_close` refuses on unfinished, branch-only, or blocker-gated items unless `force=True` is set (with a logged reason). Streams cannot be closed.
+
+`pull_next` eligibility: item is `open`, no active blockers (skipped for `item_kind='external'`), acceptance required for `size='large'`, and large bugs in release milestones must declare `linked_frs` whose ids resolve to rows in `requirements`. Agent capacity is tracked per `(agent_id, size)` and decremented by `release_item`.
+
+For the design and adversarial-review history, see `docs/superpowers/plans/2026-05-11-milestones-streams.md` and the source spec at `../autosorter/.claude/plans/codebugs-milestones-streams-v1.md`.

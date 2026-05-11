@@ -8,6 +8,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
 import threading
 from collections.abc import Callable
 from contextlib import AbstractContextManager
@@ -96,6 +97,41 @@ def register_cli_provider(name: str, register_fn: Callable) -> None:
     if any(p.name == name for p in _cli_providers):
         raise ValueError(f"CLI provider '{name}' is already registered")
     _cli_providers.append(CliProvider(name, register_fn))
+
+
+@dataclass
+class PostAddHook:
+    """A registered post-add hook (fires inside add_finding / batch_add_findings)."""
+    name: str
+    fn: Callable[[sqlite3.Connection, dict[str, Any]], None]
+
+
+_post_add_hooks: list[PostAddHook] = []
+
+
+def register_post_add_hook(
+    name: str,
+    fn: Callable[[sqlite3.Connection, dict[str, Any]], None],
+) -> None:
+    """Register a hook that runs for every newly-added finding.
+
+    Hooks run inside the same transaction as the INSERT, before the final commit,
+    so the finding row and any hook side-effects land atomically. Name-keyed so
+    module re-import is a no-op (matches register_schema discipline).
+    """
+    if any(h.name == name for h in _post_add_hooks):
+        return
+    _post_add_hooks.append(PostAddHook(name, fn))
+
+
+def _run_post_add_hooks(conn: sqlite3.Connection, finding: dict[str, Any]) -> None:
+    """Invoke every registered hook. Failures are logged but never raised —
+    finding creation must always succeed."""
+    for hook in _post_add_hooks:
+        try:
+            hook.fn(conn, finding)
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"[post-add hook '{hook.name}' failed] {e}\n")
 
 
 def get_cli_providers(*, mode: str = "all") -> list[CliProvider]:
@@ -839,7 +875,7 @@ def _ensure_modules_loaded() -> None:
     with _modules_lock:
         if _modules_loaded:
             return
-        from codebugs import reqs, merge, sweep, bench, blockers  # noqa: F401
+        from codebugs import reqs, merge, sweep, bench, blockers, milestones  # noqa: F401
         _modules_loaded = True
 
 
@@ -960,8 +996,10 @@ def add_finding(
         (fid, severity, category, file, description, source, tags_json, meta_json,
          reported_at_commit, reported_at_ref, now, now),
     )
+    result = _row_to_dict(conn.execute("SELECT * FROM findings WHERE id = ?", (fid,)).fetchone())
+    _run_post_add_hooks(conn, result)
     conn.commit()
-    return _row_to_dict(conn.execute("SELECT * FROM findings WHERE id = ?", (fid,)).fetchone())
+    return result
 
 
 def batch_add_findings(
@@ -1003,12 +1041,15 @@ def batch_add_findings(
         )
         results.append(fid)
 
-    conn.commit()
     rows = conn.execute(
         f"SELECT * FROM findings WHERE id IN ({','.join('?' for _ in results)})",
         results,
     ).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    finding_dicts = [_row_to_dict(r) for r in rows]
+    for fd in finding_dicts:
+        _run_post_add_hooks(conn, fd)
+    conn.commit()
+    return finding_dicts
 
 
 def update_finding(

@@ -26,6 +26,7 @@ SERVER_NAMES = {
     "sweep": "codesweep",
     "bench": "codebench",
     "blockers": "codeblockers",
+    "milestones": "codemilestones",
     "all": "codebugs",
 }
 
