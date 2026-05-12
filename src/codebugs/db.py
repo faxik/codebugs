@@ -14,6 +14,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from graphlib import CycleError
+from pathlib import Path
 from typing import Any
 
 from codebugs.types import FINDING_STATUSES, SEVERITIES, FINDING_STATUS_ALIASES, resolve_finding_status, utc_now  # noqa: F401
@@ -351,8 +352,29 @@ CREATE INDEX IF NOT EXISTS idx_findings_file ON findings(file);
 CREATE INDEX IF NOT EXISTS idx_findings_category ON findings(category);
 """
 
+def _find_db_root(start: str | None = None) -> str | None:
+    """Walk up from `start` (default cwd) looking for an existing `.codebugs/`.
+
+    Mirrors git's discovery rules: returns the directory containing `.codebugs/`,
+    or None if walking hits a `.git/` (repo root — picking the enclosing repo's
+    DB when invoked inside a submodule would be worse than auto-creating) or the
+    filesystem root.
+    """
+    cur = Path(start or os.getcwd()).resolve()
+    while True:
+        if (cur / DB_DIR).is_dir():
+            return str(cur)
+        if (cur / ".git").exists():
+            return None
+        if cur.parent == cur:
+            return None
+        cur = cur.parent
+
+
 def _db_path(project_dir: str | None = None) -> str:
-    root = project_dir or os.getcwd()
+    root = project_dir
+    if root is None:
+        root = _find_db_root() or os.getcwd()
     return os.path.join(root, DB_DIR, DB_FILE)
 
 
@@ -882,10 +904,17 @@ def _ensure_modules_loaded() -> None:
 def connect(project_dir: str | None = None) -> sqlite3.Connection:
     """Open (and initialize) the codebugs database."""
     path = _db_path(project_dir)
+    is_new = not os.path.exists(path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+
+    if is_new and project_dir is None:
+        sys.stderr.write(
+            f"codebugs: created fresh .codebugs/ at {path} "
+            f"(no existing DB found in current dir or parents up to .git/)\n"
+        )
 
     _ensure_modules_loaded()
     for entry in _resolved_order():
