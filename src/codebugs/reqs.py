@@ -260,12 +260,14 @@ def query_requirements(
     conditions: list[str] = []
     params: list[Any] = []
 
-    if id is not None:
+    if id:
         conditions.append("id = ?")
         params.append(id)
     if ids:
         conditions.append(f"id IN ({','.join('?' for _ in ids)})")
         params.extend(ids)
+        if limit < len(ids):
+            limit = len(ids)
     if status:
         conditions.append("status = ?")
         params.append(status)
@@ -827,10 +829,8 @@ def register_cli(sub, commands) -> None:
     def _cmd_reqs_query(args: argparse.Namespace) -> None:
         conn = db.connect()
         ids = [s.strip() for s in args.id.split(",") if s.strip()] if args.id else None
-        single_id = ids[0] if ids and len(ids) == 1 else None
-        multi_ids = ids if ids and len(ids) > 1 else None
         result = query_requirements(
-            conn, id=single_id, ids=multi_ids,
+            conn, ids=ids,
             status=args.status, priority=args.priority,
             section=args.section, search=args.search,
             group_by=args.group_by, limit=args.limit or 100,

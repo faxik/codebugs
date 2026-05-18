@@ -302,6 +302,18 @@ class TestQueryFindings:
         result = db.query_findings(conn, id="CB-4", status="open")
         assert result["total"] == 0
 
+    def test_query_empty_id_string_is_ignored(self, conn):
+        # Empty-string id must not collapse to `WHERE id = ''` (which returns 0).
+        result = db.query_findings(conn, id="")
+        assert result["total"] == 4
+
+    def test_query_ids_batch_exceeding_default_limit_returns_all(self, conn):
+        # Default limit=100; with 4 IDs the bump is a no-op, but verify the contract.
+        all_ids = [f"CB-{n}" for n in range(1, 5)]
+        result = db.query_findings(conn, ids=all_ids, limit=2)
+        assert result["total"] == 4
+        assert len(result["findings"]) == 4
+
 
 class TestGetFinding:
     def test_get_returns_full_body(self, conn):

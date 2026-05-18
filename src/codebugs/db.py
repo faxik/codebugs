@@ -287,10 +287,7 @@ def _staleness_check_impl(
     cwd = project_dir or os.getcwd()
 
     if finding_id:
-        row = conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
-        if not row:
-            raise KeyError(f"Finding not found: {finding_id}")
-        findings_list = [_row_to_dict(row)]
+        findings_list = [get_finding(conn, finding_id)]
     else:
         query_kwargs: dict[str, Any] = {"limit": 10000}
         if status:
@@ -689,12 +686,9 @@ def register_cli(sub, commands) -> None:
     def _cmd_query(args: argparse.Namespace) -> None:
         conn = connect()
         ids = [s.strip() for s in args.id.split(",") if s.strip()] if args.id else None
-        single_id = ids[0] if ids and len(ids) == 1 else None
-        multi_ids = ids if ids and len(ids) > 1 else None
         result = query_findings(
             conn,
-            id=single_id,
-            ids=multi_ids,
+            ids=ids,
             status=args.status,
             severity=args.severity,
             category=args.category,
@@ -1218,12 +1212,14 @@ def query_findings(
     conditions: list[str] = []
     params: list[Any] = []
 
-    if id is not None:
+    if id:
         conditions.append("id = ?")
         params.append(id)
     if ids:
         conditions.append(f"id IN ({','.join('?' for _ in ids)})")
         params.extend(ids)
+        if limit < len(ids):
+            limit = len(ids)
     if status:
         conditions.append("status = ?")
         params.append(resolve_finding_status(status))
