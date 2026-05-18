@@ -581,7 +581,7 @@ def triage_dismiss(
 
     # Propagate to underlying entity.
     if item["item_kind"] == "bug":
-        from codebugs.db import update_finding
+        from codebugs.findings import update_finding
         try:
             update_finding(conn, bug_id, status="not_a_bug")
         except KeyError:
@@ -1712,7 +1712,7 @@ def register_cli(sub, commands) -> None:
 
 from codebugs.db import register_schema, register_tool_provider, register_cli_provider, register_post_add_hook  # noqa: E402
 
-register_schema("milestones", ensure_schema, depends_on=("db", "reqs", "blockers"))
+register_schema("milestones", ensure_schema, depends_on=("findings", "reqs", "blockers"))
 register_tool_provider("milestones", register_tools)
 register_cli_provider("milestones", register_cli)
 register_post_add_hook("milestones.auto_route", _auto_route_finding)

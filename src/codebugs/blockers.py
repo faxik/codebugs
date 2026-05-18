@@ -7,6 +7,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
+from codebugs import db
 from codebugs.types import ENTITY_FINDING, ENTITY_REQUIREMENT, ENTITY_TABLES, TERMINAL_STATUSES, TRIGGER_TYPES, utc_now
 
 
@@ -94,10 +95,6 @@ def _normalize_trigger_at(value: str) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
-    return dict(row)
-
-
 def is_blocker_satisfied(conn: sqlite3.Connection, blocker: dict[str, Any]) -> bool:
     """Evaluate whether a blocker's condition is currently met."""
     if blocker["cancelled_at"]:
@@ -116,7 +113,7 @@ def is_blocker_satisfied(conn: sqlite3.Connection, blocker: dict[str, Any]) -> b
 
 def _evaluate_blocker(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     """Convert a blocker row to a dict with computed satisfaction state."""
-    d = _row_to_dict(row)
+    d = db.row_to_dict(row)
     d["is_cancelled"] = d["cancelled_at"] is not None
     d["is_satisfied"] = is_blocker_satisfied(conn, d)
     d["is_active"] = not d["is_cancelled"] and not d["is_satisfied"]
@@ -335,7 +332,7 @@ def resolve_blocker(
     if not row:
         raise KeyError(f"Blocker not found: {blocker_id}")
 
-    b = _row_to_dict(row)
+    b = db.row_to_dict(row)
     if b["cancelled_at"]:
         raise ValueError(f"Blocker {blocker_id} is already cancelled.")
 
@@ -448,7 +445,7 @@ def query_deferred_entities(
     """Query entities that have active blockers, with blocker counts.
 
     Encapsulates the SQL + serialization so server.py doesn't need to reach
-    into db._row_to_dict or reqs._row_to_dict.
+    into per-module row codecs.
     """
     evaluated = _get_active_blockers_by_type(conn, entity_type)
 
@@ -473,13 +470,7 @@ def query_deferred_entities(
         ids_list + [limit, offset],
     ).fetchall()
 
-    # Serialize rows using the appropriate module's pattern
-    if entity_type == ENTITY_FINDING:
-        from codebugs import db
-        entities = [db._row_to_dict(r) for r in rows]
-    else:
-        from codebugs import reqs
-        entities = [reqs._row_to_dict(r) for r in rows]
+    entities = [db.row_to_dict(r) for r in rows]
 
     for e in entities:
         e["blocker_count"] = active_counts.get(e["id"], 0)
@@ -530,7 +521,7 @@ import json  # noqa: E402
 
 from codebugs.db import register_schema, register_tool_provider, register_cli_provider  # noqa: E402
 
-register_schema("blockers", ensure_schema, depends_on=("db", "reqs"))
+register_schema("blockers", ensure_schema, depends_on=("findings", "reqs"))
 
 
 def register_tools(mcp, conn_factory) -> None:
