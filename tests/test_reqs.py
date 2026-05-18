@@ -162,6 +162,35 @@ class TestQueryRequirements:
         assert len(result["requirements"]) == 2
         assert result["total"] == 6
 
+    def test_query_by_id_single(self, populated):
+        result = reqs.query_requirements(populated, id="FR-003")
+        assert result["total"] == 1
+        assert result["requirements"][0]["id"] == "FR-003"
+
+    def test_query_by_id_missing_returns_empty(self, populated):
+        result = reqs.query_requirements(populated, id="FR-NOPE")
+        assert result["total"] == 0
+        assert result["requirements"] == []
+
+    def test_query_by_ids_batch_skips_missing(self, populated):
+        result = reqs.query_requirements(populated, ids=["FR-001", "FR-002", "FR-NOPE"])
+        ids = {r["id"] for r in result["requirements"]}
+        assert ids == {"FR-001", "FR-002"}
+        assert result["total"] == 2
+
+
+class TestGetRequirement:
+    def test_get_returns_full_body(self, populated):
+        result = reqs.get_requirement(populated, "FR-001")
+        assert result["id"] == "FR-001"
+        assert "description" in result
+        assert "priority" in result
+        assert "status" in result
+
+    def test_get_missing_raises_keyerror(self, populated):
+        with pytest.raises(KeyError, match="FR-NOPE"):
+            reqs.get_requirement(populated, "FR-NOPE")
+
 
 class TestStats:
     def test_stats_by_status(self, populated):

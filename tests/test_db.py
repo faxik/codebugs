@@ -280,6 +280,45 @@ class TestQueryFindings:
         with pytest.raises(ValueError, match="Invalid group_by"):
             db.query_findings(conn, group_by="invalid")
 
+    def test_query_by_id_single(self, conn):
+        result = db.query_findings(conn, id="CB-1")
+        assert result["total"] == 1
+        assert result["findings"][0]["id"] == "CB-1"
+        assert result["findings"][0]["description"] == "SQL injection"
+
+    def test_query_by_id_missing_returns_empty(self, conn):
+        result = db.query_findings(conn, id="CB-MISSING")
+        assert result["total"] == 0
+        assert result["findings"] == []
+
+    def test_query_by_ids_batch(self, conn):
+        result = db.query_findings(conn, ids=["CB-1", "CB-2", "CB-MISSING"])
+        ids = {f["id"] for f in result["findings"]}
+        assert ids == {"CB-1", "CB-2"}
+        assert result["total"] == 2
+
+    def test_query_id_and_filters_are_and_combined(self, conn):
+        # CB-4 has status=fixed; AND with status=open must yield nothing.
+        result = db.query_findings(conn, id="CB-4", status="open")
+        assert result["total"] == 0
+
+
+class TestGetFinding:
+    def test_get_returns_full_body(self, conn):
+        added = db.add_finding(
+            conn, severity="high", category="bug", file="x.py",
+            description="boom", tags=["a", "b"], meta={"k": "v"},
+        )
+        result = db.get_finding(conn, added["id"])
+        assert result["id"] == added["id"]
+        assert result["description"] == "boom"
+        assert result["tags"] == ["a", "b"]
+        assert result["meta"] == {"k": "v"}
+
+    def test_get_missing_raises_keyerror(self, conn):
+        with pytest.raises(KeyError, match="CB-MISSING"):
+            db.get_finding(conn, "CB-MISSING")
+
 
 class TestQueryMeta:
     def test_query_by_meta_key(self, conn):

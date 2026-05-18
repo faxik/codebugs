@@ -230,9 +230,19 @@ def update_requirement(
     return _row_to_dict(conn.execute("SELECT * FROM requirements WHERE id = ?", (req_id,)).fetchone())
 
 
+def get_requirement(conn: sqlite3.Connection, req_id: str) -> dict[str, Any]:
+    """Fetch a single requirement by ID. Raises KeyError if not found."""
+    row = conn.execute("SELECT * FROM requirements WHERE id = ?", (req_id,)).fetchone()
+    if not row:
+        raise KeyError(f"Requirement not found: {req_id}")
+    return _row_to_dict(row)
+
+
 def query_requirements(
     conn: sqlite3.Connection,
     *,
+    id: str | None = None,
+    ids: list[str] | None = None,
     status: str | None = None,
     priority: str | None = None,
     section: str | None = None,
@@ -243,10 +253,19 @@ def query_requirements(
     limit: int = 100,
     offset: int = 0,
 ) -> dict[str, Any]:
-    """Query requirements with filters."""
+    """Query requirements with filters.
+
+    `id` / `ids` are AND-combined with other filters; missing IDs are silently absent.
+    """
     conditions: list[str] = []
     params: list[Any] = []
 
+    if id is not None:
+        conditions.append("id = ?")
+        params.append(id)
+    if ids:
+        conditions.append(f"id IN ({','.join('?' for _ in ids)})")
+        params.extend(ids)
     if status:
         conditions.append("status = ?")
         params.append(status)
@@ -647,6 +666,8 @@ def register_tools(mcp, conn_factory):
 
     @mcp.tool()
     def reqs_query(
+        id: str | None = None,
+        ids: list[str] | None = None,
         status: str | None = None,
         priority: str | None = None,
         section: str | None = None,
@@ -659,7 +680,13 @@ def register_tools(mcp, conn_factory):
     ) -> dict[str, Any]:
         """Search and filter requirements.
 
+        Supports lookup by ID via `id=` (single) or `ids=` (batch). Missing IDs
+        are silently absent from the result. For a strict single-ID fetch that
+        errors on miss, use `reqs_get`.
+
         Args:
+            id: Fetch a single requirement by exact ID (e.g. FR-001)
+            ids: Fetch multiple requirements by ID list; missing IDs are skipped
             status: Filter by status (planned, partial, implemented, verified, superseded, obsolete, deferred).
                     Use 'deferred' to find requirements with active blockers.
             priority: Filter by priority (must, should, could)
@@ -677,10 +704,23 @@ def register_tools(mcp, conn_factory):
             if status == "deferred":
                 return blockers.query_deferred_entities(conn, blockers.ENTITY_REQUIREMENT, limit=limit, offset=offset)
             return query_requirements(
-                conn, status=status, priority=priority, section=section,
+                conn, id=id, ids=ids, status=status, priority=priority, section=section,
                 search=search, source=source, tag=tag,
                 group_by=group_by, limit=limit, offset=offset,
             )
+
+    @mcp.tool()
+    def reqs_get(req_id: str) -> dict[str, Any]:
+        """Fetch a single requirement by ID with full body.
+
+        Raises a not-found error if the ID does not exist. For lenient batch
+        lookup that silently drops missing IDs, use `reqs_query(ids=[...])`.
+
+        Args:
+            req_id: The requirement ID (e.g. FR-001)
+        """
+        with conn_factory() as conn:
+            return get_requirement(conn, req_id)
 
     @mcp.tool()
     def reqs_stats(group_by: str = "status") -> dict[str, Any]:
@@ -786,8 +826,12 @@ def register_cli(sub, commands) -> None:
 
     def _cmd_reqs_query(args: argparse.Namespace) -> None:
         conn = db.connect()
+        ids = [s.strip() for s in args.id.split(",") if s.strip()] if args.id else None
+        single_id = ids[0] if ids and len(ids) == 1 else None
+        multi_ids = ids if ids and len(ids) > 1 else None
         result = query_requirements(
-            conn, status=args.status, priority=args.priority,
+            conn, id=single_id, ids=multi_ids,
+            status=args.status, priority=args.priority,
             section=args.section, search=args.search,
             group_by=args.group_by, limit=args.limit or 100,
         )
@@ -814,6 +858,17 @@ def register_cli(sub, commands) -> None:
                 max_widths={"description": 60, "section": 30},
             ))
             print(f"\n{result['total']} requirement(s) total.")
+
+    def _cmd_reqs_get(args: argparse.Namespace) -> None:
+        conn = db.connect()
+        try:
+            result = get_requirement(conn, args.id)
+        except KeyError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
+        print(json.dumps(result, indent=2, sort_keys=True))
 
     def _cmd_reqs_stats(args: argparse.Namespace) -> None:
         conn = db.connect()
@@ -919,12 +974,16 @@ def register_cli(sub, commands) -> None:
     p.add_argument("--notes", help="Notes")
 
     p = sub.add_parser("reqs-query", help="Search requirements")
+    p.add_argument("--id", help="Filter by ID (single FR-N or comma-separated list)")
     p.add_argument("--status", help="Filter by status")
     p.add_argument("--priority", help="Filter by priority")
     p.add_argument("--section", help="Filter by section (substring)")
     p.add_argument("--search", help="Search in description/ID")
     p.add_argument("--group-by", help="Group by: section|status|priority|source")
     p.add_argument("--limit", type=int, help="Max results")
+
+    p = sub.add_parser("reqs-get", help="Fetch a single requirement by ID")
+    p.add_argument("id", help="Requirement ID (e.g. FR-001)")
 
     p = sub.add_parser("reqs-stats", help="Requirements cross-tab")
     p.add_argument("--by", help="Group by: status|priority|section|source")
@@ -945,6 +1004,7 @@ def register_cli(sub, commands) -> None:
         "reqs-add": _cmd_reqs_add,
         "reqs-update": _cmd_reqs_update,
         "reqs-query": _cmd_reqs_query,
+        "reqs-get": _cmd_reqs_get,
         "reqs-stats": _cmd_reqs_stats,
         "reqs-summary": _cmd_reqs_summary,
         "reqs-verify": _cmd_reqs_verify,

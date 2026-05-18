@@ -507,6 +507,8 @@ def register_tools(mcp, conn_factory) -> None:
 
     @mcp.tool()
     def query(
+        id: str | None = None,
+        ids: list[str] | None = None,
         status: str | None = None,
         severity: str | None = None,
         category: str | None = None,
@@ -523,7 +525,13 @@ def register_tools(mcp, conn_factory) -> None:
     ) -> dict[str, Any]:
         """Search and filter findings. Returns structured results.
 
+        Supports lookup by ID via `id=` (single) or `ids=` (batch). Missing IDs
+        are silently absent from the result so the caller can diff. For a strict
+        single-ID fetch that errors on miss, use `get` instead.
+
         Args:
+            id: Fetch a single finding by exact ID (e.g. CB-1383)
+            ids: Fetch multiple findings by ID list; missing IDs are skipped
             status: Filter by status (open, in_progress, fixed, not_a_bug, wont_fix, stale, deferred). Aliases accepted.
                     Use 'deferred' to find items with active blockers.
             severity: Filter by severity (critical, high, medium, low)
@@ -544,6 +552,8 @@ def register_tools(mcp, conn_factory) -> None:
                 return blockers.query_deferred_entities(conn, blockers.ENTITY_FINDING, limit=limit, offset=offset)
             return query_findings(
                 conn,
+                id=id,
+                ids=ids,
                 status=status,
                 severity=severity,
                 category=category,
@@ -558,6 +568,20 @@ def register_tools(mcp, conn_factory) -> None:
                 limit=limit,
                 offset=offset,
             )
+
+    @mcp.tool()
+    def get(finding_id: str) -> dict[str, Any]:
+        """Fetch a single finding by ID with full body (description, severity,
+        status, tags, meta, timestamps, commit refs).
+
+        Raises a not-found error if the ID does not exist. For lenient batch
+        lookup that silently drops missing IDs, use `query(ids=[...])`.
+
+        Args:
+            finding_id: The finding ID (e.g. CB-1383)
+        """
+        with conn_factory() as conn:
+            return get_finding(conn, finding_id)
 
     @mcp.tool()
     def stats(group_by: str = "severity") -> dict[str, Any]:
@@ -664,8 +688,13 @@ def register_cli(sub, commands) -> None:
 
     def _cmd_query(args: argparse.Namespace) -> None:
         conn = connect()
+        ids = [s.strip() for s in args.id.split(",") if s.strip()] if args.id else None
+        single_id = ids[0] if ids and len(ids) == 1 else None
+        multi_ids = ids if ids and len(ids) > 1 else None
         result = query_findings(
             conn,
+            id=single_id,
+            ids=multi_ids,
             status=args.status,
             severity=args.severity,
             category=args.category,
@@ -703,6 +732,17 @@ def register_cli(sub, commands) -> None:
                 )
             )
             print(f"\n{result['total']} finding(s) total.")
+
+    def _cmd_get(args: argparse.Namespace) -> None:
+        conn = connect()
+        try:
+            result = get_finding(conn, args.id)
+        except KeyError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
+        print(json.dumps(result, indent=2, sort_keys=True))
 
     def _cmd_stats(args: argparse.Namespace) -> None:
         conn = connect()
@@ -850,6 +890,7 @@ def register_cli(sub, commands) -> None:
     p.add_argument("--notes", help="Notes")
 
     p = sub.add_parser("query", help="Search findings")
+    p.add_argument("--id", help="Filter by ID (single CB-N or comma-separated list)")
     p.add_argument("--status", help="Filter by status")
     p.add_argument("--severity", "-s", help="Filter by severity")
     p.add_argument("--category", "-c", help="Filter by category")
@@ -857,6 +898,9 @@ def register_cli(sub, commands) -> None:
     p.add_argument("--source", help="Filter by source")
     p.add_argument("--group-by", help="Group by: file|category|severity|status|source")
     p.add_argument("--limit", type=int, help="Max results")
+
+    p = sub.add_parser("get", help="Fetch a single finding by ID")
+    p.add_argument("id", help="Finding ID (e.g. CB-1383)")
 
     p = sub.add_parser("stats", help="Cross-tabulated summary")
     p.add_argument("--by", help="Group by: severity|category|status|file|source")
@@ -874,6 +918,7 @@ def register_cli(sub, commands) -> None:
         "add": _cmd_add,
         "update": _cmd_update,
         "query": _cmd_query,
+        "get": _cmd_get,
         "stats": _cmd_stats,
         "summary": _cmd_summary,
         "categories": _cmd_categories,
@@ -1139,9 +1184,19 @@ def update_finding(
     return _row_to_dict(conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone())
 
 
+def get_finding(conn: sqlite3.Connection, finding_id: str) -> dict[str, Any]:
+    """Fetch a single finding by ID. Raises KeyError if not found."""
+    row = conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
+    if not row:
+        raise KeyError(f"Finding not found: {finding_id}")
+    return _row_to_dict(row)
+
+
 def query_findings(
     conn: sqlite3.Connection,
     *,
+    id: str | None = None,
+    ids: list[str] | None = None,
     status: str | None = None,
     severity: str | None = None,
     category: str | None = None,
@@ -1156,10 +1211,19 @@ def query_findings(
     limit: int = 100,
     offset: int = 0,
 ) -> dict[str, Any]:
-    """Query findings with filters. Returns results or grouped counts."""
+    """Query findings with filters. Returns results or grouped counts.
+
+    `id` / `ids` are AND-combined with other filters; missing IDs are silently absent.
+    """
     conditions: list[str] = []
     params: list[Any] = []
 
+    if id is not None:
+        conditions.append("id = ?")
+        params.append(id)
+    if ids:
+        conditions.append(f"id IN ({','.join('?' for _ in ids)})")
+        params.extend(ids)
     if status:
         conditions.append("status = ?")
         params.append(resolve_finding_status(status))
