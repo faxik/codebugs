@@ -21,6 +21,7 @@ def _conn():
 
 SERVER_NAMES = {
     "findings": "codebugs",
+    "provenance": "codeprovenance",
     "reqs": "codereqs",
     "merge": "codemerge",
     "sweep": "codesweep",

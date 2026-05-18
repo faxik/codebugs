@@ -1,0 +1,2552 @@
+[
+  {
+    "description": "Add a code finding.\n\nArgs:\n    severity: critical, high, medium, or low\n    category: Finding category (e.g. tz_naive_datetime, n_plus_one, missing_validation).\n              Call `categories` first to reuse existing category names.\n    file: File path relative to project root\n    description: What's wrong\n    source: Who created this finding (default: claude)\n    tags: Optional tags for grouping\n    meta: Optional JSON metadata (lines, module, rule_code, etc.)\n    reported_at_commit: Git SHA when finding was created (auto-detected from HEAD if omitted)\n    reported_at_ref: Version/tag label (e.g. \"v2.1.0\"), always caller-supplied\n",
+    "inputSchema": {
+      "properties": {
+        "category": {
+          "title": "Category",
+          "type": "string"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "meta": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Meta"
+        },
+        "reported_at_commit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reported At Commit"
+        },
+        "reported_at_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reported At Ref"
+        },
+        "severity": {
+          "title": "Severity",
+          "type": "string"
+        },
+        "source": {
+          "default": "claude",
+          "title": "Source",
+          "type": "string"
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tags"
+        }
+      },
+      "required": [
+        "severity",
+        "category",
+        "file",
+        "description"
+      ],
+      "title": "addArguments",
+      "type": "object"
+    },
+    "name": "add"
+  },
+  {
+    "description": "Add multiple findings at once.\n\nArgs:\n    findings: List of finding objects, each with keys:\n        severity, category, file, description, and optionally:\n        source, tags, meta, reported_at_commit, reported_at_ref\n    reported_at_commit: Default commit SHA for all findings (auto-detected if omitted).\n                        Per-finding values override this.\n    reported_at_ref: Default version label for all findings.\n                     Per-finding values override this.\n",
+    "inputSchema": {
+      "properties": {
+        "findings": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Findings",
+          "type": "array"
+        },
+        "reported_at_commit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reported At Commit"
+        },
+        "reported_at_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reported At Ref"
+        }
+      },
+      "required": [
+        "findings"
+      ],
+      "title": "batch_addArguments",
+      "type": "object"
+    },
+    "name": "batch_add"
+  },
+  {
+    "description": "Defer an item by adding a blocker.\n\nArgs:\n    item_id: The blocked entity (e.g. \"CB-5\", \"FR-012\")\n    reason: Why it's blocked\n    blocked_by: Dependency entity (e.g. \"CB-3\"). Required for entity_resolved triggers.\n    trigger_type: entity_resolved, date, or manual.\n                  Defaults to entity_resolved if blocked_by provided, manual otherwise.\n    trigger_at: Date/datetime for date triggers (e.g. \"2026-04-10\"). Normalized to UTC.\n",
+    "inputSchema": {
+      "properties": {
+        "blocked_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Blocked By"
+        },
+        "item_id": {
+          "title": "Item Id",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "trigger_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Trigger At"
+        },
+        "trigger_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Trigger Type"
+        }
+      },
+      "required": [
+        "item_id",
+        "reason"
+      ],
+      "title": "blockers_addArguments",
+      "type": "object"
+    },
+    "name": "blockers_add"
+  },
+  {
+    "description": "Scan for currently actionable items \u2014 items whose blockers are all satisfied.\n\nReturns actionable items (all blockers met), partially unblocked items\n(some blockers met), and overdue date triggers.\n",
+    "inputSchema": {
+      "properties": {},
+      "title": "blockers_checkArguments",
+      "type": "object"
+    },
+    "name": "blockers_check"
+  },
+  {
+    "description": "List blockers with filters. Each result includes computed satisfaction state.\n\nArgs:\n    item_id: Filter by blocked item (e.g. \"CB-5\")\n    blocked_by: Filter by dependency (\"what does CB-3 unblock?\")\n    trigger_type: Filter by trigger type (entity_resolved, date, manual)\n    active_only: Only unsatisfied, uncancelled blockers (default: true)\n",
+    "inputSchema": {
+      "properties": {
+        "active_only": {
+          "default": true,
+          "title": "Active Only",
+          "type": "boolean"
+        },
+        "blocked_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Blocked By"
+        },
+        "item_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Item Id"
+        },
+        "trigger_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Trigger Type"
+        }
+      },
+      "title": "blockers_queryArguments",
+      "type": "object"
+    },
+    "name": "blockers_query"
+  },
+  {
+    "description": "Cancel or manually resolve a blocker.\n\nArgs:\n    blocker_id: The blocker row ID\n    action: 'cancel' (any trigger type) or 'resolve' (manual triggers only)\n",
+    "inputSchema": {
+      "properties": {
+        "action": {
+          "title": "Action",
+          "type": "string"
+        },
+        "blocker_id": {
+          "title": "Blocker Id",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "blocker_id",
+        "action"
+      ],
+      "title": "blockers_resolveArguments",
+      "type": "object"
+    },
+    "name": "blockers_resolve"
+  },
+  {
+    "description": "List all existing categories with counts.\nCall this before adding findings to reuse consistent category names.",
+    "inputSchema": {
+      "properties": {},
+      "title": "categoriesArguments",
+      "type": "object"
+    },
+    "name": "categories"
+  },
+  {
+    "description": "Delete a single run or all runs for a benchmark.\n\nArgs:\n    run_id: Delete a specific run (e.g. \"BE-1\")\n    benchmark: Delete all runs for a benchmark name\n",
+    "inputSchema": {
+      "properties": {
+        "benchmark": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Benchmark"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Run Id"
+        }
+      },
+      "title": "codebench_deleteArguments",
+      "type": "object"
+    },
+    "name": "codebench_delete"
+  },
+  {
+    "description": "Import benchmark results from CSV or JSON.\n\nCSV convention: first column is the row label, remaining columns are\nmetric names with numeric values.\n\nJSON convention: array of objects, first key is the row label, rest\nare metric keys with numeric values.\n\nArgs:\n    benchmark: Benchmark name (e.g. \"search-perf\")\n    csv_data: CSV string (header + data rows). Provide csv_data OR json_data.\n    json_data: JSON array string. Provide csv_data OR json_data.\n    date: Run date (default: today, ISO format YYYY-MM-DD)\n    tags: Optional tags (e.g. [\"nightly\", \"v2.1\"])\n    meta: Optional metadata (e.g. {\"git_sha\": \"abc123\", \"ci_url\": \"...\"})\n",
+    "inputSchema": {
+      "properties": {
+        "benchmark": {
+          "title": "Benchmark",
+          "type": "string"
+        },
+        "csv_data": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Csv Data"
+        },
+        "date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Date"
+        },
+        "json_data": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Json Data"
+        },
+        "meta": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Meta"
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tags"
+        }
+      },
+      "required": [
+        "benchmark"
+      ],
+      "title": "codebench_importArguments",
+      "type": "object"
+    },
+    "name": "codebench_import"
+  },
+  {
+    "description": "List benchmarks or runs.\n\nWithout benchmark: lists all benchmark names with run counts.\nWith benchmark: lists runs for that benchmark.\n\nArgs:\n    benchmark: If provided, list runs for this benchmark\n    last_n: Limit to last N runs (only when benchmark is provided)\n",
+    "inputSchema": {
+      "properties": {
+        "benchmark": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Benchmark"
+        },
+        "last_n": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last N"
+        }
+      },
+      "title": "codebench_listArguments",
+      "type": "object"
+    },
+    "name": "codebench_list"
+  },
+  {
+    "description": "Query and pivot benchmark results.\n\ngroup_by=\"row\": original table shape (row_labels as rows, metrics as\ncolumns). Returns one table per run.\n\ngroup_by=\"run\": trend view (runs as rows, metrics as columns).\nReturns one table per row_label.\n\nArgs:\n    benchmark: Benchmark name to query\n    runs: Specific run IDs (default: all matching)\n    date_from: Start date filter (inclusive, YYYY-MM-DD)\n    date_to: End date filter (inclusive, YYYY-MM-DD)\n    metrics: Which metrics to include (default: all)\n    rows: Which row_labels to include (default: all)\n    group_by: Pivot axis \u2014 \"row\" or \"run\"\n    last_n: Limit to last N runs by date\n    format: Output \u2014 \"json\" or \"csv\"\n",
+    "inputSchema": {
+      "properties": {
+        "benchmark": {
+          "title": "Benchmark",
+          "type": "string"
+        },
+        "date_from": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Date From"
+        },
+        "date_to": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Date To"
+        },
+        "format": {
+          "default": "json",
+          "title": "Format",
+          "type": "string"
+        },
+        "group_by": {
+          "default": "row",
+          "title": "Group By",
+          "type": "string"
+        },
+        "last_n": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last N"
+        },
+        "metrics": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metrics"
+        },
+        "rows": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rows"
+        },
+        "runs": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Runs"
+        }
+      },
+      "required": [
+        "benchmark"
+      ],
+      "title": "codebench_queryArguments",
+      "type": "object"
+    },
+    "name": "codebench_query"
+  },
+  {
+    "description": "Check for overlapping file claims with other sessions.\n\nReturns whether the session is clean to proceed, lists any conflicts,\nand records the current main HEAD for CAS comparison at merge time.\n\nArgs:\n    session_id: The merge session ID\n    main_changed_files: Files changed on main since base (optional, for overlap check)\n",
+    "inputSchema": {
+      "properties": {
+        "main_changed_files": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Main Changed Files"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "title": "codemerge_checkArguments",
+      "type": "object"
+    },
+    "name": "codemerge_check"
+  },
+  {
+    "description": "Claim a file as being modified by this session.\n\nArgs:\n    session_id: The merge session ID\n    file_path: File path being modified (relative to repo root)\n",
+    "inputSchema": {
+      "properties": {
+        "file_path": {
+          "title": "File Path",
+          "type": "string"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "file_path"
+      ],
+      "title": "codemerge_claimArguments",
+      "type": "object"
+    },
+    "name": "codemerge_claim"
+  },
+  {
+    "description": "Finish a merge session and release the lock.\n\nArgs:\n    session_id: The merge session ID\n    success: True if merge succeeded (status\u2192done), False if it failed (status\u2192abandoned)\n",
+    "inputSchema": {
+      "properties": {
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "success": {
+          "default": true,
+          "title": "Success",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "title": "codemerge_finishArguments",
+      "type": "object"
+    },
+    "name": "codemerge_finish"
+  },
+  {
+    "description": "Acquire the merge lock and proceed with merging.\n\nUses compare-and-swap on main HEAD to prevent races. If main has moved\nsince check, returns proceed=False with reason='main_moved'. If another\nsession holds the lock, returns proceed=False with reason='lock_held'.\n\nArgs:\n    session_id: The merge session ID\n    expected_main_head: The main HEAD SHA recorded during codemerge_check\n",
+    "inputSchema": {
+      "properties": {
+        "expected_main_head": {
+          "title": "Expected Main Head",
+          "type": "string"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "expected_main_head"
+      ],
+      "title": "codemerge_mergeArguments",
+      "type": "object"
+    },
+    "name": "codemerge_merge"
+  },
+  {
+    "description": "Start a new merge session for a branch.\n\nArgs:\n    session_id: Unique identifier for this merge session\n    branch: Git branch name being merged\n    description: Human-readable description of the work\n    base_commit: Git commit SHA this branch diverged from\n    repo_root: Repo root path (default: cwd)\n    allow_restart: If True, restart an existing active session\n",
+    "inputSchema": {
+      "properties": {
+        "allow_restart": {
+          "default": false,
+          "title": "Allow Restart",
+          "type": "boolean"
+        },
+        "base_commit": {
+          "default": "",
+          "title": "Base Commit",
+          "type": "string"
+        },
+        "branch": {
+          "title": "Branch",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
+        "repo_root": {
+          "default": "",
+          "title": "Repo Root",
+          "type": "string"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "branch"
+      ],
+      "title": "codemerge_startArguments",
+      "type": "object"
+    },
+    "name": "codemerge_start"
+  },
+  {
+    "description": "Add items to a sweep. Atomic upsert: existing items have their\n`recurrence_count` bumped instead of being silently skipped, their\n`last_seen` updated, and their archive flag cleared (R5: re-detected\narchived items un-archive automatically).\n\nArgs:\n    sweep_ref: Sweep ID (SW-N) or name\n    items: Item identifiers to add\n    tags: Optional tags applied to this batch (overwrite on bump)\n\nReturns:\n    {sweep_id, added, recurrence_bumped, duplicates_skipped (alias)}\n",
+    "inputSchema": {
+      "properties": {
+        "items": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "sweep_ref": {
+          "title": "Sweep Ref",
+          "type": "string"
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tags"
+        }
+      },
+      "required": [
+        "sweep_ref",
+        "items"
+      ],
+      "title": "codesweep_addArguments",
+      "type": "object"
+    },
+    "name": "codesweep_add"
+  },
+  {
+    "description": "Archive a sweep. Archived sweeps are excluded from codesweep_list by default.\n\nFor entry-level archive, use `codesweep_archive_items`.\n\nArgs:\n    sweep_ref: Sweep ID (SW-N) or name\n",
+    "inputSchema": {
+      "properties": {
+        "sweep_ref": {
+          "title": "Sweep Ref",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sweep_ref"
+      ],
+      "title": "codesweep_archiveArguments",
+      "type": "object"
+    },
+    "name": "codesweep_archive"
+  },
+  {
+    "description": "Selectively archive entries within a sweep (soft-delete).\n\nArchived entries are excluded from `codesweep_next`, `codesweep_status`\ntotals, and default `codesweep_list_items`. They remain matchable by\n`codesweep_add` for recurrence detection \u2014 re-adding un-archives them\nwith `recurrence_count` carried forward (R5 invariant).\n\nAt least one filter is required.\n\nArgs:\n    sweep_ref: Sweep ID (SW-N) or name\n    items: Specific item identifiers to archive\n    where_status: Archive entries currently in this state\n    older_than: Duration spec \u2014 '30d', '2w', '6m', '1y'. Compares against\n        the entry's last activity timestamp.\n    reason: Free-form reason recorded on each archived entry\n",
+    "inputSchema": {
+      "properties": {
+        "items": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Items"
+        },
+        "older_than": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Older Than"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "sweep_ref": {
+          "title": "Sweep Ref",
+          "type": "string"
+        },
+        "where_status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Where Status"
+        }
+      },
+      "required": [
+        "sweep_ref"
+      ],
+      "title": "codesweep_archive_itemsArguments",
+      "type": "object"
+    },
+    "name": "codesweep_archive_items"
+  },
+  {
+    "description": "Create a new sweep for batch iteration over items.\n\nArgs:\n    name: Optional human-readable name (must be unique)\n    description: What this sweep is for\n    default_batch_size: Default items per batch (default: 10)\n    lifecycle: Ordered list of allowed states (default [\"pending\",\"done\"]).\n        For retro-style workflows: [\"DETECTED\",\"CONFIRMED\",\"ESCALATED\",\n        \"POSTPONED\",\"RESOLVED\",\"DROPPED\"].\n    terminal_states: States that count as \"processed\" (default [\"done\"]).\n    transitions: Optional dict[state, list[allowed_next_state]] for\n        DAG-constrained lifecycles. None = unconstrained transitions.\n",
+    "inputSchema": {
+      "properties": {
+        "default_batch_size": {
+          "default": 10,
+          "title": "Default Batch Size",
+          "type": "integer"
+        },
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
+        "lifecycle": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lifecycle"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "terminal_states": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Terminal States"
+        },
+        "transitions": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Transitions"
+        }
+      },
+      "title": "codesweep_createArguments",
+      "type": "object"
+    },
+    "name": "codesweep_create"
+  },
+  {
+    "description": "List all sweeps with summary counts.\n\nArgs:\n    include_archived: Include archived sweeps (default: false)\n",
+    "inputSchema": {
+      "properties": {
+        "include_archived": {
+          "default": false,
+          "title": "Include Archived",
+          "type": "boolean"
+        }
+      },
+      "title": "codesweep_listArguments",
+      "type": "object"
+    },
+    "name": "codesweep_list"
+  },
+  {
+    "description": "List items in a sweep with optional filters.\n\nArgs:\n    sweep_ref: Sweep ID (SW-N) or name\n    state: Filter to a specific state\n    tag: Filter to items having this tag\n    include_archived: Include archived entries alongside live ones\n    archived_only: Show only archived entries (overrides include_archived)\n    limit: Max number of entries to return\n",
+    "inputSchema": {
+      "properties": {
+        "archived_only": {
+          "default": false,
+          "title": "Archived Only",
+          "type": "boolean"
+        },
+        "include_archived": {
+          "default": false,
+          "title": "Include Archived",
+          "type": "boolean"
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Limit"
+        },
+        "state": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "State"
+        },
+        "sweep_ref": {
+          "title": "Sweep Ref",
+          "type": "string"
+        },
+        "tag": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tag"
+        }
+      },
+      "required": [
+        "sweep_ref"
+      ],
+      "title": "codesweep_list_itemsArguments",
+      "type": "object"
+    },
+    "name": "codesweep_list_items"
+  },
+  {
+    "description": "Mark items by state transition.\n\nArgs:\n    sweep_ref: Sweep ID (SW-N) or name\n    items: Item identifiers to mark\n    processed: Legacy mode \u2014 True maps to first terminal state, False\n        to first non-terminal state. Ignored if `state` is set.\n    state: Explicit target state. Validated against the sweep's\n        `lifecycle` and `transitions` DAG (if declared).\n",
+    "inputSchema": {
+      "properties": {
+        "items": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "processed": {
+          "default": true,
+          "title": "Processed",
+          "type": "boolean"
+        },
+        "state": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "State"
+        },
+        "sweep_ref": {
+          "title": "Sweep Ref",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sweep_ref",
+        "items"
+      ],
+      "title": "codesweep_markArguments",
+      "type": "object"
+    },
+    "name": "codesweep_mark"
+  },
+  {
+    "description": "Get next batch of unprocessed (non-terminal, non-archived) items in\ninsertion order.\n\nArgs:\n    sweep_ref: Sweep ID (SW-N) or name\n    limit: Batch size (overrides sweep default)\n    tags: Filter to items matching any of these tags\n",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Limit"
+        },
+        "sweep_ref": {
+          "title": "Sweep Ref",
+          "type": "string"
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tags"
+        }
+      },
+      "required": [
+        "sweep_ref"
+      ],
+      "title": "codesweep_nextArguments",
+      "type": "object"
+    },
+    "name": "codesweep_next"
+  },
+  {
+    "description": "Sweep overview \u2014 total/processed/remaining/archived counts, per-tag and\nper-state breakdowns. Archived entries are excluded from total/processed/\nremaining and reported separately as `archived`.\n\nArgs:\n    sweep_ref: Sweep ID (SW-N) or name\n",
+    "inputSchema": {
+      "properties": {
+        "sweep_ref": {
+          "title": "Sweep Ref",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sweep_ref"
+      ],
+      "title": "codesweep_statusArguments",
+      "type": "object"
+    },
+    "name": "codesweep_status"
+  },
+  {
+    "description": "Fetch a single finding by ID with full body (description, severity,\nstatus, tags, meta, timestamps, commit refs).\n\nRaises a not-found error if the ID does not exist. For lenient batch\nlookup that silently drops missing IDs, use `query(ids=[...])`.\n\nArgs:\n    finding_id: The finding ID (e.g. CB-1383)\n",
+    "inputSchema": {
+      "properties": {
+        "finding_id": {
+          "title": "Finding Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "finding_id"
+      ],
+      "title": "getArguments",
+      "type": "object"
+    },
+    "name": "get"
+  },
+  {
+    "description": "Flag an item as living on a feature branch (not yet integrated).\nCalled by worktree-setup.sh when a branch is created.\n\nArgs:\n    item_ref: The item id (e.g. CB-5).\n    branch_name: Git branch holding the work.\n",
+    "inputSchema": {
+      "properties": {
+        "branch_name": {
+          "title": "Branch Name",
+          "type": "string"
+        },
+        "item_ref": {
+          "title": "Item Ref",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_ref",
+        "branch_name"
+      ],
+      "title": "_mark_branch_onlyArguments",
+      "type": "object"
+    },
+    "name": "mark_branch_only"
+  },
+  {
+    "description": "Mark an item as merged to main. Sets done_commit, status='done',\nclears branch_only. Called by worktree-finish.sh.\n\nArgs:\n    item_ref: The item id (e.g. CB-5).\n    commit: Commit SHA where the work landed on main.\n",
+    "inputSchema": {
+      "properties": {
+        "commit": {
+          "title": "Commit",
+          "type": "string"
+        },
+        "item_ref": {
+          "title": "Item Ref",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_ref",
+        "commit"
+      ],
+      "title": "_mark_integratedArguments",
+      "type": "object"
+    },
+    "name": "mark_integrated"
+  },
+  {
+    "description": "Attach an item (bug / requirement / external) to a milestone.\n\nArgs:\n    milestone_id: Target milestone slug.\n    item_kind: 'bug' (CB-N), 'requirement' (FR-N), or 'external'.\n    item_ref: The id of the underlying entity (must exist for bug/req).\n    size: 'large' (worktree+sprint), 'small' (1-2h), 'triage' (minutes).\n    priority: Lower = higher priority. Default 100.\n    acceptance: Markdown acceptance criteria. Required for size='large'.\n    linked_frs: Optional list of FR ids to link (used by pull_next eligibility).\n",
+    "inputSchema": {
+      "properties": {
+        "acceptance": {
+          "default": "",
+          "title": "Acceptance",
+          "type": "string"
+        },
+        "item_kind": {
+          "title": "Item Kind",
+          "type": "string"
+        },
+        "item_ref": {
+          "title": "Item Ref",
+          "type": "string"
+        },
+        "linked_frs": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Linked Frs"
+        },
+        "milestone_id": {
+          "title": "Milestone Id",
+          "type": "string"
+        },
+        "priority": {
+          "default": 100,
+          "title": "Priority",
+          "type": "integer"
+        },
+        "size": {
+          "default": "small",
+          "title": "Size",
+          "type": "string"
+        }
+      },
+      "required": [
+        "milestone_id",
+        "item_kind",
+        "item_ref"
+      ],
+      "title": "milestone_add_itemArguments",
+      "type": "object"
+    },
+    "name": "milestone_add_item"
+  },
+  {
+    "description": "Audit log query with filters. Returns most-recent rows first.\n\nArgs:\n    milestone_id: Filter by milestone slug.\n    item_ref: Filter by item id.\n    actor: Filter by actor.\n    since: ISO datetime \u2014 only rows at or after this time.\n    limit: Max rows (default 200).\n",
+    "inputSchema": {
+      "properties": {
+        "actor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Actor"
+        },
+        "item_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Item Ref"
+        },
+        "limit": {
+          "default": 200,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "milestone_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Milestone Id"
+        },
+        "since": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Since"
+        }
+      },
+      "title": "milestone_audit_queryArguments",
+      "type": "object"
+    },
+    "name": "milestone_audit_query"
+  },
+  {
+    "description": "Close a release milestone. Refuses if items are unfinished, on a\nbranch, or have unresolved blockers. Streams cannot be closed.\n\nArgs:\n    id: Milestone slug (must be kind='release').\n    force: Override the close-gate (still won't close streams). Audit-logged.\n    reason: Audit reason for the close.\n",
+    "inputSchema": {
+      "properties": {
+        "force": {
+          "default": false,
+          "title": "Force",
+          "type": "boolean"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "reason": {
+          "default": "",
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "_milestone_closeArguments",
+      "type": "object"
+    },
+    "name": "milestone_close"
+  },
+  {
+    "description": "Create a new milestone.\n\nArgs:\n    id: Slug identifier, e.g. 'release/1.2' or 'stream/security'.\n    kind: 'release' or 'stream'. Streams never close.\n    description: Short charter for the milestone.\n    target_date: ISO date (e.g. '2026-06-30'). Optional, releases only.\n",
+    "inputSchema": {
+      "properties": {
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "target_date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Date"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "description"
+      ],
+      "title": "milestone_createArguments",
+      "type": "object"
+    },
+    "name": "milestone_create"
+  },
+  {
+    "description": "Move an item to stream/maintenance (or another milestone) and\nmark it deferred.\n\nArgs:\n    item_ref: The item to defer.\n    to_milestone: Destination (default 'stream/maintenance').\n    reason: Optional audit reason.\n",
+    "inputSchema": {
+      "properties": {
+        "item_ref": {
+          "title": "Item Ref",
+          "type": "string"
+        },
+        "reason": {
+          "default": "",
+          "title": "Reason",
+          "type": "string"
+        },
+        "to_milestone": {
+          "default": "stream/maintenance",
+          "title": "To Milestone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_ref"
+      ],
+      "title": "_milestone_deferArguments",
+      "type": "object"
+    },
+    "name": "milestone_defer"
+  },
+  {
+    "description": "List milestones with optional filters.\n\nArgs:\n    kind: 'release' or 'stream'.\n    state: 'open' / 'closing' / 'shipped' / 'archived'.\n",
+    "inputSchema": {
+      "properties": {
+        "kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kind"
+        },
+        "state": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "State"
+        }
+      },
+      "title": "milestone_listArguments",
+      "type": "object"
+    },
+    "name": "milestone_list"
+  },
+  {
+    "description": "Move an item to a different milestone.\n\nArgs:\n    item_ref: The item to move (e.g. CB-5).\n    to_milestone: Destination milestone slug.\n    reason: One-line audit reason.\n",
+    "inputSchema": {
+      "properties": {
+        "item_ref": {
+          "title": "Item Ref",
+          "type": "string"
+        },
+        "reason": {
+          "default": "",
+          "title": "Reason",
+          "type": "string"
+        },
+        "to_milestone": {
+          "title": "To Milestone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_ref",
+        "to_milestone"
+      ],
+      "title": "milestone_move_itemArguments",
+      "type": "object"
+    },
+    "name": "milestone_move_item"
+  },
+  {
+    "description": "Set an item's status. Records done_commit if status is terminal.\n\nArgs:\n    item_ref: The item id (e.g. CB-5).\n    status: open / in_progress / done / deferred / dismissed.\n    commit: SHA where the work landed on main (recorded for terminal status).\n    reason: Optional audit reason.\n",
+    "inputSchema": {
+      "properties": {
+        "commit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Commit"
+        },
+        "item_ref": {
+          "title": "Item Ref",
+          "type": "string"
+        },
+        "reason": {
+          "default": "",
+          "title": "Reason",
+          "type": "string"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_ref",
+        "status"
+      ],
+      "title": "milestone_set_statusArguments",
+      "type": "object"
+    },
+    "name": "milestone_set_status"
+  },
+  {
+    "description": "Detailed rollup for one milestone: item counts by status / size,\nblockers, branch-only items, days to target.\n\nArgs:\n    id: Milestone slug.\n",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "milestone_statusArguments",
+      "type": "object"
+    },
+    "name": "milestone_status"
+  },
+  {
+    "description": "Update mutable fields of a milestone. id and kind are immutable.\n\nArgs:\n    id: Milestone slug.\n    description: New description (or None to skip).\n    target_date: New ISO target date (or None to skip).\n    state: New state (open / closing / shipped / archived).\n",
+    "inputSchema": {
+      "properties": {
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "state": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "State"
+        },
+        "target_date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Date"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "milestone_updateArguments",
+      "type": "object"
+    },
+    "name": "milestone_update"
+  },
+  {
+    "description": "Claim the next eligible item for the calling agent. Returns the\nitem dict or None if nothing eligible.\n\nPriority: stream/security > release/* (earliest target_date) >\n          stream/triage > stream/maintenance.\n\nArgs:\n    agent_id: Stable id for the calling agent. Used as actor in audit.\n    capacity: Dict like {'large':1,'small':2,'triage':5}. Defaults\n        to those values if not provided.\n",
+    "inputSchema": {
+      "properties": {
+        "agent_id": {
+          "title": "Agent Id",
+          "type": "string"
+        },
+        "capacity": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capacity"
+        }
+      },
+      "required": [
+        "agent_id"
+      ],
+      "title": "_pull_nextArguments",
+      "type": "object"
+    },
+    "name": "pull_next"
+  },
+  {
+    "description": "Search and filter findings. Returns structured results.\n\nSupports lookup by ID via `id=` (single) or `ids=` (batch). Missing IDs\nare silently absent from the result so the caller can diff. For a strict\nsingle-ID fetch that errors on miss, use `get` instead.\n\nArgs:\n    id: Fetch a single finding by exact ID (e.g. CB-1383)\n    ids: Fetch multiple findings by ID list; missing IDs are skipped\n    status: Filter by status (open, in_progress, fixed, not_a_bug, wont_fix, stale, deferred). Aliases accepted.\n            Use 'deferred' to find items with active blockers.\n    severity: Filter by severity (critical, high, medium, low)\n    category: Filter by exact category\n    file: Filter by file path (substring match)\n    source: Filter by source (claude, ruff, human, etc.)\n    tag: Filter by tag (finds findings containing this tag)\n    meta_key: Filter by metadata key existence\n    meta_value: Filter by metadata value (requires meta_key)\n    commit: Filter by reported_at_commit (prefix match, hex validated)\n    ref: Filter by reported_at_ref (exact match)\n    group_by: Group results by: file, category, severity, status, source\n    limit: Max results (default 100)\n    offset: Pagination offset\n",
+    "inputSchema": {
+      "properties": {
+        "category": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Category"
+        },
+        "commit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Commit"
+        },
+        "file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File"
+        },
+        "group_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group By"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Id"
+        },
+        "ids": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ids"
+        },
+        "limit": {
+          "default": 100,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "meta_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Meta Key"
+        },
+        "meta_value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Meta Value"
+        },
+        "offset": {
+          "default": 0,
+          "title": "Offset",
+          "type": "integer"
+        },
+        "ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ref"
+        },
+        "severity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Severity"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        },
+        "tag": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tag"
+        }
+      },
+      "title": "queryArguments",
+      "type": "object"
+    },
+    "name": "query"
+  },
+  {
+    "description": "Free agent capacity for an item.\n\nArgs:\n    item_ref: The item id (e.g. CB-5).\n    status: 'done' (terminal) or 'abandoned' (returns item to 'open').\n    commit: SHA where the work landed (recorded if status='done').\n",
+    "inputSchema": {
+      "properties": {
+        "commit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Commit"
+        },
+        "item_ref": {
+          "title": "Item Ref",
+          "type": "string"
+        },
+        "status": {
+          "default": "done",
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_ref"
+      ],
+      "title": "_release_itemArguments",
+      "type": "object"
+    },
+    "name": "release_item"
+  },
+  {
+    "description": "Add a requirement.\n\nArgs:\n    req_id: Requirement ID (e.g. FR-001)\n    description: What the system shall do\n    section: Section name (e.g. \"1.10 Document Sorting\")\n    priority: must, should, or could\n    status: planned, partial, implemented, verified, superseded, obsolete\n    source: Where this requirement came from (e.g. Take 26, NEW)\n    test_coverage: Test file name(s)\n    tags: Optional tags\n    meta: Optional metadata\n",
+    "inputSchema": {
+      "properties": {
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "meta": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Meta"
+        },
+        "priority": {
+          "default": "should",
+          "title": "Priority",
+          "type": "string"
+        },
+        "req_id": {
+          "title": "Req Id",
+          "type": "string"
+        },
+        "section": {
+          "default": "",
+          "title": "Section",
+          "type": "string"
+        },
+        "source": {
+          "default": "",
+          "title": "Source",
+          "type": "string"
+        },
+        "status": {
+          "default": "planned",
+          "title": "Status",
+          "type": "string"
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tags"
+        },
+        "test_coverage": {
+          "default": "",
+          "title": "Test Coverage",
+          "type": "string"
+        }
+      },
+      "required": [
+        "req_id",
+        "description"
+      ],
+      "title": "reqs_addArguments",
+      "type": "object"
+    },
+    "name": "reqs_add"
+  },
+  {
+    "description": "Store embeddings for multiple requirements at once.\n\nArgs:\n    embeddings: Dict mapping requirement ID to float vector\n",
+    "inputSchema": {
+      "properties": {
+        "embeddings": {
+          "additionalProperties": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "title": "Embeddings",
+          "type": "object"
+        }
+      },
+      "required": [
+        "embeddings"
+      ],
+      "title": "reqs_batch_embedArguments",
+      "type": "object"
+    },
+    "name": "reqs_batch_embed"
+  },
+  {
+    "description": "Store an embedding vector for a requirement.\n\nThe caller generates the embedding (e.g. via an embedding API).\nEnables semantic search across requirements via reqs_search_similar.\n\nArgs:\n    req_id: Requirement ID\n    embedding: Float vector (any dimensionality)\n",
+    "inputSchema": {
+      "properties": {
+        "embedding": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Embedding",
+          "type": "array"
+        },
+        "req_id": {
+          "title": "Req Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "req_id",
+        "embedding"
+      ],
+      "title": "reqs_embedArguments",
+      "type": "object"
+    },
+    "name": "reqs_embed"
+  },
+  {
+    "description": "Report on embedding coverage --- how many requirements have embeddings.",
+    "inputSchema": {
+      "properties": {},
+      "title": "reqs_embedding_statsArguments",
+      "type": "object"
+    },
+    "name": "reqs_embedding_stats"
+  },
+  {
+    "description": "Fetch a single requirement by ID with full body.\n\nRaises a not-found error if the ID does not exist. For lenient batch\nlookup that silently drops missing IDs, use `reqs_query(ids=[...])`.\n\nArgs:\n    req_id: The requirement ID (e.g. FR-001)\n",
+    "inputSchema": {
+      "properties": {
+        "req_id": {
+          "title": "Req Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "req_id"
+      ],
+      "title": "reqs_getArguments",
+      "type": "object"
+    },
+    "name": "reqs_get"
+  },
+  {
+    "description": "Import requirements from a REQUIREMENTS.md file.\n\nParses markdown tables with columns:\n| ID | Requirement | Priority | Status | Source | Test Coverage |\n\nUses INSERT OR REPLACE, so re-importing updates existing entries.\n\nArgs:\n    markdown_path: Path to the REQUIREMENTS.md file\n",
+    "inputSchema": {
+      "properties": {
+        "markdown_path": {
+          "title": "Markdown Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "markdown_path"
+      ],
+      "title": "reqs_importArguments",
+      "type": "object"
+    },
+    "name": "reqs_import"
+  },
+  {
+    "description": "Search and filter requirements.\n\nSupports lookup by ID via `id=` (single) or `ids=` (batch). Missing IDs\nare silently absent from the result. For a strict single-ID fetch that\nerrors on miss, use `reqs_get`.\n\nArgs:\n    id: Fetch a single requirement by exact ID (e.g. FR-001)\n    ids: Fetch multiple requirements by ID list; missing IDs are skipped\n    status: Filter by status (planned, partial, implemented, verified, superseded, obsolete, deferred).\n            Use 'deferred' to find requirements with active blockers.\n    priority: Filter by priority (must, should, could)\n    section: Filter by section (substring match)\n    search: Search in description and ID\n    source: Filter by source (substring match)\n    tag: Filter by tag\n    group_by: Group by: section, status, priority, source\n    limit: Max results (default 100)\n    offset: Pagination offset\n",
+    "inputSchema": {
+      "properties": {
+        "group_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group By"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Id"
+        },
+        "ids": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ids"
+        },
+        "limit": {
+          "default": 100,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "title": "Offset",
+          "type": "integer"
+        },
+        "priority": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Priority"
+        },
+        "search": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Search"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        },
+        "tag": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tag"
+        }
+      },
+      "title": "reqs_queryArguments",
+      "type": "object"
+    },
+    "name": "reqs_query"
+  },
+  {
+    "description": "Find requirements semantically similar to a query.\n\nPass a query embedding (from the same model used to embed requirements).\nReturns requirements ranked by cosine similarity.\n\nArgs:\n    query_embedding: Query vector\n    limit: Max results (default 10)\n    min_similarity: Minimum cosine similarity (default 0.3)\n    status: Optional status filter\n",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "default": 10,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "min_similarity": {
+          "default": 0.3,
+          "title": "Min Similarity",
+          "type": "number"
+        },
+        "query_embedding": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Query Embedding",
+          "type": "array"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        }
+      },
+      "required": [
+        "query_embedding"
+      ],
+      "title": "reqs_search_similarArguments",
+      "type": "object"
+    },
+    "name": "reqs_search_similar"
+  },
+  {
+    "description": "Aggregated requirement counts by status x priority.\n\nArgs:\n    group_by: Group by: status, priority, section, source\n",
+    "inputSchema": {
+      "properties": {
+        "group_by": {
+          "default": "status",
+          "title": "Group By",
+          "type": "string"
+        }
+      },
+      "title": "reqs_statsArguments",
+      "type": "object"
+    },
+    "name": "reqs_stats"
+  },
+  {
+    "description": "Dashboard overview --- status breakdown, priority split,\nsection progress, requirements without tests, deferred counts. Start here.",
+    "inputSchema": {
+      "properties": {},
+      "title": "reqs_summaryArguments",
+      "type": "object"
+    },
+    "name": "reqs_summary"
+  },
+  {
+    "description": "Update a requirement's status, description, or metadata.\n\nArgs:\n    req_id: Requirement ID (e.g. FR-001)\n    status: New status: planned, partial, implemented, verified, superseded, obsolete\n    description: Updated description\n    priority: Updated priority: must, should, could\n    section: Updated section name\n    test_coverage: Updated test file reference\n    notes: Notes (stored in meta.notes)\n    tags: Replace tags\n    meta_update: Merge metadata keys\n",
+    "inputSchema": {
+      "properties": {
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "meta_update": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Meta Update"
+        },
+        "notes": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Notes"
+        },
+        "priority": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Priority"
+        },
+        "req_id": {
+          "title": "Req Id",
+          "type": "string"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tags"
+        },
+        "test_coverage": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Test Coverage"
+        }
+      },
+      "required": [
+        "req_id"
+      ],
+      "title": "reqs_updateArguments",
+      "type": "object"
+    },
+    "name": "reqs_update"
+  },
+  {
+    "description": "Verify requirements for issues.\n\nRuns automated checks to find problems:\n- tests: do referenced test files actually exist?\n- ids: duplicate IDs, numbering gaps\n- status: contradictions (description says superseded but status says planned)\n\nArgs:\n    checks: List of checks to run (default: all). Options: tests, ids, status\n    project_dir: Project root for test file verification (default: cwd)\n",
+    "inputSchema": {
+      "properties": {
+        "checks": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checks"
+        },
+        "project_dir": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project Dir"
+        }
+      },
+      "title": "reqs_verifyArguments",
+      "type": "object"
+    },
+    "name": "reqs_verify"
+  },
+  {
+    "description": "Check if findings are stale by comparing against git history.\n\nReturns file_status for each finding:\n- current: file unchanged since finding was reported\n- modified: file changed but still exists\n- renamed: file was renamed/moved\n- deleted: file no longer exists\n- unknown: can't determine (no provenance data, unreachable commit)\n\nArgs:\n    finding_id: Check a single finding (e.g. CB-1)\n    status: Filter by finding status (default: open)\n    category: Filter by category\n    file: Filter by file path (substring match)\n",
+    "inputSchema": {
+      "properties": {
+        "category": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Category"
+        },
+        "file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File"
+        },
+        "finding_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Finding Id"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        }
+      },
+      "title": "staleness_checkArguments",
+      "type": "object"
+    },
+    "name": "staleness_check"
+  },
+  {
+    "description": "Aggregated cross-tabulated counts.\n\nArgs:\n    group_by: Group by: severity, category, status, file, source\n",
+    "inputSchema": {
+      "properties": {
+        "group_by": {
+          "default": "severity",
+          "title": "Group By",
+          "type": "string"
+        }
+      },
+      "title": "statsArguments",
+      "type": "object"
+    },
+    "name": "stats"
+  },
+  {
+    "description": "Dashboard overview \u2014 open/resolved counts, severity breakdown,\ntop categories, hottest files, deferred counts. Start here for orientation.",
+    "inputSchema": {
+      "properties": {},
+      "title": "summaryArguments",
+      "type": "object"
+    },
+    "name": "summary"
+  },
+  {
+    "description": "Mark a triage item as dismissed. Propagates to the underlying entity:\nbug \u2192 finding 'not_a_bug'; requirement \u2192 requirement 'obsolete';\nexternal \u2192 no propagation.\n\nArgs:\n    bug_id: The item id (e.g. CB-5).\n    reason: Required one-line audit reason.\n",
+    "inputSchema": {
+      "properties": {
+        "bug_id": {
+          "title": "Bug Id",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bug_id",
+        "reason"
+      ],
+      "title": "_triage_dismissArguments",
+      "type": "object"
+    },
+    "name": "triage_dismiss"
+  },
+  {
+    "description": "List open items in stream/triage, oldest first.\n\nArgs:\n    limit: Max rows (default 50).\n",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "default": 50,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "title": "_triage_inboxArguments",
+      "type": "object"
+    },
+    "name": "triage_inbox"
+  },
+  {
+    "description": "Move a triage item to a target milestone.\n\nArgs:\n    bug_id: The item id (e.g. CB-5).\n    to_milestone: Destination milestone slug.\n    size: 'large' / 'small' / 'triage'. Default 'small'.\n    acceptance: Required for size='large'.\n    priority: Lower = higher priority. Default 100.\n    linked_frs: FR ids linked to this item (required for size='large' bugs\n        in release milestones to be pull-eligible).\n",
+    "inputSchema": {
+      "properties": {
+        "acceptance": {
+          "default": "",
+          "title": "Acceptance",
+          "type": "string"
+        },
+        "bug_id": {
+          "title": "Bug Id",
+          "type": "string"
+        },
+        "linked_frs": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Linked Frs"
+        },
+        "priority": {
+          "default": 100,
+          "title": "Priority",
+          "type": "integer"
+        },
+        "size": {
+          "default": "small",
+          "title": "Size",
+          "type": "string"
+        },
+        "to_milestone": {
+          "title": "To Milestone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bug_id",
+        "to_milestone"
+      ],
+      "title": "_triage_promoteArguments",
+      "type": "object"
+    },
+    "name": "triage_promote"
+  },
+  {
+    "description": "Update a finding's status, notes, tags, or metadata.\n\nArgs:\n    finding_id: The finding ID (e.g. CB-1)\n    status: New status: open, in_progress, fixed, not_a_bug, wont_fix, stale.\n            Aliases accepted: done/resolved/implemented/closed \u2192 fixed,\n            wontfix \u2192 wont_fix, invalid \u2192 not_a_bug,\n            active/working/in-progress \u2192 in_progress\n    notes: Add/update notes (stored in meta.notes)\n    tags: Replace tags list\n    meta_update: Merge additional metadata keys\n    reported_at_ref: Update version/tag label (e.g. \"v2.1.0\")\n",
+    "inputSchema": {
+      "properties": {
+        "finding_id": {
+          "title": "Finding Id",
+          "type": "string"
+        },
+        "meta_update": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Meta Update"
+        },
+        "notes": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Notes"
+        },
+        "reported_at_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reported At Ref"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tags"
+        }
+      },
+      "required": [
+        "finding_id"
+      ],
+      "title": "updateArguments",
+      "type": "object"
+    },
+    "name": "update"
+  },
+  {
+    "description": "Snapshot of agent_capacity. agent_id=None returns all agents.\n\nArgs:\n    agent_id: Filter to one agent (None = all).\n",
+    "inputSchema": {
+      "properties": {
+        "agent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Agent Id"
+        }
+      },
+      "title": "_wip_statusArguments",
+      "type": "object"
+    },
+    "name": "wip_status"
+  }
+]

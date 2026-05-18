@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from codebugs import blockers, db, milestones, reqs
+from codebugs import blockers, db, findings, milestones, reqs
 
 
 @pytest.fixture
@@ -24,7 +24,7 @@ def conn(tmp_project):
 def _add_finding(conn, fid="CB-1", description="bug", **kw):
     defaults = dict(severity="medium", category="bug", file="src/x.py")
     defaults.update(kw)
-    return db.add_finding(conn, finding_id=fid, description=description, **defaults)
+    return findings.add_finding(conn, finding_id=fid, description=description, **defaults)
 
 
 def _add_req(conn, rid="FR-001", description="req", **kw):
@@ -327,7 +327,7 @@ class TestAutoRouting:
         assert item["milestone_id"] == "stream/triage"
 
     def test_batch_add_routes_each(self, conn):
-        db.batch_add_findings(conn, [
+        findings.batch_add_findings(conn, [
             {"severity": "high", "category": "bug", "file": "a.py",
              "description": "x"},
             {"severity": "critical", "category": "security:xss",
@@ -361,9 +361,9 @@ class TestAutoRouting:
         c = sqlite3.connect(path)
         c.row_factory = sqlite3.Row
         c.execute("PRAGMA journal_mode=WAL")
-        db._ensure_findings_schema(c)
+        findings.ensure_schema(c)
         # Hook is already registered (module-level). It must not crash.
-        result = db.add_finding(
+        result = findings.add_finding(
             c, severity="high", category="bug",
             file="x.py", description="d",
         )

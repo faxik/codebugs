@@ -8,6 +8,7 @@ import re
 import sqlite3
 from typing import Any
 
+from codebugs import db
 from codebugs.types import resolve_requirement_status, resolve_priority, utc_now
 
 
@@ -94,13 +95,6 @@ def _migrate_to_lowercase(conn: sqlite3.Connection) -> None:
     """)
 
 
-def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
-    d = dict(row)
-    d["tags"] = json.loads(d["tags"]) if isinstance(d["tags"], str) else d["tags"]
-    d["meta"] = json.loads(d["meta"]) if isinstance(d["meta"], str) else d["meta"]
-    return d
-
-
 def add_requirement(
     conn: sqlite3.Connection,
     *,
@@ -130,7 +124,7 @@ def add_requirement(
         ),
     )
     conn.commit()
-    return _row_to_dict(conn.execute("SELECT * FROM requirements WHERE id = ?", (req_id,)).fetchone())
+    return db.row_to_dict(conn.execute("SELECT * FROM requirements WHERE id = ?", (req_id,)).fetchone())
 
 
 def batch_add_requirements(
@@ -163,7 +157,7 @@ def batch_add_requirements(
     rows = conn.execute(
         f"SELECT * FROM requirements WHERE id IN ({','.join('?' for _ in ids)})", ids,
     ).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    return [db.row_to_dict(r) for r in rows]
 
 
 def update_requirement(
@@ -219,7 +213,7 @@ def update_requirement(
         params.append(json.dumps(existing_meta))
 
     if not updates:
-        return _row_to_dict(row)
+        return db.row_to_dict(row)
 
     updates.append("updated_at = ?")
     params.append(utc_now())
@@ -227,7 +221,7 @@ def update_requirement(
 
     conn.execute(f"UPDATE requirements SET {', '.join(updates)} WHERE id = ?", params)
     conn.commit()
-    return _row_to_dict(conn.execute("SELECT * FROM requirements WHERE id = ?", (req_id,)).fetchone())
+    return db.row_to_dict(conn.execute("SELECT * FROM requirements WHERE id = ?", (req_id,)).fetchone())
 
 
 def get_requirement(conn: sqlite3.Connection, req_id: str) -> dict[str, Any]:
@@ -235,7 +229,7 @@ def get_requirement(conn: sqlite3.Connection, req_id: str) -> dict[str, Any]:
     row = conn.execute("SELECT * FROM requirements WHERE id = ?", (req_id,)).fetchone()
     if not row:
         raise KeyError(f"Requirement not found: {req_id}")
-    return _row_to_dict(row)
+    return db.row_to_dict(row)
 
 
 def query_requirements(
@@ -310,7 +304,7 @@ def query_requirements(
         "total": count,
         "limit": limit,
         "offset": offset,
-        "requirements": [_row_to_dict(r) for r in rows],
+        "requirements": [db.row_to_dict(r) for r in rows],
     }
 
 
@@ -392,7 +386,7 @@ def verify_requirements(
     issues: list[dict[str, str]] = []
 
     rows = conn.execute("SELECT * FROM requirements ORDER BY id").fetchall()
-    reqs = [_row_to_dict(r) for r in rows]
+    reqs = [db.row_to_dict(r) for r in rows]
 
     if "ids" in all_checks:
         # Duplicate IDs (should be impossible with PK, but check imported data)

@@ -92,17 +92,19 @@ class TestResolveOrder:
             _resolve_order()
 
 
-class TestDbSelfRegistration:
-    """Verify db.py registers its own findings schema."""
+class TestFindingsSelfRegistration:
+    """Verify findings.py registers the findings schema."""
 
-    def test_db_schema_in_registry(self):
-        # db.py registers "db" at module load time — it should already be there
+    def test_findings_schema_in_registry(self):
+        # findings.py registers "findings" at module load time
+        import codebugs.findings  # noqa: F401  -- trigger registration
         names = [e.name for e in _schema_registry]
-        assert "db" in names
+        assert "findings" in names
 
-    def test_db_schema_creates_findings_table(self):
+    def test_findings_schema_creates_findings_table(self):
+        import codebugs.findings  # noqa: F401
         conn = sqlite3.connect(":memory:")
-        entry = next(e for e in _schema_registry if e.name == "db")
+        entry = next(e for e in _schema_registry if e.name == "findings")
         entry.ensure_fn(conn)
         tables = [r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
@@ -117,6 +119,8 @@ class TestAllModulesRegistered:
     @pytest.fixture(autouse=True)
     def _import_all(self):
         """Ensure all domain modules are imported."""
+        import codebugs.findings  # noqa: F401
+        import codebugs.provenance  # noqa: F401
         import codebugs.reqs  # noqa: F401
         import codebugs.merge  # noqa: F401
         import codebugs.sweep  # noqa: F401
@@ -125,16 +129,16 @@ class TestAllModulesRegistered:
 
     def test_all_modules_registered(self):
         names = {e.name for e in _schema_registry}
-        assert names >= {"db", "reqs", "merge", "sweep", "bench", "blockers"}
+        assert names >= {"findings", "reqs", "merge", "sweep", "bench", "blockers"}
 
-    def test_blockers_depends_on_db_and_reqs(self):
+    def test_blockers_depends_on_findings_and_reqs(self):
         entry = next(e for e in _schema_registry if e.name == "blockers")
-        assert "db" in entry.depends_on
+        assert "findings" in entry.depends_on
         assert "reqs" in entry.depends_on
 
     def test_resolve_order_puts_blockers_after_deps(self):
         order = [e.name for e in _resolve_order()]
-        assert order.index("db") < order.index("blockers")
+        assert order.index("findings") < order.index("blockers")
         assert order.index("reqs") < order.index("blockers")
 
 

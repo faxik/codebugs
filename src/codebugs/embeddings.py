@@ -2,20 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import math
 import sqlite3
 import struct
 from typing import Any
 
+from codebugs import db
 from codebugs.types import utc_now
-
-
-def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
-    d = dict(row)
-    d["tags"] = json.loads(d["tags"]) if isinstance(d["tags"], str) else d["tags"]
-    d["meta"] = json.loads(d["meta"]) if isinstance(d["meta"], str) else d["meta"]
-    return d
 
 
 def _pack_vector(vec: list[float]) -> bytes:
@@ -119,7 +112,7 @@ def search_similar(
         vec = _unpack_vector(row["embedding"])
         sim = _cosine_similarity(query_embedding, vec)
         if sim >= min_similarity:
-            d = _row_to_dict(row)
+            d = db.row_to_dict(row)
             d.pop("embedding", None)  # Don't return the blob
             d["similarity"] = round(sim, 4)
             scored.append(d)

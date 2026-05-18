@@ -2,7 +2,7 @@
 
 import pytest
 
-from codebugs import db, reqs, blockers
+from codebugs import blockers, db, findings, reqs
 
 
 @pytest.fixture
@@ -20,7 +20,7 @@ def conn(tmp_project):
 def _add_finding(conn, fid="CB-1", description="test finding", **kw):
     defaults = dict(severity="medium", category="bug", file="src/x.py")
     defaults.update(kw)
-    return db.add_finding(conn, finding_id=fid, description=description, **defaults)
+    return findings.add_finding(conn, finding_id=fid, description=description, **defaults)
 
 
 def _add_req(conn, rid="FR-001", description="test requirement", **kw):
@@ -173,7 +173,7 @@ class TestDynamicEvaluation:
         b = blockers.add_blocker(conn, item_id="CB-2", reason="r", blocked_by="CB-1")
         assert b["is_satisfied"] is False
 
-        db.update_finding(conn, "CB-1", status="fixed")
+        findings.update_finding(conn, "CB-1", status="fixed")
         result = blockers.query_blockers(conn, item_id="CB-2", active_only=False)
         assert result["blockers"][0]["is_satisfied"] is True
         assert result["blockers"][0]["is_active"] is False
@@ -183,11 +183,11 @@ class TestDynamicEvaluation:
         _add_finding(conn, "CB-2")
         blockers.add_blocker(conn, item_id="CB-2", reason="r", blocked_by="CB-1")
 
-        db.update_finding(conn, "CB-1", status="fixed")
+        findings.update_finding(conn, "CB-1", status="fixed")
         result = blockers.query_blockers(conn, item_id="CB-2", active_only=False)
         assert result["blockers"][0]["is_satisfied"] is True
 
-        db.update_finding(conn, "CB-1", status="open")
+        findings.update_finding(conn, "CB-1", status="open")
         result = blockers.query_blockers(conn, item_id="CB-2", active_only=False)
         assert result["blockers"][0]["is_satisfied"] is False
         assert result["blockers"][0]["is_active"] is True
@@ -238,7 +238,7 @@ class TestQueryBlockers:
         _add_finding(conn, "CB-1")
         _add_finding(conn, "CB-2")
         blockers.add_blocker(conn, item_id="CB-2", reason="r", blocked_by="CB-1")
-        db.update_finding(conn, "CB-1", status="fixed")
+        findings.update_finding(conn, "CB-1", status="fixed")
 
         active = blockers.query_blockers(conn, item_id="CB-2")
         assert active["total"] == 0
@@ -278,7 +278,7 @@ class TestCheckBlockers:
         _add_finding(conn, "CB-1")
         _add_finding(conn, "CB-2")
         blockers.add_blocker(conn, item_id="CB-2", reason="r", blocked_by="CB-1")
-        db.update_finding(conn, "CB-1", status="fixed")
+        findings.update_finding(conn, "CB-1", status="fixed")
 
         result = blockers.check_blockers(conn)
         assert len(result["actionable"]) == 1
@@ -290,7 +290,7 @@ class TestCheckBlockers:
         _add_finding(conn, "CB-3")
         blockers.add_blocker(conn, item_id="CB-3", reason="r1", blocked_by="CB-1")
         blockers.add_blocker(conn, item_id="CB-3", reason="r2", blocked_by="CB-2")
-        db.update_finding(conn, "CB-1", status="fixed")
+        findings.update_finding(conn, "CB-1", status="fixed")
 
         result = blockers.check_blockers(conn)
         assert len(result["actionable"]) == 0
@@ -361,7 +361,7 @@ class TestGetUnblockedBy:
         _add_finding(conn, "CB-1")
         _add_finding(conn, "CB-2")
         blockers.add_blocker(conn, item_id="CB-2", reason="r", blocked_by="CB-1")
-        db.update_finding(conn, "CB-1", status="fixed")
+        findings.update_finding(conn, "CB-1", status="fixed")
 
         result = blockers.get_unblocked_by(conn, "CB-1", "finding")
         assert len(result) == 1
@@ -374,7 +374,7 @@ class TestGetUnblockedBy:
         _add_finding(conn, "CB-3")
         blockers.add_blocker(conn, item_id="CB-3", reason="r1", blocked_by="CB-1")
         blockers.add_blocker(conn, item_id="CB-3", reason="r2", blocked_by="CB-2")
-        db.update_finding(conn, "CB-1", status="fixed")
+        findings.update_finding(conn, "CB-1", status="fixed")
 
         result = blockers.get_unblocked_by(conn, "CB-1", "finding")
         assert len(result) == 1
@@ -410,7 +410,7 @@ class TestDeferredHelpers:
         _add_finding(conn, "CB-1")
         _add_finding(conn, "CB-2")
         blockers.add_blocker(conn, item_id="CB-2", reason="r", blocked_by="CB-1")
-        db.update_finding(conn, "CB-1", status="fixed")
+        findings.update_finding(conn, "CB-1", status="fixed")
 
         counts = blockers.get_deferred_counts(conn, "finding")
         assert counts["deferred_count"] == 0
@@ -437,7 +437,7 @@ class TestFullWorkflow:
         assert "CB-2" in deferred
 
         # Fix CB-1
-        db.update_finding(conn, "CB-1", status="fixed")
+        findings.update_finding(conn, "CB-1", status="fixed")
 
         # CB-2 is now actionable
         result = blockers.check_blockers(conn)
@@ -449,7 +449,7 @@ class TestFullWorkflow:
         assert "CB-2" not in deferred
 
         # Reopen CB-1 — CB-2 is deferred again
-        db.update_finding(conn, "CB-1", status="open")
+        findings.update_finding(conn, "CB-1", status="open")
         deferred = blockers.get_deferred_item_ids(conn, "finding")
         assert "CB-2" in deferred
 
