@@ -1,13 +1,15 @@
-"""Provenance — staleness checks for findings against git history."""
+"""Provenance — staleness checks + commit-trailer resolution for findings."""
 
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import subprocess
+import sys
 from typing import Any
 
-from codebugs import db, findings
+from codebugs import db, findings, types
 
 
 def head_sha(*, project_dir: str | None = None) -> str | None:
@@ -157,6 +159,115 @@ def check_findings(
     return {"findings": results, "total": len(results)}
 
 
+# ---------------------------------------------------------------------------
+# Commit-trailer resolution — close findings cited in integrated commits.
+# ---------------------------------------------------------------------------
+
+_TRAILER_RE = re.compile(
+    r"^[ \t]*(?P<verb>Resolves|Tightens)[ \t]*:[ \t]*(?P<ids>.+?)[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_CB_ID_RE = re.compile(r"\bCB-\d+\b")
+
+
+def _parse_trailers(
+    rev_range: str, *, project_dir: str | None = None
+) -> list[tuple[str, str, str, str]]:
+    """Return ``(verb, cb_id, sha, subject)`` for trailers in *rev_range*.
+
+    ``verb`` is lowercased (``resolves`` / ``tightens``). Reads commit bodies
+    via ``git log --no-merges``; returns ``[]`` if git is unavailable or the
+    range is empty. Field-separated with control chars so subjects/bodies with
+    newlines parse unambiguously.
+    """
+    cwd = project_dir or os.getcwd()
+    fmt = "%x1e%H%x1f%s%x1f%B"
+    try:
+        out = subprocess.check_output(
+            ["git", "log", "--no-merges", f"--pretty=format:{fmt}", rev_range],
+            cwd=cwd,
+            text=True,
+            timeout=10,
+            stderr=subprocess.DEVNULL,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return []
+    trailers: list[tuple[str, str, str, str]] = []
+    for record in out.split("\x1e"):
+        if not record.strip():
+            continue
+        parts = record.split("\x1f", 2)
+        if len(parts) < 3:
+            continue
+        sha, subject, body = parts
+        for m in _TRAILER_RE.finditer(body):
+            verb = m.group("verb").lower()
+            for cb_id in _CB_ID_RE.findall(m.group("ids")):
+                trailers.append((verb, cb_id, sha, subject))
+    return trailers
+
+
+def _append_note(finding: dict[str, Any], line: str) -> str:
+    """Return the finding's existing notes with *line* appended (newline-joined)."""
+    meta = finding.get("meta") or {}
+    existing = meta.get("notes") if isinstance(meta, dict) else None
+    return f"{existing}\n{line}" if existing else line
+
+
+def resolve_trailers(
+    conn: sqlite3.Connection,
+    *,
+    rev_range: str,
+    project_dir: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Flip findings cited by ``Resolves:`` / ``Tightens:`` commit trailers.
+
+    Parses trailers from the bodies of commits in *rev_range* (e.g.
+    ``BASE..HEAD``) inside *project_dir*, then updates each cited finding:
+
+    * ``Resolves: CB-N`` → status ``fixed`` (skipped if already terminal), with
+      a note citing the commit SHA + subject.
+    * ``Tightens: CB-N`` → appends a partial-progress note; status unchanged.
+
+    Trailer syntax is case-insensitive and accepts comma-separated IDs
+    (``Resolves: CB-1, CB-2``). Returns a report with ``resolved`` /
+    ``tightened`` / ``skipped`` / ``missing`` ID lists. A missing finding or git
+    error never aborts the batch — this runs after a successful integration and
+    must be non-fatal.
+    """
+    report: dict[str, list[str]] = {
+        "resolved": [],
+        "tightened": [],
+        "skipped": [],
+        "missing": [],
+    }
+    seen: set[tuple[str, str]] = set()
+    for verb, cb_id, sha, subject in _parse_trailers(rev_range, project_dir=project_dir):
+        if (verb, cb_id) in seen:
+            continue
+        seen.add((verb, cb_id))
+        try:
+            current = findings.get_finding(conn, cb_id)
+        except KeyError:
+            report["missing"].append(cb_id)
+            continue
+        if verb == "resolves" and current["status"] in types.FINDING_TERMINAL:
+            report["skipped"].append(cb_id)
+            continue
+        verb_label = "Resolved" if verb == "resolves" else "Tightened"
+        note = _append_note(current, f"{verb_label} by commit {sha[:12]} ({subject}).")
+        if not dry_run:
+            findings.update_finding(
+                conn,
+                cb_id,
+                status="fixed" if verb == "resolves" else None,
+                notes=note,
+            )
+        report["resolved" if verb == "resolves" else "tightened"].append(cb_id)
+    return report
+
+
 def register_tools(mcp, conn_factory) -> None:
     """Register provenance tools (staleness_check) on the given MCP server."""
 
@@ -189,7 +300,41 @@ def register_tools(mcp, conn_factory) -> None:
 
 
 def register_cli(sub, commands) -> None:
-    """Register provenance CLI subcommands. (Currently none — staleness is MCP-only.)"""
+    """Register provenance CLI subcommands."""
+    import argparse
+
+    def _cmd_resolve_trailers(args: argparse.Namespace) -> None:
+        conn = db.connect(args.repo)
+        try:
+            report = resolve_trailers(
+                conn,
+                rev_range=args.range,
+                project_dir=args.repo,
+                dry_run=args.dry_run,
+            )
+        finally:
+            conn.close()
+        prefix = "[dry-run] " if args.dry_run else ""
+        for cb_id in report["resolved"]:
+            print(f"{prefix}{cb_id} -> fixed")
+        for cb_id in report["tightened"]:
+            print(f"{prefix}{cb_id} tightened (note added)")
+        for cb_id in report["skipped"]:
+            print(f"{cb_id} skipped (already terminal)")
+        for cb_id in report["missing"]:
+            print(f"warning: {cb_id} not found", file=sys.stderr)
+        updated = len(report["resolved"]) + len(report["tightened"])
+        print(f"{updated} finding(s) updated, {len(report['skipped'])} skipped.")
+
+    p = sub.add_parser(
+        "resolve-trailers",
+        help="Flip findings from Resolves:/Tightens: commit trailers in a git range",
+    )
+    p.add_argument("--range", required=True, help="git rev range, e.g. BASE..HEAD")
+    p.add_argument("--repo", default=None, help="repo dir (also locates .codebugs/); default cwd")
+    p.add_argument("--dry-run", action="store_true", help="parse + report without writing")
+
+    commands.update({"resolve-trailers": _cmd_resolve_trailers})
 
 
 db.register_tool_provider("provenance", register_tools)

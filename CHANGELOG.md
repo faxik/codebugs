@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `codebugs resolve-trailers --range <BASE>..<HEAD> [--repo DIR] [--dry-run]`
+  (provenance module): parses `Resolves: CB-N` / `Tightens: CB-N` trailers from
+  commit bodies in a git range and flips findings in-process — `Resolves` →
+  `fixed` (skipped if already terminal), `Tightens` → appends a progress note.
+  Project-agnostic: any repo's `worktree-finish.sh` can call it to auto-close
+  findings on integration instead of copying a per-project script. Also exposed
+  as `provenance.resolve_trailers(conn, ...)`.
 - `--mode` flag for both MCP server and CLI: `findings`, `reqs`, or `all` (default)
   - `codebugs-mcp --mode findings` — exposes only the 7 findings tools
   - `codebugs-mcp --mode reqs` — exposes only the 11 requirements tools

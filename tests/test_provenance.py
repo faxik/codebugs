@@ -187,3 +187,84 @@ class TestCheckFindings:
         assert len(result["findings"]) == 3
         statuses = {f["file_status"] for f in result["findings"]}
         assert statuses == {"current"}
+
+
+class TestResolveTrailers:
+    """Test provenance.resolve_trailers against commit trailers."""
+
+    def _commit(self, project, message):
+        readme = os.path.join(project, "README.md")
+        with open(readme, "a") as f:
+            f.write(message + "\n")
+        subprocess.run(["git", "add", "."], cwd=project, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", message], cwd=project, check=True, capture_output=True
+        )
+
+    def _add(self, conn):
+        return findings.add_finding(
+            conn, severity="high", category="bug", file="src/auth.py", description="x"
+        )["id"]
+
+    def test_resolves_flips_to_fixed(self, git_project, conn):
+        project, base = git_project
+        cb_id = self._add(conn)
+        self._commit(project, f"fix(auth): patch\n\nResolves: {cb_id}")
+
+        report = provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
+
+        assert report["resolved"] == [cb_id]
+        assert findings.get_finding(conn, cb_id)["status"] == "fixed"
+
+    def test_tightens_appends_note_without_status_change(self, git_project, conn):
+        project, base = git_project
+        cb_id = self._add(conn)
+        self._commit(project, f"wip(auth): partial\n\nTightens: {cb_id}")
+
+        report = provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
+
+        assert report["tightened"] == [cb_id]
+        f = findings.get_finding(conn, cb_id)
+        assert f["status"] == "open"  # unchanged
+        assert "Tightened by commit" in f["meta"]["notes"]
+
+    def test_dry_run_reports_without_writing(self, git_project, conn):
+        project, base = git_project
+        cb_id = self._add(conn)
+        self._commit(project, f"fix: x\n\nResolves: {cb_id}")
+
+        report = provenance.resolve_trailers(
+            conn, rev_range=f"{base}..HEAD", project_dir=project, dry_run=True
+        )
+
+        assert report["resolved"] == [cb_id]
+        assert findings.get_finding(conn, cb_id)["status"] == "open"  # not written
+
+    def test_already_terminal_is_skipped(self, git_project, conn):
+        project, base = git_project
+        cb_id = self._add(conn)
+        findings.update_finding(conn, cb_id, status="wont_fix")
+        self._commit(project, f"fix: x\n\nResolves: {cb_id}")
+
+        report = provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
+
+        assert report["skipped"] == [cb_id]
+        assert findings.get_finding(conn, cb_id)["status"] == "wont_fix"
+
+    def test_missing_id_is_non_fatal(self, git_project, conn):
+        project, base = git_project
+        self._commit(project, "fix: x\n\nResolves: CB-9999")
+
+        report = provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
+
+        assert report["missing"] == ["CB-9999"]
+        assert report["resolved"] == []
+
+    def test_comma_separated_ids(self, git_project, conn):
+        project, base = git_project
+        a, b = self._add(conn), self._add(conn)
+        self._commit(project, f"fix: two\n\nResolves: {a}, {b}")
+
+        report = provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
+
+        assert set(report["resolved"]) == {a, b}
