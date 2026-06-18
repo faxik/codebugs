@@ -7,7 +7,7 @@ import re
 import sqlite3
 import subprocess
 import sys
-from typing import Any
+from typing import Any, NamedTuple
 
 from codebugs import db, findings, types
 
@@ -167,18 +167,30 @@ _TRAILER_RE = re.compile(
     r"^[ \t]*(?P<verb>Resolves|Tightens)[ \t]*:[ \t]*(?P<ids>.+?)[ \t]*$",
     re.IGNORECASE | re.MULTILINE,
 )
-_CB_ID_RE = re.compile(r"\bCB-\d+\b")
+_CB_ID_RE = re.compile(rf"\b{re.escape(types.FINDING_ID_PREFIX)}\d+\b")
+
+# verb -> (note label, status input passed to update_finding, report bucket).
+# Status "resolved" is an alias resolved to "fixed" by update_finding; None
+# leaves the status untouched (Tightens just appends a progress note).
+_VERB_ACTIONS: dict[str, tuple[str, str | None, str]] = {
+    "resolves": ("Resolved", "resolved", "resolved"),
+    "tightens": ("Tightened", None, "tightened"),
+}
 
 
-def _parse_trailers(
-    rev_range: str, *, project_dir: str | None = None
-) -> list[tuple[str, str, str, str]]:
-    """Return ``(verb, cb_id, sha, subject)`` for trailers in *rev_range*.
+class _Trailer(NamedTuple):
+    verb: str  # lowercased: "resolves" / "tightens"
+    cb_id: str
+    sha: str
+    subject: str
 
-    ``verb`` is lowercased (``resolves`` / ``tightens``). Reads commit bodies
-    via ``git log --no-merges``; returns ``[]`` if git is unavailable or the
-    range is empty. Field-separated with control chars so subjects/bodies with
-    newlines parse unambiguously.
+
+def _parse_trailers(rev_range: str, *, project_dir: str | None = None) -> list[_Trailer]:
+    """Return the ``Resolves:`` / ``Tightens:`` trailers found in *rev_range*.
+
+    Reads commit bodies via ``git log --no-merges``; returns ``[]`` if git is
+    unavailable or the range is empty. Field-separated with control chars so
+    subjects/bodies with newlines parse unambiguously.
     """
     cwd = project_dir or os.getcwd()
     fmt = "%x1e%H%x1f%s%x1f%B"
@@ -192,7 +204,7 @@ def _parse_trailers(
         )
     except (subprocess.SubprocessError, FileNotFoundError):
         return []
-    trailers: list[tuple[str, str, str, str]] = []
+    trailers: list[_Trailer] = []
     for record in out.split("\x1e"):
         if not record.strip():
             continue
@@ -203,15 +215,8 @@ def _parse_trailers(
         for m in _TRAILER_RE.finditer(body):
             verb = m.group("verb").lower()
             for cb_id in _CB_ID_RE.findall(m.group("ids")):
-                trailers.append((verb, cb_id, sha, subject))
+                trailers.append(_Trailer(verb, cb_id, sha, subject))
     return trailers
-
-
-def _append_note(finding: dict[str, Any], line: str) -> str:
-    """Return the finding's existing notes with *line* appended (newline-joined)."""
-    meta = finding.get("meta") or {}
-    existing = meta.get("notes") if isinstance(meta, dict) else None
-    return f"{existing}\n{line}" if existing else line
 
 
 def resolve_trailers(
@@ -242,29 +247,28 @@ def resolve_trailers(
         "skipped": [],
         "missing": [],
     }
-    seen: set[tuple[str, str]] = set()
-    for verb, cb_id, sha, subject in _parse_trailers(rev_range, project_dir=project_dir):
-        if (verb, cb_id) in seen:
+    seen: set[tuple[str, str]] = set()  # dedup report lists across repeated trailers
+    for t in _parse_trailers(rev_range, project_dir=project_dir):
+        if (t.verb, t.cb_id) in seen:
             continue
-        seen.add((verb, cb_id))
+        seen.add((t.verb, t.cb_id))
+        label, status_input, bucket = _VERB_ACTIONS[t.verb]
         try:
-            current = findings.get_finding(conn, cb_id)
+            current = findings.get_finding(conn, t.cb_id)
         except KeyError:
-            report["missing"].append(cb_id)
+            report["missing"].append(t.cb_id)
             continue
-        if verb == "resolves" and current["status"] in types.FINDING_TERMINAL:
-            report["skipped"].append(cb_id)
+        if status_input is not None and current["status"] in types.FINDING_TERMINAL:
+            report["skipped"].append(t.cb_id)
             continue
-        verb_label = "Resolved" if verb == "resolves" else "Tightened"
-        note = _append_note(current, f"{verb_label} by commit {sha[:12]} ({subject}).")
         if not dry_run:
             findings.update_finding(
                 conn,
-                cb_id,
-                status="fixed" if verb == "resolves" else None,
-                notes=note,
+                t.cb_id,
+                status=status_input,
+                append_note=f"{label} by commit {t.sha[:12]} ({t.subject}).",
             )
-        report["resolved" if verb == "resolves" else "tightened"].append(cb_id)
+        report[bucket].append(t.cb_id)
     return report
 
 
