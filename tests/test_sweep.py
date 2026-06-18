@@ -169,7 +169,7 @@ class TestNextBatch:
         assert isinstance(item["tags"], list)
 
     def test_by_name(self):
-        sw = sweep.create_sweep(self.conn, name="named", default_batch_size=10)
+        sweep.create_sweep(self.conn, name="named", default_batch_size=10)
         sweep.add_items(self.conn, "named", ["f.py"])
         result = sweep.next_batch(self.conn, "named")
         assert len(result["items"]) == 1
@@ -207,7 +207,7 @@ class TestMarkItems:
             sweep.mark_items(self.conn, self.sweep_id, ["nonexistent.py"])
 
     def test_mark_by_name(self):
-        sw = sweep.create_sweep(self.conn, name="named")
+        sweep.create_sweep(self.conn, name="named")
         sweep.add_items(self.conn, "named", ["x.py"])
         result = sweep.mark_items(self.conn, "named", ["x.py"])
         assert result["updated"] == 1

@@ -5,11 +5,8 @@ from __future__ import annotations
 import pytest
 
 from codebugs.types import (
-    FINDING_STATUSES, REQUIREMENT_STATUSES, MERGE_STATUSES,
-    SEVERITIES, PRIORITIES,
-    FINDING_TERMINAL, REQUIREMENT_TERMINAL, TERMINAL_STATUSES,
+    FINDING_STATUSES, REQUIREMENT_STATUSES, FINDING_TERMINAL, REQUIREMENT_TERMINAL, TERMINAL_STATUSES,
     ENTITY_FINDING, ENTITY_REQUIREMENT,
-    TRIGGER_TYPES,
     resolve_finding_status, resolve_requirement_status, resolve_priority,
 )
 

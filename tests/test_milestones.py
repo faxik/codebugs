@@ -1081,3 +1081,123 @@ class TestSpecAcceptance:
                 conn, milestone_id="release/1.1",
                 item_kind="bug", item_ref="CB-99999",
             )
+
+
+# ---------------------------------------------------------------------------
+# Eligibility seam — rules tested in isolation via injected accessors.
+# No findings / reqs / blockers schema required (the two cross-domain reads
+# are injected), so the full matrix — including the has-active-blocker case
+# the real fail-soft swallow would otherwise mask — is reachable directly.
+# ---------------------------------------------------------------------------
+
+
+class TestEligibilitySeam:
+    REL = {"id": "release/1.1", "kind": "release"}
+    STREAM = {"id": "stream/triage", "kind": "stream"}
+
+    @staticmethod
+    def _no_block(_ref):
+        return False
+
+    @staticmethod
+    def _has_block(_ref):
+        return True
+
+    @staticmethod
+    def _fr_ok(_fr):
+        return True
+
+    @staticmethod
+    def _fr_missing(_fr):
+        return False
+
+    def _item(self, **kw):
+        base = dict(
+            status="open",
+            item_kind="bug",
+            item_ref="CB-1",
+            size="small",
+            acceptance="",
+            meta={},
+        )
+        base.update(kw)
+        return base
+
+    def _check(
+        self,
+        item,
+        milestone=None,
+        capacity=None,
+        held=None,
+        has_active_blocker=None,
+        requirement_exists=None,
+    ):
+        # conn is never touched when both accessors are injected.
+        return milestones._eligibility_failure(
+            sqlite3.connect(":memory:"),
+            item,
+            milestone or self.STREAM,
+            capacity or {"small": 1, "large": 1, "triage": 1},
+            held or {},
+            has_active_blocker=has_active_blocker or self._no_block,
+            requirement_exists=requirement_exists or self._fr_ok,
+        )
+
+    def test_open_small_is_eligible(self):
+        assert self._check(self._item()) is None
+
+    def test_non_open_rejected(self):
+        assert "not open" in self._check(self._item(status="in_progress"))
+
+    def test_active_blocker_rejected(self):
+        # Reachable with NO blockers schema — the point of the seam.
+        assert self._check(self._item(), has_active_blocker=self._has_block) == "has active blocker"
+
+    def test_external_ignores_blocker(self):
+        item = self._item(item_kind="external")
+        assert self._check(item, has_active_blocker=self._has_block) is None
+
+    def test_large_requires_acceptance(self):
+        item = self._item(size="large", acceptance="")
+        assert "requires acceptance" in self._check(item, capacity={"large": 1})
+
+    def test_large_in_stream_needs_no_linked_frs(self):
+        item = self._item(size="large", acceptance="ok")
+        assert self._check(item, milestone=self.STREAM, capacity={"large": 1}) is None
+
+    def test_large_bug_in_release_needs_linked_frs(self):
+        item = self._item(size="large", acceptance="ok", meta={})
+        assert "needs linked_frs" in self._check(item, milestone=self.REL, capacity={"large": 1})
+
+    def test_large_bug_in_release_with_resolvable_frs_ok(self):
+        item = self._item(size="large", acceptance="ok", meta={"linked_frs": ["FR-1"]})
+        assert (
+            self._check(
+                item,
+                milestone=self.REL,
+                capacity={"large": 1},
+                requirement_exists=self._fr_ok,
+            )
+            is None
+        )
+
+    def test_large_bug_in_release_with_unresolved_fr_rejected(self):
+        item = self._item(size="large", acceptance="ok", meta={"linked_frs": ["FR-9"]})
+        msg = self._check(
+            item,
+            milestone=self.REL,
+            capacity={"large": 1},
+            requirement_exists=self._fr_missing,
+        )
+        assert "FR-9 not in requirements" in msg
+
+    def test_capacity_full_rejected(self):
+        msg = self._check(self._item(), capacity={"small": 0}, held={"small": 0})
+        assert "capacity for small full" in msg
+
+    def test_defaults_bind_to_real_reads(self, conn):
+        # No injected accessors: defaults bind to the real conn-backed reads.
+        # conn has full schema; FR-404 absent -> linked_frs check fires.
+        item = self._item(size="large", acceptance="ok", meta={"linked_frs": ["FR-404"]})
+        msg = milestones._eligibility_failure(conn, item, self.REL, {"large": 1}, {})
+        assert "FR-404 not in requirements" in msg
