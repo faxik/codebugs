@@ -14,6 +14,9 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# --- Finding ids ---
+FINDING_ID_PREFIX = "CB-"
+
 # --- Finding statuses ---
 FINDING_STATUSES = ("open", "in_progress", "fixed", "not_a_bug", "wont_fix", "stale")
 

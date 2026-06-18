@@ -10,7 +10,7 @@ import sys
 from typing import Any
 
 from codebugs import db, entities
-from codebugs.types import ENTITY_FINDING, SEVERITIES, resolve_finding_status, utc_now
+from codebugs.types import ENTITY_FINDING, FINDING_ID_PREFIX, SEVERITIES, resolve_finding_status, utc_now
 
 SCHEMA = """\
 CREATE TABLE IF NOT EXISTS findings (
@@ -116,15 +116,18 @@ def _migrate_findings_add_provenance_columns(conn: sqlite3.Connection) -> None:
 
 def _next_id(conn: sqlite3.Connection) -> str:
     """Generate next CB-N id."""
+    prefix_len = len(FINDING_ID_PREFIX) + 1  # 1-based SUBSTR offset past the prefix
     row = conn.execute(
-        "SELECT id FROM findings WHERE id LIKE 'CB-%' ORDER BY CAST(SUBSTR(id, 4) AS INTEGER) DESC LIMIT 1"
+        f"SELECT id FROM findings WHERE id LIKE ? "
+        f"ORDER BY CAST(SUBSTR(id, {prefix_len}) AS INTEGER) DESC LIMIT 1",
+        (f"{FINDING_ID_PREFIX}%",),
     ).fetchone()
     if row:
-        match = re.search(r"CB-(\d+)", row["id"])
+        match = re.search(rf"{re.escape(FINDING_ID_PREFIX)}(\d+)", row["id"])
         n = int(match.group(1)) + 1 if match else 1
     else:
         n = 1
-    return f"CB-{n}"
+    return f"{FINDING_ID_PREFIX}{n}"
 
 
 def add_finding(
@@ -235,13 +238,16 @@ def update_finding(
     *,
     status: str | None = None,
     notes: str | None = None,
+    append_note: str | None = None,
     tags: list[str] | None = None,
     meta_update: dict[str, Any] | None = None,
     reported_at_ref: str | None = None,
 ) -> dict[str, Any]:
     """Update a finding. Returns updated finding.
 
-    Note: reported_at_commit is intentionally excluded — it is immutable after insert.
+    ``notes`` replaces the notes wholesale; ``append_note`` adds a newline-joined
+    line, preserving prior history. Note: reported_at_commit is intentionally
+    excluded — it is immutable after insert.
     """
     row = conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
     if not row:
@@ -258,6 +264,13 @@ def update_finding(
     if notes is not None:
         existing_meta = json.loads(row["meta"])
         existing_meta["notes"] = notes
+        updates.append("meta = ?")
+        params.append(json.dumps(existing_meta))
+
+    if append_note is not None:
+        existing_meta = json.loads(row["meta"])
+        prior = existing_meta.get("notes")
+        existing_meta["notes"] = f"{prior}\n{append_note}" if prior else append_note
         updates.append("meta = ?")
         params.append(json.dumps(existing_meta))
 
