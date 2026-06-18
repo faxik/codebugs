@@ -66,7 +66,7 @@ class TestImportCsv:
         assert result["date"] == "2026-01-15"
 
     def test_tags_and_meta(self, conn):
-        result = bench.import_csv(
+        bench.import_csv(
             conn, benchmark="a", csv_data=SAMPLE_CSV,
             tags=["nightly"], meta={"git_sha": "abc123"},
         )
