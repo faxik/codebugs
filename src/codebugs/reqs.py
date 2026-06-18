@@ -8,8 +8,8 @@ import re
 import sqlite3
 from typing import Any
 
-from codebugs import db
-from codebugs.types import resolve_requirement_status, resolve_priority, utc_now
+from codebugs import db, entities
+from codebugs.types import ENTITY_REQUIREMENT, resolve_requirement_status, resolve_priority, utc_now
 
 
 REQS_SCHEMA = """\
@@ -654,8 +654,8 @@ def register_tools(mcp, conn_factory):
                 priority=priority, section=section, test_coverage=test_coverage,
                 notes=notes, tags=tags, meta_update=meta_update,
             )
-            if status and result.get("status") in blockers.TERMINAL_STATUSES.get(blockers.ENTITY_REQUIREMENT, set()):
-                unblocked = blockers.get_unblocked_by(conn, req_id, blockers.ENTITY_REQUIREMENT)
+            if status and entities.EntityRef.of(req_id).is_resolved(conn):
+                unblocked = blockers.get_unblocked_by(conn, req_id, ENTITY_REQUIREMENT)
                 if unblocked:
                     result["unblocked_items"] = unblocked
             return result
@@ -698,7 +698,7 @@ def register_tools(mcp, conn_factory):
 
         with conn_factory() as conn:
             if status == "deferred":
-                return blockers.query_deferred_entities(conn, blockers.ENTITY_REQUIREMENT, limit=limit, offset=offset)
+                return blockers.query_deferred_entities(conn, ENTITY_REQUIREMENT, limit=limit, offset=offset)
             return query_requirements(
                 conn, id=id, ids=ids, status=status, priority=priority, section=section,
                 search=search, source=source, tag=tag,
@@ -736,7 +736,7 @@ def register_tools(mcp, conn_factory):
 
         with conn_factory() as conn:
             result = get_reqs_summary(conn)
-            result.update(blockers.get_deferred_counts(conn, blockers.ENTITY_REQUIREMENT))
+            result.update(blockers.get_deferred_counts(conn, ENTITY_REQUIREMENT))
             return result
 
     @mcp.tool()

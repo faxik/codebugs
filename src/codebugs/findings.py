@@ -9,8 +9,8 @@ import sqlite3
 import sys
 from typing import Any
 
-from codebugs import db
-from codebugs.types import SEVERITIES, resolve_finding_status, utc_now
+from codebugs import db, entities
+from codebugs.types import ENTITY_FINDING, SEVERITIES, resolve_finding_status, utc_now
 
 SCHEMA = """\
 CREATE TABLE IF NOT EXISTS findings (
@@ -589,10 +589,8 @@ def register_tools(mcp, conn_factory) -> None:
                 meta_update=meta_update,
                 reported_at_ref=reported_at_ref,
             )
-            if status and result.get("status") in blockers.TERMINAL_STATUSES.get(
-                blockers.ENTITY_FINDING, set()
-            ):
-                unblocked = blockers.get_unblocked_by(conn, finding_id, blockers.ENTITY_FINDING)
+            if status and entities.EntityRef.of(finding_id).is_resolved(conn):
+                unblocked = blockers.get_unblocked_by(conn, finding_id, ENTITY_FINDING)
                 if unblocked:
                     result["unblocked_items"] = unblocked
             return result
@@ -642,7 +640,7 @@ def register_tools(mcp, conn_factory) -> None:
         with conn_factory() as conn:
             if status == "deferred":
                 return blockers.query_deferred_entities(
-                    conn, blockers.ENTITY_FINDING, limit=limit, offset=offset
+                    conn, ENTITY_FINDING, limit=limit, offset=offset
                 )
             return query_findings(
                 conn,
@@ -693,7 +691,7 @@ def register_tools(mcp, conn_factory) -> None:
         top categories, hottest files, deferred counts. Start here for orientation."""
         with conn_factory() as conn:
             result = get_summary(conn)
-            result.update(blockers.get_deferred_counts(conn, blockers.ENTITY_FINDING))
+            result.update(blockers.get_deferred_counts(conn, ENTITY_FINDING))
             return result
 
     @mcp.tool()

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
 from codebugs import db
-from codebugs.types import ENTITY_FINDING, ENTITY_REQUIREMENT, ENTITY_TABLES, TERMINAL_STATUSES, TRIGGER_TYPES, utc_now
+from codebugs.entities import EntityRef, entity_kind
+from codebugs.types import TRIGGER_TYPES, utc_now
 
 
 BLOCKERS_SCHEMA = """\
@@ -46,38 +46,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _detect_entity_type(entity_id: str) -> str:
-    """Infer entity type from ID prefix."""
-    if re.match(r"^CB-\d+", entity_id):
-        return ENTITY_FINDING
-    if re.match(r"^N?FR-\d+", entity_id):
-        return ENTITY_REQUIREMENT
-    raise ValueError(
-        f"Unknown entity ID format: {entity_id}. Expected CB-N, FR-N, or NFR-N."
-    )
-
-
-def _get_entity_field(
-    conn: sqlite3.Connection, entity_id: str, entity_type: str, field: str
-) -> Any | None:
-    """Look up a single field from a finding or requirement by ID."""
-    table = ENTITY_TABLES[entity_type]
-    row = conn.execute(
-        f"SELECT {field} FROM {table} WHERE id = ?", (entity_id,)
-    ).fetchone()
-    return row[field] if row else None
-
-
-def _entity_exists(conn: sqlite3.Connection, entity_id: str, entity_type: str) -> bool:
-    return _get_entity_field(conn, entity_id, entity_type, "id") is not None
-
-
-def _get_entity_status(conn: sqlite3.Connection, entity_id: str, entity_type: str) -> str | None:
-    return _get_entity_field(conn, entity_id, entity_type, "status")
-
-
-def _get_entity_description(conn: sqlite3.Connection, entity_id: str, entity_type: str) -> str | None:
-    return _get_entity_field(conn, entity_id, entity_type, "description")
+def _entity_description(conn: sqlite3.Connection, entity_id: str, entity_type: str) -> str | None:
+    """Description of an entity whose kind is already known (from a stored *_type column)."""
+    return EntityRef(entity_id, entity_kind(entity_type)).description(conn)
 
 
 def _normalize_trigger_at(value: str) -> str:
@@ -100,10 +71,10 @@ def is_blocker_satisfied(conn: sqlite3.Connection, blocker: dict[str, Any]) -> b
     if blocker["cancelled_at"]:
         return True
     if blocker["trigger_type"] == "entity_resolved":
-        status = _get_entity_status(conn, blocker["blocked_by"], blocker["blocked_by_type"])
-        if status is None:
-            return False
-        return status in TERMINAL_STATUSES[blocker["blocked_by_type"]]
+        # blocked_by_type is only populated for entity_resolved triggers (NULL for date/manual),
+        # so the resolver is only ever constructed inside this guard.
+        ref = EntityRef(blocker["blocked_by"], entity_kind(blocker["blocked_by_type"]))
+        return ref.is_resolved(conn)
     if blocker["trigger_type"] == "date":
         return blocker["trigger_at"] <= utc_now()
     if blocker["trigger_type"] == "manual":
@@ -135,9 +106,9 @@ def add_blocker(
     trigger_at: str | None = None,
 ) -> dict[str, Any]:
     """Add a blocker to defer an item."""
-    item_type = _detect_entity_type(item_id)
-    if not _entity_exists(conn, item_id, item_type):
-        raise KeyError(f"Entity not found: {item_id}")
+    item_ref = EntityRef.of(item_id)
+    item_type = item_ref.kind.name
+    item_ref.require(conn)
 
     # Defaults
     if trigger_type is None:
@@ -151,8 +122,9 @@ def add_blocker(
     # Validate blocked_by
     blocked_by_type = None
     if blocked_by:
-        blocked_by_type = _detect_entity_type(blocked_by)
-        if not _entity_exists(conn, blocked_by, blocked_by_type):
+        dep_ref = EntityRef.of(blocked_by)
+        blocked_by_type = dep_ref.kind.name
+        if not dep_ref.exists(conn):
             raise KeyError(f"Blocking entity not found: {blocked_by}")
         if item_id == blocked_by:
             raise ValueError("An item cannot block itself.")
@@ -205,7 +177,7 @@ def add_blocker(
         "SELECT * FROM blockers WHERE id = last_insert_rowid()"
     ).fetchone()
     result = _evaluate_blocker(conn, row)
-    result["item_description"] = _get_entity_description(conn, item_id, item_type)
+    result["item_description"] = _entity_description(conn, item_id, item_type)
     return result
 
 
@@ -245,14 +217,14 @@ def query_blockers(
         b = _evaluate_blocker(conn, row)
         if active_only and not b["is_active"]:
             continue
-        b["item_description"] = _get_entity_description(conn, b["item_id"], b["item_type"])
+        b["item_description"] = _entity_description(conn, b["item_id"], b["item_type"])
         if b["blocked_by"]:
-            b["blocked_by_description"] = _get_entity_description(
+            b["blocked_by_description"] = _entity_description(
                 conn, b["blocked_by"], b["blocked_by_type"]
             )
-            b["blocked_by_status"] = _get_entity_status(
-                conn, b["blocked_by"], b["blocked_by_type"]
-            )
+            b["blocked_by_status"] = EntityRef(
+                b["blocked_by"], entity_kind(b["blocked_by_type"])
+            ).status(conn)
         blockers.append(b)
 
     return {"blockers": blockers, "total": len(blockers)}
@@ -275,7 +247,7 @@ def check_blockers(conn: sqlite3.Connection) -> dict[str, Any]:
             items[key] = {
                 "item_id": key,
                 "item_type": b["item_type"],
-                "description": _get_entity_description(conn, key, b["item_type"]),
+                "description": _entity_description(conn, key, b["item_type"]),
                 "satisfied": [],
                 "remaining": [],
             }
@@ -416,7 +388,7 @@ def get_unblocked_by(
         results.append({
             "item_id": item_id,
             "item_type": item_type,
-            "description": _get_entity_description(conn, item_id, item_type),
+            "description": _entity_description(conn, item_id, item_type),
             "reason": blockers_for_entity[0]["reason"],
             "all_blockers_satisfied": len(all_active) == 0,
             "remaining_blockers": len(all_active),
@@ -455,27 +427,23 @@ def query_deferred_entities(
         if b["is_active"]:
             active_counts[b["item_id"]] = active_counts.get(b["item_id"], 0) + 1
 
+    kind = entity_kind(entity_type)
     if not active_counts:
-        key = "findings" if entity_type == ENTITY_FINDING else "requirements"
-        return {"grouped": False, "total": 0, "limit": limit, "offset": offset, key: []}
-
-    table = ENTITY_TABLES[entity_type]
-    sort_col = "severity" if entity_type == ENTITY_FINDING else "priority"
-    key = "findings" if entity_type == ENTITY_FINDING else "requirements"
+        return {"grouped": False, "total": 0, "limit": limit, "offset": offset, kind.result_key: []}
 
     ids_list = sorted(active_counts)
     placeholders = ",".join("?" for _ in ids_list)
     rows = conn.execute(
-        f"SELECT * FROM {table} WHERE id IN ({placeholders}) ORDER BY {sort_col}, created_at DESC LIMIT ? OFFSET ?",
+        f"SELECT * FROM {kind.table} WHERE id IN ({placeholders}) "  # noqa: S608 (identifiers from frozen registry)
+        f"ORDER BY {kind.sort_col}, created_at DESC LIMIT ? OFFSET ?",
         ids_list + [limit, offset],
     ).fetchall()
 
-    entities = [db.row_to_dict(r) for r in rows]
-
-    for e in entities:
+    rows_out = [db.row_to_dict(r) for r in rows]
+    for e in rows_out:
         e["blocker_count"] = active_counts.get(e["id"], 0)
 
-    return {"grouped": False, "total": len(ids_list), "limit": limit, "offset": offset, key: entities}
+    return {"grouped": False, "total": len(ids_list), "limit": limit, "offset": offset, kind.result_key: rows_out}
 
 
 def get_deferred_item_ids(

@@ -30,21 +30,8 @@ def _add_req(conn, rid="FR-001", description="test requirement", **kw):
 
 
 # ---------------------------------------------------------------------------
-# _detect_entity_type
+# entity-id detection now lives in entities.py (see tests/test_entities.py)
 # ---------------------------------------------------------------------------
-
-class TestDetectEntityType:
-    def test_finding(self):
-        assert blockers._detect_entity_type("CB-1") == "finding"
-        assert blockers._detect_entity_type("CB-999") == "finding"
-
-    def test_requirement(self):
-        assert blockers._detect_entity_type("FR-001") == "requirement"
-        assert blockers._detect_entity_type("NFR-001") == "requirement"
-
-    def test_unknown_raises(self):
-        with pytest.raises(ValueError, match="Unknown entity ID"):
-            blockers._detect_entity_type("XY-1")
 
 
 # ---------------------------------------------------------------------------
