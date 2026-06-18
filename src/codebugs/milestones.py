@@ -728,18 +728,39 @@ def _has_active_blocker(conn: sqlite3.Connection, item_ref: str) -> bool:
     return bool(r.get("blockers"))
 
 
+def _real_requirement_exists(conn: sqlite3.Connection, fr_id: str) -> bool:
+    """True if a requirement with this id exists. The real production read."""
+    row = conn.execute("SELECT 1 FROM requirements WHERE id = ?", (fr_id,)).fetchone()
+    return row is not None
+
+
 def _eligibility_failure(
     conn: sqlite3.Connection,
     item: dict[str, Any],
     milestone: dict[str, Any],
     capacity: dict[str, int],
     held: dict[str, int],
+    *,
+    has_active_blocker=None,
+    requirement_exists=None,
 ) -> str | None:
-    """Return None if eligible, else a short reason string. Public-ish helper
-    used by pull_next."""
+    """Return None if eligible, else a short reason string. Used by pull_next.
+
+    The two cross-domain reads are injectable for testing: ``has_active_blocker``
+    (item_ref -> bool) and ``requirement_exists`` (fr_id -> bool). Both default
+    to the real conn-backed implementations, so production callers pass only the
+    five positionals. Tests can drive the full matrix — including the
+    has-active-blocker case the real fail-soft swallow would otherwise mask —
+    with no findings/reqs/blockers schema present."""
+    if has_active_blocker is None:
+        def has_active_blocker(ref):
+            return _has_active_blocker(conn, ref)
+    if requirement_exists is None:
+        def requirement_exists(fr):
+            return _real_requirement_exists(conn, fr)
     if item["status"] != "open":
         return f"not open (status={item['status']})"
-    if item["item_kind"] != "external" and _has_active_blocker(conn, item["item_ref"]):
+    if item["item_kind"] != "external" and has_active_blocker(item["item_ref"]):
         return "has active blocker"
     if item["size"] == "large" and not (item.get("acceptance") or "").strip():
         return "size=large requires acceptance"
@@ -751,10 +772,7 @@ def _eligibility_failure(
         if not linked:
             return "size=large bug in release needs linked_frs"
         for fr in linked:
-            row = conn.execute(
-                "SELECT 1 FROM requirements WHERE id = ?", (fr,)
-            ).fetchone()
-            if not row:
+            if not requirement_exists(fr):
                 return f"linked FR {fr} not in requirements"
     size = item["size"]
     cap = capacity.get(size, 0)
