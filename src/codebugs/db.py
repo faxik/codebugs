@@ -260,20 +260,36 @@ class TrackerExistsError(RuntimeError):
     """
 
 
-def _worktree_main_root(git_file: Path) -> str | None:
-    """Resolve a `.git` FILE to the main repo's root, or None if it isn't a worktree.
+class WorktreeTrackerError(TrackerExistsError):
+    """Refuses to create a tracker inside a linked git worktree.
+
+    A worktree-local tracker is worse than a nested one: it is deleted with the
+    worktree, so every finding filed into it is destroyed rather than merely
+    hidden. Subclasses `TrackerExistsError` so existing callers keep catching it.
+    """
+
+
+def _abs_from(base: Path, raw: str) -> Path:
+    """Resolve a git pointer path, which may be absolute or relative to `base`."""
+    p = Path(raw)
+    return p.resolve() if p.is_absolute() else (base / p).resolve()
+
+
+def _linked_worktree_gitdir(git_file: Path) -> Path | None:
+    """Return the gitdir `git_file` points at, but only for a LINKED WORKTREE.
 
     Both linked worktrees and submodules present `.git` as a file holding
     `gitdir: <path>`, so the pointer must be followed to tell them apart.
     A worktree's gitdir (`<main>/.git/worktrees/<id>`) contains a `commondir`
     file pointing back at the main repo; a submodule's (`<parent>/.git/modules/<name>`)
     does not, and stays a discovery boundary.
+
+    Split out from `_worktree_main_root` because "is this a worktree?" and "where
+    is its main checkout?" have different answers: the main checkout is often
+    unrecoverable (bare and `--separate-git-dir` mains record no back-pointer),
+    but the worktree itself is always recognizable. Creation guards need the
+    former question, discovery needs the latter.
     """
-
-    def _abs(base: Path, raw: str) -> Path:
-        p = Path(raw)
-        return p.resolve() if p.is_absolute() else (base / p).resolve()
-
     try:
         text = git_file.read_text(errors="replace")
     except OSError:
@@ -286,22 +302,54 @@ def _worktree_main_root(git_file: Path) -> str | None:
     if not pointer:
         return None
 
-    gitdir = _abs(git_file.parent, pointer)
-    commondir = gitdir / "commondir"
-    if not commondir.is_file():
+    gitdir = _abs_from(git_file.parent, pointer)
+    return gitdir if (gitdir / "commondir").is_file() else None
+
+
+def _worktree_main_root(git_file: Path) -> str | None:
+    """Resolve a `.git` FILE to the main repo's root, or None if it can't be known.
+
+    Returning None is common and correct: git records no back-pointer from a
+    worktree to its main CHECKOUT, only to the common git DIR. Where that dir is
+    not literally `<checkout>/.git` — a bare main, or `--separate-git-dir` — the
+    checkout path is genuinely unrecoverable (git's own `worktree list` reports
+    the git dir in these layouts), so we refuse rather than guess. Callers that
+    only need to know they are IN a worktree must use `_linked_worktree_gitdir`.
+    """
+    gitdir = _linked_worktree_gitdir(git_file)
+    if gitdir is None:
         return None
     try:
-        common = commondir.read_text().strip()
+        common = (gitdir / "commondir").read_text().strip()
     except OSError:
         return None
     if not common:
         return None
 
-    common_git = _abs(gitdir, common)
+    common_git = _abs_from(gitdir, common)
     if common_git.name != DOT_GIT:
         # Bare or otherwise unconventional main repo — refuse rather than guess.
         return None
     return str(common_git.parent)
+
+
+def _enclosing_worktree_root(start: str) -> str | None:
+    """Return the root of the linked worktree containing `start`, if any.
+
+    Walks up on the same rules as `_find_db_root` so the two agree on where a
+    repository begins: a `.git` DIRECTORY is a normal checkout and ends the
+    search, a `.git` FILE is a worktree only if it carries a `commondir`.
+    """
+    cur = Path(start).resolve()
+    while True:
+        git = cur / DOT_GIT
+        if git.is_dir():
+            return None
+        if git.is_file():
+            return str(cur) if _linked_worktree_gitdir(git) is not None else None
+        if cur.parent == cur:
+            return None
+        cur = cur.parent
 
 
 def _find_db_root(start: str | None = None) -> str | None:
@@ -346,8 +394,20 @@ def _db_path(project_dir: str | None = None) -> str:
     if project_dir is None:
         root = _find_db_root()
         if root is None:
+            cwd = os.getcwd()
+            worktree = _enclosing_worktree_root(cwd)
+            if worktree is not None:
+                # Never advise `init` here: it would create a tracker that dies
+                # with the worktree. Name the main checkout when we can find it.
+                main = _worktree_main_root(Path(worktree) / DOT_GIT)
+                where = f"in the main checkout ({main})" if main else "in the main checkout"
+                raise DatabaseNotFoundError(
+                    f"no {DB_DIR}/ found from {cwd}; this is a git worktree ({worktree}) "
+                    f"and its main checkout has no tracker either. Run `codebugs init` "
+                    f"{where} — a tracker created inside a worktree is deleted with it"
+                )
             raise DatabaseNotFoundError(
-                f"no {DB_DIR}/ found in {os.getcwd()} or any parent; "
+                f"no {DB_DIR}/ found in {cwd} or any parent; "
                 f"run `codebugs init` here, or cd into a project that has one"
             )
     else:
@@ -385,6 +445,23 @@ def init_project(project_dir: str | None = None, *, force: bool = False) -> dict
                 f"{enclosing} already has a {DB_DIR}/ covering {root}; "
                 f"initializing here would hide it from everything below. "
                 f"Use that tracker, or pass --force to nest deliberately"
+            )
+        # The check above cannot catch a worktree whose main checkout has no
+        # tracker yet: discovery returns None, so nothing looks shadowed. The
+        # tracker would still be created inside the worktree and die with it.
+        worktree = _enclosing_worktree_root(root)
+        if worktree is not None:
+            main = _worktree_main_root(Path(worktree) / DOT_GIT)
+            where = f" Run it in the main checkout ({main}) instead." if main else ""
+            place = (
+                f"{root} is a git worktree"
+                if os.path.realpath(worktree) == os.path.realpath(root)
+                else f"{root} is inside the git worktree {worktree}"
+            )
+            raise WorktreeTrackerError(
+                f"{place}; a tracker created here is deleted along with the worktree, "
+                f"taking its findings with it."
+                f"{where} Pass --force to accept a worktree-local tracker anyway"
             )
 
     path = os.path.join(tracker_dir, DB_FILE)
