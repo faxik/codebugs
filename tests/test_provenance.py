@@ -12,6 +12,7 @@ from codebugs import db, findings, provenance
 def git_project(tmp_path):
     """Create a temporary git repo with a tracked file and some commits."""
     project = str(tmp_path)
+    db.init_project(project)
     subprocess.run(["git", "init"], cwd=project, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],

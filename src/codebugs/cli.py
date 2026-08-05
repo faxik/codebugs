@@ -3,13 +3,24 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from codebugs import db
 
 
 def _cmd_init(args: argparse.Namespace) -> None:
-    result = db.init_project(args.directory)
+    try:
+        result = db.init_project(args.directory, force=args.force)
+    except (ValueError, OSError) as e:
+        print(f"codebugs: {e}", file=sys.stderr)
+        sys.exit(1)
+    if args.force and db._find_db_root(os.path.dirname(result["root"])) is not None:
+        print(
+            f"codebugs: warning — this tracker is nested inside another and will hide it "
+            f"from everything under {result['root']}",
+            file=sys.stderr,
+        )
     verb = "Initialized" if result["created"] else "Already initialized:"
     print(f"{verb} codebugs tracker at {result['path']}")
 
@@ -22,6 +33,11 @@ def _register_init(sub, commands: dict) -> None:
     """
     p = sub.add_parser("init", help=f"Create a {db.DB_DIR}/ tracker in this directory")
     p.add_argument("directory", nargs="?", default=None, help="Directory (default: cwd)")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Create even if an enclosing tracker already covers this directory",
+    )
     commands["init"] = _cmd_init
 
 
@@ -53,7 +69,7 @@ def main() -> None:
         sys.exit(1)
     try:
         commands[args.command](args)
-    except db.DatabaseNotFoundError as e:
+    except (db.DatabaseNotFoundError, db.TrackerExistsError) as e:
         print(f"codebugs: {e}", file=sys.stderr)
         sys.exit(1)
 

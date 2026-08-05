@@ -146,6 +146,7 @@ class TestConnectUsesRegistry:
     """db.connect() initializes all schemas via the registry."""
 
     def test_connect_creates_all_tables(self, tmp_path):
+        db.init_project(str(tmp_path))
         conn = db.connect(str(tmp_path))
         try:
             tables = {r[0] for r in conn.execute(
@@ -162,6 +163,7 @@ class TestConnectUsesRegistry:
 
     def test_connect_idempotent(self, tmp_path):
         """Calling connect twice on same DB doesn't crash."""
+        db.init_project(str(tmp_path))
         conn1 = db.connect(str(tmp_path))
         conn1.close()
         conn2 = db.connect(str(tmp_path))

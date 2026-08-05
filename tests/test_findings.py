@@ -11,7 +11,8 @@ from codebugs.types import FINDING_STATUSES, FINDING_STATUS_ALIASES, resolve_fin
 
 @pytest.fixture
 def tmp_project(tmp_path):
-    """Provide a temporary project directory with a fresh DB."""
+    """Provide a temporary project directory with an initialized tracker."""
+    db.init_project(str(tmp_path))
     return str(tmp_path)
 
 
@@ -553,8 +554,14 @@ class TestProvenance:
         assert result.get("reported_at_commit") is None
         assert result.get("reported_at_ref") is None
 
-    def test_migrate_adds_provenance_to_existing_db(self, tmp_project):
-        """Simulate a DB created before provenance columns existed."""
+    def test_migrate_adds_provenance_to_existing_db(self, tmp_path):
+        """Simulate a DB created before provenance columns existed.
+
+        Uses a bare tmp_path (not the initialized `tmp_project`) so the legacy
+        schema is the FIRST thing in this DB file — `.codebugs/` is created
+        directly, which is the opt-in `connect()` requires.
+        """
+        tmp_project = str(tmp_path)
         path = os.path.join(tmp_project, db.DB_DIR, db.DB_FILE)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         old_conn = sqlite3.connect(path)

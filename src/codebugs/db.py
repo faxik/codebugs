@@ -246,9 +246,17 @@ def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 class DatabaseNotFoundError(RuntimeError):
     """No `.codebugs/` tracker was found, and one must not be created implicitly.
 
-    Auto-creating on the implicit path is what makes a wrong-directory bind
-    silent: the caller gets an empty DB instead of an error, and every finding
-    written into it is invisible to everyone else.
+    Auto-creating is what makes a wrong-directory bind silent: the caller gets an
+    empty DB instead of an error, and every finding written into it is invisible
+    to everyone else. `init_project()` is the only function that may create one.
+    """
+
+
+class TrackerExistsError(RuntimeError):
+    """A tracker already covers this directory, so creating another would shadow it.
+
+    `_find_db_root` binds to the NEAREST `.codebugs/`, so a nested tracker
+    permanently hides the project's real one from everything beneath it.
     """
 
 
@@ -329,26 +337,59 @@ def _find_db_root(start: str | None = None) -> str | None:
 
 
 def _db_path(project_dir: str | None = None) -> str:
-    root = project_dir
-    if root is None:
+    """Locate an EXISTING tracker's DB file. Never invents one.
+
+    A named `project_dir` is not an opt-in to creation: it routinely carries user
+    input (`--repo <path>`), where a typo must fail loudly rather than quietly
+    become a second, empty tracker.
+    """
+    if project_dir is None:
         root = _find_db_root()
         if root is None:
             raise DatabaseNotFoundError(
                 f"no {DB_DIR}/ found in {os.getcwd()} or any parent; "
                 f"run `codebugs init` here, or cd into a project that has one"
             )
+    else:
+        root = project_dir
+        if not os.path.isdir(os.path.join(root, DB_DIR)):
+            raise DatabaseNotFoundError(
+                f"no {DB_DIR}/ in {root}; "
+                f"check the path, or run `codebugs init {root}` to create a tracker there"
+            )
     return os.path.join(root, DB_DIR, DB_FILE)
 
 
-def init_project(project_dir: str | None = None) -> dict[str, Any]:
+def init_project(project_dir: str | None = None, *, force: bool = False) -> dict[str, Any]:
     """Create a `.codebugs/` tracker in `project_dir` (default cwd).
 
-    Creating the tracker is a deliberate act: this is the only path that makes a
-    new DB where none was found. Idempotent — an existing tracker is left alone.
+    The only function that creates a tracker, so that creation is always a
+    deliberate act. Idempotent — an existing tracker here is left alone.
+
+    Refuses when an enclosing tracker already covers this directory: a nested
+    `.codebugs/` wins the upward walk forever after, silently orphaning every
+    finding written beneath it. `force=True` allows the deliberate nested case.
     """
     root = os.path.abspath(project_dir or os.getcwd())
-    path = os.path.join(root, DB_DIR, DB_FILE)
+    if not os.path.isdir(root):
+        raise ValueError(f"cannot initialize {root}: no such directory")
+
+    tracker_dir = os.path.join(root, DB_DIR)
+    if os.path.exists(tracker_dir) and not os.path.isdir(tracker_dir):
+        raise ValueError(f"cannot initialize {root}: {tracker_dir} exists and is not a directory")
+
+    if not force:
+        enclosing = _find_db_root(root)
+        if enclosing is not None and os.path.realpath(enclosing) != os.path.realpath(root):
+            raise TrackerExistsError(
+                f"{enclosing} already has a {DB_DIR}/ covering {root}; "
+                f"initializing here would hide it from everything below. "
+                f"Use that tracker, or pass --force to nest deliberately"
+            )
+
+    path = os.path.join(tracker_dir, DB_FILE)
     created = not os.path.exists(path)
+    os.makedirs(tracker_dir, exist_ok=True)
     connect(root).close()
     return {"root": root, "path": path, "created": created}
 
@@ -374,7 +415,6 @@ def _ensure_modules_loaded() -> None:
 def connect(project_dir: str | None = None) -> sqlite3.Connection:
     """Open (and initialize) the codebugs database."""
     path = _db_path(project_dir)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")

@@ -35,6 +35,21 @@ pip install codebugs
 
 ## Setup
 
+### Create the tracker
+
+Run this once per project, in the project root:
+
+```bash
+codebugs init
+```
+
+This creates `.codebugs/findings.db`. **codebugs never creates a tracker on its own** — every other command discovers an existing one by walking up from the current directory, and refuses with an actionable error if there is none. That refusal is deliberate: silently creating an empty database is how findings go missing.
+
+Two consequences worth knowing:
+
+- **Run `init` at the project root, not in a subdirectory.** Discovery binds to the *nearest* `.codebugs/`, so a nested tracker hides the project's real one from everything beneath it. `init` refuses to do this unless you pass `--force`.
+- **Git worktrees share the main repo's tracker.** A worktree's `.git` is a file pointing at the main repo, which discovery follows — so findings filed from a worktree land in the project's database, not in a throwaway that dies with the worktree.
+
 ### Claude Code (MCP)
 
 Add to `~/.claude.json` (global) or `.mcp.json` (per-project):
@@ -49,7 +64,7 @@ Add to `~/.claude.json` (global) or `.mcp.json` (per-project):
 }
 ```
 
-The database lives at `.codebugs/findings.db` in the current working directory — each project gets its own. Add `.codebugs/` to your `.gitignore`.
+The database lives at `.codebugs/findings.db`, discovered by walking up from the server's working directory — each project gets its own. Run `codebugs init` in the project first (see above), or every tool call will fail with "no `.codebugs/` found". Add `.codebugs/` to your `.gitignore`.
 
 ### Running Modules Independently
 
