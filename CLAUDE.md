@@ -35,6 +35,7 @@ AI-native code finding & requirements tracker. SQLite-backed, exposed via MCP se
 - CLI handlers are named `cmd_<domain>_<action>()`. (Exception: findings handlers lack domain prefix — see known debt above.)
 
 ### Database
+- **DB discovery**: `db.connect()` walks up from cwd for an existing `.codebugs/`. It never creates one implicitly — no tracker found raises `db.DatabaseNotFoundError`, and `codebugs init` is the only way to make a new one. A `.git/` **directory** stops the walk (submodules must not hijack the parent's DB); a `.git` **file** is followed via its `gitdir:`/`commondir` pointer, so git worktrees resolve to the main repo's DB.
 - Each module defines its schema as a module-level string (`SCHEMA` or `<DOMAIN>_SCHEMA`) and provides `ensure_schema(conn)`.
 - All schema changes must be additive (new tables, new columns with defaults) or use explicit migration functions.
 - Use parameterized queries exclusively. Never interpolate values into SQL.
