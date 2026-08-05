@@ -3,9 +3,42 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from codebugs import db
+
+
+def _cmd_init(args: argparse.Namespace) -> None:
+    try:
+        result = db.init_project(args.directory, force=args.force)
+    except (ValueError, OSError) as e:
+        print(f"codebugs: {e}", file=sys.stderr)
+        sys.exit(1)
+    if args.force and db._find_db_root(os.path.dirname(result["root"])) is not None:
+        print(
+            f"codebugs: warning — this tracker is nested inside another and will hide it "
+            f"from everything under {result['root']}",
+            file=sys.stderr,
+        )
+    verb = "Initialized" if result["created"] else "Already initialized:"
+    print(f"{verb} codebugs tracker at {result['path']}")
+
+
+def _register_init(sub, commands: dict) -> None:
+    """Register `init`, the one command that may create a tracker.
+
+    Lives here rather than in a domain module: it bootstraps the DB every other
+    command needs, so it must work when no DB exists yet, in every --mode.
+    """
+    p = sub.add_parser("init", help=f"Create a {db.DB_DIR}/ tracker in this directory")
+    p.add_argument("directory", nargs="?", default=None, help="Directory (default: cwd)")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Create even if an enclosing tracker already covers this directory",
+    )
+    commands["init"] = _cmd_init
 
 
 def main() -> None:
@@ -26,6 +59,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command")
     commands: dict = {}
 
+    _register_init(sub, commands)
     for provider in db.get_cli_providers(mode=pre_args.mode):
         provider.register_fn(sub, commands)
 
@@ -33,7 +67,11 @@ def main() -> None:
     if not args.command:
         parser.print_help()
         sys.exit(1)
-    commands[args.command](args)
+    try:
+        commands[args.command](args)
+    except (db.DatabaseNotFoundError, db.TrackerExistsError) as e:
+        print(f"codebugs: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

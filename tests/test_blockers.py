@@ -7,6 +7,7 @@ from codebugs import blockers, db, findings, reqs
 
 @pytest.fixture
 def tmp_project(tmp_path):
+    db.init_project(str(tmp_path))
     return str(tmp_path)
 
 

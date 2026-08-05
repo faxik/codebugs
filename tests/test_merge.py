@@ -368,6 +368,7 @@ class TestIntegration:
     def test_db_connect_creates_merge_schema(self, tmp_path):
         """db.connect() should initialize merge tables too."""
         from codebugs import db
+        db.init_project(str(tmp_path))
         c = db.connect(str(tmp_path))
         tables = {r[0] for r in c.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"

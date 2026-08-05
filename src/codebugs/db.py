@@ -27,6 +27,7 @@ from typing import Any
 
 DB_DIR = ".codebugs"
 DB_FILE = "findings.db"
+DOT_GIT = ".git"
 
 
 # --- Schema registry ---
@@ -242,30 +243,155 @@ def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 # --- Connection + module loading ---
 
 
+class DatabaseNotFoundError(RuntimeError):
+    """No `.codebugs/` tracker was found, and one must not be created implicitly.
+
+    Auto-creating is what makes a wrong-directory bind silent: the caller gets an
+    empty DB instead of an error, and every finding written into it is invisible
+    to everyone else. `init_project()` is the only function that may create one.
+    """
+
+
+class TrackerExistsError(RuntimeError):
+    """A tracker already covers this directory, so creating another would shadow it.
+
+    `_find_db_root` binds to the NEAREST `.codebugs/`, so a nested tracker
+    permanently hides the project's real one from everything beneath it.
+    """
+
+
+def _worktree_main_root(git_file: Path) -> str | None:
+    """Resolve a `.git` FILE to the main repo's root, or None if it isn't a worktree.
+
+    Both linked worktrees and submodules present `.git` as a file holding
+    `gitdir: <path>`, so the pointer must be followed to tell them apart.
+    A worktree's gitdir (`<main>/.git/worktrees/<id>`) contains a `commondir`
+    file pointing back at the main repo; a submodule's (`<parent>/.git/modules/<name>`)
+    does not, and stays a discovery boundary.
+    """
+
+    def _abs(base: Path, raw: str) -> Path:
+        p = Path(raw)
+        return p.resolve() if p.is_absolute() else (base / p).resolve()
+
+    try:
+        text = git_file.read_text(errors="replace")
+    except OSError:
+        return None
+
+    pointer = next(
+        (ln[len("gitdir:") :].strip() for ln in text.splitlines() if ln.startswith("gitdir:")),
+        "",
+    )
+    if not pointer:
+        return None
+
+    gitdir = _abs(git_file.parent, pointer)
+    commondir = gitdir / "commondir"
+    if not commondir.is_file():
+        return None
+    try:
+        common = commondir.read_text().strip()
+    except OSError:
+        return None
+    if not common:
+        return None
+
+    common_git = _abs(gitdir, common)
+    if common_git.name != DOT_GIT:
+        # Bare or otherwise unconventional main repo — refuse rather than guess.
+        return None
+    return str(common_git.parent)
+
+
 def _find_db_root(start: str | None = None) -> str | None:
     """Walk up from `start` (default cwd) looking for an existing `.codebugs/`.
 
     Mirrors git's discovery rules: returns the directory containing `.codebugs/`,
-    or None if walking hits a `.git/` (repo root — picking the enclosing repo's
-    DB when invoked inside a submodule would be worse than auto-creating) or the
-    filesystem root.
+    or None if walking hits a repo boundary or the filesystem root.
+
+    A `.git/` DIRECTORY is a repo root and stops the walk (picking the enclosing
+    repo's DB when invoked inside a submodule would be worse than refusing). A
+    `.git` FILE is ambiguous: in a linked worktree it points at the main repo, so
+    discovery continues from there; in a submodule it stays a boundary.
     """
     cur = Path(start or os.getcwd()).resolve()
-    while True:
+    seen: set[Path] = set()
+    while cur not in seen:
+        seen.add(cur)
         if (cur / DB_DIR).is_dir():
             return str(cur)
-        if (cur / ".git").exists():
+        git = cur / DOT_GIT
+        if git.is_dir():
             return None
+        if git.is_file():
+            main_root = _worktree_main_root(git)
+            if main_root is None:
+                return None
+            cur = Path(main_root)
+            continue
         if cur.parent == cur:
             return None
         cur = cur.parent
+    return None
 
 
 def _db_path(project_dir: str | None = None) -> str:
-    root = project_dir
-    if root is None:
-        root = _find_db_root() or os.getcwd()
+    """Locate an EXISTING tracker's DB file. Never invents one.
+
+    A named `project_dir` is not an opt-in to creation: it routinely carries user
+    input (`--repo <path>`), where a typo must fail loudly rather than quietly
+    become a second, empty tracker.
+    """
+    if project_dir is None:
+        root = _find_db_root()
+        if root is None:
+            raise DatabaseNotFoundError(
+                f"no {DB_DIR}/ found in {os.getcwd()} or any parent; "
+                f"run `codebugs init` here, or cd into a project that has one"
+            )
+    else:
+        root = project_dir
+        if not os.path.isdir(os.path.join(root, DB_DIR)):
+            raise DatabaseNotFoundError(
+                f"no {DB_DIR}/ in {root}; "
+                f"check the path, or run `codebugs init {root}` to create a tracker there"
+            )
     return os.path.join(root, DB_DIR, DB_FILE)
+
+
+def init_project(project_dir: str | None = None, *, force: bool = False) -> dict[str, Any]:
+    """Create a `.codebugs/` tracker in `project_dir` (default cwd).
+
+    The only function that creates a tracker, so that creation is always a
+    deliberate act. Idempotent — an existing tracker here is left alone.
+
+    Refuses when an enclosing tracker already covers this directory: a nested
+    `.codebugs/` wins the upward walk forever after, silently orphaning every
+    finding written beneath it. `force=True` allows the deliberate nested case.
+    """
+    root = os.path.abspath(project_dir or os.getcwd())
+    if not os.path.isdir(root):
+        raise ValueError(f"cannot initialize {root}: no such directory")
+
+    tracker_dir = os.path.join(root, DB_DIR)
+    if os.path.exists(tracker_dir) and not os.path.isdir(tracker_dir):
+        raise ValueError(f"cannot initialize {root}: {tracker_dir} exists and is not a directory")
+
+    if not force:
+        enclosing = _find_db_root(root)
+        if enclosing is not None and os.path.realpath(enclosing) != os.path.realpath(root):
+            raise TrackerExistsError(
+                f"{enclosing} already has a {DB_DIR}/ covering {root}; "
+                f"initializing here would hide it from everything below. "
+                f"Use that tracker, or pass --force to nest deliberately"
+            )
+
+    path = os.path.join(tracker_dir, DB_FILE)
+    created = not os.path.exists(path)
+    os.makedirs(tracker_dir, exist_ok=True)
+    connect(root).close()
+    return {"root": root, "path": path, "created": created}
 
 
 _modules_loaded = False
@@ -289,17 +415,9 @@ def _ensure_modules_loaded() -> None:
 def connect(project_dir: str | None = None) -> sqlite3.Connection:
     """Open (and initialize) the codebugs database."""
     path = _db_path(project_dir)
-    is_new = not os.path.exists(path)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-
-    if is_new and project_dir is None:
-        sys.stderr.write(
-            f"codebugs: created fresh .codebugs/ at {path} "
-            f"(no existing DB found in current dir or parents up to .git/)\n"
-        )
 
     _ensure_modules_loaded()
     for entry in _resolved_order():

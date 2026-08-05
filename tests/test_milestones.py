@@ -11,6 +11,7 @@ from codebugs import blockers, db, findings, milestones, reqs
 
 @pytest.fixture
 def tmp_project(tmp_path):
+    db.init_project(str(tmp_path))
     return str(tmp_path)
 
 

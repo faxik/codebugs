@@ -37,6 +37,7 @@ class CountingConn:
 @pytest.fixture
 def conn(tmp_path):
     """Fresh DB on disk so connect()'s schema-init path runs end-to-end."""
+    db.init_project(str(tmp_path))
     c = db.connect(str(tmp_path))
     yield c
     c.close()
