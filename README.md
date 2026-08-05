@@ -48,7 +48,9 @@ This creates `.codebugs/findings.db`. **codebugs never creates a tracker on its 
 Two consequences worth knowing:
 
 - **Run `init` at the project root, not in a subdirectory.** Discovery binds to the *nearest* `.codebugs/`, so a nested tracker hides the project's real one from everything beneath it. `init` refuses to do this unless you pass `--force`.
-- **Git worktrees share the main repo's tracker.** A worktree's `.git` is a file pointing at the main repo, which discovery follows — so findings filed from a worktree land in the project's database, not in a throwaway that dies with the worktree.
+- **Git worktrees share the main repo's tracker.** A worktree's `.git` is a file pointing at the main repo, which discovery follows — so findings filed from a worktree land in the project's database, not in a throwaway that dies with the worktree. `init` refuses to run inside a worktree for the same reason; run it in the main checkout.
+
+  Two layouts are the exception: if the main repo is **bare** or was created with **`--separate-git-dir`**, git records no path back to a main checkout — its own `git worktree list` reports the git directory instead. Discovery cannot resolve those and refuses with an explicit error rather than guessing a wrong project. Run `init` in the main checkout before creating worktrees.
 
 ### Claude Code (MCP)
 

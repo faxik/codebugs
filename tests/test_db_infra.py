@@ -150,10 +150,14 @@ def _git(*args: str, cwd) -> None:
     )
 
 
-def _repo_with_worktree(tmp_path, worktree_path):
-    """A real git repo owning a `.codebugs/`, plus a real linked worktree."""
+def _repo_with_worktree(tmp_path, worktree_path, *, tracker: bool = True):
+    """A real git repo plus a real linked worktree.
+
+    `tracker=False` builds the CB-10 case: a main checkout that has not been
+    initialized yet, so discovery from the worktree legitimately finds nothing.
+    """
     repo = tmp_path / "repo"
-    (repo / ".codebugs").mkdir(parents=True)
+    (repo / ".codebugs").mkdir(parents=True) if tracker else repo.mkdir(parents=True)
     _git("init", "-b", "main", ".", cwd=repo)
     (repo / "f.txt").write_text("x")
     _git("add", "f.txt", cwd=repo)
@@ -297,6 +301,24 @@ class TestRefusesToAutoCreate:
         assert str(empty.resolve()) in msg, "error must name the directory it searched from"
         assert "codebugs init" in msg, "error must name the way out"
 
+    def test_refusal_inside_a_worktree_does_not_advise_initializing_here(
+        self, tmp_path, monkeypatch
+    ):
+        """CB-10 residue: `init` here is the one thing a worktree user must NOT do.
+
+        The generic message tells them to run `codebugs init` in the current
+        directory; inside a worktree that produces a tracker which dies with the
+        worktree. The diagnostic has to name the main checkout instead.
+        """
+        wt = tmp_path / "elsewhere"
+        repo = _repo_with_worktree(tmp_path, wt, tracker=False)
+        monkeypatch.chdir(wt)
+        with pytest.raises(db.DatabaseNotFoundError) as exc:
+            db.connect()
+        msg = str(exc.value)
+        assert "worktree" in msg.lower(), "must say why this directory is special"
+        assert str(repo.resolve()) in msg, "must name the main checkout to initialize instead"
+
     def test_refusal_creates_nothing_on_disk(self, tmp_path, monkeypatch):
         empty = tmp_path / "nowhere"
         empty.mkdir()
@@ -419,6 +441,53 @@ class TestInitProject:
         with pytest.raises(db.TrackerExistsError):
             db.init_project()
         assert not (wt / ".codebugs").exists()
+
+    def test_init_in_a_worktree_refuses_even_when_the_main_repo_has_no_tracker(
+        self, tmp_path, monkeypatch
+    ):
+        """CB-10/N1: the shadow guard cannot lean on `_find_db_root` alone.
+
+        With no tracker in the main checkout, discovery returns None, so the
+        enclosing-tracker check passes and `init` used to create a tracker
+        INSIDE the worktree — which dies with the worktree, taking its findings.
+        """
+        wt = tmp_path / "elsewhere"
+        repo = _repo_with_worktree(tmp_path, wt, tracker=False)
+        monkeypatch.chdir(wt)
+        with pytest.raises(db.TrackerExistsError) as exc:
+            db.init_project()
+        assert not (wt / ".codebugs").exists(), "no tracker may be created inside a worktree"
+        assert not (repo / ".codebugs").exists(), "and none may be invented in the main repo"
+        assert str(wt.resolve()) in str(exc.value), "error must name the worktree it refused in"
+
+    def test_init_in_a_worktree_subdir_refuses(self, tmp_path, monkeypatch):
+        """The guard must walk up, not just look at cwd."""
+        wt = tmp_path / "elsewhere"
+        _repo_with_worktree(tmp_path, wt, tracker=False)
+        sub = wt / "src" / "deep"
+        sub.mkdir(parents=True)
+        monkeypatch.chdir(sub)
+        with pytest.raises(db.TrackerExistsError):
+            db.init_project()
+        assert not (sub / ".codebugs").exists()
+
+    def test_init_force_still_works_inside_a_worktree(self, tmp_path, monkeypatch):
+        """The refusal must stay overridable — deliberate worktree-local trackers are legal."""
+        wt = tmp_path / "elsewhere"
+        _repo_with_worktree(tmp_path, wt, tracker=False)
+        monkeypatch.chdir(wt)
+        result = db.init_project(force=True)
+        assert result["created"] is True
+        assert os.path.exists(wt / ".codebugs" / "findings.db")
+
+    def test_init_in_the_main_checkout_is_unaffected(self, tmp_path, monkeypatch):
+        """The guard keys on linked worktrees only — a normal repo root still initializes."""
+        wt = tmp_path / "elsewhere"
+        repo = _repo_with_worktree(tmp_path, wt, tracker=False)
+        monkeypatch.chdir(repo)
+        result = db.init_project()
+        assert result["created"] is True
+        assert os.path.exists(repo / ".codebugs" / "findings.db")
 
     def test_init_force_creates_a_nested_tracker(self, tmp_path, monkeypatch):
         """Deliberately nesting stays possible — it just cannot happen by accident."""
