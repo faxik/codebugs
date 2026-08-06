@@ -295,7 +295,14 @@ def update_finding(
     params.append(utc_now())
     params.append(finding_id)
 
-    conn.execute(f"UPDATE findings SET {', '.join(updates)} WHERE id = ?", params)
+    old_status = row["status"]
+    cur = conn.execute(f"UPDATE findings SET {', '.join(updates)} WHERE id = ?", params)
+    # Fire iff the write actually changed the row. `status` is already canonical
+    # via resolve_finding_status above, so an alias does not read as a change.
+    # Hooks run inside this transaction, before the commit below, so a status
+    # change and its side-effects (e.g. auto-releasing a claim) land atomically.
+    if status is not None and cur.rowcount == 1 and status != old_status:
+        db.run_status_change_hooks(conn, finding_id, old_status, status)
     conn.commit()
     return db.row_to_dict(
         conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()

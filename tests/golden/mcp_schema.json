@@ -283,6 +283,194 @@
     "name": "categories"
   },
   {
+    "description": "Claim a finding or requirement so parallel agents do not collide.\n\nArgs:\n    entity_id: CB-N, FR-N or NFR-N\n    holder: who is claiming \u2014 a branch name, agent id, or person\n    holder_kind: branch | agent | human\n    holder_repo: absolute path of the repo owning the branch, if any\n    note: free-text reason, kept on renewal unless replaced\n    project: also move a finding to in_progress (requirements never project)\n    allow_terminal: claim even if the entity is already resolved\n\nReturns:\n    outcome: claimed | already_mine | held_by_other | entity_terminal | undetermined.\n    On held_by_other the holder fields name the INCUMBENT.\n    On undetermined, re-issue the identical call \u2014 it converges on already_mine.\n",
+    "inputSchema": {
+      "properties": {
+        "allow_terminal": {
+          "default": false,
+          "title": "Allow Terminal",
+          "type": "boolean"
+        },
+        "entity_id": {
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "holder": {
+          "title": "Holder",
+          "type": "string"
+        },
+        "holder_kind": {
+          "default": "agent",
+          "title": "Holder Kind",
+          "type": "string"
+        },
+        "holder_repo": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Holder Repo"
+        },
+        "note": {
+          "default": "",
+          "title": "Note",
+          "type": "string"
+        },
+        "project": {
+          "default": true,
+          "title": "Project",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entity_id",
+        "holder"
+      ],
+      "title": "claims_claimArguments",
+      "type": "object"
+    },
+    "name": "claims_claim"
+  },
+  {
+    "description": "Everything a given holder currently holds.",
+    "inputSchema": {
+      "properties": {
+        "holder": {
+          "title": "Holder",
+          "type": "string"
+        }
+      },
+      "required": [
+        "holder"
+      ],
+      "title": "claims_held_byArguments",
+      "type": "object"
+    },
+    "name": "claims_held_by"
+  },
+  {
+    "description": "List live claims, optionally filtered by kind, holder or holder kind.",
+    "inputSchema": {
+      "properties": {
+        "holder": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Holder"
+        },
+        "holder_kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Holder Kind"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kind"
+        },
+        "limit": {
+          "default": 200,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "title": "claims_listArguments",
+      "type": "object"
+    },
+    "name": "claims_list"
+  },
+  {
+    "description": "Release a claim. Authorized on the full (holder, holder_kind, holder_repo)\ntriple \u2014 pass exactly what you claimed with.\n\nReturns:\n    outcome: released | not_yours | not_claimed | undetermined.\n    A projected status is restored only if it still holds the projected\n    value, so finished work is never resurrected.\n",
+    "inputSchema": {
+      "properties": {
+        "entity_id": {
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "holder": {
+          "title": "Holder",
+          "type": "string"
+        },
+        "holder_kind": {
+          "default": "agent",
+          "title": "Holder Kind",
+          "type": "string"
+        },
+        "holder_repo": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Holder Repo"
+        },
+        "reason": {
+          "default": "explicit",
+          "title": "Reason",
+          "type": "string"
+        },
+        "restore_status": {
+          "default": true,
+          "title": "Restore Status",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entity_id",
+        "holder"
+      ],
+      "title": "claims_releaseArguments",
+      "type": "object"
+    },
+    "name": "claims_release"
+  },
+  {
+    "description": "Who currently holds this entity, if anyone.",
+    "inputSchema": {
+      "properties": {
+        "entity_id": {
+          "title": "Entity Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "entity_id"
+      ],
+      "title": "claims_who_holdsArguments",
+      "type": "object"
+    },
+    "name": "claims_who_holds"
+  },
+  {
     "description": "Delete a single run or all runs for a benchmark.\n\nArgs:\n    run_id: Delete a specific run (e.g. \"BE-1\")\n    benchmark: Delete all runs for a benchmark name\n",
     "inputSchema": {
       "properties": {

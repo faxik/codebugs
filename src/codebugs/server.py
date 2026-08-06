@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from codebugs import db
 
@@ -28,6 +28,7 @@ SERVER_NAMES = {
     "bench": "codebench",
     "blockers": "codeblockers",
     "milestones": "codemilestones",
+    "claims": "codeclaims",
     "all": "codebugs",
 }
 
@@ -43,7 +44,9 @@ def main():
     )
     args = parser.parse_args()
 
-    server = FastMCP(SERVER_NAMES[args.mode], json_response=True)
+    # mcp 2.0 renamed FastMCP -> MCPServer and dropped the constructor's
+    # json_response flag; it only ever applied to streamable-http, and we run stdio.
+    server = MCPServer(SERVER_NAMES[args.mode])
 
     for provider in db.get_tool_providers(mode=args.mode):
         provider.register_fn(server, _conn)

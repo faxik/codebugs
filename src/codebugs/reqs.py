@@ -219,7 +219,13 @@ def update_requirement(
     params.append(utc_now())
     params.append(req_id)
 
-    conn.execute(f"UPDATE requirements SET {', '.join(updates)} WHERE id = ?", params)
+    old_status = row["status"]
+    cur = conn.execute(f"UPDATE requirements SET {', '.join(updates)} WHERE id = ?", params)
+    # Same seam as findings.update_finding: fire iff the write changed the row.
+    # Both writers fire it — that is what makes this a seam over the entity layer
+    # rather than a findings-specific callback wearing a general name.
+    if status is not None and cur.rowcount == 1 and status != old_status:
+        db.run_status_change_hooks(conn, req_id, old_status, status)
     conn.commit()
     return db.row_to_dict(conn.execute("SELECT * FROM requirements WHERE id = ?", (req_id,)).fetchone())
 

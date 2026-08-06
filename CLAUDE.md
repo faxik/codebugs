@@ -6,7 +6,7 @@ AI-native code finding & requirements tracker. SQLite-backed, exposed via MCP se
 
 - **Domain modules** (`src/codebugs/`): `db.py` (findings + shared infra), `reqs.py`, `bench.py`, `blockers.py`, `merge.py`, `sweep.py`, `embeddings.py` (vector storage/similarity search, delegates from reqs), `milestones.py` (releases / streams / capacity-aware pull)
 - **Shared types** (`types.py`): Entity constants (statuses, priorities, severities), resolver functions, terminal states. Zero-dependency — safe to import from anywhere
-- **MCP server** (`server.py`): Thin FastMCP orchestrator (~48 lines). Discovers tool providers via registry, filters by `--mode` flag
+- **MCP server** (`server.py`): Thin `MCPServer` orchestrator (~48 lines). Discovers tool providers via registry, filters by `--mode` flag. Requires the mcp 2.x SDK (`mcp.server.mcpserver.MCPServer`, which replaced 1.x's `mcp.server.fastmcp.FastMCP`)
 - **CLI** (`cli.py`): Thin argparse orchestrator (~40 lines). Discovers CLI providers via registry, filters by `--mode` flag
 - **Formatting** (`fmt.py`): Shared CLI output utilities (ASCII table formatting)
 - **Storage**: Single SQLite DB at `.codebugs/findings.db`; each domain module owns its schema via `ensure_schema(conn)`
@@ -19,6 +19,7 @@ AI-native code finding & requirements tracker. SQLite-backed, exposed via MCP se
 - **Findings naming exception**: The findings domain predates the naming conventions. Its MCP tools (`add`, `query`, `stats`, etc.) lack the domain prefix that all other modules use (`reqs_add`, `codebench_import`). Renaming MCP tools is a breaking change for clients.
 - **Milestones naming exception**: The milestones spec mandates spec-canonical tool names (`pull_next`, `release_item`, `triage_dismiss`, `mark_branch_only`, `wip_status`). These are kept verbatim because external consumers (autosorter's `worktree-setup.sh` / `worktree-finish.sh`) call them by name. Milestone management tools (`milestone_create`, `milestone_status`, `milestone_close`, ...) do carry the domain prefix.
 - **Post-add hook**: `db.register_post_add_hook(name, fn)` is the extension point that lets `milestones.auto_route_finding` run inside `add_finding` / `batch_add_findings` before the final commit, so the finding and its `stream/triage` link land atomically. Other modules may register additional hooks.
+- **Status-change hook**: `db.register_status_change_hook(name, fn)` is the update-side twin of the post-add hook — same registration discipline, same in-transaction contract, same swallow-and-log policy. `findings.update_finding` and `reqs.update_requirement` fire it **only when the write actually changed the row** (a status was requested, `rowcount == 1`, and the value differs). `claims._auto_release_on_terminal` uses it to close a claim in the same transaction as the status write that resolved the entity.
 
 ## Code rules
 
@@ -39,11 +40,14 @@ AI-native code finding & requirements tracker. SQLite-backed, exposed via MCP se
 - Each module defines its schema as a module-level string (`SCHEMA` or `<DOMAIN>_SCHEMA`) and provides `ensure_schema(conn)`.
 - All schema changes must be additive (new tables, new columns with defaults) or use explicit migration functions.
 - Use parameterized queries exclusively. Never interpolate values into SQL.
-- SQLite WAL mode is enabled. No concurrent-write coordination beyond SQLite's built-in locking.
+- SQLite WAL mode is enabled. `db.connect()` also sets `busy_timeout=5000` explicitly — it used to be inherited from `sqlite3.connect(timeout=5.0)`'s default and appear nowhere in the source. That timeout is what turns a losing writer into a clean `rowcount=0` instead of an `OperationalError`.
+- **Never write a plain `BEGIN`.** It pins a read snapshot, and the later write upgrade dies with `SQLITE_BUSY_SNAPSHOT`, which `busy_timeout` cannot rescue. Use `db.txn(conn)`, which issues `BEGIN IMMEDIATE`, saves/restores `isolation_level`, and is reentrant (it yields `False` and does nothing when a transaction is already open). Two pre-existing executable `BEGIN IMMEDIATE` sites remain outside it — `merge.py` and `milestones/capacity.py`; a ratchet test in `tests/test_claims.py` keeps that allowlist from growing.
+- **The `RETURNING` rule.** A statement either carries `RETURNING` and its outcome is read by fetching, or it carries no `RETURNING` and its outcome is read from `cursor.rowcount`. Never both: on a `RETURNING` statement `rowcount` is `0` until the cursor is exhausted, so reading it reports "nothing happened" *while the write has already landed* — strictly worse than a no-op.
+- **The one sanctioned cross-table status write** is `entities.EntityRef.set_status(conn, new_status=…, expected=…)`. It runs inside the caller's transaction, must not commit, and returns whether the row moved. Domain modules keep owning their own tables; this exists so the claims ledger can project a status without importing a domain module.
 
 ### Error handling
 - Domain functions raise `ValueError` for invalid input and `KeyError` for missing entities.
-- MCP tools let exceptions propagate to FastMCP's built-in error handling.
+- MCP tools let exceptions propagate to the MCP server's built-in error handling.
 - CLI handlers catch domain exceptions and print to stderr with `sys.exit(1)`.
 - All MCP tools return `dict[str, Any]`.
 
@@ -78,6 +82,47 @@ We are migrating toward a plugin architecture in phases. Query with `reqs_query 
 - Add the new module import to `_ensure_modules_loaded()` in `db.py` (temporary, until auto-discovery).
 - Add the new module's mode slug to `SERVER_NAMES` (`server.py`) and to the `--mode` allowlist (`cli.py`) so it can be loaded in isolation.
 - Prefer self-contained modules that register themselves over central wiring.
+
+## Claims module
+
+`claims.py` answers "who currently holds this entity" for findings and requirements, so parallel
+agents can refuse to duplicate each other's work. One table, `entity_claims`; mutual exclusion is a
+**partial unique index** (`entity_id` WHERE `released_at IS NULL`), so at most one live claim per
+entity is a database guarantee rather than a matter of transaction discipline. Release is a soft
+delete, so `release_reason` (`explicit` | `terminal:<status>`) is a queryable record.
+
+- **Outcomes, not booleans**: `claim` → `claimed | already_mine | held_by_other | entity_terminal |
+  undetermined`; `release` → `released | not_yours | not_claimed | undetermined`. Every response is
+  built by the single `_response()` constructor and carries all fifteen `_COMMON_KEYS`.
+  `undetermined` means the database was too contended to tell — **re-issue the identical call**; the
+  primitive is an idempotent upsert, so a replay converges on `already_mine` and can never
+  double-claim.
+- **Ownership is the triple** `(holder, holder_kind, holder_repo)`, compared NULL-safely. Both
+  claim and release authorize on the full triple: a same-text holder of another kind or in another
+  repo is a different claimant.
+- **The discriminator is `touch_count`, never a timestamp.** `utc_now()` is whole-second, so a
+  retry inside one second is indistinguishable by clock.
+- **Two layers.** `_claim_core` / `_release_core` emit statements and never open or commit a
+  transaction — that is what the terminal hook calls, since it runs inside `update_finding`'s open
+  transaction. `claim` / `release` wrap the core in `db.txn` and classify contention.
+  **Ambient-transaction invariant: every caller of the public layer must hold a connection with no
+  open transaction.** On a connection with an implicitly-opened transaction the write happens,
+  nothing commits, and the call still reports success. It is unreachable today only because
+  `server.py`'s `_conn` and every CLI handler open a fresh connection.
+- **Projection is declarative**: `EntityKind.busy_status` (`in_progress` for findings, `None` for
+  requirements — a requirement's status vocabulary has no in-progress value and its CHECK is not
+  rebuilt). A kind declaring it must satisfy P1-P4, documented on `EntityRef.set_status`.
+- **Exit codes are the API for shell callers**: `0` proceed, `1` error, `3` held by someone else,
+  `4` already resolved, `5` contended (retry). `codebugs claims --format ids` prints bare ids and
+  exits 0 on an empty list so a shell loop needs no parsing.
+- **Adoption**: autosorter's `worktree-setup.sh` claims every card in the branch name (and in
+  `--items`) **before** `git worktree add`, with an EXIT trap that releases them if setup aborts;
+  `worktree-finish.sh` releases whatever the branch still holds. Exactly one of those calls may be
+  fatal — the setup gate. Everything else is guarded, so a missing or contended tracker can never
+  abort a finish after the merge has landed.
+- Deferred by design, not forgotten: `steal`, claim history queries, audit/divergence tooling,
+  retention, `expected_status`/`changed`, and `pull_next` integration.
+  See `docs/superpowers/plans/design-council-entity-claims/FINAL-DESIGN.md` §10.
 
 ## Milestones module
 
