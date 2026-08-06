@@ -123,7 +123,7 @@ class TestMcpWireSchema:
     @staticmethod
     def _dump_current_schema() -> list[dict]:
         """Dump the current MCP tool schemas as a flat sorted list."""
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
 
         @contextmanager
         def _conn():
@@ -136,7 +136,7 @@ class TestMcpWireSchema:
         async def collect():
             all_tools = []
             for provider in db.get_tool_providers(mode="all"):
-                server = FastMCP(provider.name, json_response=True)
+                server = MCPServer(provider.name)
                 provider.register_fn(server, _conn)
                 tools = await server.list_tools()
                 for t in tools:
@@ -144,7 +144,7 @@ class TestMcpWireSchema:
                         {
                             "name": t.name,
                             "description": t.description,
-                            "inputSchema": t.inputSchema,
+                            "inputSchema": t.input_schema,
                         }
                     )
             all_tools.sort(key=lambda x: x["name"])

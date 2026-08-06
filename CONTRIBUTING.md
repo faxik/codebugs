@@ -23,7 +23,7 @@ pytest tests/ -v
 ```
 src/codebugs/
   db.py       — Database layer (all SQLite operations, returns dicts)
-  server.py   — MCP server (7 tools via FastMCP)
+  server.py   — MCP server (tool providers registered on mcp 2.x MCPServer)
   cli.py      — CLI (argparse wrapper over db.py)
 tests/
   test_db.py  — 41 tests covering all database operations

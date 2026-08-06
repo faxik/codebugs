@@ -1,4 +1,4 @@
-"""Dump FastMCP tool schemas as a flat sorted list for regression diffing.
+"""Dump MCP tool schemas as a flat sorted list for regression diffing.
 
 Regenerate the golden file with:
     uv run python tests/dump_schema.py > tests/golden/mcp_schema.json
@@ -8,7 +8,7 @@ import asyncio
 import json
 from contextlib import contextmanager
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from codebugs import db
 
@@ -25,7 +25,7 @@ def _conn():
 async def main():
     all_tools = []
     for provider in db.get_tool_providers(mode="all"):
-        server = FastMCP(provider.name, json_response=True)
+        server = MCPServer(provider.name)
         provider.register_fn(server, _conn)
         tools = await server.list_tools()
         for t in tools:
@@ -33,7 +33,9 @@ async def main():
                 {
                     "name": t.name,
                     "description": t.description,
-                    "inputSchema": t.inputSchema,
+                    # mcp 2.0 renamed the attribute to input_schema; the wire
+                    # field is still inputSchema, so the golden keeps that name.
+                    "inputSchema": t.input_schema,
                 }
             )
     all_tools.sort(key=lambda x: x["name"])
