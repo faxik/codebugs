@@ -31,6 +31,9 @@ class EntityKind:
     sort_col: str  # deferred-query ordering column
     result_key: str  # JSON envelope key
     readable_cols: frozenset[str]  # per-kind allowlist for field() reads
+    # Status this kind moves to while claimed. None == this kind does not project.
+    # A kind declaring it MUST satisfy P1-P4 (see EntityRef.set_status).
+    busy_status: str | None = None
 
 
 ENTITY_KINDS: tuple[EntityKind, ...] = (
@@ -42,6 +45,7 @@ ENTITY_KINDS: tuple[EntityKind, ...] = (
         sort_col="severity",
         result_key="findings",
         readable_cols=frozenset({"id", "status", "description", "severity"}),
+        busy_status="in_progress",
     ),
     EntityKind(
         name=t.ENTITY_REQUIREMENT,
@@ -111,3 +115,30 @@ class EntityRef:
         """Read an arbitrary allowlisted column (escape hatch). Raises ValueError if the
         column is not in this kind's ``readable_cols``."""
         return self._read(conn, name)
+
+    def set_status(self, conn: sqlite3.Connection, *, new_status: str, expected: str) -> bool:
+        """Guarded status write — THE single sanctioned cross-table status write.
+
+        Runs inside the caller's transaction and MUST NOT commit: the caller
+        composes it with other writes. Returns True iff the row moved.
+
+        Deliberately does NOT use RETURNING — ``rowcount`` is the correct outcome
+        idiom precisely when RETURNING is absent. Deliberately does NOT fire
+        status-change hooks: it is only ever called with a non-terminal status, so
+        there is nothing for the terminal hook to react to and no recursion.
+
+        A kind that declares ``busy_status`` MUST satisfy:
+          P1. its table has ``id`` (TEXT PK), ``status`` (TEXT), ``updated_at`` (TEXT);
+          P2. the declared value passes any CHECK on ``status`` and is CANONICAL —
+              no alias resolution happens here, the string is written verbatim;
+          P3. ``busy_status not in kind.terminal``;
+          P4. its domain module accepts that this write bypasses its ``update_*``
+              function — no note appended, no meta touched, no hook fired. The
+              audit trail for a projection lives in ``entity_claims`` instead.
+        P1-P3 are enforced by a test; P4 is a review obligation.
+        """
+        cur = conn.execute(
+            f"UPDATE {self.kind.table} SET status = ?, updated_at = ? WHERE id = ? AND status = ?",  # noqa: S608 (identifier from the frozen registry)
+            (new_status, t.utc_now(), self.id, expected),
+        )
+        return cur.rowcount == 1

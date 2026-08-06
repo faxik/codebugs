@@ -18,8 +18,8 @@ import sqlite3
 import subprocess
 import sys
 import threading
-from collections.abc import Callable
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from graphlib import CycleError
 from pathlib import Path
@@ -202,6 +202,84 @@ def run_post_add_hooks(conn: sqlite3.Connection, finding: dict[str, Any]) -> Non
             hook.fn(conn, finding)
         except Exception as e:  # noqa: BLE001
             sys.stderr.write(f"[post-add hook '{hook.name}' failed] {e}\n")
+
+
+@dataclass(frozen=True)
+class StatusChangeHook:
+    name: str
+    fn: Callable[[sqlite3.Connection, str, str | None, str], None]
+
+
+_status_change_hooks: list[StatusChangeHook] = []
+
+
+def register_status_change_hook(
+    name: str,
+    fn: Callable[[sqlite3.Connection, str, str | None, str], None],
+) -> None:
+    """Register a hook that runs when an entity's status is CHANGED through a
+    domain update function.
+
+    Hooks run inside the caller's transaction, before the final commit, so the
+    status change and any hook side-effects land atomically. Name-keyed so module
+    re-import is a no-op (same discipline as register_post_add_hook).
+
+    The update-side twin of register_post_add_hook: the create side already
+    existed, the update side did not.
+    """
+    if any(h.name == name for h in _status_change_hooks):
+        return
+    _status_change_hooks.append(StatusChangeHook(name, fn))
+
+
+def run_status_change_hooks(
+    conn: sqlite3.Connection, entity_id: str, old_status: str | None, new_status: str
+) -> None:
+    """Invoke every registered status-change hook. Failures are logged but never
+    raised — a status write must always succeed.
+
+    CONTRACT FOR CALLERS: call this ONLY when the status write actually changed
+    the row (a status was requested, rowcount == 1, and the value differs).
+    """
+    for hook in _status_change_hooks:
+        try:
+            hook.fn(conn, entity_id, old_status, new_status)
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"[status-change hook '{hook.name}' failed] {e}\n")
+
+
+@contextmanager
+def txn(conn: sqlite3.Connection) -> Iterator[bool]:
+    """BEGIN IMMEDIATE with isolation_level save/restore, reentrant.
+
+    Yields True if THIS frame opened the transaction and will commit it; False if
+    a transaction was already open, in which case this frame does nothing at all
+    — no BEGIN, no COMMIT, no ROLLBACK — and the owning frame keeps full control.
+
+    Never write a plain ``BEGIN`` in this codebase: it pins a read snapshot and
+    the later write upgrade dies with SQLITE_BUSY_SNAPSHOT, which busy_timeout
+    cannot rescue. BEGIN IMMEDIATE takes the write lock up front instead.
+    """
+    if conn.in_transaction:
+        yield False  # ambient: the caller owns it
+        return
+
+    saved = conn.isolation_level
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield True
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:  # SQLite may have auto-rolled back already
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.OperationalError:
+                    pass  # cleanup must never replace the real exception
+            raise
+    finally:
+        conn.isolation_level = saved
 
 
 # --- Shared utilities (public, used by ≥2 modules) ---
@@ -484,7 +562,17 @@ def _ensure_modules_loaded() -> None:
     with _modules_lock:
         if _modules_loaded:
             return
-        from codebugs import findings, provenance, reqs, merge, sweep, bench, blockers, milestones  # noqa: F401
+        from codebugs import (  # noqa: F401
+            bench,
+            blockers,
+            claims,
+            findings,
+            merge,
+            milestones,
+            provenance,
+            reqs,
+            sweep,
+        )
 
         _modules_loaded = True
 
@@ -495,6 +583,9 @@ def connect(project_dir: str | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    # Explicit; was inherited from sqlite3.connect(timeout=5.0)'s default. This is
+    # what turns a losing writer into a clean rowcount=0 instead of an exception.
+    conn.execute("PRAGMA busy_timeout=5000")
 
     _ensure_modules_loaded()
     for entry in _resolved_order():
