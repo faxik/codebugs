@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sqlite3
 import sys
 
 from codebugs import db
@@ -72,6 +73,16 @@ def main() -> None:
     except (db.DatabaseNotFoundError, db.TrackerExistsError) as e:
         print(f"codebugs: {e}", file=sys.stderr)
         sys.exit(1)
+    except sqlite3.OperationalError as e:
+        # Contention is not a crash. db.connect() WRITES during schema init
+        # (merge.ensure_schema's INSERT OR IGNORE), so a database held by another
+        # writer for longer than busy_timeout used to kill every verb with a
+        # traceback before its own code ran. Exit 5 means "retry", uniformly.
+        # Anything that is not BUSY/LOCKED is a real error and still propagates.
+        if not db.is_contention(e):
+            raise
+        print(f"codebugs: database busy, retry shortly ({e})", file=sys.stderr)
+        sys.exit(5)
 
 
 if __name__ == "__main__":

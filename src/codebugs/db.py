@@ -248,6 +248,26 @@ def run_status_change_hooks(
             sys.stderr.write(f"[status-change hook '{hook.name}' failed] {e}\n")
 
 
+# SQLITE_BUSY (5) and SQLITE_LOCKED (6). Extended codes mask down: 517 & 0xFF == 5.
+_CONTENTION_CODES = frozenset({5, 6})
+
+
+def is_contention(exc: BaseException) -> bool:
+    """True only for SQLITE_BUSY / SQLITE_LOCKED, keyed on the numeric code.
+
+    Never match on message text: 'cannot start a transaction within a transaction'
+    and 'cannot rollback - no transaction is active' are both SQLITE_ERROR (1) and
+    are programming errors that must stay loud.
+
+    Contention is not confined to a domain module's own statements — connect()
+    itself writes during schema initialization, so any command can meet it.
+    """
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code is None:
+        return False
+    return (code & 0xFF) in _CONTENTION_CODES
+
+
 @contextmanager
 def txn(conn: sqlite3.Connection) -> Iterator[bool]:
     """BEGIN IMMEDIATE with isolation_level save/restore, reentrant.

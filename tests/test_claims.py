@@ -714,6 +714,31 @@ class TestCliContract:
             blocker.execute("ROLLBACK")
             blocker.close()
 
+    def test_30_contention_never_crashes_any_verb(self, tmp_project, conn):
+        """CB-14. db.connect() WRITES during schema init (merge.ensure_schema's
+        INSERT OR IGNORE), so a held write lock used to kill EVERY verb with an
+        unhandled traceback before its own code ran — not just the claim verbs.
+        Contention is classified centrally now: exit 5, no traceback."""
+        _finding(conn)
+        blocker = db.connect(tmp_project)
+        blocker.execute("BEGIN IMMEDIATE")
+        blocker.execute("UPDATE findings SET category='held' WHERE id='CB-1'")
+        try:
+            for verb in (["query"], ["stats"], ["get", "CB-1"]):
+                r = subprocess.run(
+                    [sys.executable, "-m", "codebugs.cli", *verb],
+                    cwd=tmp_project,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                assert r.returncode == 5, (verb, r.returncode, r.stdout, r.stderr)
+                assert "Traceback" not in r.stderr, (verb, r.stderr)
+                assert "database busy" in r.stderr, (verb, r.stderr)
+        finally:
+            blocker.execute("ROLLBACK")
+            blocker.close()
+
     def test_26_format_ids_round_trips_into_release(self, tmp_project, conn):
         """worktree-finish.sh's release loop is only correct if this holds."""
         cb1 = _finding(conn)["id"]

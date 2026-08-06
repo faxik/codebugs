@@ -93,9 +93,6 @@ _COMMON_KEYS = (
     "prev_status",
 )
 
-# SQLITE_BUSY (5) and SQLITE_LOCKED (6). Extended codes mask down: 517 & 0xFF == 5.
-_CONTENTION = frozenset({5, 6})
-
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """Initialize the claims schema (table + indexes)."""
@@ -198,15 +195,9 @@ def _response(
     return out
 
 
-def _is_contention(exc: sqlite3.OperationalError) -> bool:
-    """True only for SQLITE_BUSY / SQLITE_LOCKED, by numeric code — never by
-    message text. 'cannot start a transaction within a transaction' and 'cannot
-    rollback - no transaction is active' are both SQLITE_ERROR (1) and must stay
-    loud."""
-    code = getattr(exc, "sqlite_errorcode", None)
-    if code is None:
-        return False
-    return (code & 0xFF) in _CONTENTION
+#: Contention classification lives in db — connect() itself can meet it, so it is
+#: not a claims-specific concern. Kept as a module-local name for readability.
+_is_contention = db.is_contention
 
 
 def _undetermined(exc: sqlite3.OperationalError, *, entity_id: str) -> dict[str, Any]:
