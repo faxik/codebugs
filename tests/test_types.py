@@ -14,6 +14,7 @@ from codebugs.types import (
     ENTITY_REQUIREMENT,
     PRIORITIES,
     SEVERITIES,
+    is_vocabulary_filter_active,
     rank_case_sql,
     resolve_finding_status,
     resolve_requirement_status,
@@ -224,3 +225,56 @@ class TestResolversRefuseNonStrings:
     def test_non_string_raises_value_error_not_attribute_error(self, resolver, bad):
         with pytest.raises(ValueError, match="Invalid"):
             resolver(bad)
+
+
+class TestIsVocabularyFilterActive:
+    """CB-25: the guard in front of every vocabulary filter.
+
+    `_resolve` above refuses non-strings, but a *falsey* one never reached it — the
+    call sites guarded with plain truthiness, so `query_findings(severity=0)` skipped
+    the condition entirely and returned the whole table."""
+
+    def test_none_and_empty_string_mean_no_filter(self):
+        assert is_vocabulary_filter_active(None) is False
+        assert is_vocabulary_filter_active("") is False
+
+    def test_ordinary_value_is_active(self):
+        assert is_vocabulary_filter_active("open") is True
+        assert is_vocabulary_filter_active("  ") is True  # resolver strips, then refuses
+
+    @pytest.mark.parametrize("falsey", [0, False, [], {}, set(), 0.0, b""])
+    def test_falsey_non_strings_are_active_so_the_resolver_can_refuse_them(self, falsey):
+        """The defect itself: these are wrong input, not "no filter"."""
+        assert is_vocabulary_filter_active(falsey) is True
+
+    def test_mock_any_is_active(self):
+        """`ANY` is truthy but compares EQUAL to "" — so the obvious
+        `value is not None and value != ""` would silently disable the filter for it,
+        reintroducing CB-25 inside CB-25's own fix. Pins the type-based predicate."""
+        from unittest.mock import ANY
+
+        assert bool(ANY) is True
+        assert (ANY != "") is False  # this is what the naive predicate would trust
+        assert is_vocabulary_filter_active(ANY) is True
+
+    def test_str_subclass_overriding_ne_is_still_active(self):
+        """Same trap from the other side: a perfectly valid status that lies about `!=`.
+        Under the naive predicate this resolvable value became "no filter"."""
+
+        class Contrarian(str):
+            def __ne__(self, other):
+                return False
+
+        value = Contrarian("open")
+        assert (value != "") is False  # the naive predicate would call this "no filter"
+        assert is_vocabulary_filter_active(value) is True
+        assert resolve_finding_status(value) == "open"
+
+    def test_str_subclass_overriding_len_cannot_fake_emptiness(self):
+        """`str.__len__` rather than `len()`, for the same do-not-run-user-code reason."""
+
+        class Liar(str):
+            def __len__(self):
+                return 0
+
+        assert is_vocabulary_filter_active(Liar("open")) is True

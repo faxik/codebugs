@@ -269,3 +269,49 @@ class TestResolveTrailers:
         report = provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
 
         assert set(report["resolved"]) == {a, b}
+
+
+class TestFalseyStatusDoesNotSilentlyDefaultToOpen:
+    """CB-25 sibling, one layer above the query filters.
+
+    `check_findings` wrote `status if status else "open"`, so the same truthiness
+    conflation applied — but with a DIFFERENT correct contract from the five domain
+    filters. Here `None`/`""` mean "default to open", not "no filter"; only wrong
+    input should raise. Before the fix `check_findings(status=0)` silently reported
+    on open findings, which reads as a successful, differently-scoped answer."""
+
+    def _one(self, conn, project, sha):
+        findings.add_finding(
+            conn,
+            severity="high",
+            category="bug",
+            file="src/auth.py",
+            description="d",
+            reported_at_commit=sha,
+        )
+
+    @pytest.mark.parametrize("falsey", [0, False, [], {}])
+    def test_falsey_status_raises(self, conn, git_project, falsey):
+        project, sha = git_project
+        self._one(conn, project, sha)
+        with pytest.raises(ValueError, match="Invalid finding status"):
+            provenance.check_findings(conn, project, status=falsey)
+
+    @pytest.mark.parametrize("empty", [None, ""])
+    def test_none_and_empty_string_still_default_to_open(self, conn, git_project, empty):
+        """Distinct from the domain sites: absence means 'open', not 'everything'."""
+        project, sha = git_project
+        self._one(conn, project, sha)
+        other = findings.add_finding(
+            conn,
+            severity="low",
+            category="bug",
+            file="src/auth.py",
+            description="already fixed",
+            reported_at_commit=sha,
+        )
+        findings.update_finding(conn, other["id"], status="fixed")
+        got = provenance.check_findings(conn, project, status=empty)
+        checked = {f["finding_id"] for f in got["findings"]}
+        assert other["id"] not in checked, "the fixed finding must not be checked"
+        assert len(checked) == 1

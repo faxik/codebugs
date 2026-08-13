@@ -7,7 +7,21 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from codebugs.types import utc_now
+from codebugs.types import MERGE_STATUSES, is_vocabulary_filter_active, utc_now
+
+# `MERGE_STATUSES` is imported, not redeclared. It has lived in `types.py` since the
+# module was written and was **dead** — nothing referenced it — so the CHECK constraint
+# below was the only thing enforcing the vocabulary, and `get_sessions`' filter
+# validated nothing. That is the write/query asymmetry CLAUDE.md's vocabulary rule
+# prohibits (CB-25 sibling sweep), and the fix is to USE the constant that already
+# existed rather than to declare a second one: an earlier draft of this change did
+# declare a separate `MERGE_SESSION_STATUSES` here, which would have made three copies
+# of one four-value vocabulary while the surrounding comment argued against duplication.
+#
+# The CHECK keeps its own literal rather than interpolating the tuple: values are never
+# interpolated into SQL in this package, and DDL cannot bind them. The two are pinned to
+# each other behaviourally instead, by `TestSessionStatusVocabulary` — which probes the
+# constraint with every member and a non-member rather than matching the schema text.
 
 
 MERGE_SCHEMA = """\
@@ -369,7 +383,11 @@ def get_sessions(
     """List sessions with claim counts."""
     conditions = []
     params: list[Any] = []
-    if status:
+    if is_vocabulary_filter_active(status):
+        if status not in MERGE_STATUSES:
+            raise ValueError(
+                f"Invalid status: {status!r}. Must be one of {MERGE_STATUSES}"
+            )
         conditions.append("s.status = ?")
         params.append(status)
 

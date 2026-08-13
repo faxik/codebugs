@@ -487,3 +487,51 @@ class TestConcurrentMergeScenario:
         assert check["recommendation"] == "dirty"
         assert check["conflicts"][0]["file"] == "src/shared.py"
         assert check["conflicts"][0]["blocking_session"] == "B"
+
+
+class TestSessionStatusVocabulary:
+    """CB-25 sibling sweep. `get_sessions` guarded its status filter with plain
+    truthiness AND validated nothing, so `status=0` returned every session while an
+    unknown-but-truthy status returned none. The vocabulary existed only as a literal
+    inside the CHECK constraint, i.e. enforced on the write side and nowhere else —
+    exactly the write/query asymmetry CB-19 prohibits."""
+
+    def _two(self, conn):
+        merge.start_session(conn, session_id="s1", branch="b1")
+        merge.start_session(conn, session_id="s2", branch="b2")
+
+    @pytest.mark.parametrize("falsey", [0, False, [], {}])
+    def test_falsey_status_raises_instead_of_returning_everything(self, conn, falsey):
+        self._two(conn)
+        with pytest.raises(ValueError, match="Invalid status"):
+            merge.get_sessions(conn, status=falsey)
+
+    def test_unknown_status_raises_instead_of_returning_nothing(self, conn):
+        self._two(conn)
+        with pytest.raises(ValueError, match="Invalid status"):
+            merge.get_sessions(conn, status="bogus")
+
+    @pytest.mark.parametrize("empty", [None, ""])
+    def test_none_and_empty_string_still_mean_no_filter(self, conn, empty):
+        self._two(conn)
+        assert len(merge.get_sessions(conn, status=empty)) == 2
+
+    def test_valid_status_still_filters(self, conn):
+        self._two(conn)
+        assert len(merge.get_sessions(conn, status="active")) == 2
+        assert len(merge.get_sessions(conn, status="done")) == 0
+
+    def test_constant_matches_the_check_constraint(self, conn):
+        """Pins the declared vocabulary to the schema BEHAVIOURALLY rather than by
+        matching the DDL text: every member must be accepted by the CHECK and a
+        non-member must be rejected. If the two ever drift, this fails."""
+        for i, status in enumerate(merge.MERGE_STATUSES):
+            conn.execute(
+                "INSERT INTO codemerge_sessions (session_id, branch, status) VALUES (?,?,?)",
+                (f"ok{i}", "b", status),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO codemerge_sessions (session_id, branch, status) VALUES (?,?,?)",
+                ("bad", "b", "not_a_status"),
+            )

@@ -71,6 +71,34 @@ TRIGGER_TYPES = ("entity_resolved", "date", "manual")
 # --- Resolvers ---
 
 
+def is_vocabulary_filter_active(value: object) -> bool:
+    """Is this query-filter argument a real filter, or does it mean "no filter"?
+
+    Only ``None`` (not supplied) and ``""`` (the documented empty-filter convention)
+    mean "no filter". Everything else is an active filter and must reach its resolver,
+    which is what refuses it. Guarding with plain truthiness instead conflates those two
+    with *wrong input*: ``query_findings(severity=0)`` short-circuited past the CB-19
+    guard and returned the whole table, and an unfiltered queue is indistinguishable
+    from a correctly filtered one (CB-25).
+
+    **Never decide this with ``value != ""``.** That runs arbitrary user code:
+    ``unittest.mock.ANY`` is truthy yet compares equal to ``""``, so it would flip from
+    raising to silently disabling the filter, and a ``str`` subclass overriding
+    ``__ne__`` would do the same to a perfectly valid ``"open"`` — the CB-25 defect
+    reintroduced by its own fix. ``str.__len__`` for the same reason: a subclass cannot
+    reach it.
+
+    Scoped to *vocabulary* filters on purpose. It is wrong for list-valued filters such
+    as ``ids`` / ``tags``, where an empty list legitimately means "no filter" and where
+    an active empty filter would silently return nothing instead of everything.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return str.__len__(value) != 0
+    return True
+
+
 def _resolve(
     value: str,
     valid: tuple[str, ...],

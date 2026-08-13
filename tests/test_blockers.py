@@ -493,3 +493,38 @@ class TestDeferredOrdering:
         res = blockers.query_deferred_entities(conn, entity_type="finding", limit=50)
         assert [f["id"] for f in res["findings"]] == ["CB-2", "CB-1"]
         assert res["total"] == 2
+
+
+class TestFalseyTriggerTypeDoesNotDisableTheFilter:
+    """CB-25, at the site the first sibling sweep missed.
+
+    `query_blockers` already validated `trigger_type` against `TRIGGER_TYPES` — but
+    the check sat INSIDE `if trigger_type:`, so a falsey value skipped the guard and
+    the condition alike and every blocker came back. The validation being present in
+    the body is exactly what made it look safe.
+
+    Found only by sweeping for the SHAPE of the guard rather than for the filter
+    names already known to be affected."""
+
+    def _one(self, conn):
+        a = _add_finding(conn, fid="CB-1")
+        b = _add_finding(conn, fid="CB-2", description="dep")
+        blockers.add_blocker(
+            conn, item_id=a["id"], blocked_by=b["id"], trigger_type="manual", reason="r"
+        )
+
+    @pytest.mark.parametrize("falsey", [0, False, [], {}])
+    def test_falsey_trigger_type_raises_instead_of_returning_everything(self, conn, falsey):
+        self._one(conn)
+        with pytest.raises(ValueError, match="Invalid trigger_type"):
+            blockers.query_blockers(conn, trigger_type=falsey)
+
+    @pytest.mark.parametrize("empty", [None, ""])
+    def test_none_and_empty_string_still_mean_no_filter(self, conn, empty):
+        self._one(conn)
+        assert blockers.query_blockers(conn, trigger_type=empty)["total"] == 1
+
+    def test_valid_trigger_type_still_filters(self, conn):
+        self._one(conn)
+        assert blockers.query_blockers(conn, trigger_type="manual")["total"] == 1
+        assert blockers.query_blockers(conn, trigger_type="date")["total"] == 0

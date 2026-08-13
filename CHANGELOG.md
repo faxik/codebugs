@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **A falsey non-string vocabulary filter no longer silently disables the filter**
+  (CB-25). Every vocabulary filter guarded with plain truthiness — `if severity:` —
+  which conflates `None` (not supplied), `""` (the documented empty-filter
+  convention) and `0` / `False` / `[]` / `{}` (wrong input). CB-19 put the
+  non-string refusal inside `types._resolve`, but a falsey value never reached it:
+  the guard short-circuited, the condition was never added to the `WHERE` clause,
+  and the caller got the **whole table** back. An unfiltered queue is
+  indistinguishable from a correctly filtered one, so
+  `query_findings(severity=0)` read as a successful, empty-severity query.
+
+  Fixed at `query_findings` (`status`, `severity`), `query_requirements`
+  (`status`, `priority`), `reqs_search_similar` (`status`), and
+  `staleness_check` / `check_findings`, whose contract differs — `None` and `""`
+  mean "default to `open`" there, not "no filter".
+
+  The same sweep closed three filters that validated their vocabulary on the write
+  side only: `codemerge_sessions` (`types.MERGE_STATUSES` already existed but was
+  dead code, leaving the CHECK constraint as the only enforcement — it is now
+  actually used), `milestone_list` (`kind` / `state`, which had `MILESTONE_KINDS` /
+  `MILESTONE_STATES` all along and never consulted them on query), and
+  `blockers_query` (`trigger_type`, whose validation sat *inside* the truthy guard
+  and was therefore skipped wholesale by a falsey value). All three now raise
+  `ValueError` on an unknown value instead of returning everything for a falsey one
+  and nothing for a misspelled one.
+
+  **Unchanged on purpose:** `None` and `""` still mean "no filter"; list-valued
+  filters (`ids`, `tags`) still treat an empty list as "no filter"; and free-text
+  filters (`category`, `file`, `source`, `tag`, …) are untouched — they have no
+  vocabulary to resolve against, and are tracked as CB-29.
+
 ### Changed
 - **`severity` now accepts any case, everywhere it is read or written** (CB-19).
   It was the only vocabulary in `types.py` without a resolver, so

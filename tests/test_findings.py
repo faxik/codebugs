@@ -1533,3 +1533,42 @@ class TestQueryCliReportsBadVocabularyCleanly:
         """The guard must not swallow the happy path."""
         r = self._run(tmp_project, "query", "--severity", "HIGH")
         assert r.returncode == 0, r.stdout + r.stderr
+
+
+class TestFalseyVocabularyFiltersDoNotDisableTheFilter:
+    """CB-25: `if severity:` conflated "not supplied" with "wrong input".
+
+    CB-19 put the non-string refusal inside `_resolve`, but a *falsey* value never
+    reached it — the truthy guard short-circuited first, the condition was never added,
+    and the caller got the whole table back. An unfiltered queue is indistinguishable
+    from a correctly filtered one, which is the silent shape CB-19 was filed against."""
+
+    def _two(self, conn):
+        findings.add_finding(conn, severity="high", category="c", file="a.py", description="d")
+        findings.add_finding(conn, severity="low", category="c", file="b.py", description="d")
+
+    @pytest.mark.parametrize("falsey", [0, False, [], {}])
+    def test_falsey_severity_raises_instead_of_returning_everything(self, conn, falsey):
+        self._two(conn)
+        with pytest.raises(ValueError, match="Invalid severity"):
+            findings.query_findings(conn, severity=falsey)
+
+    @pytest.mark.parametrize("falsey", [0, False, [], {}])
+    def test_falsey_status_raises_instead_of_returning_everything(self, conn, falsey):
+        self._two(conn)
+        with pytest.raises(ValueError, match="Invalid finding status"):
+            findings.query_findings(conn, status=falsey)
+
+    @pytest.mark.parametrize("empty", [None, ""])
+    def test_none_and_empty_string_still_mean_no_filter(self, conn, empty):
+        """The documented convention, unchanged."""
+        self._two(conn)
+        assert findings.query_findings(conn, severity=empty)["total"] == 2
+        assert findings.query_findings(conn, status=empty)["total"] == 2
+
+    def test_list_valued_filters_keep_their_empty_means_no_filter_semantics(self, conn):
+        """`ids=[]` is NOT a vocabulary filter and must stay untouched: made "active"
+        it would emit `id IN ()`, which SQLite accepts and which returns NOTHING —
+        turning a silent full queue into a silent empty one, quieter and worse."""
+        self._two(conn)
+        assert findings.query_findings(conn, ids=[])["total"] == 2

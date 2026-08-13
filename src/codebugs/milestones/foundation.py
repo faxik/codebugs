@@ -7,7 +7,7 @@ import sqlite3
 from datetime import date, datetime, timezone
 from typing import Any
 
-from codebugs.types import utc_now
+from codebugs.types import is_vocabulary_filter_active, utc_now
 
 from codebugs.milestones._schema import (
     ITEM_SIZES,
@@ -99,10 +99,19 @@ def list_milestones(
     """List milestones with optional filters."""
     conditions: list[str] = []
     params: list[Any] = []
-    if kind:
+    # Validated on the query side as well as the write side (`create_milestone` at :42
+    # and `update_milestone` at :79). Guarding with truthiness alone let
+    # `list_milestones(kind=0)` short-circuit into "no filter" and return every
+    # milestone, and left an unknown-but-truthy kind to return silently empty — both
+    # halves of the vocabulary-both-sides rule (CB-25 sibling sweep).
+    if is_vocabulary_filter_active(kind):
+        if kind not in MILESTONE_KINDS:
+            raise ValueError(f"Invalid kind: {kind!r}. Must be one of {MILESTONE_KINDS}")
         conditions.append("kind = ?")
         params.append(kind)
-    if state:
+    if is_vocabulary_filter_active(state):
+        if state not in MILESTONE_STATES:
+            raise ValueError(f"Invalid state: {state!r}. Must be one of {MILESTONE_STATES}")
         conditions.append("state = ?")
         params.append(state)
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""

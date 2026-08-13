@@ -887,3 +887,35 @@ class TestQueryFiltersResolveLikeTheWritePaths:
             reqs.query_requirements(conn, priority="banana")
         with pytest.raises(ValueError, match="Invalid requirement status"):
             reqs.query_requirements(conn, status="banana")
+
+
+class TestFalseyVocabularyFiltersDoNotDisableTheFilter:
+    """CB-25: `if priority:` conflated "not supplied" with "wrong input".
+
+    A falsey non-string short-circuited past the CB-19 resolver, so the condition was
+    never added and the caller got the FULL queue — indistinguishable from a correctly
+    filtered one. Only `None` and `""` may mean "no filter"."""
+
+    def _two(self, conn):
+        reqs.add_requirement(conn, req_id="FR-1", description="a", priority="must")
+        reqs.add_requirement(conn, req_id="FR-2", description="b", priority="could")
+
+    @pytest.mark.parametrize("falsey", [0, False, [], {}])
+    def test_falsey_priority_raises_instead_of_returning_everything(self, conn, falsey):
+        self._two(conn)
+        with pytest.raises(ValueError, match="Invalid priority"):
+            reqs.query_requirements(conn, priority=falsey)
+
+    @pytest.mark.parametrize("falsey", [0, False, [], {}])
+    def test_falsey_status_raises_instead_of_returning_everything(self, conn, falsey):
+        self._two(conn)
+        with pytest.raises(ValueError, match="Invalid requirement status"):
+            reqs.query_requirements(conn, status=falsey)
+
+    @pytest.mark.parametrize("empty", [None, ""])
+    def test_none_and_empty_string_still_mean_no_filter(self, conn, empty):
+        """The documented convention, unchanged — this is the half a blunt
+        `is not None` check would have broken."""
+        self._two(conn)
+        assert reqs.query_requirements(conn, priority=empty)["total"] == 2
+        assert reqs.query_requirements(conn, status=empty)["total"] == 2

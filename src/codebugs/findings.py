@@ -14,6 +14,7 @@ from codebugs.types import (
     ENTITY_FINDING,
     FINDING_ID_PREFIX,
     SEVERITIES,
+    is_vocabulary_filter_active,
     rank_case_sql,
     resolve_finding_status,
     resolve_severity,
@@ -422,10 +423,10 @@ def query_findings(
         params.extend(ids)
         if limit < len(ids):
             limit = len(ids)
-    if status:
+    if is_vocabulary_filter_active(status):
         conditions.append("status = ?")
         params.append(resolve_finding_status(status))
-    if severity:
+    if is_vocabulary_filter_active(severity):
         # Resolved, like `status` two lines up. Left raw, this filter compared the
         # caller's spelling against a canonical column: `severity="HIGH"` silently
         # returned ZERO rows rather than raising (CB-19). Once the write paths
