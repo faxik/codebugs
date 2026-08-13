@@ -561,7 +561,20 @@ def _declared_db_path(root: str, source: str) -> str:
             f"run `codebugs init {root}`, or clear {label} to fall back to "
             f"directory discovery"
         )
-    return os.path.join(root, DB_DIR, DB_FILE)
+    # The directory is not the tracker; the database is (CB-23). Accepting a
+    # `.codebugs/` that holds no `findings.db` would let sqlite3.connect create
+    # one, which is exactly the "quietly becomes a second, empty tracker" this
+    # function's docstring forbids. That state is reachable without anyone doing
+    # anything odd: `init_project` makes the directory before the database, so a
+    # Ctrl-C'd init leaves it behind.
+    path = os.path.join(root, DB_DIR, DB_FILE)
+    if not os.path.isfile(path):
+        raise DatabaseNotFoundError(
+            f"{label} names {root}, whose {DB_DIR}/ holds no {DB_FILE}; "
+            f"run `codebugs init {root}` to finish creating it, or clear {label} "
+            f"to fall back to directory discovery"
+        )
+    return path
 
 
 def _db_path(project_dir: str | None = None) -> str:
@@ -576,6 +589,17 @@ def _db_path(project_dir: str | None = None) -> str:
     A named `project_dir` is not an opt-in to creation: it routinely carries user
     input (`--repo <path>`), where a typo must fail loudly rather than quietly
     become a second, empty tracker. A declared root is held to the same rule.
+
+    On those two branches a tracker means the `findings.db` FILE, not the
+    `.codebugs/` directory (CB-23) — a directory alone carries no findings, so
+    accepting it recreates the very failure the paragraph above forbids. The
+    upward walk keeps treating the directory as the opt-in, and the asymmetry is
+    deliberate: standing inside a directory is evidence about where you actually
+    are, while a named or declared path is an assertion that can be stale,
+    inherited by an unrelated subprocess, or simply mistyped. It also has a
+    common benign cause — `init_project` creates the directory before the
+    database, so a Ctrl-C'd init leaves one behind, and self-healing on the next
+    command is the right answer there. `TestRefusesToAutoCreate` pins both sides.
     """
     if project_dir is not None:
         root = project_dir
@@ -584,7 +608,15 @@ def _db_path(project_dir: str | None = None) -> str:
                 f"no {DB_DIR}/ in {root}; "
                 f"check the path, or run `codebugs init {root}` to create a tracker there"
             )
-        return os.path.join(root, DB_DIR, DB_FILE)
+        # Same rule as the declared branch below: a `.codebugs/` holding no
+        # database is a half-made tracker, not an opt-in to creating one (CB-23).
+        path = os.path.join(root, DB_DIR, DB_FILE)
+        if not os.path.isfile(path):
+            raise DatabaseNotFoundError(
+                f"{DB_DIR}/ in {root} holds no {DB_FILE}; "
+                f"check the path, or run `codebugs init {root}` to finish creating it"
+            )
+        return path
 
     declared, source = declared_tracker_root()
     if declared is not None:
@@ -707,7 +739,12 @@ def init_project(project_dir: str | None = None, *, force: bool = False) -> dict
     path = os.path.join(tracker_dir, DB_FILE)
     created = not os.path.exists(path)
     os.makedirs(tracker_dir, exist_ok=True)
-    connect(root).close()
+    # `_open`, not `connect`: this is the one place a database may be brought into
+    # existence, and `connect` now refuses a named root that holds none (CB-23).
+    # Note the directory is created first, so an interruption here leaves a
+    # `.codebugs/` with no database — the state the upward walk deliberately still
+    # self-heals, and the named/declared branches deliberately refuse.
+    _open(path).close()
     return {"root": root, "path": path, "created": created}
 
 
@@ -739,9 +776,17 @@ def _ensure_modules_loaded() -> None:
         _modules_loaded = True
 
 
-def connect(project_dir: str | None = None) -> sqlite3.Connection:
-    """Open (and initialize) the codebugs database."""
-    path = _db_path(project_dir)
+def _open(path: str) -> sqlite3.Connection:
+    """Open a connection at an EXACT path and apply every module's schema.
+
+    Split out of `connect` so `init_project` — the only function allowed to create
+    a tracker — can reach it without going through `_db_path`, whose job on the
+    named and declared branches is now to refuse a path that does not already hold
+    a database (CB-23). Before the split, init created its database *by way of*
+    `connect`, so tightening `_db_path` broke the one caller that is supposed to
+    create. Keep it that way: this function creates, `_db_path` refuses, and only
+    `init_project` is allowed to combine them.
+    """
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -754,3 +799,8 @@ def connect(project_dir: str | None = None) -> sqlite3.Connection:
         entry.ensure_fn(conn)
 
     return conn
+
+
+def connect(project_dir: str | None = None) -> sqlite3.Connection:
+    """Open the codebugs database. Never creates one — see `init_project`."""
+    return _open(_db_path(project_dir))

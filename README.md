@@ -43,7 +43,11 @@ Run this once per project, in the project root:
 codebugs init
 ```
 
-This creates `.codebugs/findings.db`. **codebugs never creates a tracker on its own** — every other command discovers an existing one by walking up from the current directory (unless you point it somewhere explicitly, see below), and refuses with an actionable error if there is none. That refusal is deliberate: silently creating an empty database is how findings go missing.
+This creates `.codebugs/findings.db`. **`init` is the only command that creates a tracker** — every other command discovers an existing one by walking up from the current directory (unless you point it somewhere explicitly, see below), and refuses with an actionable error if there is none. That refusal is deliberate: silently creating an empty database is how findings go missing.
+
+There is one deliberate exception, and it is worth stating precisely because it looks like the rule being broken. **The upward walk treats an existing `.codebugs/` directory as the opt-in**, so if that directory is there but holds no `findings.db`, the next command creates the database inside it rather than refusing. The common way to end up in that state is an interrupted `init` — the directory is created before the database — and self-healing on the next command is more useful there than demanding a second `init`.
+
+**A tracker you name explicitly is held to the stricter rule.** `--repo`, `--tracker-root` and `$CODEBUGS_ROOT` must resolve to a directory that actually contains `findings.db`; a `.codebugs/` without one is refused, and the message names which channel pointed there. The difference is about evidence: standing inside a directory says something about where you are, while a named path is an assertion that can be mistyped, or exported into a shell days ago and inherited by an unrelated process. That is exactly where a silent empty tracker does the most damage.
 
 Two consequences worth knowing:
 

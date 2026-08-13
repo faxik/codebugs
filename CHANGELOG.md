@@ -36,6 +36,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   empty-string filter is still treated as "no filter" and is not validated.
 
 ### Fixed
+- **A named or declared tracker root must now contain a real database** (CB-23).
+  `--repo`, `--tracker-root` and `$CODEBUGS_ROOT` accepted any path holding a
+  `.codebugs/` *directory*, and `sqlite3.connect` then created a `findings.db`
+  inside it — so a mistyped path, or an export inherited by an unrelated process,
+  silently became a second, empty tracker whose writes all reported success.
+  `_db_path`'s own docstring already promised this branch would "fail loudly
+  rather than quietly become a second, empty tracker"; only the check was
+  missing. The refusal names the channel that pointed there.
+
+  **The upward walk is deliberately unchanged**: an existing `.codebugs/`
+  directory is still the opt-in, and a database is still created inside one that
+  has none. That is what makes an interrupted `codebugs init` self-heal — the
+  directory is created before the database — and standing inside a directory is
+  evidence about where you are in a way a named path is not.
+
+  Structurally, `connect()` no longer creates anything: the open-and-migrate half
+  is now `_open()`, and `init_project` is its only other caller. Before, `init`
+  created its database *by way of* `connect`, so tightening discovery broke the
+  one function allowed to create.
 - **Concurrent `meta` updates no longer erase each other** (CB-24).
   `update_finding` and `update_requirement` merged `notes` / `append_note` /
   `meta_update` in Python over a row they had read in a *separate* statement, then

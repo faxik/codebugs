@@ -109,12 +109,14 @@ class TestUpwardWalk:
     def test_db_path_explicit_project_dir_short_circuits_walk(self, tmp_path, monkeypatch):
         """An explicit dir is used as-is — it must not inherit cwd's project."""
         repo = tmp_path / "repo"
-        (repo / ".codebugs").mkdir(parents=True)
+        repo.mkdir()
+        db.init_project(str(repo))
         sub = repo / "src"
         sub.mkdir()
         monkeypatch.chdir(sub)
         explicit = tmp_path / "explicit"
-        (explicit / ".codebugs").mkdir(parents=True)
+        explicit.mkdir()
+        db.init_project(str(explicit))
         assert db._db_path(str(explicit)) == os.path.join(str(explicit), ".codebugs", "findings.db")
 
     def test_connect_silent_when_db_exists(self, tmp_path, monkeypatch, capsys):
@@ -353,6 +355,37 @@ class TestRefusesToAutoCreate:
         assert str(tmp_path) in str(exc.value)
         assert not (tmp_path / ".codebugs").exists()
 
+    def test_connect_refuses_an_explicit_dir_whose_tracker_dir_has_no_db(self, tmp_path):
+        """`--repo <path>` carries user input, so a half-made tracker is a typo target.
+
+        The sibling test above refuses when there is no `.codebugs/` at all. This
+        one refuses when the directory exists but holds no database — which is
+        the same claim, since the directory carries no findings (CB-23).
+        """
+        (tmp_path / ".codebugs").mkdir()
+        with pytest.raises(db.DatabaseNotFoundError) as exc:
+            db.connect(str(tmp_path))
+        assert str(tmp_path) in str(exc.value)
+        assert not (tmp_path / ".codebugs" / "findings.db").exists()
+
+    def test_the_upward_walk_still_self_heals_a_half_made_tracker(self, tmp_path, monkeypatch):
+        """The deliberate asymmetry, stated as a test rather than left to inference.
+
+        Standing inside a directory is evidence about where you are; a named or
+        declared path is an assertion that can be stale or mistyped. So the walk
+        keeps treating `.codebugs/` as the opt-in, which is what makes a Ctrl-C'd
+        ``init`` self-heal on the next command instead of demanding a second one.
+        Pinned next to its twin so the difference cannot be read as an oversight.
+        """
+        repo = tmp_path / "repo"
+        (repo / ".codebugs").mkdir(parents=True)
+        monkeypatch.chdir(repo)
+        c = db.connect()
+        try:
+            assert os.path.exists(repo / ".codebugs" / "findings.db")
+        finally:
+            c.close()
+
     def test_connect_opens_an_explicit_dir_after_init(self, tmp_path):
         db.init_project(str(tmp_path))
         c = db.connect(str(tmp_path))
@@ -568,8 +601,11 @@ def _separate_git_dir_worktree(tmp_path):
     """Build CB-13's layout: a `--separate-git-dir` repo whose git dir IS named `.git`.
 
     `admin/.git` is the git directory; `repo/` is the real checkout and holds the
-    real tracker. A stray `.codebugs/` sits in `admin/` — without one there is
-    nothing to mis-bind TO and the bug is invisible. Returns (repo, admin, wt).
+    real tracker — a real one, with a database, because a declared root now has to
+    resolve to an actual `findings.db` (CB-23). A stray `.codebugs/` DIRECTORY
+    sits in `admin/`, and stays a bare directory deliberately: the walk still
+    binds on the directory alone, which is what makes the misbinding reproduce.
+    Returns (repo, admin, wt).
     """
     admin = tmp_path / "admin"
     repo = tmp_path / "repo"
@@ -579,7 +615,7 @@ def _separate_git_dir_worktree(tmp_path):
     (repo / "f.txt").write_text("x")
     _git("add", "f.txt", cwd=repo)
     _git("commit", "-m", "init", cwd=repo)
-    (repo / ".codebugs").mkdir()
+    db.init_project(str(repo), force=True)  # force: CB-13's own layout reads as a worktree
     (admin / ".codebugs").mkdir()
     wt = tmp_path / "wt"
     _git("worktree", "add", str(wt), "-b", "wt", cwd=repo)
@@ -652,6 +688,30 @@ class TestTrackerRootOverride:
             db._db_path()
         assert "--tracker-root" in str(flag_exc.value)
         assert db.ENV_ROOT not in str(flag_exc.value)
+
+    def test_a_declared_root_whose_tracker_dir_has_no_db_fails_closed(self, tmp_path, monkeypatch):
+        """A `.codebugs/` with no `findings.db` is not a tracker (CB-23).
+
+        The directory alone carries no findings, so accepting it lets an ambient
+        declaration quietly become the second, empty tracker this whole branch
+        exists to prevent. That the directory exists is not evidence a tracker
+        does: a Ctrl-C'd ``init`` leaves exactly this state, because
+        ``init_project`` creates the directory before the database.
+
+        The upward walk deliberately does NOT get this check — see
+        ``TestRefusesToAutoCreate`` for why the two branches differ.
+        """
+        half = tmp_path / "half"
+        (half / ".codebugs").mkdir(parents=True)
+        here = _tracker(tmp_path, "here")
+        monkeypatch.chdir(here)
+        monkeypatch.setenv(db.ENV_ROOT, str(half))
+
+        with pytest.raises(db.DatabaseNotFoundError) as exc:
+            db._db_path()
+        assert str(half) in str(exc.value)
+        assert db.ENV_ROOT in str(exc.value), "the channel must be named: the value is ambient"
+        assert not (half / ".codebugs" / "findings.db").exists(), "must not have created one"
 
     def test_a_declared_root_that_is_not_a_directory_fails_closed(self, tmp_path, monkeypatch):
         missing = tmp_path / "typo"
