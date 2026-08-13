@@ -7,6 +7,7 @@ net change. Tracker: this repo's own `.codebugs/findings.db`, served by `mcp__co
 |---|---|---|---|---|---|
 | 2026-08-13 | `codebugs` | CB-16 | **fixed** — meta clobber in `update_finding` / `update_requirement` | `1d85756`, hardening `63d0658` | CB-18 unblocked |
 | 2026-08-13 | `codebugs` | CB-4, CB-1, CB-5 | **closed stale** with evidence — all three describe code that has since been refactored | `6e5236c`, `63d0658` (doc corrections) | sweep the remaining arch-debt cards |
+| 2026-08-13 | `codebugs` | CB-18, CB-15 | **fixed** — `append_note` unreachable from either surface; unknown argument names silently dropped | `6a1aef2` (`987fc20`, `d6ce8de`) | CB-17 left open by design |
 
 ## 2026-08-13 — CB-16
 
@@ -60,3 +61,30 @@ verification of the author's own report claims. Hardening merged as `63d0658`.
 CB-5) described a codebase that no longer exists, and `CLAUDE.md`'s debt section had drifted with
 them — each doc entry was repeating its card's false premise. Verify that section against the code
 as a batch rather than discovering them one card at a time.
+
+## 2026-08-13 — CB-18 + CB-15 (the update surface)
+
+One tree, two commits, because CB-18 is exactly and only CB-15's first defect — dedup rather than
+clustering. Plan: `.claude/plans/CB-18-CB-15-update-surface.md`.
+
+- **CB-18 / CB-15(1)** — `append_note` existed in the domain layer but neither surface declared it,
+  so every agent note edit took the destructive replace. Now plumbed to MCP and CLI; `notes` says
+  REPLACES.
+- **CB-15(2)** — an unknown argument *name* was dropped and the call reported success, while an
+  unknown *value* raised. Cause: the SDK's argument model uses pydantic's default `extra="ignore"`.
+  Fixed server-wide by a middleware refusing undeclared arguments.
+
+**I nearly got this wrong.** My plan was to ship (1) and defer (2) as "needs SDK internals". The
+bounded Codex pass rejected the split and pointed at the public `MCPServer.middleware` API I had
+missed — deferring would have been the cheap-substitute failure the workflow exists to prevent. The
+lesson generalises: *"the correct fix needs private API"* is a claim to verify against the library,
+not a reason to shrink scope.
+
+**Negative result worth not re-deriving:** `additionalProperties: false` does nothing here. The
+server never validates arguments against the JSON Schema — confirmed by injecting it into a live
+tool and watching the call still succeed.
+
+**CB-17 deliberately excluded** despite Codex judging it cluster-eligible. It needs a core parameter
+plus validation and carries real product questions (should retriage record actor/reason/history?).
+The hostage test decided it: if CB-17 stalled on that decision, two finished edits would wait behind
+it. It is now the only substantive card left — and its first question is for the user, not an agent.
