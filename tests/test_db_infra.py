@@ -3,6 +3,7 @@
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -896,6 +897,33 @@ class TestDescribeRoot:
         finally:
             db.set_tracker_root(None)
             os.chdir(original)
+
+
+class TestOpenCallSitesRatchet:
+    """`_open` is the only door to a live connection. Guard how many hold a key.
+
+    Everything CB-23 buys rests on `_open(create=...)` having exactly two callers:
+    `init_project`, and `connect` (which passes the walk's may-create flag). A
+    third one — some future "repair" or "ensure" helper reaching for `_open`
+    because `connect` refused it — would reopen the hole quietly, and nothing but
+    review would notice. Prose is the wrong enforcement layer for that, which this
+    repo has established twice over (the `BEGIN IMMEDIATE` allowlist in
+    `test_claims.py`, and `EntityKind.__post_init__`). This allowlist may shrink,
+    never grow.
+    """
+
+    def test_only_two_call_sites_may_open_a_connection(self):
+        src = Path(db.__file__).parent
+        calls = [
+            (path.name, line.strip())
+            for path in src.rglob("*.py")
+            for line in path.read_text().splitlines()
+            if "_open(" in line
+            and not line.lstrip().startswith("#")
+            and not line.lstrip().startswith("def _open(")
+        ]
+        assert len(calls) == 2, f"new _open() call site(s) — is this deliberate? {calls}"
+        assert all(name == "db.py" for name, _ in calls), calls
 
 
 class TestWhereCommand:

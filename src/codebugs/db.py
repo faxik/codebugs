@@ -562,12 +562,12 @@ def _declared_db_path(root: str, source: str) -> str:
             f"run `codebugs init {root}`, or clear {label} to fall back to "
             f"directory discovery"
         )
-    # The directory is not the tracker; the database is (CB-23). Accepting a
-    # `.codebugs/` that holds no `findings.db` would let sqlite3.connect create
-    # one, which is exactly the "quietly becomes a second, empty tracker" this
-    # function's docstring forbids. That state is reachable without anyone doing
-    # anything odd: `init_project` makes the directory before the database, so a
-    # Ctrl-C'd init leaves it behind.
+    # The directory is not the tracker; the database is (CB-23) — the asymmetry
+    # and its benign cause are written out once, on `_resolve_db`. What matters
+    # here is that accepting a directory would be the "quietly becomes a second,
+    # empty tracker" this function's own docstring forbids. The check earns its
+    # place by naming the channel; `mode=rw` at the open is what makes the
+    # refusal race-free.
     path = os.path.join(root, DB_DIR, DB_FILE)
     if not os.path.isfile(path):
         raise DatabaseNotFoundError(
@@ -719,8 +719,13 @@ def describe_root() -> dict[str, Any]:
 def init_project(project_dir: str | None = None, *, force: bool = False) -> dict[str, Any]:
     """Create a `.codebugs/` tracker in `project_dir` (default cwd).
 
-    The only function that creates a tracker, so that creation is always a
-    deliberate act. Idempotent — an existing tracker here is left alone.
+    **The only function that creates the `.codebugs/` DIRECTORY** — the single
+    `os.makedirs` in the package — so opting a project in is always a deliberate
+    act. State it that way rather than "the only function that creates a
+    tracker", which stopped being true once the distinction mattered: the upward
+    walk in `connect` will fill in a `findings.db` inside a directory that
+    already exists, and the named and declared routes refuse to do even that
+    (CB-23). Idempotent — an existing tracker here is left alone.
 
     Refuses when an enclosing tracker already covers this directory: a nested
     `.codebugs/` wins the upward walk forever after, silently orphaning every
@@ -804,12 +809,18 @@ def _ensure_modules_loaded() -> None:
 def _open(path: str, *, create: bool) -> sqlite3.Connection:
     """Open a connection at an EXACT path and apply every module's schema.
 
-    Split out of `connect` so `init_project` — the only function that may bring a
-    tracker into existence — can reach it without going through `_resolve_db`,
-    whose job on the named and declared branches is to refuse a path that does not
-    already hold a database (CB-23). Before the split, init created its database
-    *by way of* `connect`, so tightening the resolver broke the one caller that is
-    supposed to create.
+    Split out of `connect` so `init_project` can reach it without going through
+    `_resolve_db`, whose job on the named and declared branches is to refuse a
+    path that does not already hold a database (CB-23). Before the split, init
+    created its database *by way of* `connect`, so tightening the resolver broke
+    the one caller that is supposed to create.
+
+    Two callers pass ``create=True`` and the difference between them is the whole
+    design: `init_project`, which has just made the `.codebugs/` directory, and
+    `connect` on the upward-walk route, where the directory was already there.
+    Neither invents a directory — that is `init_project`'s single `os.makedirs`,
+    and it is the precise sense in which opting a project in is deliberate.
+    `TestOpenCallSitesRatchet` pins that there are exactly these two.
 
     ``create=False`` opens through SQLite's ``mode=rw`` URI, which fails rather
     than creating. That is what makes the refusal race-free: the resolver's

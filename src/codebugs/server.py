@@ -96,6 +96,11 @@ def _preflight() -> None:
             file=sys.stderr,
         )
         return
+    # The two checks below are mutually exclusive, which is not visible from here:
+    # a resolved-but-absent database can only come from the walk, since the named
+    # and declared routes refuse it — so `source` is always "discovery" when
+    # `exists` is False. Written as two `if`s rather than an `elif` chain because
+    # they answer different questions, not because both can fire.
     if not info["exists"]:
         # Resolving is not the same as being there (CB-23). This binding does not
         # fail — the first tool call CREATES the tracker — so it is invisible in
