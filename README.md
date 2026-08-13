@@ -21,7 +21,7 @@ Building a real codebase with AI assistants creates four problems that compound 
 3. **Parallel agents race.** Two agents both pick the same bug, both edit the same file, both think they've shipped it.
 4. **Releases lose track of what's in them.** Work sits stranded on feature branches for 9 days. "Where are we on 1.1?" has no single answer.
 
-codebugs is one SQLite database (`.codebugs/findings.db`) that solves all four. Eight self-contained modules, 59 MCP tools, one CLI.
+codebugs is one SQLite database (`.codebugs/findings.db`) that solves all four. Nine self-contained modules, 66 MCP tools, one CLI.
 
 ## Install
 
@@ -124,13 +124,15 @@ Use `--mode` to load only the tools you need:
 | Mode | Tools | Use it when |
 |------|-------|-------------|
 | `findings` | 8 | Code review / bug tracking only |
-| `reqs` | 11 | Specification tracking only |
+| `provenance` | 1 | Staleness checks against git history |
+| `reqs` | 12 | Specification tracking only |
 | `sweep` | 9 | Batch iteration / state-machine tasks |
 | `bench` | 4 | Performance benchmarks |
 | `merge` | 5 | Multi-agent merge coordination |
 | `blockers` | 4 | Cross-entity dependency tracking |
 | `milestones` | 18 | Release + stream + capacity-aware pull |
-| `all` | **59** | Default — everything |
+| `claims` | 5 | "Who holds this card" for parallel agents |
+| `all` | **66** | Default — everything |
 
 The CLI takes the same flag: `codebugs --mode findings summary`.
 
@@ -138,7 +140,7 @@ The CLI takes the same flag: `codebugs --mode findings summary`.
 
 Any MCP-compatible client can connect to `codebugs-mcp` via stdio transport.
 
-## The eight modules
+## The nine modules
 
 | Module | Domain | Headline tools |
 |--------|--------|----------------|
@@ -149,6 +151,8 @@ Any MCP-compatible client can connect to `codebugs-mcp` via stdio transport.
 | **bench** | Performance benchmark snapshots | `codebench_import`, `codebench_query` |
 | **merge** | Parallel-agent merge serialization | `codemerge_start`, `codemerge_claim` |
 | **milestones** | Releases, streams, capacity-aware pull | `pull_next`, `milestone_status`, `milestone_close` |
+| **provenance** | Staleness vs git history, commit trailers | `staleness_check` |
+| **claims** | Which agent holds a finding or requirement | `claims_claim`, `claims_release`, `claims_who_holds` |
 
 Modules are self-registering — adding a new one is local to its own file. See [`docs/superpowers/specs/`](docs/superpowers/specs/) for the architecture history.
 
@@ -163,7 +167,7 @@ Modules are self-registering — adding a new one is local to its own file. See 
 | `summary` | Dashboard overview — **start here** for orientation |
 | `add` | Log a finding with severity, category, file, description |
 | `batch_add` | Log multiple findings at once |
-| `update` | Change status, add notes, update tags or metadata |
+| `update` | Change status, severity, notes, tags or metadata (`append_note` adds, `notes` replaces) |
 | `query` | Search/filter with pagination and group-by |
 | `stats` | Cross-tabulated counts (severity x category/file/status) |
 | `categories` | List existing categories — **call before `add`** for consistency |
@@ -175,9 +179,11 @@ Modules are self-registering — adding a new one is local to its own file. See 
 codebugs add -s high -c n_plus_one -f src/api.py -d "Query in loop at line 42"
 codebugs summary
 codebugs query --status open --severity critical
-codebugs update CB-1 --status fixed --notes "Fixed in PR #42"
+codebugs update CB-1 --status fixed --append-note "Fixed in PR #42"
 codebugs categories
 ```
+
+`--append-note` adds to a finding's notes; `--notes` **replaces** them wholesale. Prefer `--append-note` when recording investigation history — `--notes` will discard whatever was there, which is usually not what you want on a finding others have been working.
 
 When a new finding is added, the **milestones auto-router** automatically attaches it to `stream/triage` (or `stream/security` when `severity=critical` and `category` starts with `security:`). The finding and its triage entry land in the same transaction.
 
