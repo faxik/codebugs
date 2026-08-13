@@ -248,6 +248,12 @@ def update_finding(
     ``notes`` replaces the notes wholesale; ``append_note`` adds a newline-joined
     line, preserving prior history. Note: reported_at_commit is intentionally
     excluded — it is immutable after insert.
+
+    The three meta-writing arguments compose over a single dict, applied in this
+    order: ``notes`` replaces, ``append_note`` then extends *that replacement*,
+    and ``meta_update`` merges last — so an explicit ``meta_update["notes"]``
+    still wins. They must never build separate dicts from the pre-update row: a
+    second ``meta = ?`` in one UPDATE silently discards the first (CB-16).
     """
     row = conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
     if not row:
@@ -261,28 +267,29 @@ def update_finding(
         updates.append("status = ?")
         params.append(status)
 
-    if notes is not None:
-        existing_meta = json.loads(row["meta"])
-        existing_meta["notes"] = notes
-        updates.append("meta = ?")
-        params.append(json.dumps(existing_meta))
-
-    if append_note is not None:
-        existing_meta = json.loads(row["meta"])
-        prior = existing_meta.get("notes")
-        existing_meta["notes"] = f"{prior}\n{append_note}" if prior else append_note
-        updates.append("meta = ?")
-        params.append(json.dumps(existing_meta))
-
     if tags is not None:
         updates.append("tags = ?")
         params.append(json.dumps(tags))
 
-    if meta_update is not None:
-        existing_meta = json.loads(row["meta"])
-        existing_meta.update(meta_update)
+    # One dict, one `meta = ?`. See the docstring for the ordering contract.
+    # Parsed lazily: an update that touches no meta argument must not depend on
+    # the stored JSON being well-formed, since the column carries no json_valid
+    # constraint and legacy rows may hold anything.
+    if notes is not None or append_note is not None or meta_update is not None:
+        new_meta = json.loads(row["meta"])
+
+        if notes is not None:
+            new_meta["notes"] = notes
+
+        if append_note is not None:
+            prior = new_meta.get("notes")
+            new_meta["notes"] = f"{prior}\n{append_note}" if prior else append_note
+
+        if meta_update is not None:
+            new_meta.update(meta_update)
+
         updates.append("meta = ?")
-        params.append(json.dumps(existing_meta))
+        params.append(json.dumps(new_meta))
 
     if reported_at_ref is not None:
         updates.append("reported_at_ref = ?")
