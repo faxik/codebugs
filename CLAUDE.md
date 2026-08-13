@@ -13,7 +13,7 @@ AI-native code finding & requirements tracker. SQLite-backed, exposed via MCP se
 
 ### Known architectural debt
 
-- **Staleness/provenance logic** (~130 lines) now lives in `db.py` alongside findings. Extraction to a dedicated `provenance.py` is planned.
+- ~~Staleness/provenance logic pending extraction~~ — **done.** `provenance.py` owns staleness checks and commit-trailer resolution (`file_status`, `check_findings`, `head_sha`, `resolve_trailers`) and registers its own tools and CLI; `provenance` is a first-class `--mode`. This entry claimed the logic still sat in `db.py` long after it had moved (CB-4).
 - **`db.connect()` import trigger**: `_ensure_modules_loaded()` still imports all known domain modules so their `register_schema()`, `register_tool_provider()`, and `register_cli_provider()` calls execute. All three registries are complete (ARCH-001 + ARCH-002 + ARCH-004). This trigger will be replaced by auto-discovery.
 - **`blockers.py` cross-module reach**: calls `db._row_to_dict()` and `reqs._row_to_dict()` — private functions across module boundaries. These should be made public or replaced with a shared utility.
 - **Findings naming exception**: The findings domain predates the naming conventions. Its MCP tools (`add`, `query`, `stats`, etc.) lack the domain prefix that all other modules use (`reqs_add`, `codebench_import`). Renaming MCP tools is a breaking change for clients.
