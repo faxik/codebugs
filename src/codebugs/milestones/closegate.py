@@ -6,6 +6,7 @@ import json
 import sqlite3
 from typing import Any
 
+from codebugs import db
 from codebugs.types import utc_now
 
 from codebugs.milestones._spine import (
@@ -26,26 +27,33 @@ def mark_branch_only(
     actor: str = "user",
 ) -> dict[str, Any]:
     """Flag an item as living on a feature branch (not yet integrated to main).
-    Called by worktree-setup.sh when a branch is created for this item."""
-    item = _get_item_by_ref(conn, item_ref)
-    meta = dict(item.get("meta") or {})
-    meta["branch"] = branch_name
-    now = utc_now()
-    conn.execute(
-        "UPDATE milestone_items SET branch_only=1, meta_json=?, updated_at=? WHERE id=?",
-        (json.dumps(meta), now, item["id"]),
-    )
-    _audit(
-        conn,
-        milestone_id=item["milestone_id"],
-        item_ref=item_ref,
-        actor=actor,
-        action="branch",
-        from_state="branch_only=0",
-        to_state="branch_only=1",
-        reason=f"branch={branch_name}",
-    )
-    conn.commit()
+    Called by worktree-setup.sh when a branch is created for this item.
+
+    ``meta_json`` is merged in Python from the row read here, so the read and the
+    write are one transaction (CB-24 sibling). Two agents branching different items
+    do not collide, but a concurrent writer to the *same* item's meta would
+    otherwise be erased by whichever UPDATE landed second, with both reporting
+    success. ``db.txn`` owns the commit — do not restore ``conn.commit()``.
+    """
+    with db.txn(conn):
+        item = _get_item_by_ref(conn, item_ref)
+        meta = dict(item.get("meta") or {})
+        meta["branch"] = branch_name
+        now = utc_now()
+        conn.execute(
+            "UPDATE milestone_items SET branch_only=1, meta_json=?, updated_at=? WHERE id=?",
+            (json.dumps(meta), now, item["id"]),
+        )
+        _audit(
+            conn,
+            milestone_id=item["milestone_id"],
+            item_ref=item_ref,
+            actor=actor,
+            action="branch",
+            from_state="branch_only=0",
+            to_state="branch_only=1",
+            reason=f"branch={branch_name}",
+        )
     return _get_item_by_ref(conn, item_ref)
 
 

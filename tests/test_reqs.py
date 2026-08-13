@@ -10,7 +10,7 @@ import threading
 
 import pytest
 
-from codebugs import reqs
+from codebugs import db, reqs
 from codebugs.types import utc_now
 
 
@@ -282,6 +282,29 @@ class TestConcurrentMetaUpdatesDoNotLoseEachOther:
         c.execute("PRAGMA busy_timeout=5000")
         return c
 
+    def test_an_ambient_transaction_is_not_committed_by_the_nested_update(self, conn):
+        """The requirements twin of the findings guard — and not redundant with it.
+
+        Restoring an unconditional ``conn.commit()`` in ``update_requirement`` alone
+        would pass every other test in this file while once again committing the
+        requirement branch of ``milestones.triage_dismiss`` early. A guard that
+        exists on only one of two sibling entities is the CB-17 shape again: the
+        asymmetry is invisible from inside either file.
+        """
+        reqs.add_requirement(conn, req_id="FR-1", section="S", description="d")
+
+        with pytest.raises(RuntimeError, match="caller aborts"):
+            with db.txn(conn) as opened:
+                assert opened, "the caller owns this transaction"
+                conn.execute("UPDATE requirements SET section = ? WHERE id = ?", ("outer", "FR-1"))
+                reqs.update_requirement(conn, "FR-1", status="implemented", notes="nested")
+                raise RuntimeError("caller aborts after the nested update")
+
+        row = reqs.get_requirement(conn, "FR-1")
+        assert row["section"] == "S", "the caller's own write must have rolled back"
+        assert row["status"] == "planned", "the nested update must roll back with its caller"
+        assert "nested" not in json.dumps(row["meta"]), row["meta"]
+
     def test_a_competing_meta_update_key_is_not_erased(self, tmp_path):
         # File-backed rather than the module's in-memory fixture: two connections
         # to ``:memory:`` are two separate databases, so the race cannot exist there.
@@ -292,12 +315,13 @@ class TestConcurrentMetaUpdatesDoNotLoseEachOther:
         reqs.add_requirement(seed, req_id="FR-1", section="S", description="d")
 
         a = self._open(db_path)
-        a_read, b_read = threading.Event(), threading.Event()
+        a_read, b_started, b_read = (threading.Event() for _ in range(3))
 
         def competing_writer():
             a_read.wait(timeout=10)
             b = self._open(db_path)  # opened here: sqlite3 connections are
             b.after_select = b_read.set  # bound to their creating thread
+            b_started.set()
             try:
                 reqs.update_requirement(b, "FR-1", meta_update={"from_b": True})
             finally:
@@ -307,7 +331,14 @@ class TestConcurrentMetaUpdatesDoNotLoseEachOther:
         # row. After it, A holds the write lock from before its own SELECT, so B
         # blocks at BEGIN IMMEDIATE, this wait times out, A commits, and B then
         # re-reads a row that already carries A's key.
-        a.after_select = lambda: (a_read.set(), b_read.wait(timeout=1.0))
+        # `b_started` is load-bearing, not belt-and-braces: with only the 1.0s
+        # timeout, a worker not scheduled inside that second lets A write first, B
+        # then reads A's committed row, and the test passes against the UNFIXED code.
+        a.after_select = lambda: (
+            a_read.set(),
+            b_started.wait(timeout=10),
+            b_read.wait(timeout=1.0),
+        )
 
         t = threading.Thread(target=competing_writer)
         t.start()
@@ -332,18 +363,26 @@ class TestConcurrentMetaUpdatesDoNotLoseEachOther:
         reqs.add_requirement(seed, req_id="FR-1", section="S", description="d")
 
         a = self._open(db_path)
-        a_read, b_read = threading.Event(), threading.Event()
+        a_read, b_started, b_read = (threading.Event() for _ in range(3))
 
         def competing_writer():
             a_read.wait(timeout=10)
             b = self._open(db_path)
             b.after_select = b_read.set
+            b_started.set()
             try:
                 reqs.update_requirement(b, "FR-1", notes="FROM-B", meta_update={"b_ran": True})
             finally:
                 b.close()
 
-        a.after_select = lambda: (a_read.set(), b_read.wait(timeout=1.0))
+        # `b_started` is load-bearing, not belt-and-braces: with only the 1.0s
+        # timeout, a worker not scheduled inside that second lets A write first, B
+        # then reads A's committed row, and the test passes against the UNFIXED code.
+        a.after_select = lambda: (
+            a_read.set(),
+            b_started.wait(timeout=10),
+            b_read.wait(timeout=1.0),
+        )
 
         t = threading.Thread(target=competing_writer)
         t.start()

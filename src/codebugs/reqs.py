@@ -188,6 +188,15 @@ def update_requirement(
     restore a ``conn.commit()`` — ``db.txn`` yields ``False`` under an ambient
     transaction, and committing then would commit the caller's work.
     """
+    # Argument-only validation runs BEFORE the transaction, same reason as the
+    # findings twin: these resolvers need no row, and opening BEGIN IMMEDIATE first
+    # would turn an invalid priority into an OperationalError after a five-second
+    # wait under write contention, instead of an immediate ValueError.
+    if status is not None:
+        status = resolve_requirement_status(status)
+    if priority is not None:
+        priority = resolve_priority(priority)
+
     with db.txn(conn):
         row = conn.execute("SELECT * FROM requirements WHERE id = ?", (req_id,)).fetchone()
         if not row:
@@ -200,14 +209,12 @@ def update_requirement(
             updates.append("section = ?")
             params.append(section)
         if status is not None:
-            status = resolve_requirement_status(status)
             updates.append("status = ?")
             params.append(status)
         if description is not None:
             updates.append("description = ?")
             params.append(description)
         if priority is not None:
-            priority = resolve_priority(priority)
             updates.append("priority = ?")
             params.append(priority)
         if test_coverage is not None:
@@ -252,9 +259,11 @@ def update_requirement(
                 "SELECT * FROM requirements WHERE id = ?", (req_id,)
             ).fetchone()
 
-    # Converted AFTER the transaction commits — same reason as the findings twin:
-    # row_to_dict raises on malformed stored meta, and inside the block that would
-    # roll back a write the contract promises has landed (CB-16).
+    # Converted OUTSIDE the block — same reason as the findings twin: row_to_dict
+    # raises on malformed stored meta, and inside the block that would roll back a
+    # write the contract promises has landed (CB-16). Under an ambient transaction
+    # nothing has committed yet and the raise abandons the caller's unit too, which
+    # is the intended behaviour for a compound caller, not an oversight.
     return db.row_to_dict(final_row)
 
 

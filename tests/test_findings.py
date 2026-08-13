@@ -506,12 +506,13 @@ class TestConcurrentMetaUpdatesDoNotLoseEachOther:
         findings.update_finding(conn, "CB-1", notes="BASE")
 
         a = self._open(tmp_project)
-        a_read, b_read = threading.Event(), threading.Event()
+        a_read, b_started, b_read = (threading.Event() for _ in range(3))
 
         def competing_writer():
             a_read.wait(timeout=10)
             b = self._open(tmp_project)  # opened here: sqlite3 connections are
             b.after_select = b_read.set  # bound to their creating thread
+            b_started.set()
             try:
                 findings.update_finding(b, "CB-1", append_note="FROM-B")
             finally:
@@ -522,7 +523,17 @@ class TestConcurrentMetaUpdatesDoNotLoseEachOther:
         # holds the write lock from before its own SELECT, so B blocks at BEGIN
         # IMMEDIATE and never reaches its read — the wait times out, A commits,
         # and B then re-reads a row that already carries A's note.
-        a.after_select = lambda: (a_read.set(), b_read.wait(timeout=1.0))
+        # Waiting on `b_started` first is what keeps this honest. Without it the only
+        # guard is the 1.0s timeout, and a worker thread not scheduled within that
+        # second lets A write first — after which B reads A's committed row, merges
+        # cleanly, and the test PASSES against the unfixed code. `b_started` is set
+        # after B's connection is open, so the unguarded gap is just B's entry into
+        # the call rather than thread startup plus a connection open.
+        a.after_select = lambda: (
+            a_read.set(),
+            b_started.wait(timeout=10),
+            b_read.wait(timeout=1.0),
+        )
 
         t = threading.Thread(target=competing_writer)
         t.start()
@@ -572,18 +583,29 @@ class TestConcurrentMetaUpdatesDoNotLoseEachOther:
         findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
 
         a = self._open(tmp_project)
-        a_read, b_read = threading.Event(), threading.Event()
+        a_read, b_started, b_read = (threading.Event() for _ in range(3))
 
         def competing_writer():
             a_read.wait(timeout=10)
             b = self._open(tmp_project)
             b.after_select = b_read.set
+            b_started.set()
             try:
                 findings.update_finding(b, "CB-1", meta_update={"from_b": True})
             finally:
                 b.close()
 
-        a.after_select = lambda: (a_read.set(), b_read.wait(timeout=1.0))
+        # Waiting on `b_started` first is what keeps this honest. Without it the only
+        # guard is the 1.0s timeout, and a worker thread not scheduled within that
+        # second lets A write first — after which B reads A's committed row, merges
+        # cleanly, and the test PASSES against the unfixed code. `b_started` is set
+        # after B's connection is open, so the unguarded gap is just B's entry into
+        # the call rather than thread startup plus a connection open.
+        a.after_select = lambda: (
+            a_read.set(),
+            b_started.wait(timeout=10),
+            b_read.wait(timeout=1.0),
+        )
 
         t = threading.Thread(target=competing_writer)
         t.start()

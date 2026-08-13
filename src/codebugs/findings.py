@@ -281,6 +281,15 @@ def update_finding(
     ambient transaction, and committing then would commit the *caller's* work
     (``milestones.triage_dismiss`` is such a caller).
     """
+    # Argument-only validation runs BEFORE the transaction. These resolvers are pure
+    # functions of their input and need no row, and `BEGIN IMMEDIATE` first would mean
+    # an invalid status raises OperationalError after a five-second wait under write
+    # contention, instead of the ValueError the contract promises immediately.
+    if status is not None:
+        status = resolve_finding_status(status)
+    if severity is not None:
+        severity = resolve_severity(severity)
+
     with db.txn(conn):
         row = conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
         if not row:
@@ -290,14 +299,12 @@ def update_finding(
         params: list[Any] = []
 
         if status is not None:
-            status = resolve_finding_status(status)
             updates.append("status = ?")
             params.append(status)
 
         # A plain column, appended exactly once to the shared `updates` list — it must
         # never grow a second `severity = ?` the way `meta` once did (CB-16).
         if severity is not None:
-            severity = resolve_severity(severity)
             updates.append("severity = ?")
             params.append(severity)
 
@@ -359,11 +366,17 @@ def update_finding(
                 "SELECT * FROM findings WHERE id = ?", (finding_id,)
             ).fetchone()
 
-    # Converted AFTER the transaction commits, and that placement is load-bearing.
-    # `row_to_dict` raises json.JSONDecodeError on a row whose stored meta is
-    # malformed; raised inside the block it would roll back a write the contract
-    # promises has landed, reporting failure for a mutation that succeeded (CB-16).
-    # The SELECT stays inside so the returned row is the transaction's own view.
+    # Converted OUTSIDE the block, and that placement is load-bearing. `row_to_dict`
+    # raises json.JSONDecodeError on a row whose stored meta is malformed; raised
+    # inside, it would roll back a write the contract promises has landed, reporting
+    # failure for a mutation that succeeded (CB-16). The SELECT stays inside so the
+    # returned row is the transaction's own view.
+    #
+    # The guarantee is "after THIS frame's transaction", not "after a commit". Under
+    # an ambient transaction db.txn yields False and nothing has committed yet, so
+    # the raise propagates to the owning frame and abandons the whole unit with it —
+    # deliberate: a compound caller such as milestones.triage_dismiss should not keep
+    # half its work because the row it touched had unreadable meta.
     return db.row_to_dict(final_row)
 
 
