@@ -155,3 +155,101 @@ Every test must be proven to fail against the unfixed code (revert the registrat
 11. backfill: `dry_run=True` mutates nothing; real run closes exactly the stale rows and is a no-op
     on a second run.
 12. Full suite (886 baseline) + `ruff check`.
+
+---
+
+# REVISION after adversarial-review-x2 (Opus adversary + Codex/gpt-5.6-sol), 2026-08-14
+
+**Both reviewers returned FAIL.** They converged on the same structural defects. The plan above is
+superseded where it conflicts with this section. Verified independently by the author before
+accepting: all 23 milestone items are in `stream/triage` (kind=`stream`, item_kind=`bug`); there are
+**zero** release-milestone items and **zero** `agent_capacity` rows; `milestone_close`'s unfinished
+check reads only `status in ("open","in_progress")` (`closegate.py:162-165`) while `branch_only`
+(`:172`) and active blockers (`:181`) are checked for every status.
+
+## Structural changes adopted
+
+1. **Scope the hook to `kind='stream'` milestones.** `fixed → done` with `done_commit IS NULL`
+   passes `milestone_close`'s unfinished gate, and `worktree-finish.sh` flips the finding to `fixed`
+   *before* its non-fatal `mark_integrated` step — so a naive hook would silently convert a caught
+   missed-integration into a clean close. Streams have no close gate (`closegate.py` refuses to
+   close a stream outright), and streams hold 100% of the live defect. Release-milestone
+   reconciliation **and** the "is source `fixed` sufficient integration evidence without a
+   `done_commit`?" question are escalated to their own card, not decided here.
+
+2. **Defensive source-aware filtering is added to the queue reads** (`triage_inbox`,
+   `capacity._candidates`), not just the hook. This is a change in kind, and it is why the invariant
+   can actually be claimed: eager reconciliation alone **cannot** hold it, because several writers
+   bypass the hook entirely — `add_milestone_item` inserts `open` even when the source is already
+   terminal (`foundation.py:201`), `set_item_status` can reopen (`foundation.py:290`),
+   `release_item(status='abandoned')` reopens unconditionally (`capacity.py:269`), requirements bulk
+   add/replace and markdown import write statuses with no hook (`reqs.py:136,148,594`), and
+   `EntityRef.set_status` deliberately never fires hooks (`entities.py:193`). The user ratified
+   "hook + backfill" for durable stored correctness; this preserves that intent and adds the net that
+   makes the guarantee true.
+
+3. **Row selection is `stored status != mapped target`, excluding `deferred`.** The original
+   `NOT IN ('done','dismissed')` was wrong in both directions: it would close `deferred` rows, which
+   no queue returns (`triage.py:69`, `capacity.py:160`) and whose deferral record it would destroy;
+   and it would skip terminal→terminal remaps (`fixed → wont_fix` must move `done → dismissed`),
+   which both domain updaters permit and which fire the hook.
+
+4. **Selection is constrained by `item_kind`, derived from the entity kind** — `bug` for findings,
+   `requirement` for requirements. `_validate_item_ref` skips validation for externals
+   (`_spine.py:47`), and `UNIQUE` includes `item_kind` (`_schema.py:52`), so `(bug, CB-1)` and
+   `(external, CB-1)` are both legal and matching on `item_ref` alone would close the external row.
+
+5. **Capacity ordering: capture `(agent, size)`, decrement, then write status and clear
+   `assigned_agent`** — and only when `assigned_agent IS NOT NULL`. Clearing first then failing would
+   leak the slot *and* destroy the only record of who held it.
+
+6. **Partial-failure honesty.** `db.run_status_change_hooks` swallows and logs to stderr
+   (`db.py:248`) and the caller's `db.txn` then commits normally, so a mid-loop failure would commit
+   rows 1..N-1 and return success. The hook body therefore runs inside a **SAVEPOINT** so its own DML
+   is all-or-nothing, and the failure is recorded as a `milestone_audit` row (queryable, unlike
+   stderr). The original plan's claim that an unmapped status "stays open, which is visible" was
+   **not honest** — in an MCP context stderr is invisible to the caller and the tool still returns
+   success. That wording is withdrawn.
+
+7. **Backfill defaults to dry-run** and is exposed as a CLI command requiring `--apply`. A permanent
+   MCP bulk mutator is not justified by a one-time repair. **The backfill is actually run against the
+   live DB as part of this iteration** — shipping the code alone would leave all 19 stale rows.
+
+## Deferred, out loud — filed as follow-up cards, not fixed here
+
+- **`release_item` capacity double-decrement race.** It reads `assigned_agent` at `capacity.py:256`
+  *before* taking any write lock, then decrements on that stale value (`:294`). With the hook also
+  decrementing, a counter can go 2→1→0 while a second item stays assigned. Pre-existing; the hook
+  makes it reachable more often. Currently dormant (zero capacity rows).
+- **Terminal item transitions are not centralized.** `triage_dismiss` (`triage.py:96`),
+  `set_item_status` (`foundation.py:290`) and `mark_integrated` (`closegate.py:73`) all move an item
+  to a terminal status without clearing `assigned_agent` or decrementing capacity. One shared
+  non-committing core should own this.
+- **Multi-attachment ambiguity.** `_get_item_by_ref` silently returns the newest row
+  (`_spine.py:83`), so `release_item` can close an unassigned attachment while the pulled one stays
+  live. Therefore **no "multi-attachment supported" test is added here**; the hook closes all
+  matching rows, which is correct, but the public single-row operations remain ambiguous.
+- **Release-milestone reconciliation + the `done_commit` close-gate question** (see change 1).
+- **Blocker-derived deferred queues** (`blockers.py:471`) do not exclude terminal sources either.
+
+## Verification corrections
+
+The original list overstated its own falsifiability. Honestly labelled:
+- **Genuinely falsifiable** against the unfixed code: stream item `fixed`→`done`;
+  `not_a_bug`/`wont_fix`→`dismissed`; requirement mappings; capacity released on a pulled item;
+  terminal→terminal remap; `item_kind` isolation (external `CB-N` untouched); `deferred` untouched;
+  defensive filtering hides a terminal-source item from `triage_inbox`/`pull_next`; backfill closes
+  exactly the stale rows and is a no-op on re-run; no second audit row on re-entry.
+- **Not regression tests, labelled as ratchets/non-regression:** the outcome-map completeness test
+  (a CI drift gate on `types.py`, cannot fail under either revert); the schema-probe test (its real
+  revert is removing the probe, not the registration); `triage_dismiss` unchanged; `dry_run` mutates
+  nothing.
+- **Atomicity must be induced in the CALLER's frame**, not by raising inside the hook — a hook
+  exception is swallowed and aborts nothing.
+- Surface tests (`tests/test_milestones_surface.py:24,47,57`) and the exact wire golden
+  (`tests/golden/mcp_schema.json`, compared at `tests/test_boundary.py:155`) must both be updated.
+
+## Citation corrections carried back
+
+`db.run_status_change_hooks` is called at `findings.py:365` (`:358` is the `old_status` read).
+`foundation`'s mover is `move_milestone_item` (`foundation.py:223`, commits at `:262`).
