@@ -12,6 +12,7 @@ net change. Tracker: this repo's own `.codebugs/findings.db`, served by `mcp__co
 | 2026-08-13 | `codebugs` | CB-17 (post-hoc) | **simplify pass** that should have run before landing — 3 redundant tests, a duplicated fixture, and two false doc claims | `1892b80` | filed CB-21 |
 | 2026-08-13 | `codebugs` | CB-20 | **fixed** — vocabulary columns ordered alphabetically, so `low` outranked `medium` and `could` outranked `must` | `f9a682e` (`2ac27c4`) | filed CB-22 |
 | 2026-08-13 | `codebugs` | CB-22 | **fixed** — an allowlist that never validated its own members; sibling in `capacity.py` silently lost an increment | `e1900d4` (`4db5a07`, `6996b8e`, `d1fea09`) | CB-21 still needs a user decision |
+| 2026-08-13 | `codebugs` | CB-19 | **fixed** — severity had no resolver; the sweep found query filters comparing raw text against canonical columns in both entities | `071a630` (`f1f4bd0`, `d1a31f5`, `3f91704`) | queue now blocked: every remaining card needs a product decision |
 
 ## 2026-08-13 — CB-16
 
@@ -230,3 +231,46 @@ was not: `f"{size}_held"` guarded only by a CHECK two layers away, and the two b
 for the same input — `OperationalError` with a capacity row, and **a row of zeros plus a success
 return** without one. A success-shaped return for a write that did not happen is the CB-15/CB-16
 class of lie, found in a module this card never mentioned.
+
+## 2026-08-13 — CB-19 (the vocabulary that only resolved on one side)
+
+**The card scoped it to three sites. It was five, and the missing one would have made the fix
+harmful.** `query_findings` resolved `status` and left `severity` raw, *two lines apart*. Routing
+only the write paths — exactly what the card specified — would have stored `high` for
+`add(severity="High")` while a read-back by the same spelling found nothing. The card would have
+manufactured a silent wrong answer. Codex/Sol found it when asked, specifically, "is there a fifth
+site I have not listed"; that phrasing is worth reusing, because "review my plan" would not have.
+
+**The sibling sweep found the bigger, older defect.** Sweeping every vocabulary filter turned up
+`query_requirements`'s `status`/`priority` and `embeddings.search_similar`'s `status`, all raw —
+while the requirements *write* path has normalized through `resolve_priority` since it was written.
+So `update_requirement(priority="SHOULD")` stored `should` and `query_requirements(priority="SHOULD")`
+returned zero rows, **live, in the sibling entity, predating this card entirely**. Worse than the
+findings case the card was filed for, where a bad severity was at least rejected loudly on write.
+The general rule is now in CLAUDE.md: *a vocabulary must resolve on both sides of the entity.*
+
+**A tripwire fired, exactly as its author intended.** `test_invalid_severity_raises[HIGH]` carried
+the docstring "pins the case-strictness that CB-19 proposes to relax, so relaxing it cannot happen
+silently." That is the pattern worth copying: when you deliberately ship a strictness you expect a
+future card to relax, pin it with a test that *names the card*. It cost nothing and it converted a
+silent contract change into a deliberate one.
+
+**Review of the finished diff caught two regressions, one of them mine and one pre-existing.**
+`_resolve` called `.lower()` before checking anything, so `severity=None` escaped as `AttributeError`
+instead of the contractual `ValueError` — fixed at the shared helper, not per resolver. And
+`_cmd_query`/`_cmd_reqs_query` never caught `ValueError` at all, so an unknown `--status` printed a
+raw traceback and leaked the connection. **I checked whether that was mine before claiming it**: it
+was not — `acf520b` already resolved `status` with no `try` in the handler. Worth the two minutes;
+the honest framing is "pre-existing hole I widened", not "regression I introduced".
+
+**Verification trap, hit and worth not repeating twice.** Testing the old behaviour by pointing
+`PYTHONPATH` at a worktree of `acf520b` produced a traceback citing `/home/faxik/w/codebugs/src` —
+the editable install resolved `codebugs` to the *main* checkout, so the test proved nothing. This is
+the same trap CLAUDE.md documents for `dump_schema.py`. `git show <ref>:<path>` is the reliable way
+to read old behaviour.
+
+**Also: the mutation loop timed out mid-run and left a mutation applied**, and a second time a
+`git checkout --` restore during mutation testing destroyed an uncommitted fix. Both are the same
+lesson the skill already states — commit before mutating — and the second occurrence means it should
+be a habit, not a rule to re-read. Run mutations against targeted test files, not the full suite:
+five full-suite runs is 5 minutes and blows a 2-minute timeout, five targeted runs is 50 seconds.
