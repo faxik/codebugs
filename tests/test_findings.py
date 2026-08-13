@@ -1,13 +1,33 @@
 """Tests for the findings domain — CRUD, query, stats, migrations."""
 
+import json
 import os
-import re
 import sqlite3
 
 import pytest
 
 from codebugs import db, findings
 from codebugs.types import FINDING_STATUSES, FINDING_STATUS_ALIASES, resolve_finding_status
+
+
+class RecordingConnection(sqlite3.Connection):
+    """Records SQL *templates*, as issued, before parameters are bound.
+
+    ``set_trace_callback`` reports statements with parameters already expanded, so a
+    guard built on it cannot tell a real ``meta`` assignment from the literal text
+    ``meta =`` sitting inside a notes value — it yields both false passes (quoted
+    identifiers) and false failures (a notes payload containing the token). Recording
+    the template removes that whole class of error: the template contains `?`
+    placeholders, so only genuine assignments are ever counted.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.recorded_sql: list[str] = []
+
+    def execute(self, sql, *args, **kwargs):
+        self.recorded_sql.append(sql)
+        return super().execute(sql, *args, **kwargs)
 
 
 @pytest.fixture
@@ -198,6 +218,16 @@ class TestUpdateMetaComposition:
         )
         return conn
 
+    @pytest.fixture
+    def recording(self, tmp_project):
+        """A connection that records SQL templates, on an already-initialized tracker."""
+        db.connect(tmp_project).close()  # apply every module's schema to the file
+        path = os.path.join(tmp_project, ".codebugs", "findings.db")
+        conn = sqlite3.connect(path, factory=RecordingConnection)
+        conn.row_factory = sqlite3.Row
+        yield conn
+        conn.close()
+
     def test_notes_and_meta_update_both_survive(self, one):
         result = findings.update_finding(
             one, "CB-1", notes="INVESTIGATION", meta_update={"fix_commit": "abc123"}
@@ -235,23 +265,28 @@ class TestUpdateMetaComposition:
         assert result["meta"]["notes"] == ""
         assert result["meta"]["k"] == "v"
 
-    def test_empty_meta_update_still_counts_as_a_write(self, one):
-        """``meta_update={}`` is a write, not a no-op.
+    def test_empty_meta_update_still_counts_as_a_write(self, recording):
+        """``meta_update={}`` emits a real meta assignment, not a no-op.
 
-        Asserted on the emitted SQL rather than on ``updated_at``: timestamps
-        have one-second resolution, so a ``>=`` comparison passes even if the
-        call degrades to a no-op and proves nothing.
+        Asserted on the SQL template rather than on ``updated_at``: timestamps
+        have one-second resolution, so a ``>=`` comparison passes even when the
+        call degrades to a no-op, and proves nothing.
         """
-        statements: list[str] = []
-        one.set_trace_callback(statements.append)
-        try:
-            result = findings.update_finding(one, "CB-1", meta_update={})
-        finally:
-            one.set_trace_callback(None)
+        findings.add_finding(
+            recording,
+            severity="high",
+            category="bug",
+            file="a.py",
+            description="d",
+            meta={"lines": "1-2"},
+        )
+        recording.recorded_sql.clear()
 
-        updates = [s for s in statements if "UPDATE findings" in s]
-        assert len(updates) == 1, statements
-        assert re.search(r"\bmeta\s*=", updates[0]), updates[0]
+        result = findings.update_finding(recording, "CB-1", meta_update={})
+
+        updates = [s for s in recording.recorded_sql if s.startswith("UPDATE findings")]
+        assert len(updates) == 1, updates
+        assert updates[0].count("meta = ?") == 1, updates[0]
         assert result["meta"]["lines"] == "1-2"
 
     def test_non_meta_update_still_writes_when_stored_meta_is_malformed(self, one):
@@ -266,36 +301,42 @@ class TestUpdateMetaComposition:
         one.execute("UPDATE findings SET meta = ? WHERE id = ?", ("{not json", "CB-1"))
         one.commit()
 
-        with pytest.raises(ValueError):  # JSONDecodeError, from the result conversion
+        with pytest.raises(json.JSONDecodeError):  # raised by the result conversion
             findings.update_finding(one, "CB-1", status="fixed")
 
         stored = one.execute("SELECT status FROM findings WHERE id = ?", ("CB-1",)).fetchone()
         assert stored["status"] == "fixed", "the status write must still have landed"
 
-    def test_single_update_never_assigns_meta_twice(self, one):
-        """Structural guard on the emitted SQL, not on the resulting row.
+    def test_single_update_never_assigns_meta_twice(self, recording):
+        """Structural guard: exactly one ``meta = ?`` per emitted UPDATE.
 
-        The trace callback reports statements with parameters already expanded,
-        so this matches ``meta =`` rather than ``meta = ?``.
+        Asserted against the SQL *template* rather than the executed statement.
+        The notes payload deliberately contains the literal token ``meta =``: a
+        guard reading trace-callback output would see that text inside the
+        expanded JSON and fail on correct code.
         """
-        statements: list[str] = []
-        one.set_trace_callback(statements.append)
-        try:
-            findings.update_finding(
-                one,
-                "CB-1",
-                status="fixed",
-                notes="N",
-                append_note="A",
-                meta_update={"k": "v"},
-            )
-        finally:
-            one.set_trace_callback(None)
+        findings.add_finding(
+            recording,
+            severity="high",
+            category="bug",
+            file="a.py",
+            description="d",
+            meta={"lines": "1-2"},
+        )
+        recording.recorded_sql.clear()
 
-        updates = [s for s in statements if "UPDATE findings" in s]
-        assert updates, "no UPDATE was captured"
-        for statement in updates:
-            assert len(re.findall(r"\bmeta\s*=", statement)) <= 1, statement
+        findings.update_finding(
+            recording,
+            "CB-1",
+            status="fixed",
+            notes="a value that itself contains meta = bait",
+            append_note="A",
+            meta_update={"k": "v"},
+        )
+
+        updates = [s for s in recording.recorded_sql if s.startswith("UPDATE findings")]
+        assert len(updates) == 1, updates
+        assert updates[0].count("meta = ?") == 1, updates[0]
 
     def test_update_status_in_progress(self, conn):
         findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")

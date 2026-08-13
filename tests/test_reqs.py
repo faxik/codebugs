@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import json
 import os
-import re
 import sqlite3
 import tempfile
 
@@ -11,6 +11,24 @@ import pytest
 
 from codebugs import reqs
 from codebugs.types import utc_now
+
+
+class RecordingConnection(sqlite3.Connection):
+    """Records SQL *templates*, as issued, before parameters are bound.
+
+    ``set_trace_callback`` expands bound parameters, so a guard reading its output
+    cannot distinguish a real ``meta`` assignment from the same text appearing
+    inside a value. Duplicated from the findings suite rather than shared: this
+    project deliberately has no ``conftest.py``, each test file owns its fixtures.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.recorded_sql: list[str] = []
+
+    def execute(self, sql, *args, **kwargs):
+        self.recorded_sql.append(sql)
+        return super().execute(sql, *args, **kwargs)
 
 
 @pytest.fixture
@@ -21,6 +39,29 @@ def conn():
     reqs.ensure_schema(c)
     yield c
     c.close()
+
+
+@pytest.fixture
+def recording():
+    """In-memory database on a connection that records SQL templates."""
+    c = sqlite3.connect(":memory:", factory=RecordingConnection)
+    c.row_factory = sqlite3.Row
+    reqs.ensure_schema(c)
+    yield c
+    c.close()
+
+
+@pytest.fixture
+def with_meta(conn):
+    """A requirement that already carries unrelated meta keys."""
+    reqs.add_requirement(
+        conn,
+        req_id="FR-100",
+        section="S",
+        description="d",
+        meta={"origin": "spec"},
+    )
+    return conn
 
 
 def _import_md(conn, md_text: str) -> dict:
@@ -125,13 +166,32 @@ class TestUpdateRequirement:
         result = reqs.update_requirement(populated, "FR-001", test_coverage="test_new.py")
         assert result["test_coverage"] == "test_new.py"
 
-    def test_notes_and_meta_update_both_survive(self, populated):
+    def test_notes_and_meta_update_both_survive(self, with_meta):
         """CB-16: two branches each rebuilt meta and emitted their own ``meta = ?``,
-        so SQLite kept only the last and the notes were silently destroyed."""
+        so SQLite kept only the last and the notes were silently destroyed.
+
+        Starts from a requirement that already carries unrelated meta, so this also
+        covers the key-preservation half — the findings twin had that from the start
+        and this one did not.
+        """
         result = reqs.update_requirement(
-            populated, "FR-001", notes="INVESTIGATION", meta_update={"k": "v"}
+            with_meta, "FR-100", notes="INVESTIGATION", meta_update={"k": "v"}
         )
         assert result["meta"]["notes"] == "INVESTIGATION"
+        assert result["meta"]["k"] == "v"
+        assert result["meta"]["origin"] == "spec"
+
+    def test_meta_update_alone_preserves_unrelated_keys(self, with_meta):
+        reqs.update_requirement(with_meta, "FR-100", notes="KEEP ME")
+        result = reqs.update_requirement(with_meta, "FR-100", meta_update={"k": "v"})
+        assert result["meta"]["notes"] == "KEEP ME"
+        assert result["meta"]["origin"] == "spec"
+        assert result["meta"]["k"] == "v"
+
+    def test_empty_string_notes_is_a_real_write(self, with_meta):
+        reqs.update_requirement(with_meta, "FR-100", notes="SOMETHING")
+        result = reqs.update_requirement(with_meta, "FR-100", notes="", meta_update={"k": "v"})
+        assert result["meta"]["notes"] == ""
         assert result["meta"]["k"] == "v"
 
     def test_meta_update_notes_key_wins_because_it_merges_last(self, populated):
@@ -140,20 +200,44 @@ class TestUpdateRequirement:
         )
         assert result["meta"]["notes"] == "WINS"
 
-    def test_single_update_never_assigns_meta_twice(self, populated):
-        statements: list[str] = []
-        populated.set_trace_callback(statements.append)
-        try:
-            reqs.update_requirement(
-                populated, "FR-001", status="implemented", notes="N", meta_update={"k": "v"}
-            )
-        finally:
-            populated.set_trace_callback(None)
+    def test_non_meta_update_still_writes_when_stored_meta_is_malformed(self, populated):
+        """A status-only update must not start depending on stored meta parsing.
 
-        updates = [s for s in statements if "UPDATE requirements" in s]
-        assert updates, "no UPDATE was captured"
-        for statement in updates:
-            assert len(re.findall(r"\bmeta\s*=", statement)) <= 1, statement
+        Mirrors the findings twin: the meta column has no ``json_valid`` constraint,
+        so building the new meta dict eagerly would abort this write before its SQL.
+        """
+        populated.execute("UPDATE requirements SET meta = ? WHERE id = ?", ("{not json", "FR-001"))
+        populated.commit()
+
+        with pytest.raises(json.JSONDecodeError):  # raised by the result conversion
+            reqs.update_requirement(populated, "FR-001", status="implemented")
+
+        stored = populated.execute(
+            "SELECT status FROM requirements WHERE id = ?", ("FR-001",)
+        ).fetchone()
+        assert stored["status"] == "implemented", "the status write must still have landed"
+
+    def test_single_update_never_assigns_meta_twice(self, recording):
+        """Structural guard: exactly one ``meta = ?`` per emitted UPDATE.
+
+        Asserted against the SQL *template*. The notes payload deliberately carries
+        the literal token ``meta =``, which would break a guard that inspected the
+        executed statement, since the trace callback expands bound parameters.
+        """
+        reqs.add_requirement(recording, req_id="FR-100", section="S", description="d")
+        recording.recorded_sql.clear()
+
+        reqs.update_requirement(
+            recording,
+            "FR-100",
+            status="implemented",
+            notes="a value that itself contains meta = bait",
+            meta_update={"k": "v"},
+        )
+
+        updates = [s for s in recording.recorded_sql if s.startswith("UPDATE requirements")]
+        assert len(updates) == 1, updates
+        assert updates[0].count("meta = ?") == 1, updates[0]
 
     def test_noop_update(self, populated):
         result = reqs.update_requirement(populated, "FR-001")

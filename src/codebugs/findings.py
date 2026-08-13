@@ -272,9 +272,16 @@ def update_finding(
         params.append(json.dumps(tags))
 
     # One dict, one `meta = ?`. See the docstring for the ordering contract.
-    # Parsed lazily: an update that touches no meta argument must not depend on
-    # the stored JSON being well-formed, since the column carries no json_valid
-    # constraint and legacy rows may hold anything.
+    #
+    # Parsed lazily so that an update touching no meta argument still reaches its
+    # own SQL: the column carries no json_valid constraint, and building the dict
+    # unconditionally would abort a plain status write on a malformed legacy row.
+    # This does NOT make such a call succeed — the row_to_dict conversion at the
+    # return still raises. It only keeps the write itself from being skipped.
+    #
+    # The condition must list every meta-writing argument below it. A new argument
+    # added to the block but not to this guard becomes a silent no-op on its own,
+    # while working whenever some other meta argument happens to be present.
     if notes is not None or append_note is not None or meta_update is not None:
         new_meta = json.loads(row["meta"])
 
