@@ -2635,9 +2635,21 @@
     "name": "triage_promote"
   },
   {
-    "description": "Update a finding's status, notes, tags, or metadata.\n\nArgs:\n    finding_id: The finding ID (e.g. CB-1)\n    status: New status: open, in_progress, fixed, not_a_bug, wont_fix, stale.\n            Aliases accepted: done/resolved/implemented/closed \u2192 fixed,\n            wontfix \u2192 wont_fix, invalid \u2192 not_a_bug,\n            active/working/in-progress \u2192 in_progress\n    notes: Add/update notes (stored in meta.notes)\n    tags: Replace tags list\n    meta_update: Merge additional metadata keys\n    reported_at_ref: Update version/tag label (e.g. \"v2.1.0\")\n",
+    "description": "Update a finding's status, notes, tags, or metadata.\n\nArgs:\n    finding_id: The finding ID (e.g. CB-1)\n    status: New status: open, in_progress, fixed, not_a_bug, wont_fix, stale.\n            Aliases accepted: done/resolved/implemented/closed \u2192 fixed,\n            wontfix \u2192 wont_fix, invalid \u2192 not_a_bug,\n            active/working/in-progress \u2192 in_progress\n    notes: REPLACES the notes wholesale, discarding whatever was there.\n           To add to an existing record without destroying it, use\n           append_note instead.\n    append_note: Appends a newline-joined line, preserving the prior notes.\n                 This is the safe way to add evidence to a long-lived card.\n    tags: Replace tags list\n    meta_update: Merge additional metadata keys\n    reported_at_ref: Update version/tag label (e.g. \"v2.1.0\")\n",
     "inputSchema": {
       "properties": {
+        "append_note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Append Note"
+        },
         "finding_id": {
           "title": "Finding Id",
           "type": "string"

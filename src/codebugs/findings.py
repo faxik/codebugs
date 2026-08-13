@@ -596,6 +596,7 @@ def register_tools(mcp, conn_factory) -> None:
         finding_id: str,
         status: str | None = None,
         notes: str | None = None,
+        append_note: str | None = None,
         tags: list[str] | None = None,
         meta_update: dict[str, Any] | None = None,
         reported_at_ref: str | None = None,
@@ -608,7 +609,11 @@ def register_tools(mcp, conn_factory) -> None:
                     Aliases accepted: done/resolved/implemented/closed → fixed,
                     wontfix → wont_fix, invalid → not_a_bug,
                     active/working/in-progress → in_progress
-            notes: Add/update notes (stored in meta.notes)
+            notes: REPLACES the notes wholesale, discarding whatever was there.
+                   To add to an existing record without destroying it, use
+                   append_note instead.
+            append_note: Appends a newline-joined line, preserving the prior notes.
+                         This is the safe way to add evidence to a long-lived card.
             tags: Replace tags list
             meta_update: Merge additional metadata keys
             reported_at_ref: Update version/tag label (e.g. "v2.1.0")
@@ -619,6 +624,7 @@ def register_tools(mcp, conn_factory) -> None:
                 finding_id,
                 status=status,
                 notes=notes,
+                append_note=append_note,
                 tags=tags,
                 meta_update=meta_update,
                 reported_at_ref=reported_at_ref,
@@ -772,6 +778,7 @@ def register_cli(sub, commands) -> None:
                 args.id,
                 status=args.status,
                 notes=args.notes,
+                append_note=args.append_note,
             )
             print(f"Updated: {result['id']} (status={result['status']})")
         except KeyError as e:
@@ -993,7 +1000,8 @@ def register_cli(sub, commands) -> None:
     p = sub.add_parser("update", help="Update a finding")
     p.add_argument("id", help="Finding ID")
     p.add_argument("--status", help="New status")
-    p.add_argument("--notes", help="Notes")
+    p.add_argument("--notes", help="Notes (REPLACES the existing notes wholesale)")
+    p.add_argument("--append-note", help="Append a line, preserving the existing notes")
 
     p = sub.add_parser("query", help="Search findings")
     p.add_argument("--id", help="Filter by ID (single CB-N or comma-separated list)")

@@ -198,6 +198,57 @@ class TestUpdateFinding:
             findings.update_finding(conn, "CB-999", status="fixed")
 
 
+class TestAppendNoteIsReachable:
+    """CB-18 / CB-15(1): `append_note` existed in the domain layer but was not
+    plumbed to either surface, so every agent-driven note edit was forced through
+    the destructive whole-value replace."""
+
+    def test_mcp_update_tool_declares_append_note(self):
+        import asyncio
+        from contextlib import contextmanager
+
+        from mcp.server.mcpserver import MCPServer
+
+        @contextmanager
+        def _never_called():
+            raise AssertionError("listing tools must not open a connection")
+            yield  # pragma: no cover
+
+        async def update_tool():
+            mcp = MCPServer("codebugs")
+            for provider in db.get_tool_providers(mode="findings"):
+                provider.register_fn(mcp, _never_called)
+            for tool in await mcp.list_tools():
+                if tool.name == "update":
+                    return tool
+            raise AssertionError("no `update` tool registered")
+
+        tool = asyncio.run(update_tool())
+        assert "append_note" in tool.input_schema.get("properties", {})
+        # The SDK carries per-argument prose in the tool's top-level description
+        # (built from the docstring Args block), not in the property schemas.
+        assert "REPLACES" in tool.description, (
+            "the destructive option must not read like the safe one"
+        )
+        assert "append_note" in tool.description
+
+    def test_cli_update_parser_accepts_append_note(self):
+        import argparse
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="command")
+        findings.register_cli(sub, {})
+
+        args = parser.parse_args(["update", "CB-1", "--append-note", "another line"])
+        assert args.append_note == "another line"
+
+    def test_append_note_extends_rather_than_replaces(self, conn):
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        findings.update_finding(conn, "CB-1", notes="FIRST")
+        result = findings.update_finding(conn, "CB-1", append_note="SECOND")
+        assert result["meta"]["notes"] == "FIRST\nSECOND"
+
+
 class TestUpdateMetaComposition:
     """CB-16: the meta-writing arguments must compose over one dict.
 
