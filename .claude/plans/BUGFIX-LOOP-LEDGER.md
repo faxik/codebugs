@@ -5,7 +5,8 @@ net change. Tracker: this repo's own `.codebugs/findings.db`, served by `mcp__co
 
 | Date | Focus | Cards | Disposition | Merge | Follow-ups |
 |---|---|---|---|---|---|
-| 2026-08-13 | `codebugs` | CB-16 | **fixed** — meta clobber in `update_finding` / `update_requirement` | `1d85756` on `feature/entity-claims` (fix commit `82f693f`) | CB-18 now unblocked; CB-1 suspected stale |
+| 2026-08-13 | `codebugs` | CB-16 | **fixed** — meta clobber in `update_finding` / `update_requirement` | `1d85756`, hardening `63d0658` | CB-18 unblocked |
+| 2026-08-13 | `codebugs` | CB-4, CB-1, CB-5 | **closed stale** with evidence — all three describe code that has since been refactored | `6e5236c`, `63d0658` (doc corrections) | sweep the remaining arch-debt cards |
 
 ## 2026-08-13 — CB-16
 
@@ -36,3 +37,26 @@ immutable). CB-1 (March, "separate MCP servers") is a **stale-card candidate** �
 **Note for the next iteration:** the long-running MCP server process holds pre-fix code in
 memory until it restarts, so `update` calls made through it can still clobber. Use one
 meta-writing argument per call until the server is restarted.
+
+### Post-landing adversarial review (Codex / gpt-5.6-sol, three lenses)
+
+Run after CB-16 landed, at the user's request. Lenses: code correctness, test quality, and
+verification of the author's own report claims. Hardening merged as `63d0658`.
+
+- **Code: clean.** No correctness regression in the shipped fix. Ordering, hook firing, commit
+  ordering and the no-op path all unchanged; concurrency exposure identical to before.
+- **Tests: the worst finding.** The structural guard asserted on `set_trace_callback` output,
+  which expands bound parameters — so it produced false failures (a notes value containing the
+  token `meta =`) and false passes (quoted identifiers). Both suites now assert on the SQL
+  *template* via a `RecordingConnection`. The requirements twin was also materially thinner than
+  the findings one and has been brought level.
+- **Claims: two were overstated.** The sibling sweep did not enumerate `ON CONFLICT DO UPDATE SET`
+  upserts (checked since — `claims.py` and `sweep.py`, both safe, conclusion unchanged). And the
+  CB-4 closure claimed provenance "owns `head_sha`" when that function is a dead delegation.
+- **The review found a third stale card, CB-5**, by checking `CLAUDE.md` against the code rather
+  than the code against itself.
+
+**Lesson worth keeping:** three of this tracker's April-2026 architecture-debt cards (CB-4, CB-1,
+CB-5) described a codebase that no longer exists, and `CLAUDE.md`'s debt section had drifted with
+them — each doc entry was repeating its card's false premise. Verify that section against the code
+as a batch rather than discovering them one card at a time.
