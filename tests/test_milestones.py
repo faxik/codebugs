@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
 
 import pytest
@@ -891,6 +893,100 @@ class TestPullNextConcurrent:
         assert len(refs) == len(set(refs))
         # All 4 items got claimed (since capacity is generous and 2x2 pulls).
         assert set(refs) == {"CB-1", "CB-2", "CB-3", "CB-4"}
+
+
+class PausingConnection(sqlite3.Connection):
+    """Fires a one-shot hook right after ``_get_item_by_ref``'s SELECT.
+
+    The findings and requirements suites carry twins of this; each keys on its
+    own entity's read, and the project deliberately has no ``conftest.py``.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.after_select = None
+
+    def execute(self, sql, *args, **kwargs):
+        cur = super().execute(sql, *args, **kwargs)
+        if self.after_select and sql.lstrip().startswith("SELECT * FROM milestone_items"):
+            hook, self.after_select = self.after_select, None
+            hook()
+        return cur
+
+
+class TestConcurrentItemMetaWritesDoNotLoseEachOther:
+    """CB-24 siblings: ``meta_json`` is merged in Python by two milestone writers.
+
+    ``mark_branch_only`` merges ``meta["branch"]`` and ``triage_promote`` merges
+    ``meta["linked_frs"]``, each over the row it read a statement earlier. Unless
+    the read and the write are one transaction, an agent branching an item while
+    another promotes it loses one of the two keys, and both calls report success.
+
+    This is not hypothetical plumbing: ``mark_branch_only`` is called by
+    autosorter's ``worktree-setup.sh`` at the moment a branch is created, which is
+    exactly when another agent is likely to be triaging the same queue.
+    """
+
+    def _open(self, tmp_project):
+        path = os.path.join(tmp_project, ".codebugs", "findings.db")
+        c = sqlite3.connect(path, factory=PausingConnection)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA busy_timeout=5000")
+        return c
+
+    def test_branching_an_item_does_not_erase_a_concurrent_promotion(self, tmp_project):
+        import threading
+
+        seed = db.connect(tmp_project)
+        try:
+            _add_finding(seed, "CB-1")  # auto-routes into stream/triage
+            _add_req(seed, "FR-1")
+        finally:
+            seed.close()
+
+        a = self._open(tmp_project)
+        a_read, b_started, b_read = (threading.Event() for _ in range(3))
+
+        def competing_promoter():
+            a_read.wait(timeout=10)
+            b = self._open(tmp_project)
+            b.after_select = b_read.set
+            b_started.set()
+            try:
+                milestones.triage_promote(
+                    b, bug_id="CB-1", to_milestone="release/1.1",
+                    size="small", linked_frs=["FR-1"],
+                )
+            finally:
+                b.close()
+
+        a.after_select = lambda: (
+            a_read.set(),
+            b_started.wait(timeout=10),
+            b_read.wait(timeout=1.0),
+        )
+
+        t = threading.Thread(target=competing_promoter)
+        t.start()
+        try:
+            milestones.mark_branch_only(a, item_ref="CB-1", branch_name="fix/cb-1")
+        finally:
+            t.join(timeout=30)
+            a.close()
+        assert not t.is_alive()
+
+        # Read the stored column directly: no public reader returns a single item's
+        # meta, and what this test is about is what actually landed in the row.
+        check = db.connect(tmp_project)
+        try:
+            stored = check.execute(
+                "SELECT meta_json FROM milestone_items WHERE item_ref = ?", ("CB-1",)
+            ).fetchone()["meta_json"]
+        finally:
+            check.close()
+        meta = json.loads(stored)
+        assert meta.get("branch") == "fix/cb-1", meta
+        assert meta.get("linked_frs") == ["FR-1"], meta
 
 
 # ---------------------------------------------------------------------------
