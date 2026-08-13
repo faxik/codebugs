@@ -433,10 +433,15 @@ def query_deferred_entities(
 
     ids_list = sorted(active_counts)
     placeholders = ",".join("?" for _ in ids_list)
+    # Declared precedence, not alphabetical (CB-20). `sort_col` is TEXT, so ordering
+    # by it directly ranked `low` above `medium` for findings and — worse — `could`
+    # above `must` for requirements, inverting the priority order outright. Params
+    # are spliced in textual placeholder order: ids, then the rank, then limit/offset.
+    rank_sql, rank_params = kind.order_by()
     rows = conn.execute(
         f"SELECT * FROM {kind.table} WHERE id IN ({placeholders}) "  # noqa: S608 (identifiers from frozen registry)
-        f"ORDER BY {kind.sort_col}, created_at DESC LIMIT ? OFFSET ?",
-        ids_list + [limit, offset],
+        f"ORDER BY {rank_sql}, created_at DESC LIMIT ? OFFSET ?",
+        ids_list + rank_params + [limit, offset],
     ).fetchall()
 
     rows_out = [db.row_to_dict(r) for r in rows]

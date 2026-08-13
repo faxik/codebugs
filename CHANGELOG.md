@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Queues are ordered by declared severity/priority precedence instead of
+  alphabetically** (CB-20). `severity` and `priority` are TEXT columns, so a bare
+  `ORDER BY` sorted them lexically: findings came back `critical, high, low,
+  medium` — ranking `low` above `medium` — and blocked requirements came back
+  `could, must, should`, putting the *highest* priority last. Under a `LIMIT`
+  this was not cosmetic: asking for the top 3 of a queue holding 3 `medium` and
+  3 `low` findings returned three `low` ones and truncated every `medium`.
+  Affects `query_findings`, `get_summary`'s severity breakdown, and the deferred
+  entity query in `blockers`. The rank is now derived from the `SEVERITIES` /
+  `PRIORITIES` tuples via `types.rank_case_sql()`, so the ordering cannot drift
+  from the vocabulary, and unrecognised values sort last rather than first.
+
 ### Added
 - Findings can be **re-triaged**: `severity` is now accepted by
   `update_finding()`, by the `update` MCP tool, and as `codebugs update <id>

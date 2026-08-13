@@ -6,8 +6,11 @@ import sqlite3
 
 import pytest
 
+from dataclasses import replace
+
 from codebugs import entities, findings, reqs
 from codebugs.entities import EntityRef, entity_kind
+from codebugs.types import PRIORITIES, SEVERITIES
 
 
 @pytest.fixture
@@ -157,3 +160,34 @@ def test_id_patterns_are_mutually_exclusive():
     for sid in sample_ids:
         matches = [k.name for k in entities.ENTITY_KINDS if k.id_pattern.match(sid)]
         assert len(matches) == 1, f"{sid} matched {matches}"
+
+
+class TestEntityKindOrderBy:
+    """CB-20: sort_col is TEXT, so ordering by it directly sorts alphabetically."""
+
+    def test_findings_rank_by_declared_severity(self):
+        sql, params = entity_kind("finding").order_by()
+        assert params == list(SEVERITIES)
+        assert sql.startswith("CASE severity ")
+
+    def test_requirements_rank_by_declared_priority(self):
+        sql, params = entity_kind("requirement").order_by()
+        assert params == list(PRIORITIES)
+        assert sql.startswith("CASE priority ")
+
+    def test_every_registered_kind_declares_its_precedence(self):
+        """The field is required, so this cannot silently regress — but a kind
+        whose sort_col IS a vocabulary column must not declare None."""
+        for kind in entities.ENTITY_KINDS:
+            assert kind.sort_vocabulary is not None, (
+                f"{kind.name} sorts by {kind.sort_col!r} with no declared precedence"
+            )
+
+    def test_a_non_vocabulary_sort_col_orders_directly(self):
+        kind = replace(entity_kind("finding"), sort_col="id", sort_vocabulary=None)
+        assert kind.order_by() == ("id", [])
+
+    def test_a_non_identifier_sort_col_is_refused(self):
+        kind = replace(entity_kind("finding"), sort_col="id; DROP TABLE t", sort_vocabulary=None)
+        with pytest.raises(ValueError, match="bare column identifier"):
+            kind.order_by()

@@ -10,7 +10,14 @@ import sys
 from typing import Any
 
 from codebugs import db, entities
-from codebugs.types import ENTITY_FINDING, FINDING_ID_PREFIX, SEVERITIES, resolve_finding_status, utc_now
+from codebugs.types import (
+    ENTITY_FINDING,
+    FINDING_ID_PREFIX,
+    SEVERITIES,
+    rank_case_sql,
+    resolve_finding_status,
+    utc_now,
+)
 
 SCHEMA = """\
 CREATE TABLE IF NOT EXISTS findings (
@@ -427,9 +434,21 @@ def query_findings(
         return {"grouped": True, "group_by": group_by, "groups": [dict(r) for r in rows]}
 
     count = conn.execute(f"SELECT COUNT(*) as c FROM findings {where}", params).fetchone()["c"]
+
+    # Order by DECLARED severity precedence, not alphabetically (CB-20). A bare
+    # `ORDER BY severity` ranks `low` above `medium`, which under a LIMIT
+    # truncates the more important rows rather than merely displaying them oddly.
+    #
+    # PARAMETER ORDER IS LOAD-BEARING. The CASE placeholders sit textually after
+    # the WHERE fragment and before LIMIT/OFFSET, so its values must be spliced
+    # in exactly that position. Prepending them instead would bind severities to
+    # the WHERE placeholders — corrupting every *filtered* query while unfiltered
+    # ones kept passing. The count query above must also run before this extend.
+    rank_sql, rank_params = rank_case_sql("severity", SEVERITIES)
+    params.extend(rank_params)
     params.extend([limit, offset])
     rows = conn.execute(
-        f"SELECT * FROM findings {where} ORDER BY severity, created_at DESC LIMIT ? OFFSET ?",
+        f"SELECT * FROM findings {where} ORDER BY {rank_sql}, created_at DESC LIMIT ? OFFSET ?",
         params,
     ).fetchall()
     return {
@@ -476,9 +495,16 @@ def get_summary(conn: sqlite3.Connection) -> dict[str, Any]:
     for r in conn.execute("SELECT status, COUNT(*) as c FROM findings GROUP BY status"):
         by_status[r["status"]] = r["c"]
 
+    # Declared precedence, not alphabetical (CB-20) — this dict's key order IS the
+    # dashboard's row order, and nothing downstream re-sorts it. Unlike `get_stats`,
+    # which pre-seeds its dict with the vocabulary and so is immune to row order,
+    # this one is built straight from the rows.
+    rank_sql, rank_params = rank_case_sql("severity", SEVERITIES)
     by_severity = {}
     for r in conn.execute(
-        "SELECT severity, COUNT(*) as c FROM findings WHERE status = 'open' GROUP BY severity ORDER BY severity"
+        "SELECT severity, COUNT(*) as c FROM findings WHERE status = 'open' "
+        f"GROUP BY severity ORDER BY {rank_sql}",
+        rank_params,
     ):
         by_severity[r["severity"]] = r["c"]
 
