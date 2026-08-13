@@ -537,6 +537,31 @@ class TestConcurrentMetaUpdatesDoNotLoseEachOther:
         assert "FROM-A" in notes, notes
         assert "FROM-B" in notes, notes
 
+    def test_an_ambient_transaction_is_not_committed_by_the_nested_update(self, conn):
+        """The other half of the fix: under an ambient transaction this frame must not commit.
+
+        ``db.txn`` yields ``False`` when a transaction is already open, and the
+        owning frame keeps full control. A restored ``conn.commit()`` inside
+        ``update_finding`` would therefore commit *the caller's* work from inside a
+        nested call — ``milestones.triage_dismiss`` writes ``milestone_items`` and
+        its audit row before calling here, and would lose the ability to roll them
+        back. Rolling the outer transaction back is the only way to observe that,
+        so this test asserts on what survives the rollback.
+        """
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+
+        with pytest.raises(RuntimeError, match="caller aborts"):
+            with db.txn(conn) as opened:
+                assert opened, "the caller owns this transaction"
+                conn.execute("UPDATE findings SET category = ? WHERE id = ?", ("outer", "CB-1"))
+                findings.update_finding(conn, "CB-1", status="fixed", append_note="nested")
+                raise RuntimeError("caller aborts after the nested update")
+
+        row = findings.get_finding(conn, "CB-1")
+        assert row["category"] == "bug", "the caller's own write must have rolled back"
+        assert row["status"] == "open", "the nested update must roll back with its caller"
+        assert "nested" not in json.dumps(row["meta"]), row["meta"]
+
     def test_a_competing_meta_update_key_is_not_erased(self, conn, tmp_project):
         """The same defect reached through ``meta_update`` rather than ``append_note``.
 

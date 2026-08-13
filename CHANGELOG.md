@@ -36,6 +36,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   empty-string filter is still treated as "no filter" and is not validated.
 
 ### Fixed
+- **Concurrent `meta` updates no longer erase each other** (CB-24).
+  `update_finding` and `update_requirement` merged `notes` / `append_note` /
+  `meta_update` in Python over a row they had read in a *separate* statement, then
+  wrote the result back — so two writers that both read before either wrote both
+  returned success and the later silently discarded the earlier's merge.
+  `busy_timeout` serializes the writes and does nothing about the read preceding
+  them. This is the harm CB-18 was filed to prevent, reached by another route: the
+  tracker exists to coordinate parallel agents, and `append_note` — the one
+  operation whose entire purpose is to be additive — is the likeliest to be issued
+  concurrently. Both bodies now sit in `db.txn`, so the write lock is held from
+  before the read. `milestones.triage_dismiss` gains atomicity as a side effect:
+  its dismissal, audit row and status write now commit as one unit, where the
+  nested call used to commit the dismissal early.
 - **An `EntityKind` carrying a malformed SQL identifier is refused at construction**
   (CB-22). `entities.py` claimed, in a comment, that every interpolated SQL
   identifier (`table` / `sort_col` / readable column) was pattern-checked; only
