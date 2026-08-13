@@ -470,3 +470,27 @@ vanished mid-sentence from the first commit; amended via `-F` from a file.
 CB-21), CB-21, CB-26, CB-27, CB-29. `blockers.query_deferred_entities` is now called only by its own
 tests and is marked SUPERSEDED rather than deleted, because those tests pin the ranked ordering the
 forwarded path must also produce.
+
+## 2026-08-14 — CB-26 (re-scoped): terminal source entities left live in derived queues — IN FLIGHT
+
+Focus `codebugs`. Branch `fix/cb-26-triage-projection-reconciliation`. Card claimed `in_progress`.
+
+**The ledger's own "fully decision-blocked" conclusion, recorded twice, was FALSE** — and this
+iteration exists because a Codex triage pass said so and was right. Each card mixes three separable
+things: an invariant, a product choice, and a proposed enforcement mechanism. The previous two
+iterations let an unresolved *mechanism* or *product choice* block the *invariant*, and so skipped
+live defects. CB-26 was skipped as "a design question" while its projection was measurably broken;
+CB-27 was filed as prospective ("about the fifth site") while the fifth site already existed.
+
+Verified before picking: 19 of 23 open `stream/triage` items point at terminal findings; the only
+`register_status_change_hook` in the package is `claims.py:825`; milestones registers add-time
+routing only (`milestones/__init__.py:638`).
+
+**Also corrected on the cards this iteration:** CB-6's headline premise is stale (blockers HAS had
+CLI commands since 5fffe4d) and its 2026-08-13 "CONFIRMED" note re-confirmed the wrong clause;
+CB-27 re-scoped with the live `sweep.mark_items` site; CB-26 raised low → high.
+
+**My own triage error, recorded because it is the reusable lesson:** I proposed CB-6+CB-21 as one
+tree on an "atomic landing" predicate. It does not hold — CB-21's argument-parity axis does not
+depend on CB-6's operation-coverage question, so that was grouping by theme wearing a predicate's
+name. Disposition and merge SHA below on completion.
