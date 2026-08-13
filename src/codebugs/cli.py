@@ -47,6 +47,11 @@ def _cmd_where(args: argparse.Namespace) -> None:
         sys.exit(1)
     print(f"root:     {info['root']}")
     print(f"database: {info['path']}")
+    if not info["exists"]:
+        # Only reachable on the walk route — a `.codebugs/` with no database in
+        # it. Saying so is the whole job here: otherwise `where` reports a path
+        # that is not there as if it were the project's tracker (CB-23).
+        print("          (no database there yet — the next command creates one)")
 
 
 def _register_builtins(sub, commands: dict) -> None:

@@ -3,6 +3,7 @@
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -109,12 +110,14 @@ class TestUpwardWalk:
     def test_db_path_explicit_project_dir_short_circuits_walk(self, tmp_path, monkeypatch):
         """An explicit dir is used as-is — it must not inherit cwd's project."""
         repo = tmp_path / "repo"
-        (repo / ".codebugs").mkdir(parents=True)
+        repo.mkdir()
+        db.init_project(str(repo))
         sub = repo / "src"
         sub.mkdir()
         monkeypatch.chdir(sub)
         explicit = tmp_path / "explicit"
-        (explicit / ".codebugs").mkdir(parents=True)
+        explicit.mkdir()
+        db.init_project(str(explicit))
         assert db._db_path(str(explicit)) == os.path.join(str(explicit), ".codebugs", "findings.db")
 
     def test_connect_silent_when_db_exists(self, tmp_path, monkeypatch, capsys):
@@ -333,7 +336,15 @@ class TestRefusesToAutoCreate:
         assert not (empty / ".codebugs").exists()
 
     def test_connect_creates_db_inside_an_existing_codebugs_dir(self, tmp_path, monkeypatch):
-        """`.codebugs/` present but no DB file yet — that directory IS the opt-in."""
+        """`.codebugs/` present but no DB file yet — that directory IS the opt-in.
+
+        The deliberate asymmetry, and the reason the two refusal tests below do
+        NOT contradict it (CB-23): standing inside a directory is evidence about
+        where you are, while a named or declared path is an assertion that can be
+        stale or mistyped. This is also what makes a Ctrl-C'd ``init`` self-heal
+        on the next command — ``init_project`` creates the directory before the
+        database — instead of demanding a second ``init``.
+        """
         repo = tmp_path / "repo"
         (repo / ".codebugs").mkdir(parents=True)
         monkeypatch.chdir(repo)
@@ -352,6 +363,45 @@ class TestRefusesToAutoCreate:
             db.connect(str(tmp_path))
         assert str(tmp_path) in str(exc.value)
         assert not (tmp_path / ".codebugs").exists()
+
+    def test_connect_refuses_an_explicit_dir_whose_tracker_dir_has_no_db(self, tmp_path):
+        """`--repo <path>` carries user input, so a half-made tracker is a typo target.
+
+        The sibling test above refuses when there is no `.codebugs/` at all. This
+        one refuses when the directory exists but holds no database — which is
+        the same claim, since the directory carries no findings (CB-23).
+        """
+        (tmp_path / ".codebugs").mkdir()
+        with pytest.raises(db.DatabaseNotFoundError) as exc:
+            db.connect(str(tmp_path))
+        assert str(tmp_path) in str(exc.value)
+        assert not (tmp_path / ".codebugs" / "findings.db").exists()
+
+    def test_a_named_root_cannot_create_even_if_the_db_vanishes_after_the_check(
+        self, tmp_path, monkeypatch
+    ):
+        """The resolver's `isfile` is check-then-act; `mode=rw` at the open closes it.
+
+        Deleting the database between the check and the open simulates the other
+        agent this project is built to run alongside. With the check alone, the
+        open would build a fresh empty tracker at that path and every later write
+        would report success — CB-23's failure mode surviving CB-23's fix.
+        """
+        db.init_project(str(tmp_path))
+        real_path = tmp_path / ".codebugs" / "findings.db"
+        assert real_path.exists()
+
+        original = db._resolve_db
+
+        def resolve_then_delete(project_dir=None):
+            result = original(project_dir)
+            real_path.unlink()  # the window between the check and the open
+            return result
+
+        monkeypatch.setattr(db, "_resolve_db", resolve_then_delete)
+        with pytest.raises(db.DatabaseNotFoundError):
+            db.connect(str(tmp_path))
+        assert not real_path.exists(), "the refusal must not have created one"
 
     def test_connect_opens_an_explicit_dir_after_init(self, tmp_path):
         db.init_project(str(tmp_path))
@@ -568,8 +618,11 @@ def _separate_git_dir_worktree(tmp_path):
     """Build CB-13's layout: a `--separate-git-dir` repo whose git dir IS named `.git`.
 
     `admin/.git` is the git directory; `repo/` is the real checkout and holds the
-    real tracker. A stray `.codebugs/` sits in `admin/` — without one there is
-    nothing to mis-bind TO and the bug is invisible. Returns (repo, admin, wt).
+    real tracker — a real one, with a database, because a declared root now has to
+    resolve to an actual `findings.db` (CB-23). A stray `.codebugs/` DIRECTORY
+    sits in `admin/`, and stays a bare directory deliberately: the walk still
+    binds on the directory alone, which is what makes the misbinding reproduce.
+    Returns (repo, admin, wt).
     """
     admin = tmp_path / "admin"
     repo = tmp_path / "repo"
@@ -579,7 +632,7 @@ def _separate_git_dir_worktree(tmp_path):
     (repo / "f.txt").write_text("x")
     _git("add", "f.txt", cwd=repo)
     _git("commit", "-m", "init", cwd=repo)
-    (repo / ".codebugs").mkdir()
+    db.init_project(str(repo), force=True)  # force: CB-13's own layout reads as a worktree
     (admin / ".codebugs").mkdir()
     wt = tmp_path / "wt"
     _git("worktree", "add", str(wt), "-b", "wt", cwd=repo)
@@ -652,6 +705,30 @@ class TestTrackerRootOverride:
             db._db_path()
         assert "--tracker-root" in str(flag_exc.value)
         assert db.ENV_ROOT not in str(flag_exc.value)
+
+    def test_a_declared_root_whose_tracker_dir_has_no_db_fails_closed(self, tmp_path, monkeypatch):
+        """A `.codebugs/` with no `findings.db` is not a tracker (CB-23).
+
+        The directory alone carries no findings, so accepting it lets an ambient
+        declaration quietly become the second, empty tracker this whole branch
+        exists to prevent. That the directory exists is not evidence a tracker
+        does: a Ctrl-C'd ``init`` leaves exactly this state, because
+        ``init_project`` creates the directory before the database.
+
+        The upward walk deliberately does NOT get this check — see
+        ``TestRefusesToAutoCreate`` for why the two branches differ.
+        """
+        half = tmp_path / "half"
+        (half / ".codebugs").mkdir(parents=True)
+        here = _tracker(tmp_path, "here")
+        monkeypatch.chdir(here)
+        monkeypatch.setenv(db.ENV_ROOT, str(half))
+
+        with pytest.raises(db.DatabaseNotFoundError) as exc:
+            db._db_path()
+        assert str(half) in str(exc.value)
+        assert db.ENV_ROOT in str(exc.value), "the channel must be named: the value is ambient"
+        assert not (half / ".codebugs" / "findings.db").exists(), "must not have created one"
 
     def test_a_declared_root_that_is_not_a_directory_fails_closed(self, tmp_path, monkeypatch):
         missing = tmp_path / "typo"
@@ -732,6 +809,12 @@ class TestSeparateGitDirMisbinding:
         info = db.describe_root()
         assert info["source"] == "discovery"
         assert info["root"] == str(admin.resolve())
+        # The mis-bound root is a stray DIRECTORY with no database, so the
+        # diagnostic has a second, sharper thing to say: the tracker it names is
+        # not there, and the next write would invent it (CB-23). Reporting the
+        # wrong root as healthy is how this stayed invisible.
+        assert info["exists"] is False
+        assert info["error"] is None, "it resolves — that is exactly why it is dangerous"
 
 
 class TestDescribeRoot:
@@ -816,6 +899,33 @@ class TestDescribeRoot:
             os.chdir(original)
 
 
+class TestOpenCallSitesRatchet:
+    """`_open` is the only door to a live connection. Guard how many hold a key.
+
+    Everything CB-23 buys rests on `_open(create=...)` having exactly two callers:
+    `init_project`, and `connect` (which passes the walk's may-create flag). A
+    third one — some future "repair" or "ensure" helper reaching for `_open`
+    because `connect` refused it — would reopen the hole quietly, and nothing but
+    review would notice. Prose is the wrong enforcement layer for that, which this
+    repo has established twice over (the `BEGIN IMMEDIATE` allowlist in
+    `test_claims.py`, and `EntityKind.__post_init__`). This allowlist may shrink,
+    never grow.
+    """
+
+    def test_only_two_call_sites_may_open_a_connection(self):
+        src = Path(db.__file__).parent
+        calls = [
+            (path.name, line.strip())
+            for path in src.rglob("*.py")
+            for line in path.read_text().splitlines()
+            if "_open(" in line
+            and not line.lstrip().startswith("#")
+            and not line.lstrip().startswith("def _open(")
+        ]
+        assert len(calls) == 2, f"new _open() call site(s) — is this deliberate? {calls}"
+        assert all(name == "db.py" for name, _ in calls), calls
+
+
 class TestWhereCommand:
     """`codebugs where` — the single moment that says where this process is pointed."""
 
@@ -835,6 +945,26 @@ class TestWhereCommand:
         assert proc.returncode == 0, proc.stderr
         assert str(tmp_path) in proc.stdout
         assert "discovery" in proc.stdout
+
+    def test_says_when_the_resolved_database_is_not_there_yet(self, tmp_path):
+        """Resolving is not being there — and the walk resolves a bare directory.
+
+        Without this line `where` prints a path that does not exist and calls it
+        the project's tracker, which is the same shape as the CB-13 misbinding
+        (where the wrong root is a stray directory). CB-23.
+        """
+        repo = tmp_path / "repo"
+        (repo / ".codebugs").mkdir(parents=True)
+        proc = self._where(repo)
+        assert proc.returncode == 0, proc.stderr
+        assert str(repo) in proc.stdout
+        assert "no database there yet" in proc.stdout
+        assert not (repo / ".codebugs" / "findings.db").exists(), "`where` must not create"
+
+    def test_is_quiet_about_existence_when_the_database_is_really_there(self, tmp_path):
+        db.init_project(str(tmp_path))
+        proc = self._where(tmp_path)
+        assert "no database there yet" not in proc.stdout
 
     def test_names_the_env_channel(self, tmp_path):
         declared = _tracker(tmp_path, "declared")

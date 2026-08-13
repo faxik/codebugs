@@ -36,6 +36,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   empty-string filter is still treated as "no filter" and is not validated.
 
 ### Fixed
+- **A named or declared tracker root must now contain a real database** (CB-23).
+  `--repo`, `--tracker-root` and `$CODEBUGS_ROOT` accepted any path holding a
+  `.codebugs/` *directory*, and `sqlite3.connect` then created a `findings.db`
+  inside it — so a mistyped path, or an export inherited by an unrelated process,
+  silently became a second, empty tracker whose writes all reported success.
+  `_db_path`'s own docstring already promised this branch would "fail loudly
+  rather than quietly become a second, empty tracker"; only the check was
+  missing. The refusal names the channel that pointed there.
+
+  **The upward walk is deliberately unchanged**: an existing `.codebugs/`
+  directory is still the opt-in, and a database is still created inside one that
+  has none. That is what makes an interrupted `codebugs init` self-heal — the
+  directory is created before the database — and standing inside a directory is
+  evidence about where you are in a way a named path is not.
+
+  Structurally, the open-and-migrate half of `connect()` is now `_open()`, and
+  `init_project` is its only other caller. Before, `init` created its database
+  *by way of* `connect`, so tightening discovery broke the one function allowed
+  to create. The named and declared routes open through SQLite's `mode=rw` URI,
+  so "must already exist" is enforced by the open itself — the path check alone
+  would be a check-then-act, and another agent removing the database in that
+  window would get a fresh empty one built for it.
+
+- **`codebugs where` and the MCP preflight now say when the tracker they name
+  does not exist yet** (CB-23). `describe_root()` gained an `exists` field,
+  reported separately from `error` because resolving is not the same as being
+  there: on the walk route a `.codebugs/` with no database resolves cleanly and
+  the next write creates the tracker, so nothing errors and nothing was visible.
+  That is the CB-13 misbinding's exact shape — the root it mis-binds to is a
+  stray directory — and `where` used to print it as the project's tracker.
 - **Concurrent `meta` updates no longer erase each other** (CB-24).
   `update_finding` and `update_requirement` merged `notes` / `append_note` /
   `meta_update` in Python over a row they had read in a *separate* statement, then

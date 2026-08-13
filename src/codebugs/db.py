@@ -23,6 +23,7 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from graphlib import CycleError
 from pathlib import Path
+from urllib.request import pathname2url
 from typing import Any
 
 DB_DIR = ".codebugs"
@@ -561,11 +562,30 @@ def _declared_db_path(root: str, source: str) -> str:
             f"run `codebugs init {root}`, or clear {label} to fall back to "
             f"directory discovery"
         )
-    return os.path.join(root, DB_DIR, DB_FILE)
+    # The directory is not the tracker; the database is (CB-23) — the asymmetry
+    # and its benign cause are written out once, on `_resolve_db`. What matters
+    # here is that accepting a directory would be the "quietly becomes a second,
+    # empty tracker" this function's own docstring forbids. The check earns its
+    # place by naming the channel; `mode=rw` at the open is what makes the
+    # refusal race-free.
+    path = os.path.join(root, DB_DIR, DB_FILE)
+    if not os.path.isfile(path):
+        raise DatabaseNotFoundError(
+            f"{label} names {root}, whose {DB_DIR}/ holds no {DB_FILE}; "
+            f"run `codebugs init {root}` to finish creating it, or clear {label} "
+            f"to fall back to directory discovery"
+        )
+    return path
 
 
-def _db_path(project_dir: str | None = None) -> str:
-    """Locate an EXISTING tracker's DB file. Never invents one.
+def _resolve_db(project_dir: str | None = None) -> tuple[str, bool]:
+    """Locate a tracker's DB file, and say whether this route may CREATE it.
+
+    The boolean is the whole point of returning a tuple: only the upward walk may
+    create, and `connect` opens the other two routes with SQLite's `mode=rw` so
+    that "must already exist" is enforced by the open itself rather than by a
+    check that happened earlier (CB-23). `_db_path` is the thin wrapper for the
+    callers that only want the path.
 
     Resolution order, most specific first: an explicit `project_dir` argument, a
     declared tracker root (`--tracker-root`, then `CODEBUGS_ROOT`), then the
@@ -576,6 +596,17 @@ def _db_path(project_dir: str | None = None) -> str:
     A named `project_dir` is not an opt-in to creation: it routinely carries user
     input (`--repo <path>`), where a typo must fail loudly rather than quietly
     become a second, empty tracker. A declared root is held to the same rule.
+
+    On those two branches a tracker means the `findings.db` FILE, not the
+    `.codebugs/` directory (CB-23) — a directory alone carries no findings, so
+    accepting it recreates the very failure the paragraph above forbids. The
+    upward walk keeps treating the directory as the opt-in, and the asymmetry is
+    deliberate: standing inside a directory is evidence about where you actually
+    are, while a named or declared path is an assertion that can be stale,
+    inherited by an unrelated subprocess, or simply mistyped. It also has a
+    common benign cause — `init_project` creates the directory before the
+    database, so a Ctrl-C'd init leaves one behind, and self-healing on the next
+    command is the right answer there. `TestRefusesToAutoCreate` pins both sides.
     """
     if project_dir is not None:
         root = project_dir
@@ -584,11 +615,21 @@ def _db_path(project_dir: str | None = None) -> str:
                 f"no {DB_DIR}/ in {root}; "
                 f"check the path, or run `codebugs init {root}` to create a tracker there"
             )
-        return os.path.join(root, DB_DIR, DB_FILE)
+        # Same rule as the declared branch below: a `.codebugs/` holding no
+        # database is a half-made tracker, not an opt-in to creating one (CB-23).
+        # This check exists for its MESSAGE — `mode=rw` at the open is what makes
+        # the refusal race-free; a check here alone is a check-then-act.
+        path = os.path.join(root, DB_DIR, DB_FILE)
+        if not os.path.isfile(path):
+            raise DatabaseNotFoundError(
+                f"{DB_DIR}/ in {root} holds no {DB_FILE}; "
+                f"check the path, or run `codebugs init {root}` to finish creating it"
+            )
+        return path, False
 
     declared, source = declared_tracker_root()
     if declared is not None:
-        return _declared_db_path(declared, source)
+        return _declared_db_path(declared, source), False
 
     # Read cwd ONCE, and treat losing it as "no tracker" rather than letting an
     # OSError escape. A deleted working directory is not hypothetical here: a
@@ -621,7 +662,13 @@ def _db_path(project_dir: str | None = None) -> str:
             f"no {DB_DIR}/ found in {cwd} or any parent; "
             f"run `codebugs init` here, or cd into a project that has one"
         )
-    return os.path.join(root, DB_DIR, DB_FILE)
+    # The one route allowed to create: see the asymmetry note above.
+    return os.path.join(root, DB_DIR, DB_FILE), True
+
+
+def _db_path(project_dir: str | None = None) -> str:
+    """The resolved DB path, without the may-create flag. See `_resolve_db`."""
+    return _resolve_db(project_dir)[0]
 
 
 def describe_root() -> dict[str, Any]:
@@ -647,15 +694,24 @@ def describe_root() -> dict[str, Any]:
             "source": source,
             "source_label": SOURCE_LABELS[source],
             "path": None,
+            "exists": False,
             "error": str(e),
         }
     # `path` is always `<root>/<DB_DIR>/<DB_FILE>`, so the root is recoverable
     # without walking again — and cannot disagree with the path we just resolved.
+    #
+    # `exists` is reported separately because resolving is not the same as being
+    # there: on the walk route a `.codebugs/` holding no database resolves fine
+    # and the next command CREATES the tracker (CB-23). Without this the
+    # diagnostic prints a path that is not there and calls it healthy — which is
+    # exactly the CB-13 misbinding's shape, where the wrong root is a stray
+    # directory. A binding you cannot see is a binding you cannot debug (CB-11).
     return {
         "root": os.path.dirname(os.path.dirname(path)),
         "source": source,
         "source_label": SOURCE_LABELS[source],
         "path": path,
+        "exists": os.path.isfile(path),
         "error": None,
     }
 
@@ -663,8 +719,13 @@ def describe_root() -> dict[str, Any]:
 def init_project(project_dir: str | None = None, *, force: bool = False) -> dict[str, Any]:
     """Create a `.codebugs/` tracker in `project_dir` (default cwd).
 
-    The only function that creates a tracker, so that creation is always a
-    deliberate act. Idempotent — an existing tracker here is left alone.
+    **The only function that creates the `.codebugs/` DIRECTORY** — the single
+    `os.makedirs` in the package — so opting a project in is always a deliberate
+    act. State it that way rather than "the only function that creates a
+    tracker", which stopped being true once the distinction mattered: the upward
+    walk in `connect` will fill in a `findings.db` inside a directory that
+    already exists, and the named and declared routes refuse to do even that
+    (CB-23). Idempotent — an existing tracker here is left alone.
 
     Refuses when an enclosing tracker already covers this directory: a nested
     `.codebugs/` wins the upward walk forever after, silently orphaning every
@@ -707,7 +768,13 @@ def init_project(project_dir: str | None = None, *, force: bool = False) -> dict
     path = os.path.join(tracker_dir, DB_FILE)
     created = not os.path.exists(path)
     os.makedirs(tracker_dir, exist_ok=True)
-    connect(root).close()
+    # `_open(create=True)`, not `connect`: this is the one place a database may be
+    # brought into existence at a named path, and `connect` refuses a named root
+    # that holds none (CB-23). Note the directory is created first, so an
+    # interruption here leaves a `.codebugs/` with no database — the state the
+    # upward walk deliberately still self-heals, and the named/declared branches
+    # deliberately refuse.
+    _open(path, create=True).close()
     return {"root": root, "path": path, "created": created}
 
 
@@ -739,10 +806,47 @@ def _ensure_modules_loaded() -> None:
         _modules_loaded = True
 
 
-def connect(project_dir: str | None = None) -> sqlite3.Connection:
-    """Open (and initialize) the codebugs database."""
-    path = _db_path(project_dir)
-    conn = sqlite3.connect(path)
+def _open(path: str, *, create: bool) -> sqlite3.Connection:
+    """Open a connection at an EXACT path and apply every module's schema.
+
+    Split out of `connect` so `init_project` can reach it without going through
+    `_resolve_db`, whose job on the named and declared branches is to refuse a
+    path that does not already hold a database (CB-23). Before the split, init
+    created its database *by way of* `connect`, so tightening the resolver broke
+    the one caller that is supposed to create.
+
+    Two callers pass ``create=True`` and the difference between them is the whole
+    design: `init_project`, which has just made the `.codebugs/` directory, and
+    `connect` on the upward-walk route, where the directory was already there.
+    Neither invents a directory — that is `init_project`'s single `os.makedirs`,
+    and it is the precise sense in which opting a project in is deliberate.
+    `TestOpenCallSitesRatchet` pins that there are exactly these two.
+
+    ``create=False`` opens through SQLite's ``mode=rw`` URI, which fails rather
+    than creating. That is what makes the refusal race-free: the resolver's
+    ``isfile`` check runs earlier and only supplies a good message, so on its own
+    it is a check-then-act — another process removing the database in between
+    would get a fresh empty one built here, which is precisely CB-23's failure
+    mode. Enforcing existence at the open closes the window.
+    """
+    if not create:
+        # pathname2url escapes `?` and `#`, which would otherwise be read as URI
+        # syntax; abspath because a relative path has no valid file: URI.
+        uri = "file:" + pathname2url(os.path.abspath(path)) + "?mode=rw"
+        try:
+            conn = sqlite3.connect(uri, uri=True)
+        except sqlite3.OperationalError as e:
+            # Keep the documented exception type: callers catch
+            # DatabaseNotFoundError, and a bare OperationalError here would reach
+            # the CLI's contention arm and be misreported as "database busy".
+            if is_contention(e):
+                raise
+            raise DatabaseNotFoundError(
+                f"no readable {DB_FILE} at {path} ({e}); "
+                f"run `codebugs init` for that project, or check the path"
+            ) from e
+    else:
+        conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     # Explicit; was inherited from sqlite3.connect(timeout=5.0)'s default. This is
@@ -754,3 +858,15 @@ def connect(project_dir: str | None = None) -> sqlite3.Connection:
         entry.ensure_fn(conn)
 
     return conn
+
+
+def connect(project_dir: str | None = None) -> sqlite3.Connection:
+    """Open the codebugs database.
+
+    Creates one only on the upward-walk route, and only inside a `.codebugs/`
+    directory that already exists — the deliberate asymmetry documented on
+    `_resolve_db` (CB-23). A named `project_dir` or a declared root is opened
+    `mode=rw` and never creates anything.
+    """
+    path, may_create = _resolve_db(project_dir)
+    return _open(path, create=may_create)
