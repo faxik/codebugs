@@ -8,6 +8,7 @@ net change. Tracker: this repo's own `.codebugs/findings.db`, served by `mcp__co
 | 2026-08-13 | `codebugs` | CB-16 | **fixed** — meta clobber in `update_finding` / `update_requirement` | `1d85756`, hardening `63d0658` | CB-18 unblocked |
 | 2026-08-13 | `codebugs` | CB-4, CB-1, CB-5 | **closed stale** with evidence — all three describe code that has since been refactored | `6e5236c`, `63d0658` (doc corrections) | sweep the remaining arch-debt cards |
 | 2026-08-13 | `codebugs` | CB-18, CB-15 | **fixed** — `append_note` unreachable from either surface; unknown argument names silently dropped | `6a1aef2` (`987fc20`, `d6ce8de`) | CB-17 left open by design |
+| 2026-08-13 | `codebugs` | CB-17 | **fixed** — severity was write-once, so a re-measured card could not be re-triaged | `dc49160` (`741f428`) | filed CB-19, CB-20; upgraded CB-6 |
 
 ## 2026-08-13 — CB-16
 
@@ -88,3 +89,49 @@ tool and watching the call still succeed.
 plus validation and carries real product questions (should retriage record actor/reason/history?).
 The hostage test decided it: if CB-17 stalled on that decision, two finished edits would wait behind
 it. It is now the only substantive card left — and its first question is for the user, not an agent.
+
+## 2026-08-13 — CB-17 (severity became mutable)
+
+**The "first question is for the user" call above was wrong, and worth correcting rather than
+quietly dropping.** CB-17 was filed by the user, and its body already picks the shape ("Recommend
+(a) plus a hook, if an audit trail is wanted"). The only genuinely open sub-question was the
+conditional hook, and that answers itself: nothing consumes a severity-change event, so building
+one would have been speculative surface. Direction was ratified in the card all along. The lesson
+is narrow but real — *check whether the card's author already answered the question before
+escalating it back to them.*
+
+**Half the card was already fixed.** Its "unknown kwargs should raise at the MCP boundary" half was
+CB-15, closed last iteration. That is now what makes the wire test meaningful: an undeclared
+`severity` is REFUSED, so the test fails loudly against the old wrapper instead of passing while
+the value is dropped. Two iterations compounding.
+
+**Review placement, deliberately changed.** The standing rule sends a pre-implementation plan to
+`adversarial-review-x2`. Here the design question went to Codex *before* the plan (it produced the
+"file the case-asymmetry separately" decision), and the full pass went on the **finished diff**
+instead — which is where this repo's last real regression was caught. It paid again: Codex found a
+regression I had introduced (`except (KeyError, ValueError)` swallows `json.JSONDecodeError`, so a
+committed write would report as bad input and exit 1) plus two test gaps that would have let a
+broken implementation ship — the MCP test proved the argument was *declared* but never *forwarded*,
+and every fixture held one row, so a missing `WHERE` would have passed all 12 tests.
+
+**Mutation testing is now the standard here, not a flourish.** Three separate mutations — delete the
+MCP forwarding, delete the CLI forwarding, revert the exception arm — each failed exactly the tests
+that should catch them. Verifying the mutation *landed* mattered: an early grep discriminator
+returned a misleading count because `query_findings` declares the same signature.
+
+**Live instance of CB-15's failure mode, still running.** An `append_note` call through the session's
+MCP server returned a success payload and changed nothing — the server process predates `987fc20`
+and `d6ce8de`, so it has neither the parameter nor the strict-argument refusal. **The MCP server must
+be restarted before `append_note` or `severity` are usable through it.** Until then, prefer `notes=`
+and re-fetch to confirm every write.
+
+**Verify subagent citations, but check your own greps too.** Two of the sweep agent's claims looked
+false and were not: `grep -c actor` over `milestones/__init__.py` returns ~27 because the substring
+lives inside `conn_factory`, and a `merge.py` window that stopped at 620 missed the parsers at
+624–632. The agent was right both times; my discriminators were bad.
+
+**Filed rather than fixed:** CB-19 (severity case-strict, sibling priority case-lenient — split on
+Codex's advice because fixing it widens `add_finding`'s accepted inputs) and CB-20 (`ORDER BY
+severity` is lexical, so `low` outranks `medium` in the primary read path — this card's own premise
+one layer down). CB-6 upgraded from suspected to confirmed: the CLI is *systematically* a subset of
+the MCP surface, not just missing blockers, so its real question is a policy one.
