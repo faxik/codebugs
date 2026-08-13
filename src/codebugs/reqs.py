@@ -9,7 +9,13 @@ import sqlite3
 from typing import Any
 
 from codebugs import db, entities
-from codebugs.types import ENTITY_REQUIREMENT, resolve_requirement_status, resolve_priority, utc_now
+from codebugs.types import (
+    ENTITY_REQUIREMENT,
+    is_vocabulary_filter_active,
+    resolve_priority,
+    resolve_requirement_status,
+    utc_now,
+)
 
 
 REQS_SCHEMA = """\
@@ -313,10 +319,10 @@ def query_requirements(
     # `query_requirements(priority="SHOULD")` then returned ZERO rows. A tracker
     # reporting "no requirements" for a value it just wrote is the worst answer it
     # can give, and it is indistinguishable from an empty queue.
-    if status:
+    if is_vocabulary_filter_active(status):
         conditions.append("status = ?")
         params.append(resolve_requirement_status(status))
-    if priority:
+    if is_vocabulary_filter_active(priority):
         conditions.append("priority = ?")
         params.append(resolve_priority(priority))
     if section:

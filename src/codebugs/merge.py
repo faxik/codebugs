@@ -7,7 +7,18 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from codebugs.types import utc_now
+from codebugs.types import is_vocabulary_filter_active, utc_now
+
+# The session status vocabulary. It previously existed ONLY as a literal inside the
+# CHECK constraint below, so the write side validated it and `get_sessions`' filter did
+# not — the write/query asymmetry CLAUDE.md's vocabulary rule prohibits (CB-25 sibling
+# sweep). Declared here so the filter has something to validate against.
+#
+# The CHECK keeps its own literal rather than interpolating this tuple: values are never
+# interpolated into SQL in this package, and DDL cannot bind them. The two are pinned to
+# each other behaviourally instead, by `TestMergeStatusVocabulary` — which probes the
+# constraint with every member and a non-member rather than matching the schema text.
+MERGE_SESSION_STATUSES = ("active", "merging", "done", "abandoned")
 
 
 MERGE_SCHEMA = """\
@@ -369,7 +380,11 @@ def get_sessions(
     """List sessions with claim counts."""
     conditions = []
     params: list[Any] = []
-    if status:
+    if is_vocabulary_filter_active(status):
+        if status not in MERGE_SESSION_STATUSES:
+            raise ValueError(
+                f"Invalid status: {status!r}. Must be one of {MERGE_SESSION_STATUSES}"
+            )
         conditions.append("s.status = ?")
         params.append(status)
 

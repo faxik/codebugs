@@ -102,3 +102,22 @@ class TestEmbeddings:
 
     def test_cosine_similarity_zero_vector(self):
         assert embeddings._cosine_similarity([0, 0], [1, 1]) == 0.0
+
+
+class TestFalseyStatusFilterDoesNotDisableTheFilter:
+    """CB-25, at the similarity-search site. Same defect as the findings and
+    requirements query filters; fixed in the same sweep so the seam cannot move."""
+
+    @pytest.mark.parametrize("falsey", [0, False, [], {}])
+    def test_falsey_status_raises(self, conn, falsey):
+        reqs.add_requirement(conn, req_id="FR-1", description="a")
+        embeddings.store_embedding(conn, "FR-1", [0.1, 0.2, 0.3])
+        with pytest.raises(ValueError, match="Invalid requirement status"):
+            embeddings.search_similar(conn, query_embedding=[0.1, 0.2, 0.3], status=falsey)
+
+    @pytest.mark.parametrize("empty", [None, ""])
+    def test_none_and_empty_string_still_mean_no_filter(self, conn, empty):
+        reqs.add_requirement(conn, req_id="FR-1", description="a")
+        embeddings.store_embedding(conn, "FR-1", [0.1, 0.2, 0.3])
+        got = embeddings.search_similar(conn, query_embedding=[0.1, 0.2, 0.3], status=empty)
+        assert len(got) == 1

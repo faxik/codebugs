@@ -8,7 +8,7 @@ import struct
 from typing import Any
 
 from codebugs import db
-from codebugs.types import resolve_requirement_status, utc_now
+from codebugs.types import is_vocabulary_filter_active, resolve_requirement_status, utc_now
 
 
 def _pack_vector(vec: list[float]) -> bytes:
@@ -98,7 +98,7 @@ def search_similar(
     """
     conditions = ["embedding IS NOT NULL"]
     params: list[Any] = []
-    if status:
+    if is_vocabulary_filter_active(status):
         conditions.append("status = ?")
         # Resolved like every other status filter (CB-19 sibling sweep): raw, this
         # silently returned no similar requirements for a correctly-spelled-but-

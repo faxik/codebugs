@@ -1408,3 +1408,45 @@ class TestEligibilitySeam:
         item = self._item(size="large", acceptance="ok", meta={"linked_frs": ["FR-404"]})
         msg = milestones._eligibility_failure(conn, item, self.REL, {"large": 1}, {})
         assert "FR-404 not in requirements" in msg
+
+
+class TestListMilestonesValidatesItsVocabularies:
+    """CB-25 sibling sweep. `list_milestones` guarded `kind`/`state` with plain
+    truthiness and validated neither, while `create_milestone` (:42) and
+    `set_milestone_state` (:79) have always validated the same two vocabularies.
+    So `kind=0` returned every milestone and `kind="stremm"` returned none — both
+    halves of CLAUDE.md's rule that a vocabulary must resolve on BOTH sides."""
+
+    def _two(self, conn):
+        milestones.create_milestone(conn, id="release/9.9", kind="release", description="r")
+        milestones.create_milestone(conn, id="stream/x", kind="stream", description="s")
+
+    @pytest.mark.parametrize("falsey", [0, False, [], {}])
+    def test_falsey_kind_raises_instead_of_returning_everything(self, conn, falsey):
+        self._two(conn)
+        with pytest.raises(ValueError, match="Invalid kind"):
+            milestones.list_milestones(conn, kind=falsey)
+
+    @pytest.mark.parametrize("falsey", [0, False, [], {}])
+    def test_falsey_state_raises_instead_of_returning_everything(self, conn, falsey):
+        self._two(conn)
+        with pytest.raises(ValueError, match="Invalid state"):
+            milestones.list_milestones(conn, state=falsey)
+
+    def test_unknown_values_raise_instead_of_returning_nothing(self, conn):
+        self._two(conn)
+        with pytest.raises(ValueError, match="Invalid kind"):
+            milestones.list_milestones(conn, kind="stremm")
+        with pytest.raises(ValueError, match="Invalid state"):
+            milestones.list_milestones(conn, state="opne")
+
+    @pytest.mark.parametrize("empty", [None, ""])
+    def test_none_and_empty_string_still_mean_no_filter(self, conn, empty):
+        self._two(conn)
+        assert len(milestones.list_milestones(conn, kind=empty)) >= 2
+        assert len(milestones.list_milestones(conn, state=empty)) >= 2
+
+    def test_valid_values_still_filter(self, conn):
+        self._two(conn)
+        kinds = {m["kind"] for m in milestones.list_milestones(conn, kind="release")}
+        assert kinds == {"release"}

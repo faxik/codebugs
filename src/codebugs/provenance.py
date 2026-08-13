@@ -123,7 +123,14 @@ def check_findings(
         findings_list = [findings.get_finding(conn, finding_id)]
     else:
         query_kwargs: dict[str, Any] = {"limit": 10000}
-        query_kwargs["status"] = status if status else "open"
+        # `is_vocabulary_filter_active`, not truthiness: this default is for "not
+        # supplied", and a plain `if status` also swallowed wrong input, so
+        # `check_findings(status=0)` silently reported on open findings (CB-25). A
+        # wrong value now reaches `query_findings` and raises. Unlike the five domain
+        # filters, None/"" here mean "default to open", not "no filter".
+        query_kwargs["status"] = (
+            status if types.is_vocabulary_filter_active(status) else "open"
+        )
         if category:
             query_kwargs["category"] = category
         if file:
