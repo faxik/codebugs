@@ -237,6 +237,7 @@ def update_finding(
     finding_id: str,
     *,
     status: str | None = None,
+    severity: str | None = None,
     notes: str | None = None,
     append_note: str | None = None,
     tags: list[str] | None = None,
@@ -248,6 +249,12 @@ def update_finding(
     ``notes`` replaces the notes wholesale; ``append_note`` adds a newline-joined
     line, preserving prior history. Note: reported_at_commit is intentionally
     excluded — it is immutable after insert.
+
+    ``severity`` re-triages in place, mirroring ``priority`` on
+    ``reqs.update_requirement`` (CB-17). It is validated here with the same
+    strictness ``add_finding`` applies at insert — the column's CHECK constraint
+    is a backstop, not the validator, and reaching it would surface an
+    ``IntegrityError`` where the contract promises ``ValueError``.
 
     The three meta-writing arguments compose over a single dict, applied in this
     order: ``notes`` replaces, ``append_note`` then extends *that replacement*,
@@ -266,6 +273,14 @@ def update_finding(
         status = resolve_finding_status(status)
         updates.append("status = ?")
         params.append(status)
+
+    # A plain column, appended exactly once to the shared `updates` list — it must
+    # never grow a second `severity = ?` the way `meta` once did (CB-16).
+    if severity is not None:
+        if severity not in SEVERITIES:
+            raise ValueError(f"Invalid severity: {severity}. Must be one of {SEVERITIES}")
+        updates.append("severity = ?")
+        params.append(severity)
 
     if tags is not None:
         updates.append("tags = ?")
@@ -595,13 +610,14 @@ def register_tools(mcp, conn_factory) -> None:
     def update(
         finding_id: str,
         status: str | None = None,
+        severity: str | None = None,
         notes: str | None = None,
         append_note: str | None = None,
         tags: list[str] | None = None,
         meta_update: dict[str, Any] | None = None,
         reported_at_ref: str | None = None,
     ) -> dict[str, Any]:
-        """Update a finding's status, notes, tags, or metadata.
+        """Update a finding's status, severity, notes, tags, or metadata.
 
         Args:
             finding_id: The finding ID (e.g. CB-1)
@@ -609,6 +625,8 @@ def register_tools(mcp, conn_factory) -> None:
                     Aliases accepted: done/resolved/implemented/closed → fixed,
                     wontfix → wont_fix, invalid → not_a_bug,
                     active/working/in-progress → in_progress
+            severity: Re-triage the finding: critical, high, medium, or low.
+                      Exact lowercase only — unlike status, severity has no aliases.
             notes: REPLACES the notes wholesale, discarding whatever was there.
                    To add to an existing record without destroying it, use
                    append_note instead.
@@ -623,6 +641,7 @@ def register_tools(mcp, conn_factory) -> None:
                 conn,
                 finding_id,
                 status=status,
+                severity=severity,
                 notes=notes,
                 append_note=append_note,
                 tags=tags,
@@ -777,11 +796,22 @@ def register_cli(sub, commands) -> None:
                 conn,
                 args.id,
                 status=args.status,
+                severity=args.severity,
                 notes=args.notes,
                 append_note=args.append_note,
             )
-            print(f"Updated: {result['id']} (status={result['status']})")
-        except KeyError as e:
+            print(
+                f"Updated: {result['id']} "
+                f"(status={result['status']}, severity={result['severity']})"
+            )
+        except json.JSONDecodeError:
+            # MUST stay ahead of the ValueError arm below, which it subclasses.
+            # This is a corrupted stored row, not bad user input, and the write
+            # has ALREADY been committed by the time result serialization raises.
+            # Reporting it as a clean input error would exit 1 on a successful
+            # mutation — a failure-shaped signal for a write that landed.
+            raise
+        except (KeyError, ValueError) as e:
             print(str(e), file=sys.stderr)
             sys.exit(1)
         finally:
@@ -1000,6 +1030,7 @@ def register_cli(sub, commands) -> None:
     p = sub.add_parser("update", help="Update a finding")
     p.add_argument("id", help="Finding ID")
     p.add_argument("--status", help="New status")
+    p.add_argument("--severity", "-s", help="Re-triage: critical|high|medium|low")
     p.add_argument("--notes", help="Notes (REPLACES the existing notes wholesale)")
     p.add_argument("--append-note", help="Append a line, preserving the existing notes")
 

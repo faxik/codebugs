@@ -7,6 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Findings can be **re-triaged**: `severity` is now accepted by
+  `update_finding()`, by the `update` MCP tool, and as `codebugs update <id>
+  --severity <critical|high|medium|low>` (CB-17). Severity was previously
+  write-once, so a card whose impact was re-measured after filing could not be
+  corrected in the structured field — the correction had to be carried as prose
+  in a note, which is exactly the state a tracker exists to prevent. This brings
+  findings level with requirements, whose `priority` was already mutable.
+  Validation is exact-match lowercase, matching what `add_finding` accepts;
+  unlike `status`, severity has no aliases.
 - `codebugs resolve-trailers --range <BASE>..<HEAD> [--repo DIR] [--dry-run]`
   (provenance module): parses `Resolves: CB-N` / `Tightens: CB-N` trailers from
   commit bodies in a git range and flips findings in-process — `Resolves` →
