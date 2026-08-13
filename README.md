@@ -43,7 +43,7 @@ Run this once per project, in the project root:
 codebugs init
 ```
 
-This creates `.codebugs/findings.db`. **codebugs never creates a tracker on its own** — every other command discovers an existing one by walking up from the current directory, and refuses with an actionable error if there is none. That refusal is deliberate: silently creating an empty database is how findings go missing.
+This creates `.codebugs/findings.db`. **codebugs never creates a tracker on its own** — every other command discovers an existing one by walking up from the current directory (unless you point it somewhere explicitly, see below), and refuses with an actionable error if there is none. That refusal is deliberate: silently creating an empty database is how findings go missing.
 
 Two consequences worth knowing:
 
@@ -54,15 +54,20 @@ Two consequences worth knowing:
 
 ### Pointing codebugs at a specific tracker
 
-Discovery is a heuristic, so it has an override. In order of precedence:
+Discovery is a heuristic, so it has an override:
 
 ```bash
 codebugs --tracker-root /path/to/project query   # this invocation only
 export CODEBUGS_ROOT=/path/to/project            # this shell and anything it spawns
-codebugs where                                   # show the current binding and why
 ```
 
-`codebugs where` prints the resolved root, the database path, and which of the three channels decided it — the fastest way to check that a command is about to read the tracker you think it is.
+Resolution order, most specific first: a command's own explicit path argument (`--repo`, where a command has one) → `--tracker-root` → `CODEBUGS_ROOT` → walking up from the current directory. A per-command argument outranks a declaration because it names one operation's target, while a declaration is process-wide.
+
+```bash
+codebugs where     # show the current binding and which channel decided it
+```
+
+`where` is a diagnostic, not a precedence level: it prints the resolved root, the database path, and the channel — the fastest way to check that a command is about to read the tracker you think it is.
 
 Two things worth knowing. A declared root that contains no `.codebugs/` is a **hard error**, never a new tracker: the value may be a stale export inherited from another shell, and silently creating an empty database there is how findings go missing. And `init` ignores the declaration — it always creates where you are standing — but warns if the declaration points somewhere else, since otherwise it would report success for a tracker no other command will read.
 

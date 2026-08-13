@@ -4,11 +4,10 @@ THIS FILE IS A DELIBERATE EXCEPTION to the project's "no shared conftest.py"
 convention, because the thing it guards cannot be guarded per-file.
 
 `CODEBUGS_ROOT` redirects every `db.connect()` in this process *and* in any
-subprocess that inherits the environment. Three test modules shell out to the
-CLI and run mutating verbs — `update` in `test_findings.py`, `claim` in
-`test_claims.py`, `resolve-trailers` in `test_provenance.py` — relying on the
-subprocess binding to its own `cwd`. With the variable exported, they bind to
-whatever it names instead.
+subprocess that inherits the environment. Test modules shell out to the CLI and
+run mutating verbs — `update` in `test_findings.py`, `claim`/`release` in
+`test_claims.py` — relying on the subprocess binding to its own `cwd`. With the
+variable exported, they bind to whatever it names instead.
 
 Verified before this file existed, not theorized: with `CODEBUGS_ROOT` pointing
 at a scratch tracker, running the findings CLI tests rewrote that tracker's CB-1
