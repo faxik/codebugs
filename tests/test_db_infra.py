@@ -9,19 +9,9 @@ import pytest
 from codebugs import db, findings
 
 
-@pytest.fixture(autouse=True)
-def _no_declared_root(monkeypatch):
-    """Neutralize any tracker-root declaration inherited from the developer's shell.
-
-    Every other test in this file asserts on cwd-derived discovery, which an
-    exported `CODEBUGS_ROOT` overrides by design (CB-11). Without this the suite
-    would pass or fail depending on the environment that launched it — and the
-    ambient channel it guards against is precisely the one these tests exist to
-    pin. Module-wide rather than in `TestTrackerRootOverride` alone: the risk is
-    to the *existing* tests, not the new ones.
-    """
-    monkeypatch.delenv(db.ENV_ROOT, raising=False)
-    monkeypatch.setattr(db, "_tracker_root_override", None)
+# Every test here asserts on cwd-derived discovery, which an exported
+# CODEBUGS_ROOT overrides by design (CB-11). The guard that neutralizes it is
+# suite-wide in `conftest.py` — see that file for why it cannot live here.
 
 
 @pytest.fixture
@@ -777,6 +767,53 @@ class TestDescribeRoot:
         assert info["source"] == "env"
         assert info["path"] is None
         assert db.ENV_ROOT in info["error"]
+
+    def test_a_deleted_working_directory_is_reported_not_raised(self, tmp_path):
+        """A long-lived server outlives the worktree it started in.
+
+        `os.getcwd()` then raises FileNotFoundError. Escaping, that would bypass
+        every DatabaseNotFoundError handler and make the preflight fatal — the
+        one thing CB-11 forbids.
+        """
+        doomed = tmp_path / "doomed"
+        doomed.mkdir()
+        original = os.getcwd()
+        os.chdir(doomed)
+        try:
+            doomed.rmdir()
+            info = db.describe_root()  # must not raise
+            assert info["path"] is None
+            assert info["error"]
+        finally:
+            os.chdir(original)
+
+    def test_a_deleted_working_directory_is_a_clean_domain_error(self, tmp_path):
+        """`_db_path` converts it too, so the CLI prints an error, not a traceback."""
+        doomed = tmp_path / "doomed"
+        doomed.mkdir()
+        original = os.getcwd()
+        os.chdir(doomed)
+        try:
+            doomed.rmdir()
+            with pytest.raises(db.DatabaseNotFoundError):
+                db._db_path()
+        finally:
+            os.chdir(original)
+
+    def test_a_declared_root_survives_a_deleted_working_directory(self, tmp_path):
+        """The escape hatch has to work in exactly the case discovery cannot."""
+        declared = _tracker(tmp_path, "declared")
+        doomed = tmp_path / "doomed"
+        doomed.mkdir()
+        original = os.getcwd()
+        os.chdir(doomed)
+        try:
+            doomed.rmdir()
+            db.set_tracker_root(str(declared))
+            assert db._db_path() == str(declared / ".codebugs" / "findings.db")
+        finally:
+            db.set_tracker_root(None)
+            os.chdir(original)
 
 
 class TestWhereCommand:

@@ -64,7 +64,7 @@ AI-native code finding & requirements tracker. SQLite-backed, exposed via MCP se
 ### Testing
 - Tests live in `tests/test_<module>.py`. Most test classes use a fresh in-memory DB via a `conn` fixture.
 - Tests requiring `db.connect()`, cross-module schemas, or git operations use `tmp_path` file-based DBs.
-- No shared `conftest.py` — each test file defines its own fixtures.
+- Each test file defines its own fixtures. `tests/conftest.py` exists for **exactly one** thing and should stay that way: an autouse fixture clearing `CODEBUGS_ROOT` and the tracker-root override. That guard cannot be per-file, because three modules shell out to the CLI with mutating verbs and a forgotten guard silently rewrites the developer's real tracker — verified, not theorized: with the variable exported, the findings CLI tests moved a real CB-1 from `low`/`open` to `high`/`fixed`. **A safety property whose failure mode is silent corruption must not be an enumeration every future file has to remember.** Ordinary fixtures still belong in their own file.
 - Test the domain module's public API, not internal helpers.
 - Run tests: `uv run python -m pytest tests/ -v`
 - Run lint: `uv run ruff check src/ tests/`

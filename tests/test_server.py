@@ -18,6 +18,7 @@ would be collected and never awaited — i.e. it would pass without running.
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
 import types
 from contextlib import contextmanager
@@ -27,13 +28,6 @@ from mcp.server.mcpserver import MCPServer
 from mcp.shared.exceptions import MCPError
 
 from codebugs import db, findings, server
-
-
-@pytest.fixture(autouse=True)
-def _no_declared_root(monkeypatch):
-    """Same guard as `test_db_infra.py`: the developer's shell must not decide."""
-    monkeypatch.delenv(db.ENV_ROOT, raising=False)
-    monkeypatch.setattr(db, "_tracker_root_override", None)
 
 
 @pytest.fixture
@@ -222,3 +216,16 @@ class TestPreflight:
         server._preflight()
         err = capsys.readouterr().err
         assert db.ENV_ROOT in err
+
+    def test_survives_a_deleted_working_directory(self, tmp_path, capsys):
+        """The server outliving its worktree must warn, not die before `run()`."""
+        doomed = tmp_path / "doomed"
+        doomed.mkdir()
+        original = os.getcwd()
+        os.chdir(doomed)
+        try:
+            doomed.rmdir()
+            server._preflight()  # must not raise
+            assert capsys.readouterr().err != ""
+        finally:
+            os.chdir(original)

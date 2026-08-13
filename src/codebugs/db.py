@@ -590,9 +590,22 @@ def _db_path(project_dir: str | None = None) -> str:
     if declared is not None:
         return _declared_db_path(declared, source)
 
-    root = _find_db_root()
-    if root is None:
+    # Read cwd ONCE, and treat losing it as "no tracker" rather than letting an
+    # OSError escape. A deleted working directory is not hypothetical here: a
+    # long-lived MCP server outlives the git worktree it was started in, and
+    # `os.getcwd()` then raises FileNotFoundError. Escaping, that would bypass
+    # every DatabaseNotFoundError handler — a traceback in the CLI, and a FATAL
+    # startup preflight in the server, which is the one thing CB-11 forbids.
+    try:
         cwd = os.getcwd()
+    except OSError as e:
+        raise DatabaseNotFoundError(
+            f"cannot determine the current directory ({e}) — it may have been deleted; "
+            f"cd somewhere that exists, or name a tracker with --tracker-root"
+        ) from e
+
+    root = _find_db_root(cwd)
+    if root is None:
         worktree = _enclosing_worktree_root(cwd)
         if worktree is not None:
             # Never advise `init` here: it would create a tracker that dies
@@ -625,7 +638,10 @@ def describe_root() -> dict[str, Any]:
     declared, source = declared_tracker_root()
     try:
         path = _db_path()
-    except DatabaseNotFoundError as e:
+    except (DatabaseNotFoundError, OSError) as e:
+        # OSError as well, so "never raises" is true rather than aspirational:
+        # the filesystem can fail underneath any of this, and a preflight that
+        # dies is a fatal preflight no matter which exception killed it.
         return {
             "root": declared,
             "source": source,
