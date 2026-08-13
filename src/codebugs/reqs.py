@@ -180,66 +180,82 @@ def update_requirement(
     building one per branch would emit a second ``meta = ?`` in the same UPDATE
     and silently discard the first (CB-16). Unlike findings, there is no
     ``append_note`` here.
+
+    The whole body sits in ``db.txn`` for the same reason its findings twin does
+    (CB-24): ``meta`` is merged in Python from the row read at the top, so unless
+    that read and the write are one transaction, two writers each merging over the
+    same stale row both report success and the later erases the earlier. Do not
+    restore a ``conn.commit()`` — ``db.txn`` yields ``False`` under an ambient
+    transaction, and committing then would commit the caller's work.
     """
-    row = conn.execute("SELECT * FROM requirements WHERE id = ?", (req_id,)).fetchone()
-    if not row:
-        raise KeyError(f"Requirement not found: {req_id}")
+    with db.txn(conn):
+        row = conn.execute("SELECT * FROM requirements WHERE id = ?", (req_id,)).fetchone()
+        if not row:
+            raise KeyError(f"Requirement not found: {req_id}")
 
-    updates = []
-    params: list[Any] = []
+        updates = []
+        params: list[Any] = []
 
-    if section is not None:
-        updates.append("section = ?")
-        params.append(section)
-    if status is not None:
-        status = resolve_requirement_status(status)
-        updates.append("status = ?")
-        params.append(status)
-    if description is not None:
-        updates.append("description = ?")
-        params.append(description)
-    if priority is not None:
-        priority = resolve_priority(priority)
-        updates.append("priority = ?")
-        params.append(priority)
-    if test_coverage is not None:
-        updates.append("test_coverage = ?")
-        params.append(test_coverage)
-    if tags is not None:
-        updates.append("tags = ?")
-        params.append(json.dumps(tags))
-    # One dict, one `meta = ?`. See the docstring for the ordering contract.
-    #
-    # Parsed lazily so an update touching no meta argument still reaches its own
-    # SQL on a row whose stored meta is malformed (the column carries no
-    # json_valid constraint). The call still raises at the row_to_dict conversion;
-    # only the write is preserved. The guard must list every meta-writing argument
-    # below it, or a new one becomes a silent no-op when used alone.
-    if notes is not None or meta_update is not None:
-        new_meta = json.loads(row["meta"])
-        if notes is not None:
-            new_meta["notes"] = notes
-        if meta_update is not None:
-            new_meta.update(meta_update)
-        updates.append("meta = ?")
-        params.append(json.dumps(new_meta))
+        if section is not None:
+            updates.append("section = ?")
+            params.append(section)
+        if status is not None:
+            status = resolve_requirement_status(status)
+            updates.append("status = ?")
+            params.append(status)
+        if description is not None:
+            updates.append("description = ?")
+            params.append(description)
+        if priority is not None:
+            priority = resolve_priority(priority)
+            updates.append("priority = ?")
+            params.append(priority)
+        if test_coverage is not None:
+            updates.append("test_coverage = ?")
+            params.append(test_coverage)
+        if tags is not None:
+            updates.append("tags = ?")
+            params.append(json.dumps(tags))
+        # One dict, one `meta = ?`. See the docstring for the ordering contract.
+        #
+        # Parsed lazily so an update touching no meta argument still reaches its own
+        # SQL on a row whose stored meta is malformed (the column carries no
+        # json_valid constraint). The call still raises at the row_to_dict conversion;
+        # only the write is preserved. The guard must list every meta-writing argument
+        # below it, or a new one becomes a silent no-op when used alone.
+        if notes is not None or meta_update is not None:
+            new_meta = json.loads(row["meta"])
+            if notes is not None:
+                new_meta["notes"] = notes
+            if meta_update is not None:
+                new_meta.update(meta_update)
+            updates.append("meta = ?")
+            params.append(json.dumps(new_meta))
 
-    if not updates:
-        return db.row_to_dict(row)
+        if not updates:
+            final_row = row
+        else:
+            updates.append("updated_at = ?")
+            params.append(utc_now())
+            params.append(req_id)
 
-    updates.append("updated_at = ?")
-    params.append(utc_now())
-    params.append(req_id)
+            old_status = row["status"]
+            cur = conn.execute(
+                f"UPDATE requirements SET {', '.join(updates)} WHERE id = ?", params
+            )
+            # Same seam as findings.update_finding: fire iff the write changed the row.
+            # Both writers fire it — that is what makes this a seam over the entity layer
+            # rather than a findings-specific callback wearing a general name.
+            if status is not None and cur.rowcount == 1 and status != old_status:
+                db.run_status_change_hooks(conn, req_id, old_status, status)
+            final_row = conn.execute(
+                "SELECT * FROM requirements WHERE id = ?", (req_id,)
+            ).fetchone()
 
-    old_status = row["status"]
-    cur = conn.execute(f"UPDATE requirements SET {', '.join(updates)} WHERE id = ?", params)
-    # Same seam as findings.update_finding: fire iff the write changed the row.
-    # Both writers fire it — that is what makes this a seam over the entity layer
-    # rather than a findings-specific callback wearing a general name.
-    if status is not None and cur.rowcount == 1 and status != old_status:
-        db.run_status_change_hooks(conn, req_id, old_status, status)
-    conn.commit()
-    return db.row_to_dict(conn.execute("SELECT * FROM requirements WHERE id = ?", (req_id,)).fetchone())
+    # Converted AFTER the transaction commits — same reason as the findings twin:
+    # row_to_dict raises on malformed stored meta, and inside the block that would
+    # roll back a write the contract promises has landed (CB-16).
+    return db.row_to_dict(final_row)
 
 
 def get_requirement(conn: sqlite3.Connection, req_id: str) -> dict[str, Any]:

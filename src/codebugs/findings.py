@@ -270,80 +270,101 @@ def update_finding(
     and ``meta_update`` merges last — so an explicit ``meta_update["notes"]``
     still wins. They must never build separate dicts from the pre-update row: a
     second ``meta = ?`` in one UPDATE silently discards the first (CB-16).
+
+    That composition is only safe if the read and the write are ONE transaction,
+    which is why the whole body sits in ``db.txn`` (CB-24). ``meta`` is merged in
+    Python from the row read at the top, so two writers that each read before
+    either writes would both report success while the later erased the earlier's
+    merge. ``busy_timeout`` serializes the writes and does nothing about the read
+    that preceded them; ``BEGIN IMMEDIATE`` takes the write lock up front instead.
+    Do not restore a ``conn.commit()`` here: ``db.txn`` yields ``False`` under an
+    ambient transaction, and committing then would commit the *caller's* work
+    (``milestones.triage_dismiss`` is such a caller).
     """
-    row = conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
-    if not row:
-        raise KeyError(f"Finding not found: {finding_id}")
+    with db.txn(conn):
+        row = conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
+        if not row:
+            raise KeyError(f"Finding not found: {finding_id}")
 
-    updates = []
-    params: list[Any] = []
+        updates = []
+        params: list[Any] = []
 
-    if status is not None:
-        status = resolve_finding_status(status)
-        updates.append("status = ?")
-        params.append(status)
+        if status is not None:
+            status = resolve_finding_status(status)
+            updates.append("status = ?")
+            params.append(status)
 
-    # A plain column, appended exactly once to the shared `updates` list — it must
-    # never grow a second `severity = ?` the way `meta` once did (CB-16).
-    if severity is not None:
-        severity = resolve_severity(severity)
-        updates.append("severity = ?")
-        params.append(severity)
+        # A plain column, appended exactly once to the shared `updates` list — it must
+        # never grow a second `severity = ?` the way `meta` once did (CB-16).
+        if severity is not None:
+            severity = resolve_severity(severity)
+            updates.append("severity = ?")
+            params.append(severity)
 
-    if tags is not None:
-        updates.append("tags = ?")
-        params.append(json.dumps(tags))
+        if tags is not None:
+            updates.append("tags = ?")
+            params.append(json.dumps(tags))
 
-    # One dict, one `meta = ?`. See the docstring for the ordering contract.
-    #
-    # Parsed lazily so that an update touching no meta argument still reaches its
-    # own SQL: the column carries no json_valid constraint, and building the dict
-    # unconditionally would abort a plain status write on a malformed legacy row.
-    # This does NOT make such a call succeed — the row_to_dict conversion at the
-    # return still raises. It only keeps the write itself from being skipped.
-    #
-    # The condition must list every meta-writing argument below it. A new argument
-    # added to the block but not to this guard becomes a silent no-op on its own,
-    # while working whenever some other meta argument happens to be present.
-    if notes is not None or append_note is not None or meta_update is not None:
-        new_meta = json.loads(row["meta"])
+        # One dict, one `meta = ?`. See the docstring for the ordering contract.
+        #
+        # Parsed lazily so that an update touching no meta argument still reaches its
+        # own SQL: the column carries no json_valid constraint, and building the dict
+        # unconditionally would abort a plain status write on a malformed legacy row.
+        # This does NOT make such a call succeed — the row_to_dict conversion at the
+        # return still raises. It only keeps the write itself from being skipped.
+        #
+        # The condition must list every meta-writing argument below it. A new argument
+        # added to the block but not to this guard becomes a silent no-op on its own,
+        # while working whenever some other meta argument happens to be present.
+        if notes is not None or append_note is not None or meta_update is not None:
+            new_meta = json.loads(row["meta"])
 
-        if notes is not None:
-            new_meta["notes"] = notes
+            if notes is not None:
+                new_meta["notes"] = notes
 
-        if append_note is not None:
-            prior = new_meta.get("notes")
-            new_meta["notes"] = f"{prior}\n{append_note}" if prior else append_note
+            if append_note is not None:
+                prior = new_meta.get("notes")
+                new_meta["notes"] = f"{prior}\n{append_note}" if prior else append_note
 
-        if meta_update is not None:
-            new_meta.update(meta_update)
+            if meta_update is not None:
+                new_meta.update(meta_update)
 
-        updates.append("meta = ?")
-        params.append(json.dumps(new_meta))
+            updates.append("meta = ?")
+            params.append(json.dumps(new_meta))
 
-    if reported_at_ref is not None:
-        updates.append("reported_at_ref = ?")
-        params.append(reported_at_ref)
+        if reported_at_ref is not None:
+            updates.append("reported_at_ref = ?")
+            params.append(reported_at_ref)
 
-    if not updates:
-        return db.row_to_dict(row)
+        # The no-op path still holds the write lock for the length of one SELECT.
+        # Deriving "will this write?" from the arguments beforehand would duplicate
+        # the argument list — the same fragility the lazy meta guard above warns
+        # about — so correctness wins over the microseconds.
+        if not updates:
+            final_row = row
+        else:
+            updates.append("updated_at = ?")
+            params.append(utc_now())
+            params.append(finding_id)
 
-    updates.append("updated_at = ?")
-    params.append(utc_now())
-    params.append(finding_id)
+            old_status = row["status"]
+            cur = conn.execute(f"UPDATE findings SET {', '.join(updates)} WHERE id = ?", params)
+            # Fire iff the write actually changed the row. `status` is already canonical
+            # via resolve_finding_status above, so an alias does not read as a change.
+            # Hooks run inside this transaction, before it commits, so a status change
+            # and its side-effects (e.g. auto-releasing a claim) land atomically.
+            if status is not None and cur.rowcount == 1 and status != old_status:
+                db.run_status_change_hooks(conn, finding_id, old_status, status)
+            final_row = conn.execute(
+                "SELECT * FROM findings WHERE id = ?", (finding_id,)
+            ).fetchone()
 
-    old_status = row["status"]
-    cur = conn.execute(f"UPDATE findings SET {', '.join(updates)} WHERE id = ?", params)
-    # Fire iff the write actually changed the row. `status` is already canonical
-    # via resolve_finding_status above, so an alias does not read as a change.
-    # Hooks run inside this transaction, before the commit below, so a status
-    # change and its side-effects (e.g. auto-releasing a claim) land atomically.
-    if status is not None and cur.rowcount == 1 and status != old_status:
-        db.run_status_change_hooks(conn, finding_id, old_status, status)
-    conn.commit()
-    return db.row_to_dict(
-        conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
-    )
+    # Converted AFTER the transaction commits, and that placement is load-bearing.
+    # `row_to_dict` raises json.JSONDecodeError on a row whose stored meta is
+    # malformed; raised inside the block it would roll back a write the contract
+    # promises has landed, reporting failure for a mutation that succeeded (CB-16).
+    # The SELECT stays inside so the returned row is the transaction's own view.
+    return db.row_to_dict(final_row)
 
 
 def get_finding(conn: sqlite3.Connection, finding_id: str) -> dict[str, Any]:

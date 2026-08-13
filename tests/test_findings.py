@@ -5,6 +5,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -447,6 +448,130 @@ class TestUpdateMetaComposition:
         findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
         result = findings.update_finding(conn, "CB-1")
         assert result["status"] == "open"
+
+
+class PausingConnection(sqlite3.Connection):
+    """Fires a one-shot hook immediately after an update's opening ``SELECT``.
+
+    That instant is exactly the window CB-24 is about: the row has been read and
+    the merged ``meta`` has not been written yet. Interleaving a competing writer
+    there is what makes the lost update *deterministic* rather than a race the
+    test would only sometimes lose — and a concurrency test that only sometimes
+    fails against the broken code is a test that will be believed when it passes.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.after_select = None
+
+    def execute(self, sql, *args, **kwargs):
+        cur = super().execute(sql, *args, **kwargs)
+        if self.after_select and sql.lstrip().startswith("SELECT * FROM findings WHERE id"):
+            hook, self.after_select = self.after_select, None  # one-shot: the
+            hook()  # returning SELECT at the end of the update must not re-fire
+        return cur
+
+
+class TestConcurrentMetaUpdatesDoNotLoseEachOther:
+    """CB-24: the meta read-modify-write must be one transaction, not two steps.
+
+    ``update_finding`` SELECTs the row, merges ``notes`` / ``append_note`` /
+    ``meta_update`` in Python, then UPDATEs. Without a transaction spanning that
+    pair, two writers that both read before either writes both report success and
+    the later one erases the earlier one's merge. ``busy_timeout`` serializes the
+    *writes*; it does nothing about the read that preceded them.
+
+    This matters here specifically because the project exists to coordinate
+    parallel agents, and ``append_note`` — the operation whose entire purpose is
+    to be additive rather than destructive — is the one most likely to be issued
+    concurrently. Losing an append is the harm CB-18 was filed to prevent,
+    reached by a different route.
+    """
+
+    def _open(self, tmp_project):
+        """A second connection to the same file, carrying ``db.connect``'s pragmas.
+
+        ``busy_timeout`` is the load-bearing one: after the fix the losing writer
+        must *wait* for the lock rather than fail, which is what converts the race
+        into serialization.
+        """
+        path = os.path.join(tmp_project, ".codebugs", "findings.db")
+        c = sqlite3.connect(path, factory=PausingConnection)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA busy_timeout=5000")
+        return c
+
+    def test_a_competing_append_note_is_not_erased(self, conn, tmp_project):
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        findings.update_finding(conn, "CB-1", notes="BASE")
+
+        a = self._open(tmp_project)
+        a_read, b_read = threading.Event(), threading.Event()
+
+        def competing_writer():
+            a_read.wait(timeout=10)
+            b = self._open(tmp_project)  # opened here: sqlite3 connections are
+            b.after_select = b_read.set  # bound to their creating thread
+            try:
+                findings.update_finding(b, "CB-1", append_note="FROM-B")
+            finally:
+                b.close()
+
+        # A pauses after its read until B has also read. Before the fix B gets
+        # there and both merges are built from the same stale row. After it, A
+        # holds the write lock from before its own SELECT, so B blocks at BEGIN
+        # IMMEDIATE and never reaches its read — the wait times out, A commits,
+        # and B then re-reads a row that already carries A's note.
+        a.after_select = lambda: (a_read.set(), b_read.wait(timeout=1.0))
+
+        t = threading.Thread(target=competing_writer)
+        t.start()
+        try:
+            findings.update_finding(a, "CB-1", append_note="FROM-A")
+        finally:
+            t.join(timeout=30)
+            a.close()
+        assert not t.is_alive()
+
+        notes = findings.get_finding(conn, "CB-1")["meta"]["notes"]
+        assert "FROM-A" in notes, notes
+        assert "FROM-B" in notes, notes
+
+    def test_a_competing_meta_update_key_is_not_erased(self, conn, tmp_project):
+        """The same defect reached through ``meta_update`` rather than ``append_note``.
+
+        Worth pinning separately: ``meta_update`` merges arbitrary keys, so a lost
+        write here silently drops another agent's structured state (an assignee, a
+        claim marker) rather than a line of prose.
+        """
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+
+        a = self._open(tmp_project)
+        a_read, b_read = threading.Event(), threading.Event()
+
+        def competing_writer():
+            a_read.wait(timeout=10)
+            b = self._open(tmp_project)
+            b.after_select = b_read.set
+            try:
+                findings.update_finding(b, "CB-1", meta_update={"from_b": True})
+            finally:
+                b.close()
+
+        a.after_select = lambda: (a_read.set(), b_read.wait(timeout=1.0))
+
+        t = threading.Thread(target=competing_writer)
+        t.start()
+        try:
+            findings.update_finding(a, "CB-1", meta_update={"from_a": True})
+        finally:
+            t.join(timeout=30)
+            a.close()
+        assert not t.is_alive()
+
+        meta = findings.get_finding(conn, "CB-1")["meta"]
+        assert meta.get("from_a") is True, meta
+        assert meta.get("from_b") is True, meta
 
 
 class TestRetriageSeverity:

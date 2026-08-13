@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 
 import pytest
 
@@ -242,6 +243,122 @@ class TestUpdateRequirement:
     def test_noop_update(self, populated):
         result = reqs.update_requirement(populated, "FR-001")
         assert result["id"] == "FR-001"  # Returns unchanged
+
+
+class PausingConnection(sqlite3.Connection):
+    """Fires a one-shot hook immediately after an update's opening ``SELECT``.
+
+    The findings suite carries a twin of this class. Duplicated rather than
+    shared, per the project's deliberate no-``conftest.py`` rule — and the two are
+    not interchangeable anyway: each keys on its own entity's SELECT.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.after_select = None
+
+    def execute(self, sql, *args, **kwargs):
+        cur = super().execute(sql, *args, **kwargs)
+        if self.after_select and sql.lstrip().startswith("SELECT * FROM requirements WHERE id"):
+            hook, self.after_select = self.after_select, None  # one-shot: the
+            hook()  # returning SELECT at the end of the update must not re-fire
+        return cur
+
+
+class TestConcurrentMetaUpdatesDoNotLoseEachOther:
+    """CB-24, requirements side: the meta read-modify-write must be one transaction.
+
+    ``update_requirement`` merges ``notes`` / ``meta_update`` in Python over the row
+    it read at the top. Unless that read and the write are one unit, two writers
+    both report success and the later erases the earlier's merge. There is no
+    ``append_note`` on this entity (deliberate, and documented on the function), so
+    the exposure here is ``meta_update`` — which is worse in one respect: it carries
+    structured state such as an assignee or a claim marker, not prose.
+    """
+
+    def _open(self, db_path):
+        c = sqlite3.connect(db_path, factory=PausingConnection)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA busy_timeout=5000")
+        return c
+
+    def test_a_competing_meta_update_key_is_not_erased(self, tmp_path):
+        # File-backed rather than the module's in-memory fixture: two connections
+        # to ``:memory:`` are two separate databases, so the race cannot exist there.
+        db_path = str(tmp_path / "reqs.db")
+        seed = self._open(db_path)
+        seed.execute("PRAGMA journal_mode=WAL")
+        reqs.ensure_schema(seed)
+        reqs.add_requirement(seed, req_id="FR-1", section="S", description="d")
+
+        a = self._open(db_path)
+        a_read, b_read = threading.Event(), threading.Event()
+
+        def competing_writer():
+            a_read.wait(timeout=10)
+            b = self._open(db_path)  # opened here: sqlite3 connections are
+            b.after_select = b_read.set  # bound to their creating thread
+            try:
+                reqs.update_requirement(b, "FR-1", meta_update={"from_b": True})
+            finally:
+                b.close()
+
+        # Before the fix B reaches its read and both merges come off the same stale
+        # row. After it, A holds the write lock from before its own SELECT, so B
+        # blocks at BEGIN IMMEDIATE, this wait times out, A commits, and B then
+        # re-reads a row that already carries A's key.
+        a.after_select = lambda: (a_read.set(), b_read.wait(timeout=1.0))
+
+        t = threading.Thread(target=competing_writer)
+        t.start()
+        try:
+            reqs.update_requirement(a, "FR-1", meta_update={"from_a": True})
+        finally:
+            t.join(timeout=30)
+            a.close()
+        assert not t.is_alive()
+
+        meta = reqs.get_requirement(seed, "FR-1")["meta"]
+        seed.close()
+        assert meta.get("from_a") is True, meta
+        assert meta.get("from_b") is True, meta
+
+    def test_a_competing_notes_write_is_not_erased(self, tmp_path):
+        """``notes`` replaces wholesale, so the loser here is the *other* key it merged."""
+        db_path = str(tmp_path / "reqs.db")
+        seed = self._open(db_path)
+        seed.execute("PRAGMA journal_mode=WAL")
+        reqs.ensure_schema(seed)
+        reqs.add_requirement(seed, req_id="FR-1", section="S", description="d")
+
+        a = self._open(db_path)
+        a_read, b_read = threading.Event(), threading.Event()
+
+        def competing_writer():
+            a_read.wait(timeout=10)
+            b = self._open(db_path)
+            b.after_select = b_read.set
+            try:
+                reqs.update_requirement(b, "FR-1", notes="FROM-B", meta_update={"b_ran": True})
+            finally:
+                b.close()
+
+        a.after_select = lambda: (a_read.set(), b_read.wait(timeout=1.0))
+
+        t = threading.Thread(target=competing_writer)
+        t.start()
+        try:
+            reqs.update_requirement(a, "FR-1", meta_update={"a_ran": True})
+        finally:
+            t.join(timeout=30)
+            a.close()
+        assert not t.is_alive()
+
+        meta = reqs.get_requirement(seed, "FR-1")["meta"]
+        seed.close()
+        assert meta.get("a_ran") is True, meta
+        assert meta.get("b_ran") is True, meta
+        assert meta.get("notes") == "FROM-B", meta
 
 
 class TestQueryRequirements:
