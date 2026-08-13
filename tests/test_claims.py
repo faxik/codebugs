@@ -200,6 +200,7 @@ class TestSuccessCriteria:
             id_pattern=re.compile(r"^WG-\d+"),
             terminal=frozenset({"done"}),
             sort_col="id",
+            sort_vocabulary=None,  # "id" is not a vocabulary column (CB-20)
             result_key="widgets",
             readable_cols=frozenset({"id", "status", "description"}),
             busy_status="working",

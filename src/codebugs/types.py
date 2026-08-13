@@ -6,6 +6,7 @@ from anywhere without circular import risk.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
 
@@ -69,6 +70,7 @@ TRIGGER_TYPES = ("entity_resolved", "date", "manual")
 
 # --- Resolvers ---
 
+
 def _resolve(
     value: str,
     valid: tuple[str, ...],
@@ -97,3 +99,35 @@ def resolve_requirement_status(status: str) -> str:
 def resolve_priority(priority: str) -> str:
     """Normalize a priority input to canonical lowercase form."""
     return _resolve(priority, PRIORITIES, None, "priority")
+
+
+# --- Ordering ---
+
+_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def rank_case_sql(column: str, vocabulary: tuple[str, ...]) -> tuple[str, list[str]]:
+    """Build an ORDER BY fragment sorting ``column`` by DECLARED precedence.
+
+    Vocabulary columns are TEXT, so a bare ``ORDER BY severity`` sorts
+    alphabetically — ``critical, high, low, medium`` — silently ranking ``low``
+    above ``medium`` (CB-20). Under a ``LIMIT`` that does not merely look wrong,
+    it truncates the more important rows.
+
+    The rank is derived from the tuple rather than hardcoded, so the SQL cannot
+    drift from the vocabulary: reorder ``SEVERITIES`` and the ordering follows.
+    ``ELSE len(vocabulary)`` puts any legacy or corrupt value LAST rather than
+    first, which is the safe direction — an unrecognised value must not outrank
+    a real one.
+
+    Returns ``(fragment, params)``. The values are BOUND, not interpolated. The
+    caller must splice ``params`` at the position the fragment occupies in the
+    final statement — see the warning in ``findings.query_findings``.
+    """
+    if not _IDENT.match(column):
+        raise ValueError(f"Not a bare column identifier: {column!r}")
+    if not vocabulary:
+        raise ValueError("vocabulary must not be empty")
+
+    whens = " ".join(f"WHEN ? THEN {i}" for i in range(len(vocabulary)))
+    return f"CASE {column} {whens} ELSE {len(vocabulary)} END", list(vocabulary)

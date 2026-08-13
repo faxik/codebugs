@@ -443,3 +443,53 @@ class TestFullWorkflow:
 
         result = blockers.check_blockers(conn)
         assert len(result["actionable"]) == 0
+
+
+class TestDeferredOrdering:
+    """CB-20 sibling: the deferred query orders by `kind.sort_col`, a TEXT column.
+
+    Ordering by it directly sorts alphabetically. For findings that put `low`
+    above `medium`; for requirements it was a total inversion — `could` first and
+    `must` LAST — so the deferred queue recommended the least important work.
+    """
+
+    def test_findings_use_declared_severity_precedence(self, conn):
+        for i, sev in enumerate(("low", "critical", "medium", "high"), start=1):
+            _add_finding(conn, fid=f"CB-{i}", severity=sev)
+            blockers.add_blocker(conn, item_id=f"CB-{i}", reason="waiting", trigger_type="manual")
+
+        res = blockers.query_deferred_entities(conn, entity_type="finding", limit=50)
+        assert [f["severity"] for f in res["findings"]] == ["critical", "high", "medium", "low"]
+
+    def test_requirements_use_declared_priority_precedence(self, conn):
+        """The inverted case: lexically `could` < `must` < `should`."""
+        for i, pri in enumerate(("could", "must", "should"), start=1):
+            _add_req(conn, rid=f"FR-{i}", priority=pri)
+            blockers.add_blocker(conn, item_id=f"FR-{i}", reason="waiting", trigger_type="manual")
+
+        res = blockers.query_deferred_entities(conn, entity_type="requirement", limit=50)
+        assert [r["priority"] for r in res["requirements"]] == ["must", "should", "could"]
+
+    def test_limit_keeps_the_most_important_rows(self, conn):
+        """The harm: under LIMIT, wrong ordering truncates the rows that matter."""
+        for i, pri in enumerate(("could", "could", "must"), start=1):
+            _add_req(conn, rid=f"FR-{i}", priority=pri)
+            blockers.add_blocker(conn, item_id=f"FR-{i}", reason="waiting", trigger_type="manual")
+
+        res = blockers.query_deferred_entities(conn, entity_type="requirement", limit=1)
+        assert [r["priority"] for r in res["requirements"]] == ["must"]
+
+    def test_the_id_filter_still_applies(self, conn):
+        """Guards the parameter-splice position: ids, then rank, then limit/offset.
+
+        The rank placeholders sit between the `id IN (...)` list and LIMIT/OFFSET.
+        Binding them anywhere else corrupts the id filter itself, not just the order.
+        """
+        for i, sev in enumerate(("low", "medium"), start=1):
+            _add_finding(conn, fid=f"CB-{i}", severity=sev)
+            blockers.add_blocker(conn, item_id=f"CB-{i}", reason="waiting", trigger_type="manual")
+        _add_finding(conn, fid="CB-9", severity="critical")  # no blocker: must not appear
+
+        res = blockers.query_deferred_entities(conn, entity_type="finding", limit=50)
+        assert [f["id"] for f in res["findings"]] == ["CB-2", "CB-1"]
+        assert res["total"] == 2

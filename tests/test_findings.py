@@ -600,9 +600,7 @@ class TestRetriageCliContract:
 
     @pytest.fixture
     def project(self, tmp_project, conn):
-        findings.add_finding(
-            conn, severity="medium", category="perf", file="a.py", description="d"
-        )
+        findings.add_finding(conn, severity="medium", category="perf", file="a.py", description="d")
         conn.close()
         return tmp_project
 
@@ -824,6 +822,80 @@ class TestQueryFindings:
         result = findings.query_findings(conn, ids=all_ids, limit=2)
         assert result["total"] == 4
         assert len(result["findings"]) == 4
+
+
+class TestSeverityOrdering:
+    """CB-20: `severity` is TEXT, so a bare ORDER BY ranked `low` above `medium`.
+
+    Under a LIMIT that is not a display quirk — it truncates the more important
+    rows and nothing signals it.
+    """
+
+    @staticmethod
+    def _add(conn, severity, name):
+        findings.add_finding(
+            conn, severity=severity, category="c", file=f"{name}.py", description=name
+        )
+
+    def test_full_order_follows_declared_precedence(self, conn):
+        for sev in ("low", "critical", "medium", "high"):
+            self._add(conn, sev, sev)
+        got = [f["severity"] for f in findings.query_findings(conn, limit=50)["findings"]]
+        assert got == list(SEVERITIES)
+
+    def test_limit_does_not_truncate_medium_in_favour_of_low(self, conn):
+        """The regression that makes this a defect rather than a cosmetic issue."""
+        for i in range(3):
+            self._add(conn, "medium", f"m{i}")
+        for i in range(3):
+            self._add(conn, "low", f"l{i}")
+
+        top3 = [f["severity"] for f in findings.query_findings(conn, limit=3)["findings"]]
+        assert top3 == ["medium"] * 3, "low cards outranked medium and truncated them"
+
+    def test_ordering_survives_an_active_where_filter(self, conn):
+        """Guards the parameter-splice trap.
+
+        The CASE placeholders sit between the WHERE fragment and LIMIT/OFFSET.
+        Binding them in the wrong position corrupts *filtered* queries only —
+        every unfiltered test above would still pass.
+        """
+        for sev in ("low", "critical", "medium", "high"):
+            self._add(conn, sev, sev)
+        findings.add_finding(
+            conn, severity="critical", category="other", file="x.py", description="excluded"
+        )
+
+        result = findings.query_findings(conn, category="c", status="open", limit=50)
+        assert [f["severity"] for f in result["findings"]] == list(SEVERITIES)
+        assert result["total"] == 4, "the WHERE filter itself must still be applied"
+        assert all(f["category"] == "c" for f in result["findings"])
+
+    def test_offset_paginates_in_rank_order(self, conn):
+        for sev in ("low", "critical", "medium", "high"):
+            self._add(conn, sev, sev)
+        page2 = findings.query_findings(conn, limit=2, offset=2)["findings"]
+        assert [f["severity"] for f in page2] == ["medium", "low"]
+
+    def test_summary_severity_keys_are_in_precedence_order(self, conn):
+        for sev in ("low", "critical", "medium", "high"):
+            self._add(conn, sev, sev)
+        assert list(findings.get_summary(conn)["open_by_severity"].keys()) == list(SEVERITIES)
+
+    def test_rows_of_one_severity_stay_contiguous(self, conn):
+        """The rank sorts by severity, so equal severities must not interleave.
+
+        Deliberately not asserting the order WITHIN a severity: `utc_now()` is
+        whole-second, so rows created in the same second share a `created_at` and
+        the secondary sort has nothing to separate them. Asserting an order there
+        would be a flaky test dressed up as a contract.
+        """
+        for i in range(2):
+            self._add(conn, "low", f"l{i}")
+            self._add(conn, "medium", f"m{i}")
+
+        got = [f["severity"] for f in findings.query_findings(conn, limit=50)["findings"]]
+        assert got == ["medium", "medium", "low", "low"]
 
 
 class TestGetFinding:

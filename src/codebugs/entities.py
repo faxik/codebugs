@@ -29,11 +29,36 @@ class EntityKind:
     id_pattern: re.Pattern[str]
     terminal: frozenset[str]
     sort_col: str  # deferred-query ordering column
+    # Declared precedence of sort_col, most important first, or None when sort_col
+    # is not a vocabulary column (an id, an integer, a timestamp) and ordering by
+    # it directly is already correct.
+    #
+    # REQUIRED, deliberately nullable: it has no default so a new kind cannot
+    # inherit one silently. sort_col is TEXT for both real kinds, and ordering by
+    # it directly sorts alphabetically (CB-20) — for requirements that puts
+    # `could` FIRST and `must` LAST, inverting the ranking outright. Declaring
+    # "this column has no precedence" must be a decision someone made, not a
+    # default they never saw.
+    sort_vocabulary: tuple[str, ...] | None
     result_key: str  # JSON envelope key
     readable_cols: frozenset[str]  # per-kind allowlist for field() reads
     # Status this kind moves to while claimed. None == this kind does not project.
     # A kind declaring it MUST satisfy P1-P4 (see EntityRef.set_status).
     busy_status: str | None = None
+
+    def order_by(self) -> tuple[str, list[str]]:
+        """``(fragment, params)`` ordering this kind's rows by ``sort_col``.
+
+        Ranked by declared precedence when ``sort_vocabulary`` is set, so callers
+        cannot accidentally order a vocabulary column alphabetically (CB-20). The
+        params must be spliced at the fragment's textual position in the final
+        statement, not prepended.
+        """
+        if self.sort_vocabulary is None:
+            if not _SAFE_IDENT.match(self.sort_col):
+                raise ValueError(f"Not a bare column identifier: {self.sort_col!r}")
+            return self.sort_col, []
+        return t.rank_case_sql(self.sort_col, self.sort_vocabulary)
 
 
 ENTITY_KINDS: tuple[EntityKind, ...] = (
@@ -43,6 +68,7 @@ ENTITY_KINDS: tuple[EntityKind, ...] = (
         id_pattern=re.compile(r"^CB-\d+"),
         terminal=t.FINDING_TERMINAL,
         sort_col="severity",
+        sort_vocabulary=t.SEVERITIES,
         result_key="findings",
         readable_cols=frozenset({"id", "status", "description", "severity"}),
         busy_status="in_progress",
@@ -53,6 +79,7 @@ ENTITY_KINDS: tuple[EntityKind, ...] = (
         id_pattern=re.compile(r"^N?FR-\d+"),
         terminal=t.REQUIREMENT_TERMINAL,
         sort_col="priority",
+        sort_vocabulary=t.PRIORITIES,
         result_key="requirements",
         readable_cols=frozenset({"id", "status", "description", "priority"}),
     ),
