@@ -26,7 +26,7 @@ import pytest
 from mcp.server.mcpserver import MCPServer
 from mcp.shared.exceptions import MCPError
 
-from codebugs import db, server
+from codebugs import db, findings, server
 
 
 @pytest.fixture
@@ -114,6 +114,48 @@ class TestStrictToolArguments:
         call_next = _Recorder()
         asyncio.run(middleware(_ctx("stats", {}), call_next))
         assert call_next.calls == 1
+
+    def test_severity_is_reachable_over_the_wire(self, middleware):
+        """CB-17: a domain parameter is not reachable until the wrapper declares it.
+
+        This assertion is only meaningful *because* of CB-15: since the strict
+        middleware landed, an undeclared `severity` is refused outright, so this
+        test fails loudly against the pre-CB-17 wrapper rather than passing while
+        the value is silently dropped.
+        """
+        call_next = _Recorder()
+        asyncio.run(
+            middleware(_ctx("update", {"finding_id": "CB-1", "severity": "high"}), call_next)
+        )
+        assert call_next.calls == 1
+
+    def test_severity_actually_reaches_the_database(self, tracker):
+        """Declaring the argument is not the same as forwarding it.
+
+        The middleware test above passes with a recorder standing in for the tool,
+        so it would still pass if ``severity=severity`` were deleted from the
+        wrapper's call into ``update_finding`` — the argument would be accepted at
+        the wire and then silently dropped, which is the CB-15 failure mode wearing
+        a different hat. This drives the real tool and reads the row back.
+        """
+        mcp, _ = _server_with_middleware(tracker)
+        with tracker() as conn:
+            findings.add_finding(
+                conn, severity="medium", category="perf", file="a.py", description="d"
+            )
+
+        async def call():
+            return await mcp.call_tool(
+                "update",
+                {"finding_id": "CB-1", "severity": "high", "append_note": "re-measured"},
+            )
+
+        asyncio.run(call())
+
+        with tracker() as conn:
+            row = findings.get_finding(conn, "CB-1")
+        assert row["severity"] == "high", "the wrapper accepted severity but never forwarded it"
+        assert row["meta"]["notes"] == "re-measured", "the CB-16 neighbours must still survive"
 
     def test_every_registered_tool_is_covered(self, tracker):
         """The guard is server-wide, not a findings special case."""

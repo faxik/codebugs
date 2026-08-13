@@ -3,11 +3,18 @@
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 
 import pytest
 
 from codebugs import db, findings
-from codebugs.types import FINDING_STATUSES, FINDING_STATUS_ALIASES, resolve_finding_status
+from codebugs.types import (
+    FINDING_STATUSES,
+    FINDING_STATUS_ALIASES,
+    SEVERITIES,
+    resolve_finding_status,
+)
 
 
 class RecordingConnection(sqlite3.Connection):
@@ -433,6 +440,248 @@ class TestUpdateMetaComposition:
         findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
         result = findings.update_finding(conn, "CB-1")
         assert result["status"] == "open"
+
+
+class TestRetriageSeverity:
+    """CB-17: severity must be mutable, as ``priority`` already is on requirements.
+
+    Severity is the tracker's ranking input but is assigned when the least is known
+    about a finding. While it was write-once, a re-triage had to be carried as prose
+    inside a note body — i.e. the structured field stayed wrong and the truth moved
+    into free text, which is the state a tracker exists to prevent.
+    """
+
+    @pytest.fixture
+    def one(self, conn):
+        findings.add_finding(
+            conn,
+            severity="medium",
+            category="perf",
+            file="a.py",
+            description="filed on a hunch",
+            meta={"lines": "1-2"},
+        )
+        return conn
+
+    @pytest.fixture
+    def recording(self, tmp_project):
+        db.connect(tmp_project).close()  # apply every module's schema to the file
+        path = os.path.join(tmp_project, ".codebugs", "findings.db")
+        conn = sqlite3.connect(path, factory=RecordingConnection)
+        conn.row_factory = sqlite3.Row
+        yield conn
+        conn.close()
+
+    def test_escalate(self, one):
+        result = findings.update_finding(one, "CB-1", severity="high")
+        assert result["severity"] == "high"
+
+    def test_the_escalation_is_durable(self, one, tmp_project):
+        """Read back through a SECOND connection, so the commit is what is proved.
+
+        Re-reading through the same connection would pass even with the commit
+        removed, which makes the assertion about the statement rather than about
+        durability.
+        """
+        findings.update_finding(one, "CB-1", severity="critical")
+        one.close()
+
+        reopened = db.connect(tmp_project)
+        try:
+            assert findings.get_finding(reopened, "CB-1")["severity"] == "critical"
+        finally:
+            reopened.close()
+
+    def test_retriage_touches_only_the_named_row(self, one):
+        """A missing or wrong WHERE clause would pass every single-row test above."""
+        findings.add_finding(
+            one, severity="low", category="perf", file="b.py", description="bystander"
+        )
+        findings.update_finding(one, "CB-1", severity="critical")
+
+        assert findings.get_finding(one, "CB-1")["severity"] == "critical"
+        assert findings.get_finding(one, "CB-2")["severity"] == "low", (
+            "the bystander must not have been re-triaged too"
+        )
+
+    def test_downgrade(self, one):
+        result = findings.update_finding(one, "CB-1", severity="low")
+        assert result["severity"] == "low"
+
+    def test_every_canonical_severity_is_reachable(self, one):
+        for sev in SEVERITIES:
+            assert findings.update_finding(one, "CB-1", severity=sev)["severity"] == sev
+
+    def test_invalid_severity_raises(self, one):
+        with pytest.raises(ValueError, match="Invalid severity"):
+            findings.update_finding(one, "CB-1", severity="urgent")
+
+    def test_invalid_severity_leaves_the_row_untouched(self, one):
+        with pytest.raises(ValueError):
+            findings.update_finding(one, "CB-1", severity="urgent", status="fixed")
+        row = findings.get_finding(one, "CB-1")
+        assert row["severity"] == "medium"
+        assert row["status"] == "open", "validation must precede the write, not follow it"
+
+    def test_rejection_is_valueerror_not_integrityerror(self, one):
+        """The Python check is the validator; the column CHECK is only a backstop.
+
+        Reaching the constraint would surface ``sqlite3.IntegrityError`` where the
+        project's error contract promises ``ValueError``.
+        """
+        with pytest.raises(ValueError):
+            findings.update_finding(one, "CB-1", severity="HIGH")
+
+    def test_severity_and_status_compose_in_one_call(self, one):
+        result = findings.update_finding(one, "CB-1", severity="high", status="in_progress")
+        assert result["severity"] == "high"
+        assert result["status"] == "in_progress"
+
+    def test_severity_does_not_disturb_the_meta_arguments(self, one):
+        """The CB-16 neighbours must survive a call that also re-triages."""
+        findings.update_finding(one, "CB-1", notes="PRIOR")
+        result = findings.update_finding(
+            one, "CB-1", severity="critical", append_note="EXTRA", meta_update={"k": "v"}
+        )
+        assert result["severity"] == "critical"
+        assert result["meta"]["notes"] == "PRIOR\nEXTRA"
+        assert result["meta"]["k"] == "v"
+        assert result["meta"]["lines"] == "1-2"
+
+    def test_severity_only_update_fires_no_status_hook(self, one, monkeypatch):
+        """Adding a column must not widen the status-hook condition."""
+        fired = []
+        monkeypatch.setattr(db, "run_status_change_hooks", lambda *a, **k: fired.append(a[1:]))
+
+        findings.update_finding(one, "CB-1", severity="high")
+        assert fired == [], "a severity-only update is not a status change"
+
+        findings.update_finding(one, "CB-1", severity="low", status="fixed")
+        assert fired == [("CB-1", "open", "fixed")]
+
+    def test_single_update_assigns_severity_exactly_once(self, recording):
+        """Structural guard, in the CB-16 shape: one ``severity = ?`` per UPDATE.
+
+        Asserted against the SQL *template*. The notes payload deliberately carries
+        the literal token ``severity =`` — a guard reading expanded statements would
+        count that bait and fail on correct code.
+        """
+        findings.add_finding(
+            recording,
+            severity="medium",
+            category="bug",
+            file="a.py",
+            description="d",
+        )
+        recording.recorded_sql.clear()
+
+        findings.update_finding(
+            recording,
+            "CB-1",
+            severity="high",
+            status="fixed",
+            notes="a value that itself contains severity = bait",
+            meta_update={"k": "v"},
+        )
+
+        updates = [s for s in recording.recorded_sql if s.startswith("UPDATE findings")]
+        assert len(updates) == 1, updates
+        assert updates[0].count("severity = ?") == 1, updates[0]
+        assert updates[0].count("meta = ?") == 1, updates[0]
+
+    def test_retriage_moves_the_card_between_query_buckets(self, one):
+        """The point of the fix: the queue stops lying to whoever reads it."""
+        assert [f["id"] for f in findings.query_findings(one, severity="high")["findings"]] == []
+        findings.update_finding(one, "CB-1", severity="high")
+        assert [f["id"] for f in findings.query_findings(one, severity="high")["findings"]] == [
+            "CB-1"
+        ]
+        assert findings.query_findings(one, severity="medium")["findings"] == []
+
+
+class TestRetriageCliContract:
+    """CB-17 over the real CLI. The domain tests cannot see a parser that never
+    declares the flag, nor a handler that never forwards it."""
+
+    @staticmethod
+    def _run(project, *args):
+        return subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", *args],
+            cwd=project,
+            capture_output=True,
+            text=True,
+        )
+
+    @pytest.fixture
+    def project(self, tmp_project, conn):
+        findings.add_finding(
+            conn, severity="medium", category="perf", file="a.py", description="d"
+        )
+        conn.close()
+        return tmp_project
+
+    def test_long_flag_retriages(self, project):
+        r = self._run(project, "update", "CB-1", "--severity", "high")
+        assert r.returncode == 0, r.stderr
+        assert "severity=high" in r.stdout, r.stdout
+
+        shown = self._run(project, "query", "--severity", "high")
+        assert "CB-1" in shown.stdout
+
+    def test_short_flag_retriages(self, project):
+        r = self._run(project, "update", "CB-1", "-s", "critical")
+        assert r.returncode == 0, r.stderr
+        assert "severity=critical" in r.stdout
+
+    def test_invalid_value_exits_1_without_a_traceback(self, project):
+        r = self._run(project, "update", "CB-1", "--severity", "urgent")
+        assert r.returncode == 1
+        assert "Invalid severity" in r.stderr
+        assert "Traceback" not in r.stderr, "bad input is a clean error, not a crash"
+
+    def test_invalid_value_leaves_the_row_alone(self, project):
+        self._run(project, "update", "CB-1", "--severity", "urgent")
+        r = self._run(project, "query", "--severity", "medium")
+        assert "CB-1" in r.stdout, "the rejected retriage must not have partially landed"
+
+    def test_severity_and_status_together(self, project):
+        r = self._run(project, "update", "CB-1", "--severity", "low", "--status", "fixed")
+        assert r.returncode == 0, r.stderr
+        assert "status=fixed" in r.stdout
+        assert "severity=low" in r.stdout
+
+    def test_a_committed_write_is_never_reported_as_bad_input(self, project):
+        """``json.JSONDecodeError`` subclasses ``ValueError`` — it must not be caught.
+
+        On a row with malformed stored ``meta``, ``update_finding`` commits the
+        severity change and only then raises while serializing its return value.
+        Folding that into the handler's ``ValueError`` arm would print a tidy
+        one-line error and exit 1 — a failure-shaped signal for a write that
+        already landed, which is the exact class of lie CB-15/CB-16 were about.
+        The corruption must surface as a crash instead.
+        """
+        conn = db.connect(project)
+        conn.execute("UPDATE findings SET meta = ? WHERE id = ?", ("{not json", "CB-1"))
+        conn.commit()
+        conn.close()
+
+        r = self._run(project, "update", "CB-1", "--severity", "high")
+        assert "Traceback" in r.stderr, (
+            "stored-data corruption must not be disguised as an input error"
+        )
+        assert "JSONDecodeError" in r.stderr, r.stderr
+
+        conn = db.connect(project)
+        try:
+            stored = conn.execute(
+                "SELECT severity FROM findings WHERE id = ?", ("CB-1",)
+            ).fetchone()
+        finally:
+            conn.close()
+        assert stored["severity"] == "high", (
+            "the write did land — which is precisely why a clean 'invalid input' "
+            "exit would have been a false report"
+        )
 
 
 class TestResolveStatus:
