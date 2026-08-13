@@ -6,6 +6,7 @@ import json
 import sqlite3
 from typing import Any
 
+from codebugs import db
 from codebugs.types import utc_now
 
 from codebugs.milestones._schema import AUTO_ROUTER_ACTOR
@@ -138,52 +139,62 @@ def triage_promote(
     actor: str = "user",
 ) -> dict[str, Any]:
     """Move a triage item to a target milestone, optionally upgrading size
-    and acceptance. Acceptance is required for size='large'."""
+    and acceptance. Acceptance is required for size='large'.
+
+    Everything from the eligibility reads through the write is one transaction
+    (CB-24 sibling), for two reasons: ``meta_json`` is merged in Python from the
+    row read here, so a concurrent meta writer would otherwise be erased; and the
+    duplicate-attachment check below is a check-then-act that two concurrent
+    promotions could both pass. The argument-only validation stays outside, so
+    bad input still raises ``ValueError`` without first waiting for the write
+    lock. ``db.txn`` owns the commit — do not restore ``conn.commit()``.
+    """
     if size == "large" and not acceptance.strip():
         raise ValueError("acceptance is required for size='large'")
-    if not _milestone_exists(conn, to_milestone):
-        raise KeyError(f"Destination milestone not found: {to_milestone}")
-    item = _get_item_by_ref(conn, bug_id)
-    if item["milestone_id"] != "stream/triage":
-        raise ValueError(
-            f"{bug_id} is not in stream/triage (currently in {item['milestone_id']})"
+
+    with db.txn(conn):
+        if not _milestone_exists(conn, to_milestone):
+            raise KeyError(f"Destination milestone not found: {to_milestone}")
+        item = _get_item_by_ref(conn, bug_id)
+        if item["milestone_id"] != "stream/triage":
+            raise ValueError(
+                f"{bug_id} is not in stream/triage (currently in {item['milestone_id']})"
+            )
+
+        conflict = conn.execute(
+            """SELECT id FROM milestone_items
+               WHERE milestone_id = ? AND item_kind = ? AND item_ref = ?""",
+            (to_milestone, item["item_kind"], bug_id),
+        ).fetchone()
+        if conflict:
+            raise ValueError(f"{bug_id} already attached to {to_milestone}")
+
+        meta = dict(item.get("meta") or {})
+        if linked_frs:
+            meta["linked_frs"] = linked_frs
+
+        now = utc_now()
+        sets = [
+            "milestone_id = ?", "size = ?", "priority = ?", "updated_at = ?",
+            "meta_json = ?",
+        ]
+        params: list[Any] = [to_milestone, size, priority, now, json.dumps(meta)]
+        if acceptance:
+            sets.append("acceptance = ?")
+            params.append(acceptance)
+        params.append(item["id"])
+        conn.execute(
+            f"UPDATE milestone_items SET {', '.join(sets)} WHERE id = ?",
+            params,
         )
-
-    conflict = conn.execute(
-        """SELECT id FROM milestone_items
-           WHERE milestone_id = ? AND item_kind = ? AND item_ref = ?""",
-        (to_milestone, item["item_kind"], bug_id),
-    ).fetchone()
-    if conflict:
-        raise ValueError(f"{bug_id} already attached to {to_milestone}")
-
-    meta = dict(item.get("meta") or {})
-    if linked_frs:
-        meta["linked_frs"] = linked_frs
-
-    now = utc_now()
-    sets = [
-        "milestone_id = ?", "size = ?", "priority = ?", "updated_at = ?",
-        "meta_json = ?",
-    ]
-    params: list[Any] = [to_milestone, size, priority, now, json.dumps(meta)]
-    if acceptance:
-        sets.append("acceptance = ?")
-        params.append(acceptance)
-    params.append(item["id"])
-    conn.execute(
-        f"UPDATE milestone_items SET {', '.join(sets)} WHERE id = ?",
-        params,
-    )
-    _audit(
-        conn,
-        milestone_id=to_milestone,
-        item_ref=bug_id,
-        actor=actor,
-        action="promote",
-        from_state="stream/triage",
-        to_state=to_milestone,
-        reason="",
-    )
-    conn.commit()
+        _audit(
+            conn,
+            milestone_id=to_milestone,
+            item_ref=bug_id,
+            actor=actor,
+            action="promote",
+            from_state="stream/triage",
+            to_state=to_milestone,
+            reason="",
+        )
     return _get_item_by_ref(conn, bug_id)

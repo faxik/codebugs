@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
+import threading
 
 import pytest
 
@@ -891,6 +894,162 @@ class TestPullNextConcurrent:
         assert len(refs) == len(set(refs))
         # All 4 items got claimed (since capacity is generous and 2x2 pulls).
         assert set(refs) == {"CB-1", "CB-2", "CB-3", "CB-4"}
+
+
+class PausingConnection(sqlite3.Connection):
+    """Fires a one-shot hook right after ``_get_item_by_ref``'s SELECT.
+
+    The findings and requirements suites carry twins of this; each keys on its
+    own entity's read, and the project deliberately has no ``conftest.py``.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.after_select = None
+
+    def execute(self, sql, *args, **kwargs):
+        cur = super().execute(sql, *args, **kwargs)
+        if self.after_select and sql.lstrip().startswith("SELECT * FROM milestone_items"):
+            hook, self.after_select = self.after_select, None
+            hook()
+        return cur
+
+
+class TestConcurrentItemMetaWritesDoNotLoseEachOther:
+    """CB-24 siblings: ``meta_json`` is merged in Python by two milestone writers.
+
+    ``mark_branch_only`` merges ``meta["branch"]`` and ``triage_promote`` merges
+    ``meta["linked_frs"]``, each over the row it read a statement earlier. Unless
+    the read and the write are one transaction, an agent branching an item while
+    another promotes it loses one of the two keys, and both calls report success.
+
+    This is not hypothetical plumbing: ``mark_branch_only`` is called by
+    autosorter's ``worktree-setup.sh`` at the moment a branch is created, which is
+    exactly when another agent is likely to be triaging the same queue.
+    """
+
+    def _open(self, tmp_project):
+        path = os.path.join(tmp_project, ".codebugs", "findings.db")
+        c = sqlite3.connect(path, factory=PausingConnection)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA busy_timeout=5000")
+        return c
+
+    def test_an_ambient_transaction_is_not_committed_by_mark_branch_only(self, conn):
+        """The milestones twin of the findings/reqs ambient guard.
+
+        Both wrapped functions here carry the same "do not restore
+        ``conn.commit()``" instruction in their docstrings, and prose is not a
+        gate. Without this test the claim holds on two of the four CB-24 sites and
+        is merely asserted on the other two — the CB-17 asymmetry again, invisible
+        from inside any one file. Dormant today (both are only reached from
+        fresh-connection entry points) which is exactly when it is cheap to pin.
+        """
+        _add_finding(conn, "CB-1")
+        before = conn.execute(
+            "SELECT priority FROM milestone_items WHERE item_ref = ?", ("CB-1",)
+        ).fetchone()["priority"]
+
+        with pytest.raises(RuntimeError, match="caller aborts"):
+            with db.txn(conn) as opened:
+                assert opened, "the caller owns this transaction"
+                conn.execute(
+                    "UPDATE milestone_items SET priority = ? WHERE item_ref = ?", (7, "CB-1")
+                )
+                milestones.mark_branch_only(conn, item_ref="CB-1", branch_name="fix/cb-1")
+                raise RuntimeError("caller aborts after the nested call")
+
+        row = conn.execute(
+            "SELECT priority, branch_only, meta_json FROM milestone_items WHERE item_ref = ?",
+            ("CB-1",),
+        ).fetchone()
+        assert row["priority"] == before, "the caller's own write must have rolled back"
+        assert not row["branch_only"], "the nested call must roll back with its caller"
+        assert "branch" not in json.loads(row["meta_json"]), row["meta_json"]
+
+    def test_triage_dismiss_is_atomic_when_the_propagated_write_fails(self, conn):
+        """The atomicity this change claims for the compound caller, through it.
+
+        ``triage_dismiss`` writes ``milestone_items``, then its audit row, then
+        propagates to the finding. Before CB-24 the nested ``update_finding``
+        committed all three at its own ``conn.commit()``, so a failure raised after
+        that point left the dismissal and audit row committed while the caller's
+        own commit never ran. Now the nested call commits nothing and the unit
+        stands or falls together.
+
+        The failure is induced the only way the code allows: stored meta that is
+        not valid JSON, which ``row_to_dict`` refuses while building the return
+        value — after the write, which is the whole point.
+        """
+        _add_finding(conn, "CB-1")
+        conn.execute("UPDATE findings SET meta = ? WHERE id = ?", ("{not json", "CB-1"))
+        conn.commit()
+
+        with pytest.raises(json.JSONDecodeError):
+            milestones.triage_dismiss(conn, bug_id="CB-1", reason="duplicate")
+        conn.rollback()  # the aborted unit is still open on this connection
+
+        item = conn.execute(
+            "SELECT status FROM milestone_items WHERE item_ref = ?", ("CB-1",)
+        ).fetchone()
+        assert item["status"] != "dismissed", "the dismissal must not survive on its own"
+        audits = conn.execute(
+            "SELECT COUNT(*) AS c FROM milestone_audit WHERE item_ref = ? AND action = 'dismiss'",
+            ("CB-1",),
+        ).fetchone()["c"]
+        assert audits == 0, "the audit row must roll back with the dismissal it records"
+
+    def test_branching_an_item_does_not_erase_a_concurrent_promotion(self, tmp_project):
+        seed = db.connect(tmp_project)
+        try:
+            _add_finding(seed, "CB-1")  # auto-routes into stream/triage
+            _add_req(seed, "FR-1")
+        finally:
+            seed.close()
+
+        a = self._open(tmp_project)
+        a_read, b_started, b_read = (threading.Event() for _ in range(3))
+
+        def competing_promoter():
+            a_read.wait(timeout=10)
+            b = self._open(tmp_project)
+            b.after_select = b_read.set
+            b_started.set()
+            try:
+                milestones.triage_promote(
+                    b, bug_id="CB-1", to_milestone="release/1.1",
+                    size="small", linked_frs=["FR-1"],
+                )
+            finally:
+                b.close()
+
+        a.after_select = lambda: (
+            a_read.set(),
+            b_started.wait(timeout=10),
+            b_read.wait(timeout=1.0),
+        )
+
+        t = threading.Thread(target=competing_promoter)
+        t.start()
+        try:
+            milestones.mark_branch_only(a, item_ref="CB-1", branch_name="fix/cb-1")
+        finally:
+            t.join(timeout=30)
+            a.close()
+        assert not t.is_alive()
+
+        # Read the stored column directly: no public reader returns a single item's
+        # meta, and what this test is about is what actually landed in the row.
+        check = db.connect(tmp_project)
+        try:
+            stored = check.execute(
+                "SELECT meta_json FROM milestone_items WHERE item_ref = ?", ("CB-1",)
+            ).fetchone()["meta_json"]
+        finally:
+            check.close()
+        meta = json.loads(stored)
+        assert meta.get("branch") == "fix/cb-1", meta
+        assert meta.get("linked_frs") == ["FR-1"], meta
 
 
 # ---------------------------------------------------------------------------
