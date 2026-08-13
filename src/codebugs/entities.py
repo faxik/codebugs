@@ -27,9 +27,12 @@ class EntityKind:
     inside a query. That is what lets the ``# noqa: S608`` justifications on the
     f-string statements below be structural rather than a promise (CB-22).
 
-    The other fields never reach SQL as identifiers: ``name`` is bound as a value
-    (``claims.py``), ``result_key`` is a JSON envelope key, and ``terminal`` /
-    ``sort_vocabulary`` / ``busy_status`` are values, bound or compared.
+    Every OTHER field is unvalidated because it never becomes SQL text: it is
+    either bound as a parameter, compared in Python, or used outside SQL entirely.
+    A new field needs validation here if and only if it is destined for an
+    f-string. (Today: ``name`` binds in ``claims.py``, ``busy_status`` and
+    ``sort_vocabulary`` bind, ``terminal`` compares, ``result_key`` is a JSON
+    envelope key, ``id_pattern`` never touches the database.)
     """
 
     name: str  # == blockers item_type, e.g. "finding"
