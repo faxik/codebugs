@@ -22,15 +22,40 @@ def _cmd_init(args: argparse.Namespace) -> None:
             f"from everything under {result['root']}",
             file=sys.stderr,
         )
+    # A declared root redirects READS only: creation stays where the user is
+    # standing, because a tracker conjured somewhere else by ambient state is the
+    # failure this project refuses everywhere else. But the mismatch has to be
+    # said out loud — otherwise `init` reports success for a tracker that every
+    # other command will ignore, which is a success-shaped signal for a dead end.
+    declared, source = db.declared_tracker_root()
+    if declared is not None and os.path.realpath(declared) != os.path.realpath(result["root"]):
+        print(
+            f"codebugs: warning — {db.SOURCE_LABELS[source]} names {declared}, so commands "
+            f"will read that tracker, not the one at {result['root']}",
+            file=sys.stderr,
+        )
     verb = "Initialized" if result["created"] else "Already initialized:"
     print(f"{verb} codebugs tracker at {result['path']}")
 
 
-def _register_init(sub, commands: dict) -> None:
-    """Register `init`, the one command that may create a tracker.
+def _cmd_where(args: argparse.Namespace) -> None:
+    info = db.describe_root()
+    print(f"source:   {info['source_label']}")
+    if info["error"]:
+        print("root:     (unresolved)")
+        print(f"codebugs: {info['error']}", file=sys.stderr)
+        sys.exit(1)
+    print(f"root:     {info['root']}")
+    print(f"database: {info['path']}")
 
-    Lives here rather than in a domain module: it bootstraps the DB every other
-    command needs, so it must work when no DB exists yet, in every --mode.
+
+def _register_builtins(sub, commands: dict) -> None:
+    """Register the two commands that must work before any tracker is reachable.
+
+    They live here rather than in a domain module for the same reason: `init`
+    bootstraps the DB every other command needs, and `where` diagnoses the case
+    where that DB cannot be found at all. Both must work when no DB exists yet,
+    in every --mode.
     """
     p = sub.add_parser("init", help=f"Create a {db.DB_DIR}/ tracker in this directory")
     p.add_argument("directory", nargs="?", default=None, help="Directory (default: cwd)")
@@ -41,6 +66,9 @@ def _register_init(sub, commands: dict) -> None:
     )
     commands["init"] = _cmd_init
 
+    sub.add_parser("where", help="Show which tracker this process is bound to, and why")
+    commands["where"] = _cmd_where
+
 
 def main() -> None:
     """CLI entry point with mode-based command discovery."""
@@ -50,7 +78,19 @@ def main() -> None:
         choices=["findings", "provenance", "reqs", "merge", "sweep", "bench", "blockers", "milestones", "claims", "all"],
         default="all",
     )
+    pre_parser.add_argument(
+        "--tracker-root",
+        default=None,
+        metavar="DIR",
+        help=(
+            f"Use the tracker in DIR instead of walking up from the current directory "
+            f"(overrides ${db.ENV_ROOT}; see `codebugs where`)"
+        ),
+    )
     pre_args, _ = pre_parser.parse_known_args()
+    # Set before any command runs, and before any connection: every handler calls
+    # db.connect() with no arguments, so db is the only place that can honor it.
+    db.set_tracker_root(pre_args.tracker_root)
 
     parser = argparse.ArgumentParser(
         description="codebugs — AI-native code finding & requirements tracker",
@@ -60,7 +100,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command")
     commands: dict = {}
 
-    _register_init(sub, commands)
+    _register_builtins(sub, commands)
     for provider in db.get_cli_providers(mode=pre_args.mode):
         provider.register_fn(sub, commands)
 

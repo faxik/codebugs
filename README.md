@@ -21,7 +21,7 @@ Building a real codebase with AI assistants creates four problems that compound 
 3. **Parallel agents race.** Two agents both pick the same bug, both edit the same file, both think they've shipped it.
 4. **Releases lose track of what's in them.** Work sits stranded on feature branches for 9 days. "Where are we on 1.1?" has no single answer.
 
-codebugs is one SQLite database (`.codebugs/findings.db`) that solves all four. Eight self-contained modules, 59 MCP tools, one CLI.
+codebugs is one SQLite database (`.codebugs/findings.db`) that solves all four. Nine self-contained modules, 66 MCP tools, one CLI.
 
 ## Install
 
@@ -43,14 +43,35 @@ Run this once per project, in the project root:
 codebugs init
 ```
 
-This creates `.codebugs/findings.db`. **codebugs never creates a tracker on its own** — every other command discovers an existing one by walking up from the current directory, and refuses with an actionable error if there is none. That refusal is deliberate: silently creating an empty database is how findings go missing.
+This creates `.codebugs/findings.db`. **codebugs never creates a tracker on its own** — every other command discovers an existing one by walking up from the current directory (unless you point it somewhere explicitly, see below), and refuses with an actionable error if there is none. That refusal is deliberate: silently creating an empty database is how findings go missing.
 
 Two consequences worth knowing:
 
 - **Run `init` at the project root, not in a subdirectory.** Discovery binds to the *nearest* `.codebugs/`, so a nested tracker hides the project's real one from everything beneath it. `init` refuses to do this unless you pass `--force`.
 - **Git worktrees share the main repo's tracker.** A worktree's `.git` is a file pointing at the main repo, which discovery follows — so findings filed from a worktree land in the project's database, not in a throwaway that dies with the worktree. `init` refuses to run inside a worktree for the same reason; run it in the main checkout.
 
-  Two layouts are the exception: if the main repo is **bare** or was created with **`--separate-git-dir`**, git records no path back to a main checkout — its own `git worktree list` reports the git directory instead. Discovery cannot resolve those and refuses with an explicit error rather than guessing a wrong project. Run `init` in the main checkout before creating worktrees.
+  Two layouts are the exception: if the main repo is **bare** or was created with **`--separate-git-dir`**, git records no path back to a main checkout — its own `git worktree list` reports the git directory instead. Discovery usually refuses those with an explicit error rather than guessing. There is one case it cannot detect: a `--separate-git-dir` repo whose git directory is itself named `.git` looks exactly like a normal checkout, so discovery binds to the directory holding the git dir instead of the real checkout, silently. Nothing local can distinguish the two — git reports that directory as a valid work tree as well — so the remedy is to state the root explicitly (below). Run `init` in the main checkout before creating worktrees.
+
+### Pointing codebugs at a specific tracker
+
+Discovery is a heuristic, so it has an override:
+
+```bash
+codebugs --tracker-root /path/to/project query   # this invocation only
+export CODEBUGS_ROOT=/path/to/project            # this shell and anything it spawns
+```
+
+Resolution order, most specific first: a command's own explicit path argument (`--repo`, where a command has one) → `--tracker-root` → `CODEBUGS_ROOT` → walking up from the current directory. A per-command argument outranks a declaration because it names one operation's target, while a declaration is process-wide.
+
+```bash
+codebugs where     # show the current binding and which channel decided it
+```
+
+`where` is a diagnostic, not a precedence level: it prints the resolved root, the database path, and the channel — the fastest way to check that a command is about to read the tracker you think it is.
+
+Two things worth knowing. A declared root that contains no `.codebugs/` is a **hard error**, never a new tracker: the value may be a stale export inherited from another shell, and silently creating an empty database there is how findings go missing. And `init` ignores the declaration — it always creates where you are standing — but warns if the declaration points somewhere else, since otherwise it would report success for a tracker no other command will read.
+
+`CODEBUGS_ROOT` is inherited by every subprocess, so export it only when you mean "this shell works on that project". For one-off use across projects, prefer `--tracker-root`.
 
 ### Claude Code (MCP)
 
@@ -66,7 +87,24 @@ Add to `~/.claude.json` (global) or `.mcp.json` (per-project):
 }
 ```
 
-The database lives at `.codebugs/findings.db`, discovered by walking up from the server's working directory — each project gets its own. Run `codebugs init` in the project first (see above), or every tool call will fail with "no `.codebugs/` found". Add `.codebugs/` to your `.gitignore`.
+The database lives at `.codebugs/findings.db`, discovered by walking up from the server's working directory — each project gets its own. Run `codebugs init` in the project first (see above), or every tool call will fail with "no `.codebugs/` found".
+
+The server connects lazily, per tool call, so it starts successfully even when no tracker is reachable. At startup it writes one line to **stderr** — which MCP clients log — if discovery failed, or if a root was declared rather than discovered; on the ordinary path it says nothing. It never refuses to start: a project directory that appears later must still work.
+
+To pin one server to one tracker instead of deriving it from the working directory:
+
+```json
+{
+  "mcpServers": {
+    "codebugs": {
+      "command": "codebugs-mcp",
+      "args": ["--tracker-root", "/path/to/project"]
+    }
+  }
+}
+```
+
+Only do this when you want that server bound to a single project — the default cwd-derived behavior is what lets one registration serve many. Add `.codebugs/` to your `.gitignore`.
 
 ### Running Modules Independently
 
@@ -86,13 +124,15 @@ Use `--mode` to load only the tools you need:
 | Mode | Tools | Use it when |
 |------|-------|-------------|
 | `findings` | 8 | Code review / bug tracking only |
-| `reqs` | 11 | Specification tracking only |
+| `provenance` | 1 | Staleness checks against git history |
+| `reqs` | 12 | Specification tracking only |
 | `sweep` | 9 | Batch iteration / state-machine tasks |
 | `bench` | 4 | Performance benchmarks |
 | `merge` | 5 | Multi-agent merge coordination |
 | `blockers` | 4 | Cross-entity dependency tracking |
 | `milestones` | 18 | Release + stream + capacity-aware pull |
-| `all` | **59** | Default — everything |
+| `claims` | 5 | "Who holds this card" for parallel agents |
+| `all` | **66** | Default — everything |
 
 The CLI takes the same flag: `codebugs --mode findings summary`.
 
@@ -100,7 +140,7 @@ The CLI takes the same flag: `codebugs --mode findings summary`.
 
 Any MCP-compatible client can connect to `codebugs-mcp` via stdio transport.
 
-## The eight modules
+## The nine modules
 
 | Module | Domain | Headline tools |
 |--------|--------|----------------|
@@ -111,6 +151,8 @@ Any MCP-compatible client can connect to `codebugs-mcp` via stdio transport.
 | **bench** | Performance benchmark snapshots | `codebench_import`, `codebench_query` |
 | **merge** | Parallel-agent merge serialization | `codemerge_start`, `codemerge_claim` |
 | **milestones** | Releases, streams, capacity-aware pull | `pull_next`, `milestone_status`, `milestone_close` |
+| **provenance** | Staleness vs git history, commit trailers | `staleness_check` |
+| **claims** | Which agent holds a finding or requirement | `claims_claim`, `claims_release`, `claims_who_holds` |
 
 Modules are self-registering — adding a new one is local to its own file. See [`docs/superpowers/specs/`](docs/superpowers/specs/) for the architecture history.
 
@@ -125,7 +167,7 @@ Modules are self-registering — adding a new one is local to its own file. See 
 | `summary` | Dashboard overview — **start here** for orientation |
 | `add` | Log a finding with severity, category, file, description |
 | `batch_add` | Log multiple findings at once |
-| `update` | Change status, add notes, update tags or metadata |
+| `update` | Change status, severity, notes, tags or metadata (`append_note` adds, `notes` replaces) |
 | `query` | Search/filter with pagination and group-by |
 | `stats` | Cross-tabulated counts (severity x category/file/status) |
 | `categories` | List existing categories — **call before `add`** for consistency |
@@ -137,9 +179,11 @@ Modules are self-registering — adding a new one is local to its own file. See 
 codebugs add -s high -c n_plus_one -f src/api.py -d "Query in loop at line 42"
 codebugs summary
 codebugs query --status open --severity critical
-codebugs update CB-1 --status fixed --notes "Fixed in PR #42"
+codebugs update CB-1 --status fixed --append-note "Fixed in PR #42"
 codebugs categories
 ```
+
+`--append-note` adds to a finding's notes; `--notes` **replaces** them wholesale. Prefer `--append-note` when recording investigation history — `--notes` will discard whatever was there, which is usually not what you want on a finding others have been working.
 
 When a new finding is added, the **milestones auto-router** automatically attaches it to `stream/triage` (or `stream/security` when `severity=critical` and `category` starts with `security:`). The finding and its triage entry land in the same transaction.
 

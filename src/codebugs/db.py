@@ -428,6 +428,13 @@ def _worktree_main_root(git_file: Path) -> str | None:
     if common_git.name != DOT_GIT:
         # Bare or otherwise unconventional main repo — refuse rather than guess.
         return None
+    # KNOWN LIMIT, DELIBERATELY UNFIXED (CB-13): this basename test is exactly
+    # git's own heuristic, and a `--separate-git-dir` repo whose git dir happens
+    # to be named `.git` defeats it — we return the ADMIN directory rather than
+    # the checkout, and bind to any `.codebugs/` beside it. There is no local
+    # discriminator: git reports that directory as a valid work tree too, so any
+    # "fix" here would be a different guess, not a proof. The escape hatch is a
+    # declared root — see `declared_tracker_root`.
     return str(common_git.parent)
 
 
@@ -482,40 +489,175 @@ def _find_db_root(start: str | None = None) -> str | None:
     return None
 
 
+# --- Explicit tracker root (CB-11, CB-13) ---
+
+ENV_ROOT = "CODEBUGS_ROOT"
+
+SOURCE_LABELS = {
+    "flag": "--tracker-root",
+    "env": ENV_ROOT,
+    "argument": "an explicit project directory",
+    "discovery": "directory discovery",
+}
+
+_tracker_root_override: str | None = None
+
+
+def set_tracker_root(root: str | None) -> None:
+    """Declare this process's tracker root, overriding the upward walk.
+
+    Entry points (`cli.main`, `server.main`) call this once, before anything
+    connects. Deliberately validates NOTHING: a root may legitimately be named
+    before its tracker exists, and a server that died at startup for that reason
+    would lose the lazy-connect self-healing CB-11 requires. The declaration is
+    checked where it is used, in `_db_path`.
+    """
+    global _tracker_root_override
+    _tracker_root_override = root
+
+
+def declared_tracker_root() -> tuple[str | None, str]:
+    """Return `(root, source)` for an explicit declaration, else `(None, "discovery")`.
+
+    Precedence is flag > environment > the cwd walk — the more deliberate the
+    channel, the higher it wins. A blank value in either channel is not a
+    declaration, the same convention an empty query filter follows.
+
+    WHY A DECLARATION EXISTS AT ALL. Discovery is a heuristic, and two layouts
+    prove it cannot always be right: a `--separate-git-dir` repo whose git dir is
+    named `.git` binds to the admin directory (CB-13), and there is no local
+    discriminator that could tell it otherwise — git itself reports that
+    directory as a valid work tree. External metadata is the only thing that can
+    disambiguate, so this is it.
+    """
+    if _tracker_root_override and _tracker_root_override.strip():
+        return _tracker_root_override, "flag"
+    env = os.environ.get(ENV_ROOT, "")
+    if env.strip():
+        return env, "env"
+    return None, "discovery"
+
+
+def _declared_db_path(root: str, source: str) -> str:
+    """Resolve a DECLARED root to its DB file, refusing rather than creating.
+
+    Fails closed, and names the channel that supplied the value. Both halves are
+    load-bearing. A declaration is ambient state that may have been exported into
+    a shell days ago and inherited by an unrelated subprocess, so "no tracker
+    there" must never quietly become a second, empty tracker — that is CB-8's
+    original failure mode arriving through a new door. And because the value is
+    ambient, the message has to say WHICH channel to go fix; without that, a
+    wrong bind is a mystery with no visible cause.
+    """
+    label = SOURCE_LABELS[source]
+    if not os.path.isdir(root):
+        raise DatabaseNotFoundError(
+            f"{label} names {root}, which is not a directory; "
+            f"fix it, or clear it to fall back to directory discovery"
+        )
+    if not os.path.isdir(os.path.join(root, DB_DIR)):
+        raise DatabaseNotFoundError(
+            f"{label} names {root}, which has no {DB_DIR}/; "
+            f"run `codebugs init {root}`, or clear {label} to fall back to "
+            f"directory discovery"
+        )
+    return os.path.join(root, DB_DIR, DB_FILE)
+
+
 def _db_path(project_dir: str | None = None) -> str:
     """Locate an EXISTING tracker's DB file. Never invents one.
 
+    Resolution order, most specific first: an explicit `project_dir` argument, a
+    declared tracker root (`--tracker-root`, then `CODEBUGS_ROOT`), then the
+    upward walk from cwd. `project_dir` outranks a declaration because it is
+    per-call — `--repo <path>` names one operation's target, while a declaration
+    is process-wide ambient state.
+
     A named `project_dir` is not an opt-in to creation: it routinely carries user
     input (`--repo <path>`), where a typo must fail loudly rather than quietly
-    become a second, empty tracker.
+    become a second, empty tracker. A declared root is held to the same rule.
     """
-    if project_dir is None:
-        root = _find_db_root()
-        if root is None:
-            cwd = os.getcwd()
-            worktree = _enclosing_worktree_root(cwd)
-            if worktree is not None:
-                # Never advise `init` here: it would create a tracker that dies
-                # with the worktree. Name the main checkout when we can find it.
-                main = _worktree_main_root(Path(worktree) / DOT_GIT)
-                where = f"in the main checkout ({main})" if main else "in the main checkout"
-                raise DatabaseNotFoundError(
-                    f"no {DB_DIR}/ found from {cwd}; this is a git worktree ({worktree}) "
-                    f"and its main checkout has no tracker either. Run `codebugs init` "
-                    f"{where} — a tracker created inside a worktree is deleted with it"
-                )
-            raise DatabaseNotFoundError(
-                f"no {DB_DIR}/ found in {cwd} or any parent; "
-                f"run `codebugs init` here, or cd into a project that has one"
-            )
-    else:
+    if project_dir is not None:
         root = project_dir
         if not os.path.isdir(os.path.join(root, DB_DIR)):
             raise DatabaseNotFoundError(
                 f"no {DB_DIR}/ in {root}; "
                 f"check the path, or run `codebugs init {root}` to create a tracker there"
             )
+        return os.path.join(root, DB_DIR, DB_FILE)
+
+    declared, source = declared_tracker_root()
+    if declared is not None:
+        return _declared_db_path(declared, source)
+
+    # Read cwd ONCE, and treat losing it as "no tracker" rather than letting an
+    # OSError escape. A deleted working directory is not hypothetical here: a
+    # long-lived MCP server outlives the git worktree it was started in, and
+    # `os.getcwd()` then raises FileNotFoundError. Escaping, that would bypass
+    # every DatabaseNotFoundError handler — a traceback in the CLI, and a FATAL
+    # startup preflight in the server, which is the one thing CB-11 forbids.
+    try:
+        cwd = os.getcwd()
+    except OSError as e:
+        raise DatabaseNotFoundError(
+            f"cannot determine the current directory ({e}) — it may have been deleted; "
+            f"cd somewhere that exists, or name a tracker with --tracker-root"
+        ) from e
+
+    root = _find_db_root(cwd)
+    if root is None:
+        worktree = _enclosing_worktree_root(cwd)
+        if worktree is not None:
+            # Never advise `init` here: it would create a tracker that dies
+            # with the worktree. Name the main checkout when we can find it.
+            main = _worktree_main_root(Path(worktree) / DOT_GIT)
+            where = f"in the main checkout ({main})" if main else "in the main checkout"
+            raise DatabaseNotFoundError(
+                f"no {DB_DIR}/ found from {cwd}; this is a git worktree ({worktree}) "
+                f"and its main checkout has no tracker either. Run `codebugs init` "
+                f"{where} — a tracker created inside a worktree is deleted with it"
+            )
+        raise DatabaseNotFoundError(
+            f"no {DB_DIR}/ found in {cwd} or any parent; "
+            f"run `codebugs init` here, or cd into a project that has one"
+        )
     return os.path.join(root, DB_DIR, DB_FILE)
+
+
+def describe_root() -> dict[str, Any]:
+    """Report where this process is bound and which channel decided it.
+
+    NEVER RAISES. It is the shared body of `codebugs where` and the MCP startup
+    preflight, and the preflight must be warn-only: a fatal one would kill a
+    server whose project only appears later, which is the self-healing property
+    CB-11's card explicitly protects.
+
+    One resolver, two consumers, so the diagnostic and the server can never
+    disagree about where the process is pointed.
+    """
+    declared, source = declared_tracker_root()
+    try:
+        path = _db_path()
+    except (DatabaseNotFoundError, OSError) as e:
+        # OSError as well, so "never raises" is true rather than aspirational:
+        # the filesystem can fail underneath any of this, and a preflight that
+        # dies is a fatal preflight no matter which exception killed it.
+        return {
+            "root": declared,
+            "source": source,
+            "source_label": SOURCE_LABELS[source],
+            "path": None,
+            "error": str(e),
+        }
+    # `path` is always `<root>/<DB_DIR>/<DB_FILE>`, so the root is recoverable
+    # without walking again — and cannot disagree with the path we just resolved.
+    return {
+        "root": os.path.dirname(os.path.dirname(path)),
+        "source": source,
+        "source_label": SOURCE_LABELS[source],
+        "path": path,
+        "error": None,
+    }
 
 
 def init_project(project_dir: str | None = None, *, force: bool = False) -> dict[str, Any]:

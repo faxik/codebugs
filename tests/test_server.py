@@ -18,6 +18,7 @@ would be collected and never awaited — i.e. it would pass without running.
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
 import types
 from contextlib import contextmanager
@@ -170,3 +171,61 @@ class TestStrictToolArguments:
             return len(tools)
 
         assert asyncio.run(check()) > 50
+
+
+class TestPreflight:
+    """CB-11: a server pointed at nothing must SAY so, once, and keep running.
+
+    Before this, `_conn` connected lazily per call, so a misconfigured server
+    looked healthy at startup and failed every tool call forever with no single
+    moment that named the problem. The card's constraint is equally load-bearing
+    in the other direction: the preflight must not be fatal, or a server whose
+    project appears later stops self-healing.
+    """
+
+    def test_warns_when_no_tracker_is_reachable(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        server._preflight()
+        err = capsys.readouterr().err
+        assert str(tmp_path) in err
+        assert "codebugs init" in err
+
+    def test_does_not_exit_when_no_tracker_is_reachable(self, tmp_path, monkeypatch):
+        """Warn-only. A SystemExit here would break lazy-connect self-healing."""
+        monkeypatch.chdir(tmp_path)
+        server._preflight()  # must simply return
+
+    def test_silent_on_the_ordinary_discovered_path(self, tmp_path, monkeypatch, capsys):
+        """No noise per project per startup — the default binding is unremarkable."""
+        db.init_project(str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        server._preflight()
+        assert capsys.readouterr().err == ""
+
+    def test_announces_a_declared_root(self, tmp_path, monkeypatch, capsys):
+        """A non-default binding is worth exactly one line, on the record."""
+        db.init_project(str(tmp_path))
+        monkeypatch.setenv(db.ENV_ROOT, str(tmp_path))
+        server._preflight()
+        err = capsys.readouterr().err
+        assert str(tmp_path) in err
+        assert db.ENV_ROOT in err
+
+    def test_a_declared_root_that_fails_names_the_channel(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv(db.ENV_ROOT, str(tmp_path / "nope"))
+        server._preflight()
+        err = capsys.readouterr().err
+        assert db.ENV_ROOT in err
+
+    def test_survives_a_deleted_working_directory(self, tmp_path, capsys):
+        """The server outliving its worktree must warn, not die before `run()`."""
+        doomed = tmp_path / "doomed"
+        doomed.mkdir()
+        original = os.getcwd()
+        os.chdir(doomed)
+        try:
+            doomed.rmdir()
+            server._preflight()  # must not raise
+            assert capsys.readouterr().err != ""
+        finally:
+            os.chdir(original)
