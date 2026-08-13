@@ -52,6 +52,23 @@ def conn(tmp_project):
     c.close()
 
 
+@pytest.fixture
+def recording(tmp_project):
+    """A connection that records SQL templates, on an already-initialized tracker.
+
+    Module-level rather than per-class: the SET-clause structural guards for both
+    `meta` (CB-16) and `severity` (CB-17) need it. The project's "no shared
+    conftest.py" rule is about cross-*file* sharing, not cross-class sharing
+    inside one file.
+    """
+    db.connect(tmp_project).close()  # apply every module's schema to the file
+    path = os.path.join(tmp_project, ".codebugs", "findings.db")
+    conn = sqlite3.connect(path, factory=RecordingConnection)
+    conn.row_factory = sqlite3.Row
+    yield conn
+    conn.close()
+
+
 class TestAddFinding:
     def test_add_basic(self, conn):
         result = findings.add_finding(
@@ -276,16 +293,6 @@ class TestUpdateMetaComposition:
         )
         return conn
 
-    @pytest.fixture
-    def recording(self, tmp_project):
-        """A connection that records SQL templates, on an already-initialized tracker."""
-        db.connect(tmp_project).close()  # apply every module's schema to the file
-        path = os.path.join(tmp_project, ".codebugs", "findings.db")
-        conn = sqlite3.connect(path, factory=RecordingConnection)
-        conn.row_factory = sqlite3.Row
-        yield conn
-        conn.close()
-
     def test_notes_and_meta_update_both_survive(self, one):
         result = findings.update_finding(
             one, "CB-1", notes="INVESTIGATION", meta_update={"fix_commit": "abc123"}
@@ -463,19 +470,6 @@ class TestRetriageSeverity:
         )
         return conn
 
-    @pytest.fixture
-    def recording(self, tmp_project):
-        db.connect(tmp_project).close()  # apply every module's schema to the file
-        path = os.path.join(tmp_project, ".codebugs", "findings.db")
-        conn = sqlite3.connect(path, factory=RecordingConnection)
-        conn.row_factory = sqlite3.Row
-        yield conn
-        conn.close()
-
-    def test_escalate(self, one):
-        result = findings.update_finding(one, "CB-1", severity="high")
-        assert result["severity"] == "high"
-
     def test_the_escalation_is_durable(self, one, tmp_project):
         """Read back through a SECOND connection, so the commit is what is proved.
 
@@ -504,17 +498,18 @@ class TestRetriageSeverity:
             "the bystander must not have been re-triaged too"
         )
 
-    def test_downgrade(self, one):
-        result = findings.update_finding(one, "CB-1", severity="low")
-        assert result["severity"] == "low"
-
     def test_every_canonical_severity_is_reachable(self, one):
+        """Covers escalation and downgrade both — the fixture is seeded `medium`."""
         for sev in SEVERITIES:
             assert findings.update_finding(one, "CB-1", severity=sev)["severity"] == sev
 
-    def test_invalid_severity_raises(self, one):
+    @pytest.mark.parametrize("bad", ["urgent", "HIGH"])
+    def test_invalid_severity_raises(self, one, bad):
+        """`ValueError`, not `IntegrityError` — the Python check is the validator and
+        the column CHECK is only a backstop. ``HIGH`` also pins the case-strictness
+        that CB-19 proposes to relax, so relaxing it cannot happen silently."""
         with pytest.raises(ValueError, match="Invalid severity"):
-            findings.update_finding(one, "CB-1", severity="urgent")
+            findings.update_finding(one, "CB-1", severity=bad)
 
     def test_invalid_severity_leaves_the_row_untouched(self, one):
         with pytest.raises(ValueError):
@@ -522,15 +517,6 @@ class TestRetriageSeverity:
         row = findings.get_finding(one, "CB-1")
         assert row["severity"] == "medium"
         assert row["status"] == "open", "validation must precede the write, not follow it"
-
-    def test_rejection_is_valueerror_not_integrityerror(self, one):
-        """The Python check is the validator; the column CHECK is only a backstop.
-
-        Reaching the constraint would surface ``sqlite3.IntegrityError`` where the
-        project's error contract promises ``ValueError``.
-        """
-        with pytest.raises(ValueError):
-            findings.update_finding(one, "CB-1", severity="HIGH")
 
     def test_severity_and_status_compose_in_one_call(self, one):
         result = findings.update_finding(one, "CB-1", severity="high", status="in_progress")
