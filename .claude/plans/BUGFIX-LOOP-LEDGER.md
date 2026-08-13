@@ -9,6 +9,8 @@ net change. Tracker: this repo's own `.codebugs/findings.db`, served by `mcp__co
 | 2026-08-13 | `codebugs` | CB-4, CB-1, CB-5 | **closed stale** with evidence — all three describe code that has since been refactored | `6e5236c`, `63d0658` (doc corrections) | sweep the remaining arch-debt cards |
 | 2026-08-13 | `codebugs` | CB-18, CB-15 | **fixed** — `append_note` unreachable from either surface; unknown argument names silently dropped | `6a1aef2` (`987fc20`, `d6ce8de`) | CB-17 left open by design |
 | 2026-08-13 | `codebugs` | CB-17 | **fixed** — severity was write-once, so a re-measured card could not be re-triaged | `dc49160` (`741f428`) | filed CB-19, CB-20; upgraded CB-6 |
+| 2026-08-13 | `codebugs` | CB-17 (post-hoc) | **simplify pass** that should have run before landing — 3 redundant tests, a duplicated fixture, and two false doc claims | `1892b80` | filed CB-21 |
+| 2026-08-13 | `codebugs` | CB-20 | **fixed** — vocabulary columns ordered alphabetically, so `low` outranked `medium` and `could` outranked `must` | `f9a682e` (`2ac27c4`) | filed CB-22 |
 
 ## 2026-08-13 — CB-16
 
@@ -135,3 +137,53 @@ Codex's advice because fixing it widens `add_finding`'s accepted inputs) and CB-
 severity` is lexical, so `low` outranks `medium` in the primary read path — this card's own premise
 one layer down). CB-6 upgraded from suspected to confirmed: the CLI is *systematically* a subset of
 the MCP surface, not just missing blockers, so its real question is a policy one.
+
+## 2026-08-13 — the CB-17 simplify pass, run after landing
+
+**I skipped `/simplify` before landing CB-17.** Phase 8 mandates it; I went from verification
+straight to commit. The user asked. Running it found five things worth fixing, so the skip cost
+something real — record it as a process failure, not a footnote.
+
+The tests were the cheap half (a fixture duplicated verbatim across two classes, two tests
+subsumed by a loop, one testing the same guard twice). **The docs were the expensive half:** the
+CLAUDE.md rule I had just written, "a column settable at INSERT should be settable at UPDATE",
+**shipped false on the tree it was written for** — `description`/`category`/`file` are immutable
+on findings while requirements can rewrite `description`. A Codex doc audit then found my
+*correction* was also incomplete: `source` is INSERT-settable on **both** entities and in neither
+update contract.
+
+Three passes over one function, three different missing columns. That is the argument for CB-21:
+enumeration by inspection does not converge, so the answer is a parity test, not more careful
+reading.
+
+**Codex reliability, worth knowing:** the broad five-part review prompt timed out at 600s, and two
+`codex exec` CLI runs exited 0 after a single planning line (it reads stdin as extra prompt input,
+which `nohup` leaves dangling; `reasoning effort: ultra` compounds it). A short single-question MCP
+prompt worked first time, as every focused prompt has. **Keep cross-model prompts narrow.**
+
+## 2026-08-13 — CB-20 (queues ordered alphabetically)
+
+**The sibling sweep is what made this iteration worth more than its card.** The card named two
+sites; sweeping every `ORDER BY` in the package found a third — `blockers.query_deferred_entities`
+— and that is where the worse defect lived: `PRIORITIES` sorts lexically to `could, must, should`,
+so the deferred queue put the **highest** priority **last**. The card's own "RELATED: reqs is also
+lexical" lead was, meanwhile, **wrong** — both `get_stats` functions pre-seed their output dict
+with the vocabulary, so row order never reaches the caller. Verify a card's leads before carrying
+them; two of this one's three were false.
+
+**Fixed at the registry, not the call site.** `EntityKind` already declared `sort_col`; its
+precedence now sits beside it as `sort_vocabulary`, behind `order_by()`. The field is **required
+but nullable** — a kind may legitimately sort by an id, but a *default* would let a future kind
+with a TEXT vocabulary column inherit "no precedence" silently, which is the defect itself. That
+choice is why adding it broke a claims test, and breaking that test was the design working.
+
+**The mutation that mattered.** Codex, asked only for the fix shape, warned that the CASE
+placeholders sit between the WHERE fragment and LIMIT/OFFSET, so their params must be spliced
+there rather than prepended. Prepending fails **exactly one** test — the filtered-query one —
+while all five unfiltered ordering tests pass. Without that single test the bug ships. A test
+whose absence is invisible is the kind worth writing down.
+
+**Also worth not re-deriving:** `ruff format` on a file you only appended to reformats the whole
+file. `test_blockers.py` came back with 142 changed lines for a 50-line addition. Restore the file
+and re-append rather than shipping the noise — `ruff check` is the gate, not `ruff format --check`,
+and the repo has pre-existing drift in 25 files.
