@@ -1351,3 +1351,29 @@ class TestSeverityIsNormalizedAtEveryRoute:
             assert c.execute("SELECT severity FROM findings").fetchone()["severity"] == "high"
         finally:
             c.close()
+
+
+class TestQueryCliReportsBadVocabularyCleanly:
+    """CB-19 review finding: `_cmd_query` never caught `ValueError`, so an unknown
+    `--status` printed a raw traceback. That predates CB-19 — `status` already
+    resolved — but routing `--severity` through a resolver widened the exposure,
+    so the handler is fixed here rather than left for the next flag to trip."""
+
+    def _run(self, tmp_project, *args):
+        return subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", *args],
+            capture_output=True, text=True, cwd=tmp_project,
+            env={**os.environ, "PYTHONPATH": os.path.join(os.getcwd(), "src")},
+        )
+
+    @pytest.mark.parametrize("flag", ["--severity", "--status"])
+    def test_unknown_vocabulary_value_exits_1_without_a_traceback(self, tmp_project, flag):
+        r = self._run(tmp_project, "query", flag, "banana")
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "Traceback" not in r.stderr, r.stderr
+        assert "banana" in r.stderr
+
+    def test_a_valid_query_still_works(self, tmp_project):
+        """The guard must not swallow the happy path."""
+        r = self._run(tmp_project, "query", "--severity", "HIGH")
+        assert r.returncode == 0, r.stdout + r.stderr

@@ -206,3 +206,21 @@ class TestRankCaseSql:
             "a legacy value must not outrank a real one"
         )
         conn.close()
+
+
+class TestResolversRefuseNonStrings:
+    """CB-19 review finding: `_resolve` called `.lower()` before checking anything,
+    so a `None` escaped as `AttributeError` — violating the package contract that
+    domain functions raise `ValueError` for invalid input.
+
+    Guarded at the shared `_resolve`, not per resolver: every one of them had the
+    same hole, so a per-resolver fix would leave the next one to re-acquire it."""
+
+    @pytest.mark.parametrize(
+        "resolver", [resolve_severity, resolve_priority, resolve_finding_status,
+                     resolve_requirement_status]
+    )
+    @pytest.mark.parametrize("bad", [None, 3, ["high"], object()])
+    def test_non_string_raises_value_error_not_attribute_error(self, resolver, bad):
+        with pytest.raises(ValueError, match="Invalid"):
+            resolver(bad)

@@ -853,18 +853,33 @@ def register_cli(sub, commands) -> None:
     def _cmd_query(args: argparse.Namespace) -> None:
         conn = db.connect()
         ids = [s.strip() for s in args.id.split(",") if s.strip()] if args.id else None
-        result = query_findings(
-            conn,
-            ids=ids,
-            status=args.status,
-            severity=args.severity,
-            category=args.category,
-            file=args.file,
-            source=args.source,
-            group_by=args.group_by,
-            limit=args.limit or 100,
-        )
-        conn.close()
+        try:
+            result = query_findings(
+                conn,
+                ids=ids,
+                status=args.status,
+                severity=args.severity,
+                category=args.category,
+                file=args.file,
+                source=args.source,
+                group_by=args.group_by,
+                limit=args.limit or 100,
+            )
+        except json.JSONDecodeError:
+            # MUST stay ahead of the ValueError arm, which it subclasses — same
+            # ordering contract as `_cmd_update`. A corrupt stored row is not bad
+            # user input, and flattening it into a one-line "bad input" message
+            # would hide a data-integrity problem behind a usage error.
+            raise
+        except ValueError as e:
+            # `--severity`/`--status` are free text; an unknown value now names
+            # itself and exits 1 instead of printing a traceback. Vocabulary
+            # filters have raised since `status` began resolving — this handler
+            # simply never caught it (CB-19).
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
 
         if result.get("grouped"):
             data = [{"group": r["group_key"], "count": str(r["count"])} for r in result["groups"]]

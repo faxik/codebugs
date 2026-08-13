@@ -77,7 +77,17 @@ def _resolve(
     aliases: dict[str, str] | None,
     label: str,
 ) -> str:
-    """Normalize a value to canonical lowercase form with optional alias lookup."""
+    """Normalize a value to canonical lowercase form with optional alias lookup.
+
+    A non-string is refused as ``ValueError`` here rather than escaping as the
+    ``AttributeError`` that ``.lower()`` would raise: domain functions promise
+    ``ValueError`` for invalid input, and a caller passing ``None`` is giving
+    invalid input, not tripping an internal error. This guard belongs at the shared
+    layer — every resolver had the same hole, so fixing it per-resolver would leave
+    the next one to re-acquire it.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"Invalid {label}: {value!r}")
     v = value.lower().strip()
     if aliases:
         v = aliases.get(v, v)

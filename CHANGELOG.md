@@ -10,19 +10,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`severity` now accepts any case, everywhere it is read or written** (CB-19).
   It was the only vocabulary in `types.py` without a resolver, so
   `add_finding(severity="High")` raised while the sibling `resolve_priority("Must")`
-  returned `"must"` — an avoidable failure mode for the LLM callers this tracker
-  exists to serve, since nothing in the tool descriptions signalled that one field
-  was case-sensitive and its sibling was not. `types.resolve_severity()` now
-  normalizes case and surrounding whitespace at all five sites: `add_finding`,
-  `batch_add_findings`, `update_finding`, the CSV import, and `query_findings`.
-  **Severity still has no aliases** — `crit`, `P0` and `sev1` are refused, and only
-  spelling is forgiven, never meaning.
+  returned `"must"`. Two sibling entities answered the same question differently,
+  which is an avoidable failure mode for the LLM callers this tracker serves. (The
+  `update` tool docstring did say "Exact lowercase only"; the `add` tool's did not,
+  so the strictness was discoverable on one surface and not the other.)
+  `types.resolve_severity()` now normalizes case and surrounding whitespace at all
+  five sites: `add_finding`, `batch_add_findings`, `update_finding`, the CSV import,
+  and `query_findings`. **Severity still has no aliases** — `crit`, `P0` and `sev1`
+  are refused. Only spelling is forgiven, never meaning.
 
-  Note the `query_findings` half is a bug fix in its own right: that filter compared
-  the caller's spelling against a canonical column while `status` on the adjacent
-  line already resolved, so `query(severity="HIGH")` silently returned **zero rows**
-  rather than raising. It now resolves too, which also means an unrecognised filter
-  value raises instead of reporting an empty queue.
+- **Vocabulary query filters now resolve instead of comparing raw text**
+  (CB-19 and its sibling sweep). Affects `query_findings` (`severity`),
+  `query_requirements` (`status`, `priority`) and `reqs_search_similar` (`status`).
+  These compared the caller's spelling against a canonical column while the
+  corresponding write paths had always normalized, so a value could be written and
+  then not found by the same spelling: `update_requirement(priority="SHOULD")`
+  stored `should`, and `query_requirements(priority="SHOULD")` returned **zero
+  rows**. The failure was silent — "no requirements" is indistinguishable from an
+  empty queue.
+
+  **Behaviour change:** a filter value that is not in the vocabulary now raises
+  `ValueError` instead of returning an empty result. The `codebugs query` and
+  `codebugs reqs-query` CLI handlers report it on stderr and exit 1 rather than
+  printing a traceback, which they did not do before for `--status` either. An
+  empty-string filter is still treated as "no filter" and is not validated.
 
 ### Fixed
 - **An `EntityKind` carrying a malformed SQL identifier is refused at construction**
