@@ -95,7 +95,18 @@ def _preflight() -> None:
             "reachable; `codebugs where` shows the current binding",
             file=sys.stderr,
         )
-    elif info["source"] != "discovery":
+        return
+    if not info["exists"]:
+        # Resolving is not the same as being there (CB-23). This binding does not
+        # fail — the first tool call CREATES the tracker — so it is invisible in
+        # exactly the way CB-11 exists to prevent, and is worth a line even though
+        # nothing is broken yet.
+        print(
+            f"codebugs-mcp: {info['path']} does not exist yet — the first write will "
+            f"create a new, empty tracker there",
+            file=sys.stderr,
+        )
+    if info["source"] != "discovery":
         print(
             f"codebugs-mcp: tracker root {info['root']} (from {info['source_label']})",
             file=sys.stderr,
