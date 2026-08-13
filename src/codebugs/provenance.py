@@ -128,9 +128,7 @@ def check_findings(
         # `check_findings(status=0)` silently reported on open findings (CB-25). A
         # wrong value now reaches `query_findings` and raises. Unlike the five domain
         # filters, None/"" here mean "default to open", not "no filter".
-        query_kwargs["status"] = (
-            status if types.is_vocabulary_filter_active(status) else "open"
-        )
+        query_kwargs["status"] = status if types.is_vocabulary_filter_active(status) else "open"
         if category:
             query_kwargs["category"] = category
         if file:
