@@ -16,13 +16,24 @@ from typing import Any
 
 from codebugs import types as t
 
-# Every interpolated SQL identifier (table / sort_col / readable column) must match this.
-_SAFE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
 
 @dataclass(frozen=True)
 class EntityKind:
-    """Declarative descriptor for one resolvable entity kind."""
+    """Declarative descriptor for one resolvable entity kind.
+
+    Every field of this class that reaches SQL as an IDENTIFIER — ``table``,
+    ``sort_col``, and each member of ``readable_cols`` — is validated in
+    ``__post_init__``, so a malformed kind dies where it is declared instead of
+    inside a query. That is what lets the ``# noqa: S608`` justifications on the
+    f-string statements below be structural rather than a promise (CB-22).
+
+    Every OTHER field is unvalidated because it never becomes SQL text: it is
+    either bound as a parameter, compared in Python, or used outside SQL entirely.
+    A new field needs validation here if and only if it is destined for an
+    f-string. (Today: ``name`` binds in ``claims.py``, ``busy_status`` and
+    ``sort_vocabulary`` bind, ``terminal`` compares, ``result_key`` is a JSON
+    envelope key, ``id_pattern`` never touches the database.)
+    """
 
     name: str  # == blockers item_type, e.g. "finding"
     table: str  # frozen-constant identifier, never caller input
@@ -46,6 +57,30 @@ class EntityKind:
     # A kind declaring it MUST satisfy P1-P4 (see EntityRef.set_status).
     busy_status: str | None = None
 
+    def __post_init__(self) -> None:
+        """Refuse any identifier that must not be interpolated (CB-22).
+
+        Assigns nothing, so it is safe on a frozen dataclass, and it runs on every
+        construction path this package uses — including ``dataclasses.replace()``,
+        which builds a new instance through ``__init__``. It does NOT run for
+        ``object.__new__``, unpickling, or a subclass that overrides it; none of
+        those occur here, and none are worth designing against.
+
+        ``readable_cols`` is validated MEMBER BY MEMBER, not merely as a set. Its
+        membership check in ``_read`` guards the CALLER's argument against the
+        allowlist; nothing there guards the allowlist's own contents, so an
+        unvalidated member turns the fence into a subquery-shaped hole.
+        """
+        interpolated = [("table", self.table), ("sort_col", self.sort_col)]
+        # sorted() only so the reported member is deterministic for a set.
+        interpolated += [("readable_cols member", c) for c in sorted(self.readable_cols)]
+        for label, value in interpolated:
+            if not t.is_sql_identifier(value):
+                raise ValueError(
+                    f"EntityKind({self.name!r}).{label} is not a bare column "
+                    f"identifier: {value!r}"
+                )
+
     def order_by(self) -> tuple[str, list[str]]:
         """``(fragment, params)`` ordering this kind's rows by ``sort_col``.
 
@@ -53,10 +88,11 @@ class EntityKind:
         cannot accidentally order a vocabulary column alphabetically (CB-20). The
         params must be spliced at the fragment's textual position in the final
         statement, not prepended.
+
+        Neither branch re-checks ``sort_col``: ``__post_init__`` already refused a
+        malformed one, and a second copy of that check is what CB-22 removed.
         """
         if self.sort_vocabulary is None:
-            if not _SAFE_IDENT.match(self.sort_col):
-                raise ValueError(f"Not a bare column identifier: {self.sort_col!r}")
             return self.sort_col, []
         return t.rank_case_sql(self.sort_col, self.sort_vocabulary)
 
@@ -114,7 +150,11 @@ class EntityRef:
         if col not in self.kind.readable_cols:
             raise ValueError(f"Column {col!r} is not readable for kind {self.kind.name!r}")
         row = conn.execute(
-            f"SELECT {col} FROM {self.kind.table} WHERE id = ?",  # noqa: S608 (identifiers allowlisted)
+            # noqa justified structurally: `col` is a member of readable_cols and
+            # `table` is a field, both validated as bare identifiers in
+            # EntityKind.__post_init__ (CB-22). The check above is the allowlist;
+            # __post_init__ is what makes the allowlist itself trustworthy.
+            f"SELECT {col} FROM {self.kind.table} WHERE id = ?",  # noqa: S608
             (self.id,),
         ).fetchone()
         return row[col] if row else None
@@ -165,7 +205,9 @@ class EntityRef:
         P1-P3 are enforced by a test; P4 is a review obligation.
         """
         cur = conn.execute(
-            f"UPDATE {self.kind.table} SET status = ?, updated_at = ? WHERE id = ? AND status = ?",  # noqa: S608 (identifier from the frozen registry)
+            # noqa justified structurally: `table` is validated as a bare identifier
+            # in EntityKind.__post_init__ (CB-22), not merely assumed frozen.
+            f"UPDATE {self.kind.table} SET status = ?, updated_at = ? WHERE id = ? AND status = ?",  # noqa: S608
             (new_status, t.utc_now(), self.id, expected),
         )
         return cur.rowcount == 1

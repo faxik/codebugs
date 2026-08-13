@@ -101,9 +101,38 @@ def resolve_priority(priority: str) -> str:
     return _resolve(priority, PRIORITIES, None, "priority")
 
 
-# --- Ordering ---
+# --- SQL identifiers ---
 
-_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Unanchored on purpose — `is_sql_identifier` applies it with `fullmatch`. The
+# anchored `^...$` form this replaced was NOT equivalent: `$` also matches just
+# before a trailing newline, so it accepted "findings\n" as an identifier.
+_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def is_sql_identifier(name: str) -> bool:
+    """True iff ``name`` is identifier-SHAPED and therefore safe to interpolate.
+
+    THE single definition of that pattern for the whole package (CB-22). It lives
+    here because ``types`` is the zero-dependency module every other one may import,
+    and because the pattern is security-relevant: a second copy is how one of them
+    drifts. ``entities`` once carried a byte-identical ``_SAFE_IDENT``; that the two
+    compiled to the same object was an artifact of ``re``'s pattern cache, not a
+    guarantee.
+
+    Deliberately a SAFE SUBSET, not a validator of "is a real column". It accepts
+    identifier-shaped strings that SQLite would read as something else — bare
+    keywords like ``NULL`` are accepted here and would become an expression in an
+    ``ORDER BY``. That is fine for its actual job, which is to make interpolation
+    injection-safe; whether the identifier names a real column is the caller's
+    business, and a wrong-but-shaped name fails loudly as ``no such column``.
+
+    Callers must interpolate an identifier ONLY after this returns True. Values are
+    never interpolated — bind them.
+    """
+    return bool(_IDENT.fullmatch(name))
+
+
+# --- Ordering ---
 
 
 def rank_case_sql(column: str, vocabulary: tuple[str, ...]) -> tuple[str, list[str]]:
@@ -123,8 +152,12 @@ def rank_case_sql(column: str, vocabulary: tuple[str, ...]) -> tuple[str, list[s
     Returns ``(fragment, params)``. The values are BOUND, not interpolated. The
     caller must splice ``params`` at the position the fragment occupies in the
     final statement — see the warning in ``findings.query_findings``.
+
+    ``column`` is re-checked here rather than trusted: this is a public function
+    with callers that are not ``EntityKind`` (``findings.query_findings`` passes a
+    literal), so it owns its own boundary (CB-22).
     """
-    if not _IDENT.match(column):
+    if not is_sql_identifier(column):
         raise ValueError(f"Not a bare column identifier: {column!r}")
     if not vocabulary:
         raise ValueError("vocabulary must not be empty")
