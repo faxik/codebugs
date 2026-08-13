@@ -14,6 +14,7 @@ net change. Tracker: this repo's own `.codebugs/findings.db`, served by `mcp__co
 | 2026-08-13 | `codebugs` | CB-22 | **fixed** — an allowlist that never validated its own members; sibling in `capacity.py` silently lost an increment | `e1900d4` (`4db5a07`, `6996b8e`, `d1fea09`) | CB-21 still needs a user decision |
 | 2026-08-13 | `codebugs` | CB-19 | **fixed** — severity had no resolver; the sweep found query filters comparing raw text against canonical columns in both entities | `071a630` (`f1f4bd0`, `d1a31f5`, `3f91704`) | queue now blocked: every remaining card needs a product decision |
 | 2026-08-13 | `codebugs` | CB-24 | **fixed** — meta merged in Python over a row read in a separate statement, so concurrent writers erased each other silently | `c3491c8` (`2495998`, `2d70e06`, `6d42fdb`, `3901425`, `f296852`) | filed CB-27; **CB-23 needs a user decision and is the highest-severity card left** |
+| 2026-08-13 | `codebugs` | CB-23 | **fixed** — a named or declared root accepted a `.codebugs/` directory with no database and created one, silently | `6834775` (`e8f0ece`, `222152c`, `e803f78`) | queue: CB-21, CB-25, CB-26, CB-6, CB-27 — CB-25 is the only one needing no decision |
 
 ## 2026-08-13 — CB-16
 
@@ -329,3 +330,54 @@ tree, which is the only version of this lesson that will actually hold.
 
 **Left open:** CB-23 (high, and the only card whose fix is blocked on a decision rather than on
 work), CB-21, CB-25, CB-26, CB-6, and the newly filed CB-27.
+
+## 2026-08-13 — CB-23 (the directory is not the tracker)
+
+**The question was decidable, and framing it as a semantics choice was the mistake.** The card
+offered three options and the author's first reply was "I'm not sure which is better — what are we
+defending against, and how does an empty `.codebugs/` even arise?" Answering those two questions
+empirically collapsed the choice: `_db_path`'s and `_declared_db_path`'s **own docstrings already
+promised** that a named or declared root "must fail loudly rather than quietly become a second, empty
+tracker", while the code checked only `os.path.isdir`. So option (c) was not a new decision at all —
+it was code diverging from a rule ratified in CB-11. **Before presenting options as a values choice,
+check whether one of them is already the stated contract.**
+
+**How an empty `.codebugs/` arises, since that was the load-bearing question.** `init_project` is
+the package's only `os.makedirs` and it runs *before* the database is created, so a Ctrl-C'd `init`
+leaves exactly this state. That is the common, benign cause — and it is why the walk keeps
+self-healing. The dangerous causes are all *named* paths: a `--repo` typo, a stale exported
+`CODEBUGS_ROOT`, a collaborator with `*.db` in a global gitignore. **The discriminator is not "does
+the directory exist" but "how did we come to be pointed here"** — a walk is evidence, a named path
+is an assertion.
+
+**The first attempt broke 38 tests and 305 errors, and that was the design telling me something.**
+`init_project` created its database *by way of* `connect()`, so tightening the resolver broke the one
+caller that must create. The fix is the split: `_open(path, create=)` is the only opener,
+`connect` = `_resolve_db` + `_open`, and `init_project` calls `_open` directly. That is what makes
+"init is the only creator" structural rather than incidental.
+
+**Codex found that my fix reproduced the bug it was fixing.** `isfile` in the resolver and
+`sqlite3.connect` in the opener is a check-then-act: another agent removing the database in between
+gets a fresh empty one built for it. The named and declared routes now open through SQLite's
+`mode=rw`, so existence is enforced *by the open*. The path check stays only for its message.
+**A fail-closed gate implemented as a separate check is not closed.**
+
+**Codex also found the case that makes the asymmetry non-benign — and the suite already modelled
+it.** In the CB-13 `--separate-git-dir` layout the mis-bound root is a stray `.codebugs/` *directory*,
+so `codebugs where` printed a database that does not exist as the project's tracker, and the MCP
+preflight stayed silent. `describe_root` now reports `exists` separately from `error`, because
+**resolving is not the same as being there**. That is the one case where the preflight speaks on an
+ordinary discovery binding.
+
+**I wrote a CLAUDE.md paragraph that contradicted itself two sentences apart** — "init_project is the
+only function that creates one", then "the walk creates the database inside it", then "`connect()`
+never creates; only `init_project` may call `_open`". `_open` has exactly two call sites. The altitude
+agent caught it. The repair was not better prose but a **ratchet** (`TestOpenCallSitesRatchet`),
+following the `BEGIN IMMEDIATE` allowlist pattern — and the true rule is statable in one sentence
+once you name the right noun: *`init_project` is the only function that creates the `.codebugs/`
+**directory***.
+
+**`git checkout --` destroyed uncommitted work during mutation testing. FOURTH occurrence today.**
+The CB-24 row already said the lesson is not a reminder but a guard. Writing it down twice has now
+failed twice. **The next iteration that touches this workflow should make the mutation runner refuse
+a dirty tree**; until then, commit before every mutation without exception.
