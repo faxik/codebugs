@@ -15,6 +15,7 @@ net change. Tracker: this repo's own `.codebugs/findings.db`, served by `mcp__co
 | 2026-08-13 | `codebugs` | CB-19 | **fixed** — severity had no resolver; the sweep found query filters comparing raw text against canonical columns in both entities | `071a630` (`f1f4bd0`, `d1a31f5`, `3f91704`) | queue now blocked: every remaining card needs a product decision |
 | 2026-08-13 | `codebugs` | CB-24 | **fixed** — meta merged in Python over a row read in a separate statement, so concurrent writers erased each other silently | `c3491c8` (`2495998`, `2d70e06`, `6d42fdb`, `3901425`, `f296852`) | filed CB-27; **CB-23 needs a user decision and is the highest-severity card left** |
 | 2026-08-13 | `codebugs` | CB-23 | **fixed** — a named or declared root accepted a `.codebugs/` directory with no database and created one, silently | `6834775` (`e8f0ece`, `222152c`, `e803f78`) | queue: CB-21, CB-25, CB-26, CB-6, CB-27 — CB-25 is the only one needing no decision |
+| 2026-08-13 | `codebugs` | CB-25 | **fixed** — vocabulary filters guarded by truthiness, so a falsey non-string returned the whole table; sweep grew 3 named sites to 9 | `c55f290` (`fd77d00`, `9b9ea2e`, `aac4904`) | filed CB-28, CB-29 — **every remaining card now needs a product decision, and CB-6's CLI-parity policy gates two of them** |
 
 ## 2026-08-13 — CB-16
 
@@ -381,3 +382,44 @@ once you name the right noun: *`init_project` is the only function that creates 
 The CB-24 row already said the lesson is not a reminder but a guard. Writing it down twice has now
 failed twice. **The next iteration that touches this workflow should make the mutation runner refuse
 a dirty tree**; until then, commit before every mutation without exception.
+
+## 2026-08-13 — CB-25 (a falsey value is wrong input, not "no filter")
+
+**The fix nearly reintroduced the bug it was fixing, and only a cross-model review caught it.**
+The obvious predicate for "is this a real filter" is `value is not None and value != ""`. That runs
+arbitrary user code: `unittest.mock.ANY` is truthy yet compares **equal** to `""`, so it would have
+flipped from *raises today* to *silently disables the filter* — CB-25's exact shape, inside CB-25's
+own fix. A `str` subclass overriding `__ne__` does the same to a perfectly valid `"open"`. The
+predicate is therefore type-based and uses `str.__len__` rather than `len()`, and the two tests that
+pin this are the whole value of the test class: **mutation-tested, the naive predicate passes 10 of
+12 predicate tests and fails only those two.** A guard against running user code cannot itself run
+user code.
+
+**My sibling sweep was an enumeration, so it could not converge.** I grepped
+`if status:|if severity:|if priority:|if kind:|if state:` — the names of filters I already knew were
+affected. That is structurally incapable of finding a filter I did not already know about, and it
+missed `blockers.query_blockers(trigger_type=...)`, where the `TRIGGER_TYPES` validation sits
+*inside* the truthy guard (which is exactly what makes it look safe on inspection). Grepping the
+**shape** — `if <name>:` wrapping a vocabulary membership check — finds it in one pass and finds
+nothing else, which is what makes the sweep provably complete rather than merely long. This is the
+repo's recurring lesson (CB-21, CB-22, CB-27) arriving in the sweep methodology itself: *a check
+that validates elements cannot validate their composition, and a rule written as a list is the
+letter.* The /simplify altitude pass caught it, not me.
+
+**I duplicated a vocabulary in the commit that argued against duplicating vocabularies.** I declared
+`MERGE_SESSION_STATUSES` while `types.MERGE_STATUSES` already existed — byte-identical, and dead
+code, which is *why* `get_sessions` validated nothing. Three copies of one four-value vocabulary,
+with a comment above them about single sources of truth. The right fix was to use the constant that
+already existed, which also revived dead code. **Before declaring a constant, grep for its value,
+not just its name.**
+
+**The pick was Codex's, not mine, and it was right.** I ranked CB-21 (medium) above CB-25 (low) on
+severity × blast radius. Codex pointed out CB-21's parity gate cannot assert CLI parity without
+first answering CB-6's unresolved policy question, so CB-21 trips the product-decision predicate
+rather than being a clean pick. It also correctly reduced CB-25's claimed blast radius — pydantic
+rejects non-strings, so MCP and CLI are unreachable and only direct Python callers are affected.
+Both corrections survived my own verification.
+
+**Left open, and the queue is now fully decision-blocked:** CB-6 (CLI-peer-or-subset policy — this
+is the keystone; CB-21 depends on it), CB-21, CB-26, CB-27, CB-28, CB-29. Nothing remains that can
+be shipped without a product decision.
