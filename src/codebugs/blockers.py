@@ -8,7 +8,7 @@ from typing import Any
 
 from codebugs import db
 from codebugs.entities import EntityRef, entity_kind
-from codebugs.types import TRIGGER_TYPES, utc_now
+from codebugs.types import TRIGGER_TYPES, is_vocabulary_filter_active, utc_now
 
 
 BLOCKERS_SCHEMA = """\
@@ -199,7 +199,12 @@ def query_blockers(
     if blocked_by:
         conditions.append("blocked_by = ?")
         params.append(blocked_by)
-    if trigger_type:
+    # The validation is right here in the body and was still bypassable: a falsey
+    # `trigger_type` skipped the whole block, so `query_blockers(trigger_type=0)`
+    # returned every blocker (CB-25). Found only by sweeping for the SHAPE of the
+    # guard — the first sweep grepped for the filter *names* it already knew about
+    # and therefore could not find this one.
+    if is_vocabulary_filter_active(trigger_type):
         if trigger_type not in TRIGGER_TYPES:
             raise ValueError(
                 f"Invalid trigger_type: {trigger_type}. Must be one of {TRIGGER_TYPES}"

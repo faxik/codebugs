@@ -525,7 +525,7 @@ class TestSessionStatusVocabulary:
         """Pins the declared vocabulary to the schema BEHAVIOURALLY rather than by
         matching the DDL text: every member must be accepted by the CHECK and a
         non-member must be rejected. If the two ever drift, this fails."""
-        for i, status in enumerate(merge.MERGE_SESSION_STATUSES):
+        for i, status in enumerate(merge.MERGE_STATUSES):
             conn.execute(
                 "INSERT INTO codemerge_sessions (session_id, branch, status) VALUES (?,?,?)",
                 (f"ok{i}", "b", status),

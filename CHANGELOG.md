@@ -22,13 +22,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `staleness_check` / `check_findings`, whose contract differs — `None` and `""`
   mean "default to `open`" there, not "no filter".
 
-  The same sweep closed two filters that validated their vocabulary on the write
-  side only: `codemerge_sessions` (its status vocabulary existed solely as a
-  literal inside the CHECK constraint, and is now the exported
-  `merge.MERGE_SESSION_STATUSES`) and `milestone_list` (`kind` / `state`, which had
-  `MILESTONE_KINDS` / `MILESTONE_STATES` all along and never consulted them on
-  query). Both now raise `ValueError` on an unknown value instead of returning
-  everything for a falsey one and nothing for a misspelled one.
+  The same sweep closed three filters that validated their vocabulary on the write
+  side only: `codemerge_sessions` (`types.MERGE_STATUSES` already existed but was
+  dead code, leaving the CHECK constraint as the only enforcement — it is now
+  actually used), `milestone_list` (`kind` / `state`, which had `MILESTONE_KINDS` /
+  `MILESTONE_STATES` all along and never consulted them on query), and
+  `blockers_query` (`trigger_type`, whose validation sat *inside* the truthy guard
+  and was therefore skipped wholesale by a falsey value). All three now raise
+  `ValueError` on an unknown value instead of returning everything for a falsey one
+  and nothing for a misspelled one.
 
   **Unchanged on purpose:** `None` and `""` still mean "no filter"; list-valued
   filters (`ids`, `tags`) still treat an empty list as "no filter"; and free-text

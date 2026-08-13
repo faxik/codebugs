@@ -100,7 +100,7 @@ def list_milestones(
     conditions: list[str] = []
     params: list[Any] = []
     # Validated on the query side as well as the write side (`create_milestone` at :42
-    # and `set_milestone_state` at :79). Guarding with truthiness alone let
+    # and `update_milestone` at :79). Guarding with truthiness alone let
     # `list_milestones(kind=0)` short-circuit into "no filter" and return every
     # milestone, and left an unknown-but-truthy kind to return silently empty — both
     # halves of the vocabulary-both-sides rule (CB-25 sibling sweep).
