@@ -58,26 +58,24 @@ class EntityKind:
         """Refuse any identifier that must not be interpolated (CB-22).
 
         Assigns nothing, so it is safe on a frozen dataclass, and it runs on every
-        construction path — including ``dataclasses.replace()``, which builds a new
-        instance through ``__init__``.
+        construction path this package uses — including ``dataclasses.replace()``,
+        which builds a new instance through ``__init__``. It does NOT run for
+        ``object.__new__``, unpickling, or a subclass that overrides it; none of
+        those occur here, and none are worth designing against.
 
         ``readable_cols`` is validated MEMBER BY MEMBER, not merely as a set. Its
         membership check in ``_read`` guards the CALLER's argument against the
         allowlist; nothing there guards the allowlist's own contents, so an
         unvalidated member turns the fence into a subquery-shaped hole.
         """
-        for field_name in ("table", "sort_col"):
-            value = getattr(self, field_name)
+        interpolated = [("table", self.table), ("sort_col", self.sort_col)]
+        # sorted() only so the reported member is deterministic for a set.
+        interpolated += [("readable_cols member", c) for c in sorted(self.readable_cols)]
+        for label, value in interpolated:
             if not t.is_sql_identifier(value):
                 raise ValueError(
-                    f"EntityKind({self.name!r}).{field_name} is not a bare column "
+                    f"EntityKind({self.name!r}).{label} is not a bare column "
                     f"identifier: {value!r}"
-                )
-        for col in sorted(self.readable_cols):
-            if not t.is_sql_identifier(col):
-                raise ValueError(
-                    f"EntityKind({self.name!r}).readable_cols member is not a bare "
-                    f"column identifier: {col!r}"
                 )
 
     def order_by(self) -> tuple[str, list[str]]:

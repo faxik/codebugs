@@ -204,6 +204,24 @@ class TestEntityKindIdentifierGuard:
             kind = replace(entity_kind("finding"), readable_cols=frozenset({"id", leak}))
             EntityRef("CB-1", kind).field(conn, name=leak)
 
+    def test_sort_col_is_validated_even_when_a_vocabulary_is_declared(self):
+        """Found by cross-model review as a SURVIVING mutation, not by a failure.
+
+        Every other negative `sort_col` case sets `sort_vocabulary=None`, so an
+        implementation validating `sort_col` only on the None branch passed the whole
+        suite — while violating the stated invariant on both production kinds, which
+        both declare a vocabulary."""
+        with pytest.raises(ValueError, match=r"\.sort_col is not a bare column identifier"):
+            replace(entity_kind("finding"), sort_col="severity; DROP TABLE t")
+
+    def test_a_trailing_newline_is_not_an_identifier(self):
+        """`re` `$` matches before a trailing newline, so the anchored `^...$` pattern
+        this guard inherited accepted "findings\\n". `fullmatch` is what makes the
+        claim true."""
+        assert not is_sql_identifier("id\n")
+        with pytest.raises(ValueError, match=r"\.table is not a bare column identifier"):
+            replace(entity_kind("finding"), table="findings\n")
+
     def test_a_well_formed_kind_still_constructs(self):
         """The guard must not refuse legitimate kinds — the vacuous-pass direction."""
         k = replace(entity_kind("finding"), table="widgets", sort_col="id", sort_vocabulary=None)

@@ -440,7 +440,9 @@ def query_deferred_entities(
     rank_sql, rank_params = kind.order_by()
     rows = conn.execute(
         # noqa justified structurally: `table` is validated as a bare identifier in
-        # EntityKind.__post_init__ and `rank_sql` binds its values (CB-22, CB-20).
+        # EntityKind.__post_init__, and `rank_sql` is not caller text — it is a fixed
+        # CASE template built by order_by() around that same validated column, whose
+        # vocabulary values are BOUND, not interpolated (CB-22, CB-20).
         f"SELECT * FROM {kind.table} WHERE id IN ({placeholders}) "  # noqa: S608
         f"ORDER BY {rank_sql}, created_at DESC LIMIT ? OFFSET ?",
         ids_list + rank_params + [limit, offset],

@@ -17,11 +17,16 @@ def _held_col(size: str) -> str:
 
     This column name is INTERPOLATED into SQL, on the strength of an invariant —
     the ``size`` CHECK constraint — enforced two layers away in another table. That
-    is the same shape as the ``EntityKind`` identifiers, and it failed two different
-    ways depending on caller state: with an existing capacity row an unknown size
-    raised ``OperationalError: no such column``, and with no row it took the dict
-    branch below, wrote a row of zeros, and returned SUCCESS having silently lost
-    the increment. Fail closed, identically, in both.
+    is the same shape as the ``EntityKind`` identifiers.
+
+    Production callers pass ``item["size"]`` read back from that CHECK-constrained
+    column, so a bad size needs a direct call to one of these private helpers or a
+    corrupted row; the exposure is prospective, as in CB-22 itself. What made it
+    worth closing is that the two paths disagreed for the SAME input: with an
+    existing capacity row an unknown size raised ``OperationalError: no such
+    column``, while with no row it took the dict branch below, wrote a row of
+    zeros, and returned SUCCESS having silently lost the increment. Fail closed,
+    identically, in both.
     """
     if size not in ITEM_SIZES:
         raise ValueError(f"Invalid size: {size!r}. Must be one of {ITEM_SIZES}")
