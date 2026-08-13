@@ -501,10 +501,23 @@ class TestConcurrentMetaUpdatesDoNotLoseEachOther:
         c.execute("PRAGMA busy_timeout=5000")
         return c
 
-    def test_a_competing_append_note_is_not_erased(self, conn, tmp_project):
-        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
-        findings.update_finding(conn, "CB-1", notes="BASE")
+    def _interleave(self, tmp_project, a_call, b_call):
+        """Drive two writers through each other's read-modify-write window.
 
+        A pauses after its opening SELECT until B has also read. Before the fix B
+        gets there, both merges are built from the same stale row, and whichever
+        UPDATE lands second erases the other. After the fix A holds the write lock
+        from before its own SELECT, so B blocks at BEGIN IMMEDIATE and never
+        reaches its read — the wait times out, A commits, and B then re-reads a row
+        that already carries A's write.
+
+        Waiting on ``b_started`` before ``b_read`` is what keeps this honest. With
+        only the 1.0s timeout as a guard, a worker thread not scheduled inside that
+        second lets A write first — after which B reads A's committed row, merges
+        cleanly, and the test PASSES against the unfixed code. ``b_started`` is set
+        once B's connection is open, so the unguarded gap is B's entry into the
+        call rather than thread startup plus a connection open.
+        """
         a = self._open(tmp_project)
         a_read, b_started, b_read = (threading.Event() for _ in range(3))
 
@@ -514,21 +527,10 @@ class TestConcurrentMetaUpdatesDoNotLoseEachOther:
             b.after_select = b_read.set  # bound to their creating thread
             b_started.set()
             try:
-                findings.update_finding(b, "CB-1", append_note="FROM-B")
+                b_call(b)
             finally:
                 b.close()
 
-        # A pauses after its read until B has also read. Before the fix B gets
-        # there and both merges are built from the same stale row. After it, A
-        # holds the write lock from before its own SELECT, so B blocks at BEGIN
-        # IMMEDIATE and never reaches its read — the wait times out, A commits,
-        # and B then re-reads a row that already carries A's note.
-        # Waiting on `b_started` first is what keeps this honest. Without it the only
-        # guard is the 1.0s timeout, and a worker thread not scheduled within that
-        # second lets A write first — after which B reads A's committed row, merges
-        # cleanly, and the test PASSES against the unfixed code. `b_started` is set
-        # after B's connection is open, so the unguarded gap is just B's entry into
-        # the call rather than thread startup plus a connection open.
         a.after_select = lambda: (
             a_read.set(),
             b_started.wait(timeout=10),
@@ -538,11 +540,21 @@ class TestConcurrentMetaUpdatesDoNotLoseEachOther:
         t = threading.Thread(target=competing_writer)
         t.start()
         try:
-            findings.update_finding(a, "CB-1", append_note="FROM-A")
+            a_call(a)
         finally:
             t.join(timeout=30)
             a.close()
         assert not t.is_alive()
+
+    def test_a_competing_append_note_is_not_erased(self, conn, tmp_project):
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        findings.update_finding(conn, "CB-1", notes="BASE")
+
+        self._interleave(
+            tmp_project,
+            lambda a: findings.update_finding(a, "CB-1", append_note="FROM-A"),
+            lambda b: findings.update_finding(b, "CB-1", append_note="FROM-B"),
+        )
 
         notes = findings.get_finding(conn, "CB-1")["meta"]["notes"]
         assert "FROM-A" in notes, notes
@@ -582,39 +594,11 @@ class TestConcurrentMetaUpdatesDoNotLoseEachOther:
         """
         findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
 
-        a = self._open(tmp_project)
-        a_read, b_started, b_read = (threading.Event() for _ in range(3))
-
-        def competing_writer():
-            a_read.wait(timeout=10)
-            b = self._open(tmp_project)
-            b.after_select = b_read.set
-            b_started.set()
-            try:
-                findings.update_finding(b, "CB-1", meta_update={"from_b": True})
-            finally:
-                b.close()
-
-        # Waiting on `b_started` first is what keeps this honest. Without it the only
-        # guard is the 1.0s timeout, and a worker thread not scheduled within that
-        # second lets A write first — after which B reads A's committed row, merges
-        # cleanly, and the test PASSES against the unfixed code. `b_started` is set
-        # after B's connection is open, so the unguarded gap is just B's entry into
-        # the call rather than thread startup plus a connection open.
-        a.after_select = lambda: (
-            a_read.set(),
-            b_started.wait(timeout=10),
-            b_read.wait(timeout=1.0),
+        self._interleave(
+            tmp_project,
+            lambda a: findings.update_finding(a, "CB-1", meta_update={"from_a": True}),
+            lambda b: findings.update_finding(b, "CB-1", meta_update={"from_b": True}),
         )
-
-        t = threading.Thread(target=competing_writer)
-        t.start()
-        try:
-            findings.update_finding(a, "CB-1", meta_update={"from_a": True})
-        finally:
-            t.join(timeout=30)
-            a.close()
-        assert not t.is_alive()
 
         meta = findings.get_finding(conn, "CB-1")["meta"]
         assert meta.get("from_a") is True, meta

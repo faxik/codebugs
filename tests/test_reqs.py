@@ -305,15 +305,20 @@ class TestConcurrentMetaUpdatesDoNotLoseEachOther:
         assert row["status"] == "planned", "the nested update must roll back with its caller"
         assert "nested" not in json.dumps(row["meta"]), row["meta"]
 
-    def test_a_competing_meta_update_key_is_not_erased(self, tmp_path):
-        # File-backed rather than the module's in-memory fixture: two connections
-        # to ``:memory:`` are two separate databases, so the race cannot exist there.
-        db_path = str(tmp_path / "reqs.db")
-        seed = self._open(db_path)
-        seed.execute("PRAGMA journal_mode=WAL")
-        reqs.ensure_schema(seed)
-        reqs.add_requirement(seed, req_id="FR-1", section="S", description="d")
+    def _interleave(self, db_path, a_call, b_call):
+        """Drive two writers through each other's read-modify-write window.
 
+        A pauses after its opening SELECT until B has also read. Before the fix B
+        gets there, both merges come off the same stale row, and whichever UPDATE
+        lands second erases the other. After the fix A holds the write lock from
+        before its own SELECT, so B blocks at BEGIN IMMEDIATE and never reaches its
+        read — the wait times out, A commits, and B re-reads a row carrying A's key.
+
+        ``b_started`` is load-bearing, not belt-and-braces: with only the 1.0s
+        timeout as a guard, a worker not scheduled inside that second lets A write
+        first, B then reads A's committed row, and the test passes against the
+        UNFIXED code.
+        """
         a = self._open(db_path)
         a_read, b_started, b_read = (threading.Event() for _ in range(3))
 
@@ -323,17 +328,10 @@ class TestConcurrentMetaUpdatesDoNotLoseEachOther:
             b.after_select = b_read.set  # bound to their creating thread
             b_started.set()
             try:
-                reqs.update_requirement(b, "FR-1", meta_update={"from_b": True})
+                b_call(b)
             finally:
                 b.close()
 
-        # Before the fix B reaches its read and both merges come off the same stale
-        # row. After it, A holds the write lock from before its own SELECT, so B
-        # blocks at BEGIN IMMEDIATE, this wait times out, A commits, and B then
-        # re-reads a row that already carries A's key.
-        # `b_started` is load-bearing, not belt-and-braces: with only the 1.0s
-        # timeout, a worker not scheduled inside that second lets A write first, B
-        # then reads A's committed row, and the test passes against the UNFIXED code.
         a.after_select = lambda: (
             a_read.set(),
             b_started.wait(timeout=10),
@@ -343,60 +341,37 @@ class TestConcurrentMetaUpdatesDoNotLoseEachOther:
         t = threading.Thread(target=competing_writer)
         t.start()
         try:
-            reqs.update_requirement(a, "FR-1", meta_update={"from_a": True})
+            a_call(a)
         finally:
             t.join(timeout=30)
             a.close()
         assert not t.is_alive()
 
-        meta = reqs.get_requirement(seed, "FR-1")["meta"]
-        seed.close()
-        assert meta.get("from_a") is True, meta
-        assert meta.get("from_b") is True, meta
-
-    def test_a_competing_notes_write_is_not_erased(self, tmp_path):
-        """``notes`` replaces wholesale, so the loser here is the *other* key it merged."""
+    def test_a_competing_meta_update_key_is_not_erased(self, tmp_path):
+        # File-backed rather than the module's in-memory fixture: two connections
+        # to ``:memory:`` are two separate databases, so the race cannot exist there.
         db_path = str(tmp_path / "reqs.db")
         seed = self._open(db_path)
         seed.execute("PRAGMA journal_mode=WAL")
         reqs.ensure_schema(seed)
         reqs.add_requirement(seed, req_id="FR-1", section="S", description="d")
 
-        a = self._open(db_path)
-        a_read, b_started, b_read = (threading.Event() for _ in range(3))
-
-        def competing_writer():
-            a_read.wait(timeout=10)
-            b = self._open(db_path)
-            b.after_select = b_read.set
-            b_started.set()
-            try:
-                reqs.update_requirement(b, "FR-1", notes="FROM-B", meta_update={"b_ran": True})
-            finally:
-                b.close()
-
-        # `b_started` is load-bearing, not belt-and-braces: with only the 1.0s
-        # timeout, a worker not scheduled inside that second lets A write first, B
-        # then reads A's committed row, and the test passes against the UNFIXED code.
-        a.after_select = lambda: (
-            a_read.set(),
-            b_started.wait(timeout=10),
-            b_read.wait(timeout=1.0),
+        # B also replaces `notes` wholesale, so this covers both meta-writing
+        # arguments at once. A separate notes-vs-notes test would prove nothing
+        # extra: only B writes notes, so under the serialization the fix buys, B is
+        # always second and always wins cleanly — an ordering assertion, not a race.
+        self._interleave(
+            db_path,
+            lambda a: reqs.update_requirement(a, "FR-1", meta_update={"from_a": True}),
+            lambda b: reqs.update_requirement(
+                b, "FR-1", notes="FROM-B", meta_update={"from_b": True}
+            ),
         )
-
-        t = threading.Thread(target=competing_writer)
-        t.start()
-        try:
-            reqs.update_requirement(a, "FR-1", meta_update={"a_ran": True})
-        finally:
-            t.join(timeout=30)
-            a.close()
-        assert not t.is_alive()
 
         meta = reqs.get_requirement(seed, "FR-1")["meta"]
         seed.close()
-        assert meta.get("a_ran") is True, meta
-        assert meta.get("b_ran") is True, meta
+        assert meta.get("from_a") is True, meta
+        assert meta.get("from_b") is True, meta
         assert meta.get("notes") == "FROM-B", meta
 
 
