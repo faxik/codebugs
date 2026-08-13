@@ -716,3 +716,43 @@ class TestLowercaseMigration:
             "SELECT priority FROM requirements WHERE id=?", ("FR-LEGACY-1",)
         ).fetchone()
         assert row["priority"] == "must"
+
+
+class TestQueryFiltersResolveLikeTheWritePaths:
+    """CB-19 sibling sweep: `query_requirements` compared the caller's spelling
+    against a canonical column, while `add_requirement` / `update_requirement` had
+    ALWAYS normalized through the same resolvers.
+
+    Verified before the fix: `update_requirement(priority="SHOULD")` stored `should`
+    and `query_requirements(priority="SHOULD")` then returned zero rows. A tracker
+    reporting "no requirements" for a value it just wrote is indistinguishable from
+    an empty queue — this predates CB-19 and is not caused by it.
+    """
+
+    def _one(self, conn):
+        return reqs.add_requirement(
+            conn, req_id="FR-1", section="S", description="d", priority="must"
+        )
+
+    @pytest.mark.parametrize("spelling", ["must", "Must", "MUST", "  must  "])
+    def test_priority_filter_finds_the_row_whatever_the_spelling(self, conn, spelling):
+        self._one(conn)
+        assert reqs.query_requirements(conn, priority=spelling)["total"] == 1
+
+    @pytest.mark.parametrize("spelling", ["planned", "Planned", "PLANNED"])
+    def test_status_filter_finds_the_row_whatever_the_spelling(self, conn, spelling):
+        self._one(conn)
+        assert reqs.query_requirements(conn, status=spelling)["total"] == 1
+
+    def test_what_was_written_can_be_found_by_the_same_spelling(self, conn):
+        """The round trip that was broken: write `SHOULD`, then look for `SHOULD`."""
+        self._one(conn)
+        reqs.update_requirement(conn, "FR-1", priority="SHOULD")
+        assert reqs.query_requirements(conn, priority="SHOULD")["total"] == 1
+
+    def test_an_unknown_filter_value_raises_instead_of_reporting_an_empty_queue(self, conn):
+        self._one(conn)
+        with pytest.raises(ValueError, match="Invalid priority"):
+            reqs.query_requirements(conn, priority="banana")
+        with pytest.raises(ValueError, match="Invalid requirement status"):
+            reqs.query_requirements(conn, status="banana")

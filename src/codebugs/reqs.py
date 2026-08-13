@@ -280,12 +280,20 @@ def query_requirements(
         params.extend(ids)
         if limit < len(ids):
             limit = len(ids)
+    # Both resolved, matching the write paths (CB-19 sibling sweep). Left raw, these
+    # filters compared the caller's spelling against a canonical column while
+    # `add_requirement` and `update_requirement` had ALWAYS normalized through
+    # `resolve_priority` / `resolve_requirement_status` — so
+    # `update_requirement(priority="SHOULD")` stored `should` and
+    # `query_requirements(priority="SHOULD")` then returned ZERO rows. A tracker
+    # reporting "no requirements" for a value it just wrote is the worst answer it
+    # can give, and it is indistinguishable from an empty queue.
     if status:
         conditions.append("status = ?")
-        params.append(status)
+        params.append(resolve_requirement_status(status))
     if priority:
         conditions.append("priority = ?")
-        params.append(priority)
+        params.append(resolve_priority(priority))
     if section:
         conditions.append("section LIKE ?")
         params.append(f"%{section}%")
@@ -841,13 +849,25 @@ def register_cli(sub, commands) -> None:
     def _cmd_reqs_query(args: argparse.Namespace) -> None:
         conn = db.connect()
         ids = [s.strip() for s in args.id.split(",") if s.strip()] if args.id else None
-        result = query_requirements(
-            conn, ids=ids,
-            status=args.status, priority=args.priority,
-            section=args.section, search=args.search,
-            group_by=args.group_by, limit=args.limit or 100,
-        )
-        conn.close()
+        try:
+            result = query_requirements(
+                conn, ids=ids,
+                status=args.status, priority=args.priority,
+                section=args.section, search=args.search,
+                group_by=args.group_by, limit=args.limit or 100,
+            )
+        except json.JSONDecodeError:
+            # MUST stay ahead of the ValueError arm, which it subclasses. A corrupt
+            # stored row is not bad user input — see the same contract on
+            # `findings._cmd_query` and `_cmd_update`.
+            raise
+        except ValueError as e:
+            # `--status`/`--priority` are free text and now resolve, so an unknown
+            # value names itself and exits 1 rather than printing a traceback (CB-19).
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
 
         if result.get("grouped"):
             data = [{"group": r["group_key"], "count": str(r["count"])} for r in result["groups"]]

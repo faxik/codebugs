@@ -8,7 +8,7 @@ import struct
 from typing import Any
 
 from codebugs import db
-from codebugs.types import utc_now
+from codebugs.types import resolve_requirement_status, utc_now
 
 
 def _pack_vector(vec: list[float]) -> bytes:
@@ -100,7 +100,10 @@ def search_similar(
     params: list[Any] = []
     if status:
         conditions.append("status = ?")
-        params.append(status)
+        # Resolved like every other status filter (CB-19 sibling sweep): raw, this
+        # silently returned no similar requirements for a correctly-spelled-but-
+        # differently-cased status, which reads as "nothing is similar".
+        params.append(resolve_requirement_status(status))
 
     where = f"WHERE {' AND '.join(conditions)}"
     rows = conn.execute(

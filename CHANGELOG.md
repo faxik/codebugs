@@ -6,7 +6,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **`severity` now accepts any case, everywhere it is read or written** (CB-19).
+  It was the only vocabulary in `types.py` without a resolver, so
+  `add_finding(severity="High")` raised while the sibling `resolve_priority("Must")`
+  returned `"must"`. Two sibling entities answered the same question differently,
+  which is an avoidable failure mode for the LLM callers this tracker serves. (The
+  `update` tool docstring did say "Exact lowercase only"; the `add` tool's did not,
+  so the strictness was discoverable on one surface and not the other.)
+  `types.resolve_severity()` now normalizes case and surrounding whitespace at all
+  five sites: `add_finding`, `batch_add_findings`, `update_finding`, the CSV import,
+  and `query_findings`. **Severity still has no aliases** — `crit`, `P0` and `sev1`
+  are refused. Only spelling is forgiven, never meaning.
+
+- **Vocabulary query filters now resolve instead of comparing raw text**
+  (CB-19 and its sibling sweep). Affects `query_findings` (`severity`),
+  `query_requirements` (`status`, `priority`) and `reqs_search_similar` (`status`).
+  These compared the caller's spelling against a canonical column while the
+  corresponding write paths had always normalized, so a value could be written and
+  then not found by the same spelling: `update_requirement(priority="SHOULD")`
+  stored `should`, and `query_requirements(priority="SHOULD")` returned **zero
+  rows**. The failure was silent — "no requirements" is indistinguishable from an
+  empty queue.
+
+  **Behaviour change:** a filter value that is not in the vocabulary now raises
+  `ValueError` instead of returning an empty result. The `codebugs query` and
+  `codebugs reqs-query` CLI handlers report it on stderr and exit 1 rather than
+  printing a traceback, which they did not do before for `--status` either. An
+  empty-string filter is still treated as "no filter" and is not validated.
+
 ### Fixed
+- **An `EntityKind` carrying a malformed SQL identifier is refused at construction**
+  (CB-22). `entities.py` claimed, in a comment, that every interpolated SQL
+  identifier (`table` / `sort_col` / readable column) was pattern-checked; only
+  `sort_col` was, inside `order_by()`. The `readable_cols` allowlist was the
+  material gap — its membership check guards the *caller's* argument and never the
+  allowlist's own contents, so a kind declaring `(SELECT meta FROM findings)` as a
+  readable column passed the check and `EntityRef.field()` returned a column that is
+  not in the allowlist at all. `EntityKind.__post_init__` now validates all three,
+  and the pattern lives once as `types.is_sql_identifier()` — applied with
+  `fullmatch`, since the previous `^…$` form also matched a trailing newline.
+  Exposure was prospective: `ENTITY_KINDS` is a frozen tuple of literals, but the
+  test suite already constructs kinds dynamically.
+- **`pull_next` no longer loses an agent's capacity increment** (CB-22 sibling).
+  `milestones/capacity.py` built the column name `f"{size}_held"` and interpolated
+  it, guarded only by a CHECK constraint two layers away on another table. The two
+  paths disagreed for identical input: with an existing capacity row an unknown size
+  raised `OperationalError`, while with no row it wrote a row of zeros and returned
+  **success**, silently dropping the increment. Both now raise `ValueError`.
 - **Queues are ordered by declared severity/priority precedence instead of
   alphabetically** (CB-20). `severity` and `priority` are TEXT columns, so a bare
   `ORDER BY` sorted them lexically: findings came back `critical, high, low,
@@ -27,8 +74,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   corrected in the structured field — the correction had to be carried as prose
   in a note, which is exactly the state a tracker exists to prevent. This brings
   findings level with requirements, whose `priority` was already mutable.
-  Validation is exact-match lowercase, matching what `add_finding` accepts;
-  unlike `status`, severity has no aliases.
+  Validation matches what `add_finding` accepts — see the severity normalization
+  entry under Changed, which relaxed both together.
 - `codebugs resolve-trailers --range <BASE>..<HEAD> [--repo DIR] [--dry-run]`
   (provenance module): parses `Resolves: CB-N` / `Tightens: CB-N` trailers from
   commit bodies in a git range and flips findings in-process — `Resolves` →

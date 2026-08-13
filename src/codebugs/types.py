@@ -77,7 +77,17 @@ def _resolve(
     aliases: dict[str, str] | None,
     label: str,
 ) -> str:
-    """Normalize a value to canonical lowercase form with optional alias lookup."""
+    """Normalize a value to canonical lowercase form with optional alias lookup.
+
+    A non-string is refused as ``ValueError`` here rather than escaping as the
+    ``AttributeError`` that ``.lower()`` would raise: domain functions promise
+    ``ValueError`` for invalid input, and a caller passing ``None`` is giving
+    invalid input, not tripping an internal error. This guard belongs at the shared
+    layer — every resolver had the same hole, so fixing it per-resolver would leave
+    the next one to re-acquire it.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"Invalid {label}: {value!r}")
     v = value.lower().strip()
     if aliases:
         v = aliases.get(v, v)
@@ -99,6 +109,24 @@ def resolve_requirement_status(status: str) -> str:
 def resolve_priority(priority: str) -> str:
     """Normalize a priority input to canonical lowercase form."""
     return _resolve(priority, PRIORITIES, None, "priority")
+
+
+def resolve_severity(severity: str) -> str:
+    """Normalize a severity input to canonical lowercase form.
+
+    Case and surrounding whitespace only — severity still has NO aliases, unlike
+    ``status``. ``"High"`` and ``" HIGH "`` resolve to ``"high"``; ``"crit"``,
+    ``"P0"`` and ``"sev1"`` still raise. Add aliases only on evidence of callers
+    using them (CB-19).
+
+    Severity was the one vocabulary in this module without a resolver, so
+    ``findings.py`` open-coded ``if severity not in SEVERITIES`` at three sites
+    and the CSV import open-coded ``.strip().lower()`` at a fourth, while the
+    sibling ``priority`` had been lenient all along. Every severity input in the
+    package goes through here — including ``query_findings``, whose filter was
+    raw while ``status`` two lines above it already resolved.
+    """
+    return _resolve(severity, SEVERITIES, None, "severity")
 
 
 # --- SQL identifiers ---

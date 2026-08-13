@@ -16,6 +16,7 @@ from codebugs.types import (
     SEVERITIES,
     rank_case_sql,
     resolve_finding_status,
+    resolve_severity,
     utc_now,
 )
 
@@ -151,9 +152,12 @@ def add_finding(
     reported_at_commit: str | None = None,
     reported_at_ref: str | None = None,
 ) -> dict[str, Any]:
-    """Add a single finding. Returns the created finding as a dict."""
-    if severity not in SEVERITIES:
-        raise ValueError(f"Invalid severity: {severity}. Must be one of {SEVERITIES}")
+    """Add a single finding. Returns the created finding as a dict.
+
+    ``severity`` is normalized, not exact-matched: case and surrounding whitespace
+    are forgiven, aliases are not (CB-19). The stored value is always canonical.
+    """
+    severity = resolve_severity(severity)
 
     fid = finding_id or _next_id(conn)
     now = utc_now()
@@ -197,9 +201,7 @@ def batch_add_findings(
     now = utc_now()
     results = []
     for f in findings:
-        severity = f.get("severity", "medium")
-        if severity not in SEVERITIES:
-            raise ValueError(f"Invalid severity: {severity}")
+        severity = resolve_severity(f.get("severity", "medium"))
 
         fid = f.get("id") or _next_id(conn)
         tags_json = json.dumps(f.get("tags", []))
@@ -284,8 +286,7 @@ def update_finding(
     # A plain column, appended exactly once to the shared `updates` list — it must
     # never grow a second `severity = ?` the way `meta` once did (CB-16).
     if severity is not None:
-        if severity not in SEVERITIES:
-            raise ValueError(f"Invalid severity: {severity}. Must be one of {SEVERITIES}")
+        severity = resolve_severity(severity)
         updates.append("severity = ?")
         params.append(severity)
 
@@ -391,8 +392,13 @@ def query_findings(
         conditions.append("status = ?")
         params.append(resolve_finding_status(status))
     if severity:
+        # Resolved, like `status` two lines up. Left raw, this filter compared the
+        # caller's spelling against a canonical column: `severity="HIGH"` silently
+        # returned ZERO rows rather than raising (CB-19). Once the write paths
+        # normalize, leaving this raw would be worse still — the write would land
+        # as `high` and the read-back by the same spelling would find nothing.
         conditions.append("severity = ?")
-        params.append(severity)
+        params.append(resolve_severity(severity))
     if category:
         conditions.append("category = ?")
         params.append(category)
@@ -572,7 +578,7 @@ def register_tools(mcp, conn_factory) -> None:
         """Add a code finding.
 
         Args:
-            severity: critical, high, medium, or low
+            severity: critical, high, medium, or low (case-insensitive, no aliases)
             category: Finding category (e.g. tz_naive_datetime, n_plus_one, missing_validation).
                       Call `categories` first to reuse existing category names.
             file: File path relative to project root
@@ -652,7 +658,8 @@ def register_tools(mcp, conn_factory) -> None:
                     wontfix → wont_fix, invalid → not_a_bug,
                     active/working/in-progress → in_progress
             severity: Re-triage the finding: critical, high, medium, or low.
-                      Exact lowercase only — unlike status, severity has no aliases.
+                      Case-insensitive, but no aliases — unlike status, "crit" and
+                      "P0" are refused.
             notes: REPLACES the notes wholesale, discarding whatever was there.
                    To add to an existing record without destroying it, use
                    append_note instead.
@@ -846,18 +853,33 @@ def register_cli(sub, commands) -> None:
     def _cmd_query(args: argparse.Namespace) -> None:
         conn = db.connect()
         ids = [s.strip() for s in args.id.split(",") if s.strip()] if args.id else None
-        result = query_findings(
-            conn,
-            ids=ids,
-            status=args.status,
-            severity=args.severity,
-            category=args.category,
-            file=args.file,
-            source=args.source,
-            group_by=args.group_by,
-            limit=args.limit or 100,
-        )
-        conn.close()
+        try:
+            result = query_findings(
+                conn,
+                ids=ids,
+                status=args.status,
+                severity=args.severity,
+                category=args.category,
+                file=args.file,
+                source=args.source,
+                group_by=args.group_by,
+                limit=args.limit or 100,
+            )
+        except json.JSONDecodeError:
+            # MUST stay ahead of the ValueError arm, which it subclasses — same
+            # ordering contract as `_cmd_update`. A corrupt stored row is not bad
+            # user input, and flattening it into a one-line "bad input" message
+            # would hide a data-integrity problem behind a usage error.
+            raise
+        except ValueError as e:
+            # `--severity`/`--status` are free text; an unknown value now names
+            # itself and exits 1 instead of printing a traceback. Vocabulary
+            # filters have raised since `status` began resolving — this handler
+            # simply never caught it (CB-19).
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
 
         if result.get("grouped"):
             data = [{"group": r["group_key"], "count": str(r["count"])} for r in result["groups"]]
@@ -974,7 +996,8 @@ def register_cli(sub, commands) -> None:
         with open(args.file, newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                severity = (row.get("severity") or row.get("Severity") or "medium").strip().lower()
+                # No inline .strip().lower() — add_finding normalizes now (CB-19).
+                severity = row.get("severity") or row.get("Severity") or "medium"
                 category = (row.get("category") or row.get("Category") or "").strip()
                 filepath = (row.get("file") or row.get("File") or "").strip()
                 description = (row.get("description") or row.get("Description") or "").strip()
