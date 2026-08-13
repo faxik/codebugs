@@ -13,6 +13,7 @@ net change. Tracker: this repo's own `.codebugs/findings.db`, served by `mcp__co
 | 2026-08-13 | `codebugs` | CB-20 | **fixed** — vocabulary columns ordered alphabetically, so `low` outranked `medium` and `could` outranked `must` | `f9a682e` (`2ac27c4`) | filed CB-22 |
 | 2026-08-13 | `codebugs` | CB-22 | **fixed** — an allowlist that never validated its own members; sibling in `capacity.py` silently lost an increment | `e1900d4` (`4db5a07`, `6996b8e`, `d1fea09`) | CB-21 still needs a user decision |
 | 2026-08-13 | `codebugs` | CB-19 | **fixed** — severity had no resolver; the sweep found query filters comparing raw text against canonical columns in both entities | `071a630` (`f1f4bd0`, `d1a31f5`, `3f91704`) | queue now blocked: every remaining card needs a product decision |
+| 2026-08-13 | `codebugs` | CB-24 | **fixed** — meta merged in Python over a row read in a separate statement, so concurrent writers erased each other silently | `c3491c8` (`2495998`, `2d70e06`, `6d42fdb`, `3901425`, `f296852`) | filed CB-27; **CB-23 needs a user decision and is the highest-severity card left** |
 
 ## 2026-08-13 — CB-16
 
@@ -274,3 +275,57 @@ to read old behaviour.
 lesson the skill already states — commit before mutating — and the second occurrence means it should
 be a habit, not a rule to re-read. Run mutations against targeted test files, not the full suite:
 five full-suite runs is 5 minutes and blows a 2-minute timeout, five targeted runs is 50 seconds.
+
+## 2026-08-13 — CB-24 (the read and the write were two transactions)
+
+**The queue was NOT blocked after all.** The previous row closed with "every remaining card needs a
+product decision", which was true when written and false forty minutes later: a Codex review of the
+day's range filed CB-23/24/25/26 at 15:40. A "queue exhausted" verdict has a shelf life — re-read
+before believing your own last row.
+
+**The existing suite caught the regression I introduced, and that is the most useful thing that
+happened.** Moving the body into `db.txn` put the closing `row_to_dict` inside the block, so a
+`JSONDecodeError` from malformed stored meta rolled back a write CB-16 guarantees lands. Three tests
+failed immediately — the ones CB-16 and CB-17 left behind for exactly this. **The conversion must sit
+outside the block; the SELECT stays inside.** Worth noting the shape: a fix for one silent-write bug
+re-created a different silent-write bug two cards old, and only the earlier card's tests saw it.
+
+**`conn.commit()` had to be deleted, not moved.** `db.txn` is reentrant and yields `False` under an
+ambient transaction; a surviving commit would commit the *caller's* work from inside a nested call.
+`milestones.triage_dismiss` is such a caller, and it *gained* atomicity from the change. The card
+proposed the right fix and did not mention this, which is the part that would have broken things.
+
+**Codex on the finished diff found four real gaps, and the sharpest was in my tests.** The
+concurrency tests could **false-pass against the unfixed code**: the only guard was a 1.0s timeout, so
+a worker thread not scheduled inside that second let A write first, after which B read A's committed
+row and merged cleanly. Fixed with a `b_started` handshake set after B's connection is open. Also:
+`BEGIN IMMEDIATE` sat above the vocabulary resolvers, so under contention an invalid status raised
+`OperationalError` after five seconds instead of `ValueError` immediately (resolvers are pure
+functions of their arguments — they moved out); my "converted AFTER the transaction commits" comment
+was **false in the ambient case**; and there was no requirements twin of the ambient-commit guard.
+
+**The sibling sweep turned one fix into three.** `milestones/closegate.mark_branch_only` and
+`milestones/triage.triage_promote` both merge `meta_json` in Python with no transaction — neither
+mentioned by the card. `triage_promote`'s duplicate-attachment check is also a check-then-act that
+two concurrent promotions could both pass; the wrap closes both. Verified NOT instances, which is
+half the value of a sweep: `capacity.py` and `sweep.py` use SQL-side `col = col + 1`, `claims.py`
+uses `ON CONFLICT DO UPDATE`, `pull_next` and `merge` already sit in `BEGIN IMMEDIATE`, and
+`mark_integrated` writes literals. **A one-statement read-modify-write is not an instance.**
+
+**/simplify earned its place again** — and this time it was run *before* landing, unlike the CB-17
+iteration. The reuse and simplification agents converged independently on ~130 lines of duplicated
+thread scaffolding (extracted to a per-class `_interleave`), and the reuse agent correctly *declined*
+to consolidate `PausingConnection` across files after reading the no-`conftest.py` rule first. The
+altitude agent found the two milestones sites carried the same "do not restore `conn.commit()`"
+docstring as findings/reqs **with no test behind it** — prose on two of four sites, a real guard on
+the other two, the CB-17 asymmetry again — and that the changelog's "`triage_dismiss` gains
+atomicity" claim was asserted but never exercised *through* `triage_dismiss`. Both now have tests,
+and both tests kill a mutation.
+
+**I destroyed my own uncommitted work with `git checkout --` during mutation testing. Third
+occurrence.** The two rows above already record it twice. The cost was re-applying two `reqs.py`
+edits. It is not a rule that needs re-reading — the mutation runner should refuse to run on a dirty
+tree, which is the only version of this lesson that will actually hold.
+
+**Left open:** CB-23 (high, and the only card whose fix is blocked on a decision rather than on
+work), CB-21, CB-25, CB-26, CB-6, and the newly filed CB-27.
