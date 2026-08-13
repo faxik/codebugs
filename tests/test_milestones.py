@@ -794,6 +794,53 @@ class TestWipStatus:
         assert len(a_rows) == 1 and a_rows[0]["agent_id"] == "A"
 
 
+class TestCapacityHeldColumn:
+    """CB-22 sibling: `<size>_held` is interpolated into SQL on the strength of a
+    CHECK constraint enforced two layers away, in another table.
+
+    Before the guard the SAME bad input failed two different ways depending on
+    caller state — and one of them was silent."""
+
+    def test_unknown_size_is_refused_when_no_capacity_row_exists(self, conn):
+        """The silent branch. It used to take the dict path, write a row of all
+        zeros, and return success having lost the increment entirely."""
+        from codebugs.milestones.capacity import _upsert_capacity_increment
+
+        with pytest.raises(ValueError, match="Invalid size"):
+            _upsert_capacity_increment(conn, "agent-1", "bogus")
+        assert conn.execute("SELECT COUNT(*) c FROM agent_capacity").fetchone()["c"] == 0
+
+    def test_unknown_size_is_refused_when_a_capacity_row_exists(self, conn):
+        """The loud branch: it raised OperationalError, not the contract's ValueError."""
+        from codebugs.milestones.capacity import _upsert_capacity_increment
+
+        _upsert_capacity_increment(conn, "agent-1", "large")
+        with pytest.raises(ValueError, match="Invalid size"):
+            _upsert_capacity_increment(conn, "agent-1", "bogus")
+        row = conn.execute(
+            "SELECT * FROM agent_capacity WHERE agent_id = 'agent-1'"
+        ).fetchone()
+        assert row["large_held"] == 1
+
+    def test_unknown_size_is_refused_on_decrement(self, conn):
+        from codebugs.milestones.capacity import _decrement_capacity
+
+        with pytest.raises(ValueError, match="Invalid size"):
+            _decrement_capacity(conn, "agent-1", "bogus")
+
+    def test_every_declared_size_still_increments(self, conn):
+        """The vacuous-pass direction: the guard must not refuse legitimate sizes."""
+        from codebugs.milestones._schema import ITEM_SIZES
+        from codebugs.milestones.capacity import _upsert_capacity_increment
+
+        for size in ITEM_SIZES:
+            _upsert_capacity_increment(conn, "agent-1", size)
+        row = conn.execute(
+            "SELECT * FROM agent_capacity WHERE agent_id = 'agent-1'"
+        ).fetchone()
+        assert all(row[f"{s}_held"] == 1 for s in ITEM_SIZES)
+
+
 # ---------------------------------------------------------------------------
 # Phase 2: concurrent pull_next (BEGIN IMMEDIATE atomicity)
 # ---------------------------------------------------------------------------

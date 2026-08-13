@@ -8,7 +8,24 @@ from typing import Any
 
 from codebugs.types import utc_now
 
+from codebugs.milestones._schema import ITEM_SIZES
 from codebugs.milestones._spine import _audit, _get_item_by_ref
+
+
+def _held_col(size: str) -> str:
+    """``<size>_held``, refusing any size that is not a declared one (CB-22 sibling).
+
+    This column name is INTERPOLATED into SQL, on the strength of an invariant —
+    the ``size`` CHECK constraint — enforced two layers away in another table. That
+    is the same shape as the ``EntityKind`` identifiers, and it failed two different
+    ways depending on caller state: with an existing capacity row an unknown size
+    raised ``OperationalError: no such column``, and with no row it took the dict
+    branch below, wrote a row of zeros, and returned SUCCESS having silently lost
+    the increment. Fail closed, identically, in both.
+    """
+    if size not in ITEM_SIZES:
+        raise ValueError(f"Invalid size: {size!r}. Must be one of {ITEM_SIZES}")
+    return f"{size}_held"
 
 
 def _capacity_for(conn: sqlite3.Connection, agent_id: str) -> dict[str, int]:
@@ -30,7 +47,7 @@ def _upsert_capacity_increment(
     conn: sqlite3.Connection, agent_id: str, size: str
 ) -> None:
     """Increment the held counter for size; insert row if missing."""
-    col = f"{size}_held"
+    col = _held_col(size)
     row = conn.execute(
         "SELECT agent_id FROM agent_capacity WHERE agent_id = ?", (agent_id,)
     ).fetchone()
@@ -56,7 +73,7 @@ def _upsert_capacity_increment(
 def _decrement_capacity(
     conn: sqlite3.Connection, agent_id: str, size: str
 ) -> None:
-    col = f"{size}_held"
+    col = _held_col(size)
     now = utc_now()
     conn.execute(
         f"UPDATE agent_capacity SET {col} = MAX({col} - 1, 0), last_release_at = ? "

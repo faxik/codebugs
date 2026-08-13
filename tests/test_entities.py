@@ -177,14 +177,24 @@ class TestEntityKindIdentifierGuard:
         with pytest.raises(ValueError, match=r"\.sort_col is not a bare column identifier"):
             replace(entity_kind("finding"), sort_col="id; DROP TABLE t", sort_vocabulary=None)
 
-    def test_a_non_identifier_readable_col_is_refused(self):
+    # Both ends of sort order, deliberately. The guard iterates a set, and a
+    # mutation validating only its FIRST member survived a single-payload test:
+    # "(SELECT ...)" starts with 0x28, so it sorts BEFORE every real column name
+    # and a check-one implementation still caught it. The second payload sorts
+    # after them, so together they pin "every member", not "some member".
+    @pytest.mark.parametrize(
+        "payload",
+        ["(SELECT meta FROM findings)", "zz_evil; DROP TABLE findings"],
+        ids=["sorts-first", "sorts-last"],
+    )
+    def test_a_non_identifier_readable_col_is_refused(self, payload):
         """The member-by-member case. `_read`'s membership check passes such a value —
         it guards the caller's argument against the allowlist, never the allowlist's
         own contents — so before CB-22 `field()` returned the `meta` column through an
         allowlist that does not contain it."""
         base = entity_kind("finding")
         with pytest.raises(ValueError, match=r"readable_cols member is not a bare"):
-            replace(base, readable_cols=base.readable_cols | {"(SELECT meta FROM findings)"})
+            replace(base, readable_cols=base.readable_cols | {payload})
 
     def test_a_readable_col_leak_cannot_reach_sql(self, conn):
         """End-to-end: the exfiltration path from the CB-22 reproducer is closed."""
