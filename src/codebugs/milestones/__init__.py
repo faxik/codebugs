@@ -59,6 +59,11 @@ from codebugs.milestones.capacity import (  # noqa: F401
     pull_next,
     release_item,
 )
+from codebugs.milestones.reconcile import (  # noqa: F401
+    _reconcile_on_terminal,
+    reconcile_all,
+    source_is_terminal,
+)
 from codebugs.milestones.closegate import (  # noqa: F401
     mark_branch_only,
     mark_integrated,
@@ -612,6 +617,44 @@ def register_cli(sub, commands) -> None:
     p.add_argument("item_ref", help="Item id (e.g. CB-1234)")
     p.add_argument("commit", help="Commit SHA where the work landed on main")
 
+    def _cmd_milestone_reconcile(args: argparse.Namespace) -> None:
+        from codebugs.db import connect
+        conn = connect()
+        try:
+            result = reconcile_all(conn, apply=args.apply)
+        finally:
+            conn.close()
+        if not result["candidates"]:
+            print("(nothing to reconcile)")
+            return
+        print(format_table(
+            [
+                {
+                    "item": r["item_ref"],
+                    "milestone": r["milestone_id"],
+                    "transition": f"{r['from_status']} -> {r['to_status']}",
+                    "source": r["source_status"],
+                }
+                for r in result["items"]
+            ],
+            ["item", "milestone", "transition", "source"],
+        ))
+        verb = "reconciled" if result["applied"] else "would reconcile (dry run)"
+        print(f"\n{verb}: {result['candidates']} item(s)")
+        if not result["applied"]:
+            print("re-run with --apply to write")
+
+    p = sub.add_parser(
+        "milestone-reconcile",
+        help="Close stream items whose source finding/requirement is already terminal",
+    )
+    # Dry run by DEFAULT. A bulk repair that mutates unless told otherwise is how a
+    # repair tool becomes an accident.
+    p.add_argument(
+        "--apply", action="store_true",
+        help="Actually write the changes (default: dry run)",
+    )
+
     commands.update({
         "milestone-list": _cmd_milestone_list,
         "milestone-status": _cmd_milestone_status,
@@ -620,6 +663,7 @@ def register_cli(sub, commands) -> None:
         "wip-status": _cmd_wip_status,
         "milestone-mark-branch": _cmd_milestone_mark_branch,
         "milestone-mark-integrated": _cmd_milestone_mark_integrated,
+        "milestone-reconcile": _cmd_milestone_reconcile,
     })
 
 
@@ -629,6 +673,7 @@ from codebugs.db import (  # noqa: E402
     register_cli_provider,
     register_post_add_hook,
     register_schema,
+    register_status_change_hook,
     register_tool_provider,
 )
 
@@ -636,3 +681,6 @@ register_schema("milestones", ensure_schema, depends_on=("findings", "reqs", "bl
 register_tool_provider("milestones", register_tools)
 register_cli_provider("milestones", register_cli)
 register_post_add_hook("milestones.auto_route", _auto_route_finding)
+# The update-side twin of the router above. Without it, routing happened once at
+# add time and a resolved finding stayed live in its stream forever (CB-26).
+register_status_change_hook("milestones.reconcile_terminal", _reconcile_on_terminal)

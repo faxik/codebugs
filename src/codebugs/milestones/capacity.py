@@ -10,6 +10,7 @@ from codebugs.types import utc_now
 
 from codebugs.milestones._schema import ITEM_SIZES
 from codebugs.milestones._spine import _audit, _get_item_by_ref
+from codebugs.milestones.reconcile import source_is_terminal
 
 
 def _held_col(size: str) -> str:
@@ -173,6 +174,12 @@ def _candidates(conn: sqlite3.Connection):
     for pattern, _ in buckets:
         rows = conn.execute(_bucket_query(pattern)).fetchall()
         for row in rows:
+            # A terminal source is never eligible, whatever the stored status says
+            # (CB-26). This covers RELEASE milestones too, which the reconciliation
+            # hook deliberately does not touch, so `pull_next` never hands out
+            # finished work even where the stored row was left behind.
+            if source_is_terminal(conn, row["item_kind"], row["item_ref"]):
+                continue
             d = dict(row)
             kind = d.pop("milestone_kind")
             d.pop("milestone_target_date")
