@@ -209,8 +209,12 @@ def update_requirement(
         updates.append("tags = ?")
         params.append(json.dumps(tags))
     # One dict, one `meta = ?`. See the docstring for the ordering contract.
-    # Parsed lazily so an update touching no meta argument does not depend on the
-    # stored JSON being well-formed (the column carries no json_valid constraint).
+    #
+    # Parsed lazily so an update touching no meta argument still reaches its own
+    # SQL on a row whose stored meta is malformed (the column carries no
+    # json_valid constraint). The call still raises at the row_to_dict conversion;
+    # only the write is preserved. The guard must list every meta-writing argument
+    # below it, or a new one becomes a silent no-op when used alone.
     if notes is not None or meta_update is not None:
         new_meta = json.loads(row["meta"])
         if notes is not None:
