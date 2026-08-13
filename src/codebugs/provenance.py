@@ -120,7 +120,22 @@ def check_findings(
     cwd = project_dir or os.getcwd()
 
     if finding_id:
-        findings_list = [findings.get_finding(conn, finding_id)]
+        # The docstring below has always promised "Filters forward to
+        # findings.query_findings", and this branch forwarded nothing: a
+        # `check_findings(finding_id="CB-1", status="fixed")` reported on CB-1
+        # whatever its status (CB-28). `get_finding` is still what raises KeyError
+        # for an unknown id, so that contract is unchanged; the filters are applied
+        # on top of it and simply narrow the result to nothing when they exclude it.
+        findings.get_finding(conn, finding_id)  # raises KeyError on an unknown id
+        narrowed = findings.query_findings(
+            conn,
+            id=finding_id,
+            status=status if types.is_vocabulary_filter_active(status) else None,
+            category=category,
+            file=file,
+            limit=1,
+        )
+        findings_list = narrowed["findings"]
     else:
         query_kwargs: dict[str, Any] = {"limit": 10000}
         # `is_vocabulary_filter_active`, not truthiness: this default is for "not

@@ -256,6 +256,16 @@ def release_item(
     item = _get_item_by_ref(conn, item_ref)
     agent = item.get("assigned_agent")
 
+    if status == "abandoned" and commit:
+        # Incompatible combination, not a forwarding gap: an abandoned item is
+        # reopened and re-pullable, so there is no landed commit to record and only
+        # `done` has a `done_commit` column to record it in. Silently dropping it
+        # returned success for a commit that was never stored (CB-28).
+        raise ValueError(
+            "commit cannot be recorded with status='abandoned' "
+            "(only 'done' records a commit)"
+        )
+
     now = utc_now()
     if status == "abandoned":
         conn.execute(

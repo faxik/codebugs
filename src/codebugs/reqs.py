@@ -754,13 +754,31 @@ def register_tools(mcp, conn_factory):
         from codebugs import blockers
 
         with conn_factory() as conn:
+            deferred_ids: list[str] | None = None
             if status == "deferred":
-                return blockers.query_deferred_entities(conn, ENTITY_REQUIREMENT, limit=limit, offset=offset)
-            return query_requirements(
+                # Pseudo-status resolved to an id restriction so the ordinary query
+                # applies `priority` and every sibling filter. The twin of the
+                # findings wrapper above; see its comment for why (CB-28).
+                deferred_ids = blockers.deferred_id_restriction(
+                    conn, ENTITY_REQUIREMENT, id=id, ids=ids
+                )
+                if not deferred_ids:
+                    # MUST NOT fall through as `ids=[]` — that reads as "no filter".
+                    return {
+                        "grouped": False, "total": 0, "limit": limit,
+                        "offset": offset, "requirements": [],
+                    }
+                id, ids, status = None, deferred_ids, None
+            result = query_requirements(
                 conn, id=id, ids=ids, status=status, priority=priority, section=section,
                 search=search, source=source, tag=tag,
                 group_by=group_by, limit=limit, offset=offset,
             )
+            if deferred_ids is not None and not result.get("grouped"):
+                counts = blockers.blocker_counts_for(conn, ENTITY_REQUIREMENT, deferred_ids)
+                for row in result["requirements"]:
+                    row["blocker_count"] = counts.get(row["id"], 0)
+            return result
 
     @mcp.tool()
     def reqs_get(req_id: str) -> dict[str, Any]:

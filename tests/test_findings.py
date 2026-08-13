@@ -1572,3 +1572,28 @@ class TestFalseyVocabularyFiltersDoNotDisableTheFilter:
         turning a silent full queue into a silent empty one, quieter and worse."""
         self._two(conn)
         assert findings.query_findings(conn, ids=[])["total"] == 2
+
+
+class TestMetaValueRequiresMetaKey:
+    """CB-28: a lone `meta_value` matched neither arm of the meta filter, so it
+    added no condition and the caller got the unfiltered queue — while the MCP
+    description already declared `meta_key` required."""
+
+    def test_meta_value_without_meta_key_raises(self, conn):
+        findings.add_finding(conn, severity="high", category="c", file="a.py", description="d")
+        with pytest.raises(ValueError, match="meta_value requires meta_key"):
+            findings.query_findings(conn, meta_value="anything")
+
+    def test_meta_key_alone_still_means_key_exists(self, conn):
+        findings.add_finding(
+            conn, severity="high", category="c", file="a.py", description="d", meta={"k": "v"}
+        )
+        findings.add_finding(conn, severity="low", category="c", file="b.py", description="d")
+        assert findings.query_findings(conn, meta_key="k")["total"] == 1
+
+    def test_both_together_still_match_on_value(self, conn):
+        findings.add_finding(
+            conn, severity="high", category="c", file="a.py", description="d", meta={"k": "v"}
+        )
+        assert findings.query_findings(conn, meta_key="k", meta_value="v")["total"] == 1
+        assert findings.query_findings(conn, meta_key="k", meta_value="other")["total"] == 0

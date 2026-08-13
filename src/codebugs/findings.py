@@ -446,6 +446,11 @@ def query_findings(
     if tag:
         conditions.append("EXISTS (SELECT 1 FROM json_each(tags) WHERE json_each.value = ?)")
         params.append(tag)
+    if meta_value and not meta_key:
+        # A lone `meta_value` matched neither arm below, so it added no condition and
+        # the caller got the unfiltered queue back (CB-28). The MCP description already
+        # declares meta_key required; this enforces it instead of discarding the value.
+        raise ValueError("meta_value requires meta_key")
     if meta_key and meta_value:
         conditions.append("json_extract(meta, ?) = ?")
         params.append(f"$.{meta_key}")
@@ -765,11 +770,26 @@ def register_tools(mcp, conn_factory) -> None:
             offset: Pagination offset
         """
         with conn_factory() as conn:
+            deferred_ids: list[str] | None = None
             if status == "deferred":
-                return blockers.query_deferred_entities(
-                    conn, ENTITY_FINDING, limit=limit, offset=offset
+                # `deferred` is a PSEUDO-status: resolve it to an id restriction and
+                # let the ordinary query apply every other filter, exactly as the
+                # 2026-04-04 blockers design specified. This branch used to forward
+                # only limit/offset, so `query(status="deferred", severity="critical")`
+                # returned every deferred finding and the caller read that as the
+                # critical ones — a success payload with the arguments discarded,
+                # which is CB-15's failure mode reached through routing (CB-28).
+                deferred_ids = blockers.deferred_id_restriction(
+                    conn, ENTITY_FINDING, id=id, ids=ids
                 )
-            return query_findings(
+                if not deferred_ids:
+                    # MUST NOT fall through as `ids=[]` — that reads as "no filter".
+                    return {
+                        "grouped": False, "total": 0, "limit": limit,
+                        "offset": offset, "findings": [],
+                    }
+                id, ids, status = None, deferred_ids, None
+            result = query_findings(
                 conn,
                 id=id,
                 ids=ids,
@@ -787,6 +807,11 @@ def register_tools(mcp, conn_factory) -> None:
                 limit=limit,
                 offset=offset,
             )
+            if deferred_ids is not None and not result.get("grouped"):
+                counts = blockers.blocker_counts_for(conn, ENTITY_FINDING, deferred_ids)
+                for row in result["findings"]:
+                    row["blocker_count"] = counts.get(row["id"], 0)
+            return result
 
     @mcp.tool()
     def get(finding_id: str) -> dict[str, Any]:

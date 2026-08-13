@@ -277,6 +277,15 @@ def set_item_status(
         raise ValueError(f"Invalid status: {status!r}. Must be one of {ITEM_STATUSES}")
     current = _get_item_by_ref(conn, item_ref)
     if current["status"] == status:
+        if commit:
+            # The no-op path silently dropped `commit` while the docstring promised
+            # to record it, so a backfill attempt returned success and stored nothing
+            # (CB-28). Refuse rather than invent backfill semantics here: recording a
+            # commit on an already-terminal item is `mark_integrated`'s job.
+            raise ValueError(
+                f"{item_ref} is already {status!r}; commit not recorded. "
+                "Use mark_integrated to record a commit on an existing item."
+            )
         return current
     now = utc_now()
     sets = ["status = ?", "updated_at = ?"]

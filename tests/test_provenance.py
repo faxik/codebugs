@@ -315,3 +315,41 @@ class TestFalseyStatusDoesNotSilentlyDefaultToOpen:
         checked = {f["finding_id"] for f in got["findings"]}
         assert other["id"] not in checked, "the fixed finding must not be checked"
         assert len(checked) == 1
+
+
+class TestFindingIdBranchHonoursItsFilters:
+    """CB-28: `check_findings`'s docstring has always promised "Filters forward to
+    findings.query_findings", and the finding_id branch forwarded nothing — so
+    `check_findings(finding_id="CB-1", status="fixed")` reported on CB-1 whatever its
+    status. Code contradicting its own stated contract is the CB-23 shape, and CB-23
+    settled that the contract wins."""
+
+    def _open_finding(self, conn, sha):
+        return findings.add_finding(
+            conn, severity="high", category="bug", file="src/auth.py",
+            description="d", reported_at_commit=sha,
+        )
+
+    def test_status_filter_excluding_the_finding_yields_nothing(self, conn, git_project):
+        project, sha = git_project
+        f = self._open_finding(conn, sha)
+        got = provenance.check_findings(conn, project, finding_id=f["id"], status="fixed")
+        assert got["total"] == 0
+
+    def test_status_filter_matching_the_finding_still_returns_it(self, conn, git_project):
+        project, sha = git_project
+        f = self._open_finding(conn, sha)
+        got = provenance.check_findings(conn, project, finding_id=f["id"], status="open")
+        assert [r["finding_id"] for r in got["findings"]] == [f["id"]]
+
+    def test_no_filters_still_returns_the_named_finding(self, conn, git_project):
+        project, sha = git_project
+        f = self._open_finding(conn, sha)
+        got = provenance.check_findings(conn, project, finding_id=f["id"])
+        assert [r["finding_id"] for r in got["findings"]] == [f["id"]]
+
+    def test_unknown_id_still_raises_keyerror(self, conn, git_project):
+        """The get_finding contract is unchanged; filters narrow, they do not mask."""
+        project, _ = git_project
+        with pytest.raises(KeyError):
+            provenance.check_findings(conn, project, finding_id="CB-99999")

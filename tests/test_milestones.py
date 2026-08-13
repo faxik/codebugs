@@ -1450,3 +1450,50 @@ class TestListMilestonesValidatesItsVocabularies:
         self._two(conn)
         kinds = {m["kind"] for m in milestones.list_milestones(conn, kind="release")}
         assert kinds == {"release"}
+
+
+class TestUnhonourableCommitIsRefused:
+    """CB-28, the refuse half: two paths accepted a `commit` they could never store
+    and returned success. Unlike the deferred query sites there is nothing to forward
+    to — an abandoned item has no `done_commit` column to fill, and the no-op status
+    path performs no write at all."""
+
+    def _pulled_item(self, conn):
+        f = _add_finding(conn, fid="CB-70", description="work")
+        milestones.create_milestone(conn, id="release/7.7", kind="release", description="r")
+        milestones.move_milestone_item(conn, item_ref=f["id"], to_milestone="release/7.7")
+        milestones.pull_next(conn, agent_id="ag1", capacity={"small": 1})
+        return f
+
+    def test_abandoned_with_commit_raises(self, conn):
+        f = self._pulled_item(conn)
+        with pytest.raises(ValueError, match="commit cannot be recorded"):
+            milestones.release_item(conn, item_ref=f["id"], status="abandoned", commit="deadbeef")
+
+    def test_abandoned_without_commit_still_works(self, conn):
+        f = self._pulled_item(conn)
+        milestones.release_item(conn, item_ref=f["id"], status="abandoned")
+        row = conn.execute(
+            "SELECT status FROM milestone_items WHERE item_ref = ?", (f["id"],)
+        ).fetchone()
+        assert row["status"] == "open"
+
+    def test_done_with_commit_still_records_it(self, conn):
+        f = self._pulled_item(conn)
+        milestones.release_item(conn, item_ref=f["id"], status="done", commit="cafe1234")
+        row = conn.execute(
+            "SELECT status, done_commit FROM milestone_items WHERE item_ref = ?", (f["id"],)
+        ).fetchone()
+        assert row["status"] == "done" and row["done_commit"] == "cafe1234"
+
+    def test_setting_the_status_it_already_has_with_a_commit_raises(self, conn):
+        f = self._pulled_item(conn)
+        milestones.set_item_status(conn, item_ref=f["id"], status="done", commit="aaa111")
+        with pytest.raises(ValueError, match="already 'done'; commit not recorded"):
+            milestones.set_item_status(conn, item_ref=f["id"], status="done", commit="bbb222")
+
+    def test_repeating_a_status_without_a_commit_is_still_a_quiet_no_op(self, conn):
+        f = self._pulled_item(conn)
+        milestones.set_item_status(conn, item_ref=f["id"], status="done", commit="aaa111")
+        again = milestones.set_item_status(conn, item_ref=f["id"], status="done")
+        assert again["status"] == "done" and again["done_commit"] == "aaa111"

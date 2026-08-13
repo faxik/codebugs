@@ -528,3 +528,144 @@ class TestFalseyTriggerTypeDoesNotDisableTheFilter:
         self._one(conn)
         assert blockers.query_blockers(conn, trigger_type="manual")["total"] == 1
         assert blockers.query_blockers(conn, trigger_type="date")["total"] == 0
+
+
+class TestDeferredQueryForwardsDomainFilters:
+    """CB-28: the MCP `deferred` path discarded every filter but limit/offset.
+
+    `query(status="deferred", severity="critical")` returned EVERY deferred finding
+    and the caller read that as the critical ones — a success payload with the
+    caller's arguments discarded, which is CB-15's failure mode reached through
+    routing rather than through validation.
+
+    The fix is the shape the 2026-04-04 blockers design already specified: resolve
+    the pseudo-status to an id restriction, then let the OWNING DOMAIN apply its own
+    filters. Blockers never learns what `severity` or `priority` mean."""
+
+    def _mcp(self, conn, module):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def factory():
+            yield conn
+
+        class FakeMCP:
+            def __init__(self):
+                self.tools = {}
+
+            def tool(self, *a, **k):
+                def deco(fn):
+                    self.tools[fn.__name__] = fn
+                    return fn
+
+                return deco
+
+        m = FakeMCP()
+        module.register_tools(m, factory)
+        return m.tools
+
+    def _two_deferred_findings(self, conn):
+        crit = _add_finding(conn, fid="CB-90", description="crit", severity="critical")
+        low = _add_finding(conn, fid="CB-91", description="low", severity="low")
+        dep = _add_finding(conn, fid="CB-99", description="dep")
+        for x in (crit, low):
+            blockers.add_blocker(
+                conn, item_id=x["id"], blocked_by=dep["id"],
+                trigger_type="entity_resolved", reason="r",
+            )
+        return crit, low
+
+    def test_severity_filter_applies_to_deferred_findings(self, conn):
+        crit, _ = self._two_deferred_findings(conn)
+        q = self._mcp(conn, findings)["query"]
+        assert q(status="deferred")["total"] == 2
+        got = q(status="deferred", severity="critical")
+        assert got["total"] == 1
+        assert [f["id"] for f in got["findings"]] == [crit["id"]]
+
+    def test_non_matching_filter_yields_nothing_not_everything(self, conn):
+        self._two_deferred_findings(conn)
+        q = self._mcp(conn, findings)["query"]
+        assert q(status="deferred", category="no-such-category")["total"] == 0
+
+    def test_blocker_count_is_still_annotated(self, conn):
+        """The design doc requires it and the old path provided it."""
+        self._two_deferred_findings(conn)
+        q = self._mcp(conn, findings)["query"]
+        got = q(status="deferred")
+        assert all(f["blocker_count"] == 1 for f in got["findings"])
+
+    def test_declared_severity_precedence_survives_forwarding(self, conn):
+        """CB-20's ranked order must not regress: critical before low."""
+        self._two_deferred_findings(conn)
+        q = self._mcp(conn, findings)["query"]
+        assert [f["severity"] for f in q(status="deferred")["findings"]] == ["critical", "low"]
+
+    def test_caller_supplied_ids_intersect_rather_than_being_overwritten(self, conn):
+        crit, low = self._two_deferred_findings(conn)
+        q = self._mcp(conn, findings)["query"]
+        got = q(status="deferred", ids=[low["id"]])
+        assert [f["id"] for f in got["findings"]] == [low["id"]]
+
+    def test_priority_filter_applies_to_deferred_requirements(self, conn):
+        must = _add_req(conn, rid="FR-90", priority="must")
+        _add_req(conn, rid="FR-91", priority="could")
+        dep = _add_finding(conn, fid="CB-98", description="dep")
+        for r in ("FR-90", "FR-91"):
+            blockers.add_blocker(
+                conn, item_id=r, blocked_by=dep["id"],
+                trigger_type="entity_resolved", reason="r",
+            )
+        rq = self._mcp(conn, reqs)["reqs_query"]
+        assert rq(status="deferred")["total"] == 2
+        got = rq(status="deferred", priority="must")
+        assert got["total"] == 1
+        assert [r["id"] for r in got["requirements"]] == [must["id"]]
+
+
+class TestDeferredEmptyIntersection:
+    """The sharp edge of the CB-28 fix, and the reason it is pinned separately.
+
+    `ids=[]` means "no filter" to every domain query (a CB-25 test pins that). So an
+    empty deferred intersection must NOT be forwarded as `ids=[]` — doing so returns
+    the WHOLE TABLE, which is CB-28's own defect reappearing inside CB-28's fix,
+    exactly as the naive predicate reintroduced CB-25 inside its fix."""
+
+    def _q(self, conn):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def factory():
+            yield conn
+
+        class FakeMCP:
+            def __init__(self):
+                self.tools = {}
+
+            def tool(self, *a, **k):
+                def deco(fn):
+                    self.tools[fn.__name__] = fn
+                    return fn
+
+                return deco
+
+        m = FakeMCP()
+        findings.register_tools(m, factory)
+        return m.tools["query"]
+
+    def test_no_deferred_entities_at_all_returns_empty_not_everything(self, conn):
+        _add_finding(conn, fid="CB-80", description="unblocked")
+        _add_finding(conn, fid="CB-81", description="also unblocked")
+        got = self._q(conn)(status="deferred")
+        assert got["total"] == 0 and got["findings"] == []
+
+    def test_ids_disjoint_from_deferred_set_returns_empty_not_everything(self, conn):
+        blocked = _add_finding(conn, fid="CB-82", description="blocked")
+        other = _add_finding(conn, fid="CB-83", description="not blocked")
+        dep = _add_finding(conn, fid="CB-84", description="dep")
+        blockers.add_blocker(
+            conn, item_id=blocked["id"], blocked_by=dep["id"],
+            trigger_type="entity_resolved", reason="r",
+        )
+        got = self._q(conn)(status="deferred", ids=[other["id"]])
+        assert got["total"] == 0 and got["findings"] == []

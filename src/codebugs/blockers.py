@@ -423,6 +423,14 @@ def query_deferred_entities(
 
     Encapsulates the SQL + serialization so server.py doesn't need to reach
     into per-module row codecs.
+
+    SUPERSEDED for the MCP `status="deferred"` path, and now called only by its own
+    tests. It ignores every domain filter but limit/offset, which is what CB-28 was
+    filed for; the wrappers instead use `deferred_id_restriction` and let the owning
+    domain apply its filters. Kept because it is public and its tests pin the ranked
+    ordering the forwarded path must also produce — but **do not route new callers
+    here**, and if it is ever deleted, move those ordering assertions rather than
+    dropping them.
     """
     evaluated = _get_active_blockers_by_type(conn, entity_type)
 
@@ -465,6 +473,46 @@ def get_deferred_item_ids(
 ) -> set[str]:
     """Return set of item IDs that have active blockers of given entity type."""
     return {b["item_id"] for b in _get_active_blockers_by_type(conn, entity_type) if b["is_active"]}
+
+
+def deferred_id_restriction(
+    conn: sqlite3.Connection,
+    entity_type: str,
+    *,
+    id: str | None = None,
+    ids: list[str] | None = None,
+) -> list[str]:
+    """The id set a ``status="deferred"`` query must be restricted to.
+
+    This is the seam the 2026-04-04 blockers design specified and that the MCP
+    wrappers never used: get the deferred ids here, then let the *owning domain*
+    apply its own filters to them. Blockers stays generic over entity kinds and
+    never learns what `severity` or `priority` mean (CB-28).
+
+    Intersected with whatever `id` / `ids` the caller also supplied, so those keep
+    working alongside the pseudo-status instead of being overwritten by it.
+
+    **An empty result means "match nothing" and callers MUST short-circuit on it —
+    never pass it on as `ids=[]`**, which every domain query reads as "no filter"
+    and which would therefore return the entire table. That is CB-28's own defect
+    reappearing inside CB-28's fix, the same way the naive predicate reintroduced
+    CB-25 inside its fix. `TestDeferredEmptyIntersection` pins it.
+    """
+    deferred = get_deferred_item_ids(conn, entity_type)
+    requested = {i for i in ([id] if id else []) + list(ids or []) if i}
+    return sorted(deferred & requested) if requested else sorted(deferred)
+
+
+def blocker_counts_for(
+    conn: sqlite3.Connection, entity_type: str, entity_ids: list[str]
+) -> dict[str, int]:
+    """Active-blocker count per id, for annotating a forwarded deferred query."""
+    counts: dict[str, int] = {}
+    wanted = set(entity_ids)
+    for b in _get_active_blockers_by_type(conn, entity_type):
+        if b["is_active"] and b["item_id"] in wanted:
+            counts[b["item_id"]] = counts.get(b["item_id"], 0) + 1
+    return counts
 
 
 def get_deferred_counts(
