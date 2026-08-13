@@ -173,7 +173,14 @@ def update_requirement(
     tags: list[str] | None = None,
     meta_update: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Update a requirement."""
+    """Update a requirement.
+
+    ``notes`` replaces the notes wholesale; ``meta_update`` merges last, so an
+    explicit ``meta_update["notes"]`` still wins. Both compose over a single dict:
+    building one per branch would emit a second ``meta = ?`` in the same UPDATE
+    and silently discard the first (CB-16). Unlike findings, there is no
+    ``append_note`` here.
+    """
     row = conn.execute("SELECT * FROM requirements WHERE id = ?", (req_id,)).fetchone()
     if not row:
         raise KeyError(f"Requirement not found: {req_id}")
@@ -198,19 +205,20 @@ def update_requirement(
     if test_coverage is not None:
         updates.append("test_coverage = ?")
         params.append(test_coverage)
-    if notes is not None:
-        existing_meta = json.loads(row["meta"])
-        existing_meta["notes"] = notes
-        updates.append("meta = ?")
-        params.append(json.dumps(existing_meta))
     if tags is not None:
         updates.append("tags = ?")
         params.append(json.dumps(tags))
-    if meta_update is not None:
-        existing_meta = json.loads(row["meta"])
-        existing_meta.update(meta_update)
+    # One dict, one `meta = ?`. See the docstring for the ordering contract.
+    # Parsed lazily so an update touching no meta argument does not depend on the
+    # stored JSON being well-formed (the column carries no json_valid constraint).
+    if notes is not None or meta_update is not None:
+        new_meta = json.loads(row["meta"])
+        if notes is not None:
+            new_meta["notes"] = notes
+        if meta_update is not None:
+            new_meta.update(meta_update)
         updates.append("meta = ?")
-        params.append(json.dumps(existing_meta))
+        params.append(json.dumps(new_meta))
 
     if not updates:
         return db.row_to_dict(row)

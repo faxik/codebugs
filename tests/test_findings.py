@@ -1,6 +1,7 @@
 """Tests for the findings domain — CRUD, query, stats, migrations."""
 
 import os
+import re
 import sqlite3
 
 import pytest
@@ -175,6 +176,126 @@ class TestUpdateFinding:
     def test_update_not_found_raises(self, conn):
         with pytest.raises(KeyError, match="not found"):
             findings.update_finding(conn, "CB-999", status="fixed")
+
+
+class TestUpdateMetaComposition:
+    """CB-16: the meta-writing arguments must compose over one dict.
+
+    Each branch used to rebuild meta from the pre-update row and append its own
+    ``meta = ?``, so one UPDATE assigned meta several times and SQLite kept only
+    the last — silently destroying the others.
+    """
+
+    @pytest.fixture
+    def one(self, conn):
+        findings.add_finding(
+            conn,
+            severity="high",
+            category="bug",
+            file="a.py",
+            description="d",
+            meta={"lines": "1-2"},
+        )
+        return conn
+
+    def test_notes_and_meta_update_both_survive(self, one):
+        result = findings.update_finding(
+            one, "CB-1", notes="INVESTIGATION", meta_update={"fix_commit": "abc123"}
+        )
+        assert result["meta"]["notes"] == "INVESTIGATION"
+        assert result["meta"]["fix_commit"] == "abc123"
+        assert result["meta"]["lines"] == "1-2"
+
+    def test_append_note_and_meta_update_both_survive(self, one):
+        findings.update_finding(one, "CB-1", notes="FIRST")
+        result = findings.update_finding(one, "CB-1", append_note="SECOND", meta_update={"k": "v"})
+        assert result["meta"]["notes"] == "FIRST\nSECOND"
+        assert result["meta"]["k"] == "v"
+
+    def test_append_note_extends_the_replacement_not_the_prior(self, one):
+        findings.update_finding(one, "CB-1", notes="OLD")
+        result = findings.update_finding(one, "CB-1", notes="NEW", append_note="EXTRA")
+        assert result["meta"]["notes"] == "NEW\nEXTRA"
+
+    def test_all_three_compose_in_order(self, one):
+        findings.update_finding(one, "CB-1", notes="PRIOR")
+        result = findings.update_finding(
+            one, "CB-1", notes="NEW", append_note="EXTRA", meta_update={"k": "v"}
+        )
+        assert result["meta"]["notes"] == "NEW\nEXTRA"
+        assert result["meta"]["k"] == "v"
+
+    def test_meta_update_notes_key_wins_because_it_merges_last(self, one):
+        result = findings.update_finding(one, "CB-1", notes="LOSES", meta_update={"notes": "WINS"})
+        assert result["meta"]["notes"] == "WINS"
+
+    def test_empty_string_notes_is_a_real_write(self, one):
+        findings.update_finding(one, "CB-1", notes="SOMETHING")
+        result = findings.update_finding(one, "CB-1", notes="", meta_update={"k": "v"})
+        assert result["meta"]["notes"] == ""
+        assert result["meta"]["k"] == "v"
+
+    def test_empty_meta_update_still_counts_as_a_write(self, one):
+        """``meta_update={}`` is a write, not a no-op.
+
+        Asserted on the emitted SQL rather than on ``updated_at``: timestamps
+        have one-second resolution, so a ``>=`` comparison passes even if the
+        call degrades to a no-op and proves nothing.
+        """
+        statements: list[str] = []
+        one.set_trace_callback(statements.append)
+        try:
+            result = findings.update_finding(one, "CB-1", meta_update={})
+        finally:
+            one.set_trace_callback(None)
+
+        updates = [s for s in statements if "UPDATE findings" in s]
+        assert len(updates) == 1, statements
+        assert re.search(r"\bmeta\s*=", updates[0]), updates[0]
+        assert result["meta"]["lines"] == "1-2"
+
+    def test_non_meta_update_still_writes_when_stored_meta_is_malformed(self, one):
+        """A status-only update must not start depending on stored meta parsing.
+
+        The column carries no ``json_valid`` constraint, so legacy rows may hold
+        anything. Pre-existing behaviour on such a row: the UPDATE lands and only
+        then does the return-value conversion raise. That is odd but out of scope
+        here — this test exists to pin it, so building the new meta dict eagerly
+        (which would abort before the SQL) is caught as the behaviour change it is.
+        """
+        one.execute("UPDATE findings SET meta = ? WHERE id = ?", ("{not json", "CB-1"))
+        one.commit()
+
+        with pytest.raises(ValueError):  # JSONDecodeError, from the result conversion
+            findings.update_finding(one, "CB-1", status="fixed")
+
+        stored = one.execute("SELECT status FROM findings WHERE id = ?", ("CB-1",)).fetchone()
+        assert stored["status"] == "fixed", "the status write must still have landed"
+
+    def test_single_update_never_assigns_meta_twice(self, one):
+        """Structural guard on the emitted SQL, not on the resulting row.
+
+        The trace callback reports statements with parameters already expanded,
+        so this matches ``meta =`` rather than ``meta = ?``.
+        """
+        statements: list[str] = []
+        one.set_trace_callback(statements.append)
+        try:
+            findings.update_finding(
+                one,
+                "CB-1",
+                status="fixed",
+                notes="N",
+                append_note="A",
+                meta_update={"k": "v"},
+            )
+        finally:
+            one.set_trace_callback(None)
+
+        updates = [s for s in statements if "UPDATE findings" in s]
+        assert updates, "no UPDATE was captured"
+        for statement in updates:
+            assert len(re.findall(r"\bmeta\s*=", statement)) <= 1, statement
 
     def test_update_status_in_progress(self, conn):
         findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")

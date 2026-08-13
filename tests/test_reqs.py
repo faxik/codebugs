@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import tempfile
 
@@ -123,6 +124,36 @@ class TestUpdateRequirement:
     def test_update_test_coverage(self, populated):
         result = reqs.update_requirement(populated, "FR-001", test_coverage="test_new.py")
         assert result["test_coverage"] == "test_new.py"
+
+    def test_notes_and_meta_update_both_survive(self, populated):
+        """CB-16: two branches each rebuilt meta and emitted their own ``meta = ?``,
+        so SQLite kept only the last and the notes were silently destroyed."""
+        result = reqs.update_requirement(
+            populated, "FR-001", notes="INVESTIGATION", meta_update={"k": "v"}
+        )
+        assert result["meta"]["notes"] == "INVESTIGATION"
+        assert result["meta"]["k"] == "v"
+
+    def test_meta_update_notes_key_wins_because_it_merges_last(self, populated):
+        result = reqs.update_requirement(
+            populated, "FR-001", notes="LOSES", meta_update={"notes": "WINS"}
+        )
+        assert result["meta"]["notes"] == "WINS"
+
+    def test_single_update_never_assigns_meta_twice(self, populated):
+        statements: list[str] = []
+        populated.set_trace_callback(statements.append)
+        try:
+            reqs.update_requirement(
+                populated, "FR-001", status="implemented", notes="N", meta_update={"k": "v"}
+            )
+        finally:
+            populated.set_trace_callback(None)
+
+        updates = [s for s in statements if "UPDATE requirements" in s]
+        assert updates, "no UPDATE was captured"
+        for statement in updates:
+            assert len(re.findall(r"\bmeta\s*=", statement)) <= 1, statement
 
     def test_noop_update(self, populated):
         result = reqs.update_requirement(populated, "FR-001")
