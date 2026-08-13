@@ -16,6 +16,7 @@ net change. Tracker: this repo's own `.codebugs/findings.db`, served by `mcp__co
 | 2026-08-13 | `codebugs` | CB-24 | **fixed** — meta merged in Python over a row read in a separate statement, so concurrent writers erased each other silently | `c3491c8` (`2495998`, `2d70e06`, `6d42fdb`, `3901425`, `f296852`) | filed CB-27; **CB-23 needs a user decision and is the highest-severity card left** |
 | 2026-08-13 | `codebugs` | CB-23 | **fixed** — a named or declared root accepted a `.codebugs/` directory with no database and created one, silently | `6834775` (`e8f0ece`, `222152c`, `e803f78`) | queue: CB-21, CB-25, CB-26, CB-6, CB-27 — CB-25 is the only one needing no decision |
 | 2026-08-13 | `codebugs` | CB-25 | **fixed** — vocabulary filters guarded by truthiness, so a falsey non-string returned the whole table; sweep grew 3 named sites to 9 | `c55f290` (`fd77d00`, `9b9ea2e`, `aac4904`) | filed CB-28, CB-29 — **every remaining card now needs a product decision, and CB-6's CLI-parity policy gates two of them** |
+| 2026-08-13 | `codebugs` | CB-28 | **fixed** — the `deferred` pseudo-status discarded every other filter; forwarded per the April design doc instead of refusing | `a29fd50` | filed none; **CB-6 still the keystone, unanswered** |
 
 ## 2026-08-13 — CB-16
 
@@ -423,3 +424,49 @@ Both corrections survived my own verification.
 **Left open, and the queue is now fully decision-blocked:** CB-6 (CLI-peer-or-subset policy — this
 is the keystone; CB-21 depends on it), CB-21, CB-26, CB-27, CB-28, CB-29. Nothing remains that can
 be shipped without a product decision.
+
+## 2026-08-13 — CB-28 (a declared argument discarded by routing)
+
+**My plan was rejected by cross-model review, and the rejection was correct.** I proposed raising
+at every site, arguing that forwarding the filters would teach the generic `blockers` module what
+`severity` and `priority` mean. That attacked a strawman implementation. The review produced the
+evidence: `docs/2026-04-04-blockers-design.md:278-291` **already specifies** the clean shape — strip
+the pseudo-status, get the deferred ids from blockers, pass them as an id restriction to the owning
+domain's query — and `blockers.get_deferred_item_ids` had **already been written** for exactly that
+and was simply never called. `provenance.check_findings`' own docstring had promised the same thing
+for just as long. So "raise" was a cheaper substitute for a fix the repo had already designed, which
+is the precise failure the bugfix workflow's Phase 2b exists to prevent. **Before concluding the
+correct fix is infeasible, grep the design docs — this repo writes them and then forgets them.**
+
+**The feasibility worry I never wrote down was ordering**, and it evaporated on inspection:
+`query_findings` and `query_deferred_entities` both order by `{rank_sql}, created_at DESC`. An
+unstated objection cannot be checked, which is why Phase 2b says to write the correct fix down
+*first*.
+
+**The fix contains the same trap as the last two cards, one layer along.** An empty deferred
+intersection must not be forwarded as `ids=[]`, because every domain query reads an empty list as
+"no filter" and would return the whole table — CB-28's defect reappearing inside CB-28's fix,
+exactly as the naive predicate reintroduced CB-25 inside its fix. Three iterations running, the
+dangerous line has been *the fix's own edge case*, not the original defect.
+
+**Two of the six sites came from the review, not from my sweep**, and the sweep needed two AST
+passes because pass 1's notion of "a branch" was `return` — which structurally cannot see
+`provenance`'s if/else assignment. Even both passes missed the conditional-query-building shape
+(`meta_value` without `meta_key`). Last iteration's lesson was "sweep for the shape, not the names";
+this one refines it: **enumerate the shapes a branch can take before trusting a shape sweep.**
+
+**Process miss, recorded because it cost a real verification.** I committed straight to `main`
+instead of branching, so the first mutation attempt (`git checkout main -- src/`) was a **no-op**
+and reported 20 tests passing against "unfixed" code. That is precisely the vacuous-mutation trap
+the workflow warns about, and it was caught only because the diffstat was empty. Re-run against
+`f22d9fb` showed 9 of 20 failing, with the other 11 being genuine behaviour-preservation controls.
+**Always check the mutation diffstat before reading the test result** — and branch first, which
+would have made the no-op impossible.
+
+**Also worth knowing:** backticks in a `git commit -m` message get shell-substituted. Two words
+vanished mid-sentence from the first commit; amended via `-F` from a file.
+
+**Left open:** CB-6 (CLI-peer-or-subset policy, the keystone — still unanswered and still gating
+CB-21), CB-21, CB-26, CB-27, CB-29. `blockers.query_deferred_entities` is now called only by its own
+tests and is marked SUPERSEDED rather than deleted, because those tests pin the ranked ordering the
+forwarded path must also produce.

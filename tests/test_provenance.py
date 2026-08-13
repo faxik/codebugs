@@ -326,8 +326,12 @@ class TestFindingIdBranchHonoursItsFilters:
 
     def _open_finding(self, conn, sha):
         return findings.add_finding(
-            conn, severity="high", category="bug", file="src/auth.py",
-            description="d", reported_at_commit=sha,
+            conn,
+            severity="high",
+            category="bug",
+            file="src/auth.py",
+            description="d",
+            reported_at_commit=sha,
         )
 
     def test_status_filter_excluding_the_finding_yields_nothing(self, conn, git_project):

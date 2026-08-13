@@ -785,8 +785,11 @@ def register_tools(mcp, conn_factory) -> None:
                 if not deferred_ids:
                     # MUST NOT fall through as `ids=[]` — that reads as "no filter".
                     return {
-                        "grouped": False, "total": 0, "limit": limit,
-                        "offset": offset, "findings": [],
+                        "grouped": False,
+                        "total": 0,
+                        "limit": limit,
+                        "offset": offset,
+                        "findings": [],
                     }
                 id, ids, status = None, deferred_ids, None
             result = query_findings(

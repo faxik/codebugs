@@ -7,6 +7,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`status="deferred"` now honours every other filter instead of discarding it**
+  (CB-28). The MCP `query` / `reqs_query` deferred branch forwarded only `limit`
+  and `offset`, so `query(status="deferred", severity="critical")` returned **every**
+  deferred finding and `reqs_query(status="deferred", priority="must")` every
+  deferred requirement. The arguments were known, correctly spelled and correctly
+  typed — they passed every validation the package has — and the call returned a
+  success payload, so the caller could not tell. `staleness_check(finding_id=…)`
+  had the same shape, discarding `status` / `category` / `file` despite its
+  docstring promising to forward them.
+
+  `deferred` is a pseudo-status and now resolves to an id restriction, letting the
+  owning domain apply its own filters — the shape the April blockers design already
+  specified. `blocker_count` annotation and the CB-20 ranked ordering are unchanged,
+  and `group_by` works on the deferred path as a result.
+
+  Three sites **refuse** instead, because no path could honour the argument:
+  `release_item(status="abandoned", commit=…)` (an abandoned item is reopened and has
+  no commit to record), `set_item_status` when the status already matches (no write
+  happens — use `mark_integrated`), and `query_findings(meta_value=…)` without
+  `meta_key` (the MCP description already declared the key required).
+
+  `blockers.query_deferred_entities` is superseded for this path and kept only for
+  its ordering tests.
 - **A falsey non-string vocabulary filter no longer silently disables the filter**
   (CB-25). Every vocabulary filter guarded with plain truthiness — `if severity:` —
   which conflates `None` (not supplied), `""` (the documented empty-filter
