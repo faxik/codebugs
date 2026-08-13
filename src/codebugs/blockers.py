@@ -439,7 +439,9 @@ def query_deferred_entities(
     # are spliced in textual placeholder order: ids, then the rank, then limit/offset.
     rank_sql, rank_params = kind.order_by()
     rows = conn.execute(
-        f"SELECT * FROM {kind.table} WHERE id IN ({placeholders}) "  # noqa: S608 (identifiers from frozen registry)
+        # noqa justified structurally: `table` is validated as a bare identifier in
+        # EntityKind.__post_init__ and `rank_sql` binds its values (CB-22, CB-20).
+        f"SELECT * FROM {kind.table} WHERE id IN ({placeholders}) "  # noqa: S608
         f"ORDER BY {rank_sql}, created_at DESC LIMIT ? OFFSET ?",
         ids_list + rank_params + [limit, offset],
     ).fetchall()
