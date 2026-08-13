@@ -18,6 +18,7 @@ from codebugs.types import (
     resolve_finding_status,
     resolve_requirement_status,
     resolve_priority,
+    resolve_severity,
 )
 
 
@@ -89,6 +90,40 @@ class TestResolvePriority:
     def test_invalid_raises(self):
         with pytest.raises(ValueError, match="Invalid priority"):
             resolve_priority("bogus")
+
+
+class TestResolveSeverity:
+    """CB-19: severity was the one vocabulary in this module with no resolver."""
+
+    def test_canonical_passthrough(self):
+        for sev in SEVERITIES:
+            assert resolve_severity(sev) == sev
+
+    @pytest.mark.parametrize(
+        "given,expected",
+        [
+            ("High", "high"),
+            ("HIGH", "high"),
+            ("  critical  ", "critical"),
+            ("MeDiUm", "medium"),
+            ("\tlow\n", "low"),
+        ],
+    )
+    def test_case_and_whitespace_are_forgiven(self, given, expected):
+        assert resolve_severity(given) == expected
+
+    @pytest.mark.parametrize("bad", ["crit", "P0", "sev1", "blocker", "urgent", "", "  "])
+    def test_meaning_is_never_guessed(self, bad):
+        """Severity normalizes case, not meaning — it has NO aliases, deliberately.
+        Adding them is a separate decision requiring evidence of real callers."""
+        with pytest.raises(ValueError, match="Invalid severity"):
+            resolve_severity(bad)
+
+    def test_it_matches_its_sibling_priority(self):
+        """The card's whole point: two vocabularies in one module answered the same
+        question differently."""
+        assert resolve_severity("High") == "high"
+        assert resolve_priority("Must") == "must"
 
 
 class TestRankCaseSql:

@@ -503,11 +503,15 @@ class TestRetriageSeverity:
         for sev in SEVERITIES:
             assert findings.update_finding(one, "CB-1", severity=sev)["severity"] == sev
 
-    @pytest.mark.parametrize("bad", ["urgent", "HIGH"])
+    @pytest.mark.parametrize("bad", ["urgent", "crit", "P0", ""])
     def test_invalid_severity_raises(self, one, bad):
         """`ValueError`, not `IntegrityError` — the Python check is the validator and
-        the column CHECK is only a backstop. ``HIGH`` also pins the case-strictness
-        that CB-19 proposes to relax, so relaxing it cannot happen silently."""
+        the column CHECK is only a backstop.
+
+        ``HIGH`` used to be in this list, pinning the case-strictness so that CB-19
+        could not relax it silently. CB-19 has now relaxed it deliberately, so the
+        payloads here are the ones that must STILL raise: an alias-shaped input
+        (`crit`, `P0`) and a non-value. Severity normalizes case, never meaning."""
         with pytest.raises(ValueError, match="Invalid severity"):
             findings.update_finding(one, "CB-1", severity=bad)
 
@@ -517,6 +521,12 @@ class TestRetriageSeverity:
         row = findings.get_finding(one, "CB-1")
         assert row["severity"] == "medium"
         assert row["status"] == "open", "validation must precede the write, not follow it"
+
+    def test_mixed_case_is_normalized_not_stored_verbatim(self, one):
+        """CB-19. Asserts the STORED value, not the return value — a fix that
+        normalized only on the way out would leave a non-canonical row."""
+        findings.update_finding(one, "CB-1", severity="HiGh")
+        assert findings.get_finding(one, "CB-1")["severity"] == "high"
 
     def test_severity_and_status_compose_in_one_call(self, one):
         result = findings.update_finding(one, "CB-1", severity="high", status="in_progress")
@@ -1260,3 +1270,84 @@ class TestProvenance:
         )
         with pytest.raises(TypeError):
             findings.update_finding(conn, f["id"], reported_at_commit="b" * 40)
+
+
+class TestSeverityIsNormalizedAtEveryRoute:
+    """CB-19: severity gained a resolver, so every route must use it.
+
+    One test per route, deliberately. A single CSV-import test would pass whether
+    or not the fix exists, because the CSV path already lowercased inline — the
+    cross-model review named that as the likely vacuous test for this card. Each
+    test here asserts the value as STORED, so normalizing only on the way out
+    would not satisfy them.
+    """
+
+    def test_add_finding(self, conn):
+        f = findings.add_finding(
+            conn, severity="High", category="bug", file="a.py", description="d"
+        )
+        assert conn.execute(
+            "SELECT severity FROM findings WHERE id = ?", (f["id"],)
+        ).fetchone()["severity"] == "high"
+
+    def test_batch_add_findings(self, conn):
+        rows = findings.batch_add_findings(
+            conn,
+            [{"severity": " CRITICAL ", "category": "bug", "file": "a.py", "description": "d"}],
+        )
+        assert conn.execute(
+            "SELECT severity FROM findings WHERE id = ?", (rows[0]["id"],)
+        ).fetchone()["severity"] == "critical"
+
+    def test_batch_add_defaults_still_work(self, conn):
+        """The default flows through the resolver too — it must not be special-cased."""
+        rows = findings.batch_add_findings(
+            conn, [{"category": "bug", "file": "a.py", "description": "d"}]
+        )
+        assert rows[0]["severity"] == "medium"
+
+    def test_update_finding(self, conn):
+        f = findings.add_finding(
+            conn, severity="low", category="bug", file="a.py", description="d"
+        )
+        findings.update_finding(conn, f["id"], severity="MeDiUm")
+        assert conn.execute(
+            "SELECT severity FROM findings WHERE id = ?", (f["id"],)
+        ).fetchone()["severity"] == "medium"
+
+    def test_query_filter_finds_the_row_it_wrote(self, conn):
+        """The fifth site, found by cross-model review and missed by the card.
+
+        `query_findings` resolved `status` and left `severity` RAW, two lines apart.
+        Had the write paths been normalized alone, this exact call would have written
+        `high` and then matched nothing — a silent empty result, not an error."""
+        findings.add_finding(
+            conn, severity="High", category="bug", file="a.py", description="d"
+        )
+        assert findings.query_findings(conn, severity="HIGH")["total"] == 1
+        assert findings.query_findings(conn, severity="high")["total"] == 1
+
+    def test_query_filter_refuses_a_non_value(self, conn):
+        """Raising beats returning zero rows: an unknown filter is a caller bug, and
+        silently reporting "no findings" is the worst possible answer for a tracker."""
+        with pytest.raises(ValueError, match="Invalid severity"):
+            findings.query_findings(conn, severity="banana")
+
+    def test_csv_import_still_normalizes_without_its_inline_lower(self, tmp_project, tmp_path):
+        """The inline `.strip().lower()` was removed as redundant — this proves the
+        redundancy claim rather than assuming it."""
+        csv_file = tmp_path / "in.csv"
+        csv_file.write_text(
+            "severity,category,file,description\nHIGH,bug,a.py,something broke\n"
+        )
+        r = subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", "import-csv", str(csv_file)],
+            capture_output=True, text=True, cwd=tmp_project,
+            env={**os.environ, "PYTHONPATH": os.path.join(os.getcwd(), "src")},
+        )
+        assert r.returncode == 0, r.stderr
+        c = db.connect(tmp_project)
+        try:
+            assert c.execute("SELECT severity FROM findings").fetchone()["severity"] == "high"
+        finally:
+            c.close()

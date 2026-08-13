@@ -101,6 +101,24 @@ def resolve_priority(priority: str) -> str:
     return _resolve(priority, PRIORITIES, None, "priority")
 
 
+def resolve_severity(severity: str) -> str:
+    """Normalize a severity input to canonical lowercase form.
+
+    Case and surrounding whitespace only — severity still has NO aliases, unlike
+    ``status``. ``"High"`` and ``" HIGH "`` resolve to ``"high"``; ``"crit"``,
+    ``"P0"`` and ``"sev1"`` still raise. Add aliases only on evidence of callers
+    using them (CB-19).
+
+    Severity was the one vocabulary in this module without a resolver, so
+    ``findings.py`` open-coded ``if severity not in SEVERITIES`` at three sites
+    and the CSV import open-coded ``.strip().lower()`` at a fourth, while the
+    sibling ``priority`` had been lenient all along. Every severity input in the
+    package goes through here — including ``query_findings``, whose filter was
+    raw while ``status`` two lines above it already resolved.
+    """
+    return _resolve(severity, SEVERITIES, None, "severity")
+
+
 # --- SQL identifiers ---
 
 # Unanchored on purpose — `is_sql_identifier` applies it with `fullmatch`. The
