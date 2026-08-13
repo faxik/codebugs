@@ -9,6 +9,21 @@ import pytest
 from codebugs import db, findings
 
 
+@pytest.fixture(autouse=True)
+def _no_declared_root(monkeypatch):
+    """Neutralize any tracker-root declaration inherited from the developer's shell.
+
+    Every other test in this file asserts on cwd-derived discovery, which an
+    exported `CODEBUGS_ROOT` overrides by design (CB-11). Without this the suite
+    would pass or fail depending on the environment that launched it — and the
+    ambient channel it guards against is precisely the one these tests exist to
+    pin. Module-wide rather than in `TestTrackerRootOverride` alone: the risk is
+    to the *existing* tests, not the new ones.
+    """
+    monkeypatch.delenv(db.ENV_ROOT, raising=False)
+    monkeypatch.setattr(db, "_tracker_root_override", None)
+
+
 @pytest.fixture
 def tmp_project(tmp_path):
     """Provide a temporary project directory with an initialized tracker."""
@@ -557,3 +572,313 @@ class TestInitProject:
         assert proc.returncode == 1
         assert "Traceback" not in proc.stderr
         assert "codebugs init" in proc.stderr
+
+
+def _separate_git_dir_worktree(tmp_path):
+    """Build CB-13's layout: a `--separate-git-dir` repo whose git dir IS named `.git`.
+
+    `admin/.git` is the git directory; `repo/` is the real checkout and holds the
+    real tracker. A stray `.codebugs/` sits in `admin/` — without one there is
+    nothing to mis-bind TO and the bug is invisible. Returns (repo, admin, wt).
+    """
+    admin = tmp_path / "admin"
+    repo = tmp_path / "repo"
+    admin.mkdir()
+    repo.mkdir()
+    _git("init", "-b", "main", f"--separate-git-dir={admin / '.git'}", str(repo), cwd=tmp_path)
+    (repo / "f.txt").write_text("x")
+    _git("add", "f.txt", cwd=repo)
+    _git("commit", "-m", "init", cwd=repo)
+    (repo / ".codebugs").mkdir()
+    (admin / ".codebugs").mkdir()
+    wt = tmp_path / "wt"
+    _git("worktree", "add", str(wt), "-b", "wt", cwd=repo)
+    return repo, admin, wt
+
+
+def _tracker(parent, name):
+    """Create `parent/name` and initialize a tracker in it. Returns the Path."""
+    root = parent / name
+    root.mkdir(parents=True, exist_ok=True)
+    db.init_project(str(root))
+    return root
+
+
+class TestTrackerRootOverride:
+    """An explicitly declared tracker root, the remedy for CB-11 and CB-13.
+
+    Discovery guesses; a declaration does not. These tests pin the precedence
+    (`--tracker-root` > `CODEBUGS_ROOT` > cwd walk), the fail-closed contract,
+    and the one layout where discovery is provably unable to find the right
+    answer on its own.
+    """
+
+    def test_env_var_overrides_the_cwd_walk(self, tmp_path, monkeypatch):
+        declared = _tracker(tmp_path, "declared")
+        elsewhere = tmp_path / "elsewhere"
+        (elsewhere / ".codebugs").mkdir(parents=True)
+        monkeypatch.chdir(elsewhere)
+        monkeypatch.setenv(db.ENV_ROOT, str(declared))
+        assert db._db_path() == str(declared / ".codebugs" / "findings.db")
+
+    def test_flag_beats_the_env_var(self, tmp_path, monkeypatch):
+        flag_root = _tracker(tmp_path, "flag")
+        env_root = _tracker(tmp_path, "env")
+        monkeypatch.setenv(db.ENV_ROOT, str(env_root))
+        monkeypatch.setattr(db, "_tracker_root_override", str(flag_root))
+        assert db.declared_tracker_root() == (str(flag_root), "flag")
+        assert db._db_path() == str(flag_root / ".codebugs" / "findings.db")
+
+    def test_explicit_project_dir_still_beats_a_declared_root(self, tmp_path, monkeypatch):
+        """`--repo <path>` is per-call and more specific than ambient state."""
+        declared = _tracker(tmp_path, "declared")
+        named = _tracker(tmp_path, "named")
+        monkeypatch.setenv(db.ENV_ROOT, str(declared))
+        assert db._db_path(str(named)) == str(named / ".codebugs" / "findings.db")
+
+    def test_a_declared_root_with_no_tracker_fails_closed(self, tmp_path, monkeypatch):
+        """The mitigation for a stale export: refuse, never create a second tracker."""
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        here = _tracker(tmp_path, "here")
+        monkeypatch.chdir(here)
+        monkeypatch.setenv(db.ENV_ROOT, str(empty))
+        with pytest.raises(db.DatabaseNotFoundError) as exc:
+            db._db_path()
+        assert not (empty / ".codebugs").exists()
+        assert str(empty) in str(exc.value)
+
+    def test_the_refusal_names_the_channel_that_set_it(self, tmp_path, monkeypatch):
+        """Without the channel name, a wrong bind is a mystery: the value is ambient."""
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.setenv(db.ENV_ROOT, str(empty))
+        with pytest.raises(db.DatabaseNotFoundError) as env_exc:
+            db._db_path()
+        assert db.ENV_ROOT in str(env_exc.value)
+
+        monkeypatch.setattr(db, "_tracker_root_override", str(empty))
+        with pytest.raises(db.DatabaseNotFoundError) as flag_exc:
+            db._db_path()
+        assert "--tracker-root" in str(flag_exc.value)
+        assert db.ENV_ROOT not in str(flag_exc.value)
+
+    def test_a_declared_root_that_is_not_a_directory_fails_closed(self, tmp_path, monkeypatch):
+        missing = tmp_path / "typo"
+        monkeypatch.setenv(db.ENV_ROOT, str(missing))
+        with pytest.raises(db.DatabaseNotFoundError) as exc:
+            db._db_path()
+        assert str(missing) in str(exc.value)
+
+    def test_a_blank_declaration_is_no_declaration(self, tmp_path, monkeypatch):
+        """Uniform with the project's 'an empty filter is no filter' convention."""
+        here = _tracker(tmp_path, "here")
+        monkeypatch.chdir(here)
+        monkeypatch.setenv(db.ENV_ROOT, "   ")
+        assert db.declared_tracker_root() == (None, "discovery")
+        assert db._db_path() == str(here / ".codebugs" / "findings.db")
+
+    def test_declaration_is_validated_at_use_not_at_set_time(self, tmp_path):
+        """Lazy self-healing: a root that appears later must still work (CB-11).
+
+        A server told about a root before the tracker exists must not die at
+        startup — that is the constraint recorded on the card.
+        """
+        later = tmp_path / "later"
+        db.set_tracker_root(str(later))
+        try:
+            with pytest.raises(db.DatabaseNotFoundError):
+                db._db_path()
+            later.mkdir()
+            db.init_project(str(later))
+            assert db._db_path() == str(later / ".codebugs" / "findings.db")
+        finally:
+            db.set_tracker_root(None)
+
+    def test_findings_land_in_the_declared_tracker(self, tmp_path, monkeypatch):
+        """End to end: the override moves real writes, not just path resolution."""
+        declared = _tracker(tmp_path, "declared")
+        elsewhere = _tracker(tmp_path, "elsewhere")
+        monkeypatch.chdir(elsewhere)
+        monkeypatch.setenv(db.ENV_ROOT, str(declared))
+        c = db.connect()
+        try:
+            findings.add_finding(c, severity="low", category="x", file="a.py", description="d")
+        finally:
+            c.close()
+        for root, expected in ((declared, 1), (elsewhere, 0)):
+            c2 = db.connect(str(root))
+            try:
+                assert findings.query_findings(c2)["total"] == expected
+            finally:
+                c2.close()
+
+
+class TestSeparateGitDirMisbinding:
+    """CB-13: the one layout where discovery provably cannot find the right answer.
+
+    `_worktree_main_root` accepts any commondir whose basename is `.git` — git's
+    own heuristic. When a `--separate-git-dir` repo's git dir is literally named
+    `.git`, that resolves to the ADMIN directory, not the checkout. There is no
+    local discriminator, so the heuristic stays; the declaration is the fix.
+    """
+
+    def test_the_misbinding_still_reproduces(self, tmp_path, monkeypatch):
+        """Guard the premise. If this ever stops failing, the fix below is moot."""
+        repo, admin, wt = _separate_git_dir_worktree(tmp_path)
+        monkeypatch.chdir(wt)
+        assert db._find_db_root() == str(admin.resolve()), "CB-13 no longer reproduces"
+
+    def test_a_declared_root_defeats_the_misbinding(self, tmp_path, monkeypatch):
+        repo, admin, wt = _separate_git_dir_worktree(tmp_path)
+        monkeypatch.chdir(wt)
+        monkeypatch.setenv(db.ENV_ROOT, str(repo))
+        assert db._db_path() == str((repo / ".codebugs" / "findings.db").resolve())
+
+    def test_where_reports_the_misbinding(self, tmp_path, monkeypatch):
+        """The bug is invisible by definition; `where` is what makes it visible."""
+        repo, admin, wt = _separate_git_dir_worktree(tmp_path)
+        monkeypatch.chdir(wt)
+        info = db.describe_root()
+        assert info["source"] == "discovery"
+        assert info["root"] == str(admin.resolve())
+
+
+class TestDescribeRoot:
+    """One resolver, two consumers: `codebugs where` and the MCP preflight."""
+
+    def test_reports_a_discovered_root(self, tmp_path, monkeypatch):
+        db.init_project(str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        info = db.describe_root()
+        assert info["source"] == "discovery"
+        assert info["root"] == str(tmp_path.resolve())
+        assert info["path"] == str(tmp_path / ".codebugs" / "findings.db")
+        assert info["error"] is None
+
+    def test_reports_a_declared_root(self, tmp_path, monkeypatch):
+        db.init_project(str(tmp_path))
+        monkeypatch.setenv(db.ENV_ROOT, str(tmp_path))
+        info = db.describe_root()
+        assert info["source"] == "env"
+        assert info["root"] == str(tmp_path)
+
+    def test_reports_failure_without_raising(self, tmp_path, monkeypatch):
+        """The preflight must be warn-only, so this may never raise (CB-11)."""
+        monkeypatch.chdir(tmp_path)
+        info = db.describe_root()
+        assert info["path"] is None
+        assert info["root"] is None
+        assert "codebugs init" in info["error"]
+
+    def test_reports_a_declared_root_that_does_not_resolve(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(db.ENV_ROOT, str(tmp_path / "nope"))
+        info = db.describe_root()
+        assert info["source"] == "env"
+        assert info["path"] is None
+        assert db.ENV_ROOT in info["error"]
+
+
+class TestWhereCommand:
+    """`codebugs where` — the single moment that says where this process is pointed."""
+
+    def _where(self, cwd, *args, env=None):
+        environ = {**os.environ, **(env or {})}
+        return subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", *args, "where"],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            env=environ,
+        )
+
+    def test_prints_the_discovered_root(self, tmp_path):
+        db.init_project(str(tmp_path))
+        proc = self._where(tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        assert str(tmp_path) in proc.stdout
+        assert "discovery" in proc.stdout
+
+    def test_names_the_env_channel(self, tmp_path):
+        declared = _tracker(tmp_path, "declared")
+        other = tmp_path / "other"
+        other.mkdir()
+        proc = self._where(other, env={db.ENV_ROOT: str(declared)})
+        assert proc.returncode == 0, proc.stderr
+        assert str(declared) in proc.stdout
+        assert db.ENV_ROOT in proc.stdout
+
+    def test_names_the_flag_channel(self, tmp_path):
+        declared = _tracker(tmp_path, "declared")
+        other = tmp_path / "other"
+        other.mkdir()
+        proc = self._where(other, "--tracker-root", str(declared))
+        assert proc.returncode == 0, proc.stderr
+        assert str(declared) in proc.stdout
+        assert "--tracker-root" in proc.stdout
+
+    def test_unbound_is_a_clean_failure(self, tmp_path):
+        proc = self._where(tmp_path)
+        assert proc.returncode == 1
+        assert "Traceback" not in proc.stderr
+        assert "codebugs init" in proc.stdout + proc.stderr
+
+    def test_the_flag_reaches_a_real_command(self, tmp_path):
+        """The flag is global, not `where`-only — it must bind every verb."""
+        declared = _tracker(tmp_path, "declared")
+        other = tmp_path / "other"
+        other.mkdir()
+        proc = subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", "--tracker-root", str(declared), "stats"],
+            cwd=str(other),
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+
+
+class TestInitUnderADeclaredRoot:
+    """`init` creates where you stand; the declaration only redirects READS.
+
+    Creation driven by ambient state is the failure this project refuses
+    everywhere else, so the declaration is ignored here — but a mismatch would
+    leave a tracker nothing ever reads, so it is announced.
+    """
+
+    def test_init_ignores_the_declared_root(self, tmp_path, monkeypatch):
+        declared = _tracker(tmp_path, "declared")
+        here = tmp_path / "here"
+        here.mkdir()
+        monkeypatch.chdir(here)
+        monkeypatch.setenv(db.ENV_ROOT, str(declared))
+        result = db.init_project()
+        assert result["root"] == str(here)
+        assert (here / ".codebugs").is_dir()
+
+    def test_cli_init_warns_on_mismatch(self, tmp_path):
+        declared = _tracker(tmp_path, "declared")
+        here = tmp_path / "here"
+        here.mkdir()
+        proc = subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", "init"],
+            cwd=str(here),
+            capture_output=True,
+            text=True,
+            env={**os.environ, db.ENV_ROOT: str(declared)},
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert db.ENV_ROOT in proc.stderr
+        assert str(declared) in proc.stderr
+
+    def test_cli_init_is_silent_when_the_declaration_agrees(self, tmp_path):
+        here = tmp_path / "here"
+        here.mkdir()
+        proc = subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", "init"],
+            cwd=str(here),
+            capture_output=True,
+            text=True,
+            env={**os.environ, db.ENV_ROOT: str(here)},
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "warning" not in proc.stderr.lower()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Mapping
 from contextlib import contextmanager
 from typing import Any
@@ -69,6 +70,38 @@ def install_strict_arguments(server: MCPServer) -> None:
     server.middleware.append(reject_unknown_arguments)
 
 
+def _preflight() -> None:
+    """Say once, on stderr, when this server's tracker binding is broken or unusual.
+
+    WHY THIS EXISTS (CB-11). `_conn` connects lazily per tool call, so a server
+    started where no tracker is reachable looks perfectly healthy at startup and
+    then fails every call forever — once per invocation, with no single moment
+    that names the problem. stderr is the right channel because MCP clients log
+    it, while tool responses are the one place the diagnostic cannot reach.
+
+    WARN-ONLY, NEVER FATAL. Exiting here would break lazy-connect self-healing: a
+    server whose project directory appears after startup must still work. So this
+    reports and returns, always.
+
+    Silent on the ordinary discovered path — one line per project per startup is
+    noise. A DECLARED root is announced, because a non-default binding is exactly
+    what someone reading the log later needs to see.
+    """
+    info = db.describe_root()
+    if info["error"]:
+        print(f"codebugs-mcp: {info['error']}", file=sys.stderr)
+        print(
+            "codebugs-mcp: serving anyway — tool calls will fail until a tracker is "
+            "reachable; `codebugs where` shows the current binding",
+            file=sys.stderr,
+        )
+    elif info["source"] != "discovery":
+        print(
+            f"codebugs-mcp: tracker root {info['root']} (from {info['source_label']})",
+            file=sys.stderr,
+        )
+
+
 SERVER_NAMES = {
     "findings": "codebugs",
     "provenance": "codeprovenance",
@@ -92,7 +125,18 @@ def main():
         default="all",
         help="Which tools to expose (default: all)",
     )
+    parser.add_argument(
+        "--tracker-root",
+        default=None,
+        metavar="DIR",
+        help=(
+            f"Serve the tracker in DIR instead of deriving it from the working "
+            f"directory (overrides ${db.ENV_ROOT})"
+        ),
+    )
     args = parser.parse_args()
+    db.set_tracker_root(args.tracker_root)
+    _preflight()
 
     # mcp 2.0 renamed FastMCP -> MCPServer and dropped the constructor's
     # json_response flag; it only ever applied to streamable-http, and we run stdio.
