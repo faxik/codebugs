@@ -280,12 +280,20 @@ def query_requirements(
         params.extend(ids)
         if limit < len(ids):
             limit = len(ids)
+    # Both resolved, matching the write paths (CB-19 sibling sweep). Left raw, these
+    # filters compared the caller's spelling against a canonical column while
+    # `add_requirement` and `update_requirement` had ALWAYS normalized through
+    # `resolve_priority` / `resolve_requirement_status` — so
+    # `update_requirement(priority="SHOULD")` stored `should` and
+    # `query_requirements(priority="SHOULD")` then returned ZERO rows. A tracker
+    # reporting "no requirements" for a value it just wrote is the worst answer it
+    # can give, and it is indistinguishable from an empty queue.
     if status:
         conditions.append("status = ?")
-        params.append(status)
+        params.append(resolve_requirement_status(status))
     if priority:
         conditions.append("priority = ?")
-        params.append(priority)
+        params.append(resolve_priority(priority))
     if section:
         conditions.append("section LIKE ?")
         params.append(f"%{section}%")
