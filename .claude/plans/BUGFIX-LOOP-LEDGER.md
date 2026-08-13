@@ -11,6 +11,7 @@ net change. Tracker: this repo's own `.codebugs/findings.db`, served by `mcp__co
 | 2026-08-13 | `codebugs` | CB-17 | **fixed** — severity was write-once, so a re-measured card could not be re-triaged | `dc49160` (`741f428`) | filed CB-19, CB-20; upgraded CB-6 |
 | 2026-08-13 | `codebugs` | CB-17 (post-hoc) | **simplify pass** that should have run before landing — 3 redundant tests, a duplicated fixture, and two false doc claims | `1892b80` | filed CB-21 |
 | 2026-08-13 | `codebugs` | CB-20 | **fixed** — vocabulary columns ordered alphabetically, so `low` outranked `medium` and `could` outranked `must` | `f9a682e` (`2ac27c4`) | filed CB-22 |
+| 2026-08-13 | `codebugs` | CB-22 | **fixed** — an allowlist that never validated its own members; sibling in `capacity.py` silently lost an increment | `e1900d4` (`4db5a07`, `6996b8e`, `d1fea09`) | CB-21 still needs a user decision |
 
 ## 2026-08-13 — CB-16
 
@@ -187,3 +188,45 @@ whose absence is invisible is the kind worth writing down.
 file. `test_blockers.py` came back with 142 changed lines for a 50-line addition. Restore the file
 and re-append rather than shipping the noise — `ruff check` is the gate, not `ruff format --check`,
 and the repo has pre-existing drift in 25 files.
+
+## 2026-08-13 — CB-22 (the allowlist that never checked itself)
+
+**Picked against my own ranking.** CB-21 (medium) led on severity and blast radius; CB-22 (low) was
+second. The bounded Codex pass over the shortlist put CB-22 first and it was right: CB-21's correct
+fix includes making `description`/`file` mutable on findings, which widens the tracker's API — a
+user decision, and Phase 3's explicit always-ask condition. CB-22 has none, and it lays the
+fail-closed-at-construction pattern CB-21's parity gate wants. Sequencing, not substitution.
+
+**The card was wrong twice, and only running it showed that.** It claimed `sort_col` was unguarded
+on the vocabulary branch (both branches were covered) and that `_SAFE_IDENT` had no callers (its
+grep was scoped to `src/`; a test used it). Meanwhile the defect it *understated* was the real one:
+`readable_cols` was not merely a prospective syntax hazard — a member of `(SELECT meta FROM
+findings)` passed the membership check and `field()` returned the `meta` column. **An allowlist
+membership check guards the caller's argument, never the allowlist's own contents.** Two
+obligations; only the first is visible at the query site. That is now a CLAUDE.md rule.
+
+**The fix shipped with the defect it was fixing, until review caught it.** I lifted the pattern
+`^[A-Za-z_][A-Za-z0-9_]*$` unchanged out of `_SAFE_IDENT` and into the new gate. `$` also matches
+just before a trailing newline, so `is_sql_identifier("id\n")` was True and
+`EntityKind(table="findings\n")` constructed cleanly. Codex/Sol found it on the finished diff.
+**Anchor with `fullmatch`, never `^…$`.** Related: `entities._SAFE_IDENT is types._IDENT` returned
+`True`, which reads as "already deduped" and is only `re` caching on the pattern string — a check
+that would have talked me out of the dedup for a reason that isn't one.
+
+**Two of five mutations were added because a mutation SURVIVED.** Truncating the member loop to its
+first element passed all 28 tests: my payload `(SELECT …)` starts with `0x28` and sorts before every
+real column name, so a check-one implementation still caught it. The test proved *some* member was
+validated, not *every* member — fixed by parametrizing over payloads at both ends of sort order.
+Codex found the other survivor: validating `sort_col` only when `sort_vocabulary is None`, which
+every negative test happened to set, while both production kinds declare a vocabulary.
+
+**Process failure worth recording:** I mutation-tested `capacity.py` before committing it, so the
+`git checkout --` restore destroyed my own fix. The skill says commit first, mutate second, and it
+says so for exactly this reason. Cost was one re-edit; the tests caught it in the same run.
+
+**The sibling sweep paid again.** `group_by` in `findings.py`/`reqs.py` is caller-supplied straight
+from MCP and correctly allowlisted — the scariest-looking site was fine. `milestones/capacity.py`
+was not: `f"{size}_held"` guarded only by a CHECK two layers away, and the two branches disagreed
+for the same input — `OperationalError` with a capacity row, and **a row of zeros plus a success
+return** without one. A success-shaped return for a write that did not happen is the CB-15/CB-16
+class of lie, found in a module this card never mentioned.
