@@ -198,3 +198,35 @@ One judgement recorded rather than actioned: Codex notes there is no fencing tok
 `abandon_session` can revoke a holder after it was told to proceed. That is a real property of this
 design, pre-existing and unchanged here; it wants a fencing token or an owner acknowledgement, which
 is a larger design question than this tree.
+
+---
+
+## Adversarial Review Corrections (round 3 — third NO-GO)
+
+Codex, 0.99 confidence, reproduced the **same fatal defect one step further along**: round 2 moved
+the lease stamp below the lock and the HEAD callback, but the stale-holder `abandoned` UPDATE sits
+between the stamp and the lease write. Burning the TTL there produced B and C both `proceed: True`.
+
+**Three rounds on one shape is the signal that the fix was at the wrong layer.** Point-of-use
+sampling has to be re-established every time a statement is inserted, and twice it silently wasn't.
+So the deadline is now computed by SQLite inside the UPDATE
+(`strftime('%Y-%m-%dT%H:%M:%SZ','now',?)`) — sampling and writing are the same operation, and a
+stale deadline is unrepresentable rather than merely avoided. `merge.py` imports no clock at all now.
+
+Consequences worth recording:
+
+* **The round-2 regression test became vacuous** and was replaced. It monkeypatched
+  `merge.datetime`, which the SQL version does not consult, so it passed trivially. The replacement
+  asserts the **SQL template** (the repo's rule for guards of this kind) plus a live-lease check, and
+  a second test covers the stale-holder takeover path specifically. Both verified to fail against a
+  Python-sampled-deadline mutation.
+* **The AST ratchet had three more gaps**, all closed: `executescript` bodies hold many statements
+  so only checking the literal's prefix missed `"SELECT 1; BEGIN IMMEDIATE; …"`; a leading `--`
+  comment hid the statement after it; and a bare `startswith("BEGIN")` over-counted `BEGINNING`. It
+  is now statement-split, comment-stripped and token-aware. Its docstring now states what it still
+  cannot see — runtime-built SQL, and the unresolved receiver — instead of claiming a complete
+  executable-site census.
+
+Recorded but not actioned, same as round 2: there is no fencing token, so an external
+`abandon_session` can revoke a holder after it was told to proceed. Pre-existing, unchanged here,
+and a larger design question than this tree.
