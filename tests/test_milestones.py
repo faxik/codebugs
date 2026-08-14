@@ -1601,8 +1601,20 @@ class TestPullNextTransactionBoundary:
         inserted in that window — an item this call never claimed. The row now comes
         from the claim UPDATE's `RETURNING`.
 
-        Asserted structurally rather than by racing: the returned row must be the one
-        carrying this agent's assignment. A re-resolve cannot promise that.
+        **This PASSES against the old code, and the docstring above would be a lie
+        without saying so.** With a single attachment the post-commit re-resolve finds
+        the same row, so nothing here discriminates. It is a structural regression pin:
+        it fixes the returned row's identity as "the row carrying this agent's claim",
+        which the `RETURNING` implementation guarantees by construction and the
+        re-resolve only happened to satisfy.
+
+        The discriminating version needs a SECOND attachment inserted between the
+        commit and the re-read, via the `CommitPausingConnection` seam below — the
+        same recipe `TestReleaseItemAtomicity` uses for CB-30. Not built here because
+        `pull_next` reaches its commit through `db.txn`'s `COMMIT` while the old code
+        used `conn.commit()`, so the seam needs both hooks and a candidate item that
+        survives `_candidates`' eligibility filter. Recorded on CB-39 rather than
+        approximated.
         """
         self._open_item(conn)
         got = milestones.pull_next(conn, agent_id="agent-A", capacity={"small": 1})
