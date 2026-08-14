@@ -306,11 +306,29 @@ def merge(
             "for a lock row that is not yet committed."
         )
 
-    now_dt = datetime.now(timezone.utc)
-    now = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-    expires = (now_dt + timedelta(seconds=LOCK_TTL_SECONDS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    def _stamp() -> tuple[str, str]:
+        """(now, now+TTL), sampled at the moment of use.
+
+        **Never hoist this above the lock or above the HEAD callback (CB-41, round 2).**
+        An earlier revision of this very fix computed both once, before
+        ``BEGIN IMMEDIATE``. Acquiring the write lock can block for ``busy_timeout``,
+        and ``current_main_head_fn`` is an injected callback that shells out to git —
+        either can consume the whole TTL. The lease then lands ALREADY EXPIRED: this
+        call returns ``proceed: True`` while a competitor immediately sees the lock
+        reclaimable and also gets ``proceed: True``. That is the exact double-admission
+        CB-41 was filed for, reintroduced inside its own fix and caught by cross-model
+        review.
+        """
+        dt = datetime.now(timezone.utc)
+        return (
+            dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            (dt + timedelta(seconds=LOCK_TTL_SECONDS)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
 
     with db.txn(conn):
+        # Sampled INSIDE the lock, so the expiry comparison below reflects when this
+        # transaction actually got the database, not when it asked.
+        now, _ = _stamp()
         row = _get_session(conn, session_id)
         lock = conn.execute("SELECT * FROM codemerge_locks WHERE id=1").fetchone()
 
@@ -318,9 +336,10 @@ def merge(
         # `expires_at` — see CB-41 in the docstring. This branch WRITES, so it must
         # commit; returning from inside the block does exactly that.
         if row["status"] == "merging" and lock and lock["session_id"] == session_id:
+            _, renewed_expires = _stamp()  # granted deadline, sampled at the write
             conn.execute(
                 "UPDATE codemerge_locks SET expires_at=? WHERE id=1 AND session_id=?",
-                (expires, session_id),
+                (renewed_expires, session_id),
             )
             return {"proceed": True, "session_id": session_id}
 
@@ -351,7 +370,11 @@ def merge(
                 "current_head": actual_head,
             }
 
-        # Only now do we write. A stale holder (expired lease) loses its session here.
+        # Only now do we write, and only now is the granted deadline decided — after
+        # the lock wait AND after the HEAD callback, both of which can burn the TTL.
+        now, expires = _stamp()
+
+        # A stale holder (expired lease) loses its session here.
         if lock["session_id"] is not None:
             conn.execute(
                 "UPDATE codemerge_sessions SET status='abandoned', last_activity=? "

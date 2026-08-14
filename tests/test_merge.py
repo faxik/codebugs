@@ -855,6 +855,52 @@ class TestMergeLockLease:
         ).fetchone()["session_id"]
         assert holder == "A", "the lock must not have moved on a refusal"
 
+    def test_a_slow_acquisition_does_not_grant_an_already_expired_lease(self, conn):
+        """CB-41, round two — the defect this fix REINTRODUCED before review caught it.
+
+        The first implementation computed `now` and `now+TTL` once, at the top of the
+        function: before `BEGIN IMMEDIATE` and before `current_main_head_fn`. Both can
+        take real time — the lock wait is bounded by `busy_timeout`, and the HEAD
+        callback shells out to git. If either consumed the TTL, the lease was written
+        ALREADY EXPIRED, this call returned proceed=True, and a competitor immediately
+        saw the lock as reclaimable and also got proceed=True. Two admissions again,
+        through the fix rather than the original branch disagreement.
+
+        Reproduced deterministically by burning the TTL inside the HEAD callback rather
+        than by sleeping. Both stamps are now sampled at their point of use, so the
+        granted deadline is decided AFTER the callback returns.
+        """
+        merge.start_session(conn, session_id="A", branch="fix/A")
+
+        def slow_head():
+            # The callback is where real time goes; simulate it exceeding the TTL.
+            conn.execute(
+                "UPDATE codemerge_locks SET expires_at=? WHERE id=1", (self.PAST,)
+            )
+            return "H0"
+
+        a = merge.merge(
+            conn, "A", expected_main_head="H0", current_main_head_fn=slow_head
+        )
+        assert a["proceed"] is True
+
+        granted = conn.execute(
+            "SELECT expires_at FROM codemerge_locks WHERE id=1"
+        ).fetchone()["expires_at"]
+        assert granted > utc_now(), (
+            f"A was granted a lease that had already expired ({granted}). A competitor "
+            "would see the lock reclaimable and also be told to proceed — CB-41 "
+            "reappearing inside its own fix."
+        )
+
+        merge.start_session(conn, session_id="B", branch="fix/B")
+        b = merge.merge(
+            conn, "B", expected_main_head="H0", current_main_head_fn=lambda: "H0"
+        )
+        assert b["proceed"] is False and b["reason"] == "lock_held", (
+            "exactly one session may hold the gate after a slow acquisition"
+        )
+
     def test_merge_refuses_an_ambient_transaction(self, conn):
         """CB-40's replacement contract, and it must be a raise, not an assert.
 
