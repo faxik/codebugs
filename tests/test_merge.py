@@ -799,6 +799,10 @@ class TestMergeLockLease:
         If B reclaims during A's expiry window BEFORE A retries, A's self-owned branch
         must not fire — the lock's session_id is B now. A falls through to the status
         guard and learns it lost, rather than being handed a lock it does not hold.
+
+        **Passes against the old code as well**, deliberately: this is the half of the
+        lease behaviour the renewal remedy had to PRESERVE, not change. Recorded so a
+        reader can tell it from the tests above, which do discriminate.
         """
         self._acquire(conn, "A")
         self._expire_lock(conn)
@@ -818,8 +822,17 @@ class TestMergeLockLease:
         Old code marked the expired holder `abandoned` and only THEN checked the head,
         relying on a rollback to unwind it. That is why the raw transaction needed a
         rollback-and-return path at all. Reordering removed both the write and the
-        need for the machinery — this test pins the ordering, and fails against any
-        implementation that writes first.
+        need for the machinery.
+
+        **This test PASSES against the old code too, and that is not a defect in it.**
+        The old rollback did correctly undo the abandon, so the end state matches; no
+        assertion over these tables can separate "never wrote" from "wrote and undid
+        it". What it pins is that the new ordering reaches the same outcome WITHOUT
+        depending on a rollback — which is what makes the refusal safe once the
+        function no longer owns a raw transaction. It would fail against an
+        implementation that writes first and returns without rolling back, which is
+        precisely what the rejected `TxnAbort` design would have produced under an
+        ambient transaction.
         """
         self._acquire(conn, "A")
         self._expire_lock(conn)
