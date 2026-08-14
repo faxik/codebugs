@@ -724,3 +724,135 @@ class TestSessionLifecycleIsOneTransaction:
         assert conn.execute(
             "SELECT COUNT(*) AS c FROM codemerge_claims WHERE session_id='s1'"
         ).fetchone()["c"] == 0, "the nested call must roll back with its caller"
+
+
+class TestMergeLockLease:
+    """CB-41 / CB-40 / CB-36 — the mutual-exclusion gate itself.
+
+    These three defects all lived in `merge()`'s transaction boundary and are fixed
+    together. The lease tests below did not exist in any form; every prior idempotent
+    -retry test used a FRESH lease, which is exactly the case where the old code's two
+    branches agreed.
+    """
+
+    PAST = "2000-01-01T00:00:00Z"
+
+    def _expire_lock(self, conn):
+        """Drive the clock by writing the past, not by sleeping 300s."""
+        conn.execute("UPDATE codemerge_locks SET expires_at=? WHERE id=1", (self.PAST,))
+        conn.commit()
+
+    def _acquire(self, conn, session_id, head="H0"):
+        merge.start_session(conn, session_id=session_id, branch=f"fix/{session_id}")
+        return merge.merge(
+            conn, session_id,
+            expected_main_head=head, current_main_head_fn=lambda: head,
+        )
+
+    def test_an_expired_holder_and_a_competitor_cannot_both_proceed(self, conn):
+        """CB-41. This is the defect: two agents told to push to main at once.
+
+        Old behaviour: A's idempotent retry matched on `session_id` alone and never
+        read `expires_at`, so A got proceed=True on a dead lease — while B found the
+        lease expired, reclaimed it, and also got proceed=True.
+
+        New behaviour: A's retry RENEWS the lease (the user-chosen remedy), so B is
+        refused with `lock_held`. Exactly one of them proceeds.
+        """
+        assert self._acquire(conn, "A")["proceed"] is True
+        self._expire_lock(conn)
+
+        a_retry = merge.merge(
+            conn, "A", expected_main_head="H0", current_main_head_fn=lambda: "H0"
+        )
+        merge.start_session(conn, session_id="B", branch="fix/B")
+        b = merge.merge(
+            conn, "B", expected_main_head="H0", current_main_head_fn=lambda: "H0"
+        )
+
+        proceeding = [s for s, r in (("A", a_retry), ("B", b)) if r["proceed"]]
+        assert proceeding == ["A"], (
+            f"exactly one session may hold the merge gate; got {proceeding}. "
+            "Both proceeding is CB-41 — the idempotent branch ignoring lease expiry "
+            "while the acquisition branch treats the same lease as reclaimable."
+        )
+        assert b["reason"] == "lock_held"
+
+    def test_a_self_retry_renews_the_lease(self, conn):
+        """The chosen remedy, stated as behaviour: owning the lock extends it."""
+        self._acquire(conn, "A")
+        self._expire_lock(conn)
+        before = conn.execute(
+            "SELECT expires_at FROM codemerge_locks WHERE id=1"
+        ).fetchone()["expires_at"]
+
+        merge.merge(conn, "A", expected_main_head="H0", current_main_head_fn=lambda: "H0")
+
+        after = conn.execute(
+            "SELECT expires_at FROM codemerge_locks WHERE id=1"
+        ).fetchone()["expires_at"]
+        assert after > before, "an expired self-retry must renew, not return a dead lease"
+
+    def test_a_holder_that_lost_its_lock_is_told_so(self, conn):
+        """The interleaving the renewal remedy has to survive.
+
+        If B reclaims during A's expiry window BEFORE A retries, A's self-owned branch
+        must not fire — the lock's session_id is B now. A falls through to the status
+        guard and learns it lost, rather than being handed a lock it does not hold.
+        """
+        self._acquire(conn, "A")
+        self._expire_lock(conn)
+        merge.start_session(conn, session_id="B", branch="fix/B")
+        assert merge.merge(
+            conn, "B", expected_main_head="H0", current_main_head_fn=lambda: "H0"
+        )["proceed"] is True
+
+        with pytest.raises(ValueError, match="not in 'active' state"):
+            merge.merge(
+                conn, "A", expected_main_head="H0", current_main_head_fn=lambda: "H0"
+            )
+
+    def test_main_moved_abandons_nobody(self, conn):
+        """The head check runs BEFORE any write, so this refusal has nothing to undo.
+
+        Old code marked the expired holder `abandoned` and only THEN checked the head,
+        relying on a rollback to unwind it. That is why the raw transaction needed a
+        rollback-and-return path at all. Reordering removed both the write and the
+        need for the machinery — this test pins the ordering, and fails against any
+        implementation that writes first.
+        """
+        self._acquire(conn, "A")
+        self._expire_lock(conn)
+        merge.start_session(conn, session_id="B", branch="fix/B")
+
+        result = merge.merge(
+            conn, "B", expected_main_head="H0", current_main_head_fn=lambda: "MOVED"
+        )
+        assert result["reason"] == "main_moved"
+
+        a_status = conn.execute(
+            "SELECT status FROM codemerge_sessions WHERE session_id='A'"
+        ).fetchone()["status"]
+        assert a_status == "merging", (
+            "a main_moved refusal must not have abandoned the previous holder — it "
+            "decided not to proceed, so it must have changed nothing"
+        )
+        holder = conn.execute(
+            "SELECT session_id FROM codemerge_locks WHERE id=1"
+        ).fetchone()["session_id"]
+        assert holder == "A", "the lock must not have moved on a refusal"
+
+    def test_merge_refuses_an_ambient_transaction(self, conn):
+        """CB-40's replacement contract, and it must be a raise, not an assert.
+
+        Under an ambient transaction `db.txn` yields False and the caller owns the
+        commit, so this would report proceed=True for a lock row no other connection
+        can see. `assert` would be stripped under -O; this is an unconditional raise.
+        """
+        merge.start_session(conn, session_id="A", branch="fix/A")
+        with db.txn(conn) as opened:
+            assert opened
+            with pytest.raises(RuntimeError, match="no open transaction"):
+                merge.merge(
+                    conn, "A", expected_main_head="H0", current_main_head_fn=lambda: "H0"
+                )
