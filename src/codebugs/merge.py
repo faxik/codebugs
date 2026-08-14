@@ -377,18 +377,30 @@ def merge(
                 (lock["session_id"],),
             )
 
-        # The granted lease. `acquired_at` and `expires_at` are both evaluated by
-        # SQLite as this statement runs, so however long the abandonment above took,
-        # the deadline is TTL seconds from NOW and cannot be born expired.
-        conn.execute(
-            f"UPDATE codemerge_locks SET session_id=?, acquired_at={_NOW_SQL}, "  # noqa: S608
-            f"expires_at={_EXPIRES_SQL} WHERE id=1",
-            (session_id, ttl),
-        )
+        # Session state BEFORE the lease, so the lease write is the LAST mutation in
+        # this transaction. Every statement between writing a deadline and committing
+        # it is time the deadline is already burning; keeping that list empty is the
+        # only part of that window this code controls.
         conn.execute(
             f"UPDATE codemerge_sessions SET status='merging', "  # noqa: S608
             f"last_activity={_NOW_SQL} WHERE session_id=?",
             (session_id,),
+        )
+
+        # The granted lease, evaluated by SQLite as this statement runs — so however
+        # long anything above took, the deadline is TTL seconds from NOW.
+        #
+        # RESIDUAL, and it is irreducible here rather than an oversight (CB-42): the
+        # gap between this statement and `COMMIT` is still unaccounted for. A stall
+        # longer than the TTL in that gap commits a lease that is already expired.
+        # Post-commit re-validation does not close it — it only moves the window to
+        # "between the re-validation and the caller acting" — because `proceed: True`
+        # is not a durable capability in a TTL scheme without a fencing token checked
+        # at the protected operation itself. Filed rather than papered over.
+        conn.execute(
+            f"UPDATE codemerge_locks SET session_id=?, acquired_at={_NOW_SQL}, "  # noqa: S608
+            f"expires_at={_EXPIRES_SQL} WHERE id=1",
+            (session_id, ttl),
         )
     return {"proceed": True, "session_id": session_id}
 

@@ -363,7 +363,7 @@ class TestTransactionDiscipline:
         `(filename, statement)` into a SET and asserted `found <= allowed`, so any
         number of raw sites inside an already-allowed file passed — and so did zero.
         That is a filename allowlist, not a one-site ratchet. Since the claim this
-        gate now makes is "exactly one executable site, and it is `db.txn`", it counts.
+        gate now makes is about the COUNT of raw sites, it counts them.
 
         **Counted from the AST, not from a line scan.** The line-based version missed
         a multiline `conn.execute(\\n "BEGIN ..." )`, lowercase spelling, and two calls
@@ -375,11 +375,19 @@ class TestTransactionDiscipline:
         `--` comment hid the statement after it; and a bare `startswith("BEGIN")`
         over-counted `BEGIN TUTORIAL` and `BEGINNING`.
 
-        **What it still cannot see, stated rather than papered over:** SQL built at
-        runtime (f-strings, concatenation, names) is invisible to any static check, and
-        the receiver is not resolved — `anything.execute("BEGIN")` counts, whether or
-        not it is a sqlite3 connection. This gate is a tripwire against a raw BEGIN
-        being *typed into the source*, not a proof that exactly one can execute.
+        **What it still cannot see — enumerated, because two rounds of review caught
+        this docstring claiming more than the code enforces:** SQL built at runtime is
+        invisible; the receiver is not resolved, so `anything.execute("BEGIN")` counts;
+        the statement split is a plain `;` split, so it mishandles semicolons inside
+        quoted strings and inside `--` comments, and does not strip `/* block */`
+        comments; and a non-script `execute("BEGIN;")` with a trailing semicolon is
+        missed. It also does NOT verify that the one allowed site is `db.txn` — it
+        records a filename and a classification, nothing more.
+
+        So: this is a tripwire against a raw BEGIN being *typed into the source* in a
+        recognisable form. It is not a proof that exactly one can execute, and the
+        allowlist is the real contract. Tightening it further is tracked rather than
+        claimed.
         """
         import ast as _ast
 
