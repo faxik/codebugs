@@ -1,86 +1,47 @@
-# CB-40 + CB-36 (final site) — absorb the two raw `BEGIN IMMEDIATE` sites into `db.txn`
+# CB-40 + CB-41 + CB-36 (final site) + CB-39 — `merge.py` and `pull_next` transaction boundaries
 
 Branch: `fix/cb-40-cb-36-raw-txn` · Base: `4bc34ef` · 2026-08-14
-Remedy **(b)** of CB-40, chosen by the user: shrink the `BEGIN IMMEDIATE` allowlist to zero rather
-than guard the assignment in place.
+**Revision 2** — rewritten after a Codex/gpt-5.6-sol **NO-GO** on revision 1. Corrections appendix at
+the end.
 
-Closes **CB-40** and the last site of **CB-36** (`merge.merge`), which share one transaction
-boundary. Also closes **CB-39** if the `pull_next` return is fixed in the same pass — see edit 3.
+Remedy **(b)** of CB-40 (user-chosen): absorb both raw sites into `db.txn`, allowlist to zero.
+CB-41 semantics: **renew the lease atomically** (user-chosen).
+
+Closes **CB-40**, **CB-41**, **CB-39**, and CB-36's last site. All four live in one transaction
+boundary; that is why they are one tree and not four.
 
 ---
 
-## The blocker remedy (b) has to solve
+## What revision 1 got wrong
 
-Both raw sites exist for ONE reason, and it is not style: **they roll back and return a value.**
+Revision 1 invented a `db.TxnAbort` sentinel so a block could roll back and return a value, because
+three paths do that today. **It is not needed, and it was dangerous.**
 
-| site | abort path | returns |
-|---|---|---|
-| `merge.merge` | lock held and unexpired | `{"proceed": False, "reason": "lock_held", …}` |
-| `merge.merge` | main moved | `{"proceed": False, "reason": "main_moved", …}` |
-| `capacity.pull_next` | no eligible candidate | `None` |
+* Not needed: `lock_held`, idempotent-success and no-candidate **write nothing**, so they can simply
+  `return` and let `db.txn` commit an empty transaction. And `main_moved` only needed a rollback
+  because the expired-holder `abandoned` UPDATE happened *before* the head check — **reorder those
+  two and there is nothing to discard.**
+* Dangerous: `db.txn` swallows a failed `ROLLBACK` (`db.py:297-300`, verified). That is correct for a
+  real exception — cleanup must not mask the original — but for a control-flow sentinel deliberately
+  converted into a normal return, it means a refusal-shaped result handed back with the transaction
+  still live and the write still present.
 
-A plain `return` inside `with db.txn(conn)` **commits** — the context manager's `__exit__` runs
-normally. So `db.txn` as it stands cannot express these three paths. That is the whole reason the
-allowlist has two entries.
+So: **no change to `db.py` at all.** The allowlist shrinks because the raw sites become `db.txn`
+users, not because `db.txn` grew a feature.
 
-`merge.merge`'s `main_moved` abort is not hypothetical bookkeeping: the expired-lock branch above it
-has already UPDATEd the previous holder's session to `abandoned`, and that write **must** be
-discarded when the head check then fails.
+## Ambient transactions: an unconditional check, not `assert`
 
-## Design: `db.TxnAbort`, and NO change to `db.txn`
+Revision 1 proposed `assert not conn.in_transaction`. **Python removes `assert` under `-O`**, so
+that is not a barrier. Nor is documentation alone.
 
-```python
-class TxnAbort(Exception):  # db.py
-    """Raise inside ``db.txn`` to roll back and return a value instead of raising out.
+Both functions get an unconditional runtime refusal. The reason is specific to what they are: under
+an ambient transaction `db.txn` yields `False` and the caller owns the commit, so `merge()` would
+return `proceed: True` **before the lock row is committed** — invisible to every other connection.
+For a mutual-exclusion gate, returning "you hold the lock" while the lock is uncommitted is worse
+than any defect being fixed here. Same for `pull_next` returning a claim nobody else can see.
 
-    ``db.txn``'s ``except BaseException`` already rolls back and re-raises, so this
-    needs no special handling there. The CALLER catches it outside the block and
-    returns ``.result``.
-    """
-    def __init__(self, result=None):
-        super().__init__("transaction aborted by caller")
-        self.result = result
-```
-
-Call shape:
-
-```python
-try:
-    with db.txn(conn):
-        ...
-        raise db.TxnAbort({"proceed": False, "reason": "lock_held", ...})
-        ...
-except db.TxnAbort as abort:
-    return abort.result
-```
-
-**Why this and not a `db.txn` signature change.** `db.txn` yields a `bool` and seven call sites rely
-on it. Yielding a handle object instead would change every one of them and the CLAUDE.md contract
-that documents the bool. A sentinel exception rides the rollback path that already exists.
-
-**It lives in `db.py`, not privately in each module** — two private copies is the exact drift the
-`_SAFE_IDENT` / `_IDENT` bullet warns about.
-
-### The one honest gap, stated up front
-
-Under an **ambient** transaction `db.txn` yields `False` and does not roll back, so a `TxnAbort`
-raised there unwinds to the caller's `except` **with the block's partial writes still live in the
-caller's transaction**. For `merge.merge` that means the expired-lock `abandoned` UPDATE survives an
-abort it was supposed to discard.
-
-This is a *smaller* hazard than CB-40's current one (today those writes are committed outright,
-along with the caller's), but it is not zero, and remedy (b) does not by itself make these functions
-ambient-safe. Two candidate answers:
-
-* **(i) Document + assert.** Both functions declare "must be called with no open transaction" and
-  assert `not conn.in_transaction`. Precedent: the claims module already declares exactly this
-  invariant in CLAUDE.md, for the same reason, and no in-repo caller violates it.
-* **(ii) SAVEPOINT.** Wrap the abortable region in a SAVEPOINT so the abort rolls back to it even
-  when ambient. Precedent: `reconcile._reconcile_on_terminal`. Strictly better, strictly more code.
-
-**Plan takes (i)**, because it matches the existing claims precedent and keeps this tree at four
-edits; (ii) is recorded as a follow-up rather than silently skipped. **If review judges (i)
-insufficient for a mutual-exclusion gate, take (ii) instead — say so and I will.**
+The claims module's documented invariant is the precedent for the *rule*, not for enforcing it with
+prose — and Codex is right that its "precedent" asserts nothing.
 
 ---
 
@@ -88,47 +49,99 @@ insufficient for a mutual-exclusion gate, take (ii) instead — say so and I wil
 
 | # | Change | Locations | Cards |
 |---|---|---|---|
-| 1 | Add `TxnAbort` + docstring | `db.py` | CB-40 |
-| 2 | `merge.merge` → `db.txn` + `TxnAbort`; **move the status guard inside the lock** | `merge.py:~248-337` | CB-40, CB-36 |
-| 3 | `pull_next` → `db.txn` + `TxnAbort`; capture result by numeric id | `capacity.py:200-255` | CB-40, CB-39 |
-| 4 | Shrink the ratchet allowlist to `{("db.py", "BEGIN IMMEDIATE")}` | `tests/test_claims.py:350-358` | CB-40 |
+| 1 | `merge.merge` → `db.txn`; guard moved inside; head check reordered before the expired-holder write; expired self-retry renews | `merge.py:~246-337` | CB-40, CB-41, CB-36 |
+| 2 | `pull_next` → `db.txn`; claim captured via `UPDATE … RETURNING *` | `capacity.py:200-255` | CB-40, CB-39 |
+| 3 | Ratchet: allowlist → `db.py` only, and count occurrences rather than dedupe by filename | `tests/test_claims.py:350-365` | CB-40 |
+| 4 | Correct the stale transaction docs | `CLAUDE.md` | CB-40 |
 
-Four rows, at the ceiling.
+Four rows, at the ceiling. `merge.py` and `capacity.py` already import `db` (batches 1–2).
 
-### Edit 2 detail — the CB-36 half
+### Edit 1 — the new `merge.merge` order
 
-`merge.merge` reads the session and decides `row["status"] != "active"` at `:262-268`, **before**
-`BEGIN IMMEDIATE` at `:288`. A concurrent `abandon_session` committing in that window lets `merge()`
-flip an abandoned session back to `merging` and hand it the singleton lock. The guard moves inside.
+Everything below is inside one `with db.txn(conn):`, after the ambient check:
 
-The idempotent "already merging" short-circuit (`:264-267`) also reads `codemerge_locks` outside the
-lock. It moves inside too and becomes a `TxnAbort({"proceed": True, ...})` — it must not commit,
-because it writes nothing.
+1. `_get_session` — the read.
+2. **Idempotent / self-owned branch.** If this session already holds the lock: **renew** —
+   `UPDATE codemerge_locks SET expires_at=<now+TTL> WHERE id=1 AND session_id=?` — and return
+   `proceed: True`. This branch now WRITES, so it must commit; returning normally does that.
+   Renewal is unconditional on expiry: a live lease is extended, an expired one is reclaimed by its
+   own owner. That is CB-41 option (b), and it removes the disagreement between the two branches
+   because expiry no longer decides anything on the self-owned path.
+3. **Status guard**, now inside the lock (CB-36): refuse unless `active`.
+4. Read the lock row. If held by *someone else* and unexpired → `return` `lock_held`. No writes.
+5. **Head check** — `current_main_head_fn()` — moved to HERE, *before* any write. Mismatch →
+   `return` `main_moved`. No writes.
+6. Only now: if the lock is held by someone else and expired, mark that holder abandoned; then take
+   the lock and set this session `merging`.
 
-### Edit 3 detail — CB-39 rides along
+Step 5 moving above step 6 is what makes the sentinel unnecessary, and it is also simply more
+correct: today a `main_moved` refusal has already abandoned another session before deciding not to
+proceed, and only the rollback hides it.
 
-`pull_next` returns `_get_item_by_ref(conn, chosen["item_ref"])` **after** its COMMIT (`:255`), which
-re-resolves `ORDER BY id DESC LIMIT 1` and can return a different attachment. That is CB-39
-verbatim. Since this edit already restructures the function's transaction boundary, capturing the
-row by numeric `id` inside the block is free here and CB-39 closes with it.
+**Accepted consequence (Codex, and it is a real contract change):** requests that previously refused
+instantly — nonexistent, `done`, `abandoned` sessions — now may wait up to `busy_timeout` and can
+surface `database is locked` instead of `KeyError`/`ValueError` under contention. That is inherent
+to making the guard authoritative; a guard evaluated outside the lock is the defect. Documented in
+the docstring. The external head callback already ran under the lock, so that exposure is unchanged.
+
+### Edit 2 — `pull_next`
+
+Same absorb. The claim UPDATE gains `RETURNING *`; the raw row is fetched **inside** the block and
+converted with `_row_to_item` **after** it — converting inside would let a malformed `meta_json`
+roll back an otherwise successful claim (CB-24 consequence 2). That closes **CB-39**'s post-commit
+re-read in the same pass, and per CLAUDE.md's RETURNING rule that statement's `rowcount` must never
+be read afterwards.
+
+### Edit 3 — the ratchet
+
+Allowlist becomes `{("db.py", "BEGIN IMMEDIATE")}`. Codex is right that the current check is a
+*filename* allowlist — `found` is a set and the assertion is `found <= allowed`, so any number of
+occurrences in an allowed file passes, and zero would pass too. Since this tree's claim is "exactly
+one executable site", the check counts occurrences and asserts the count.
 
 ## Verification
 
-1. **Ratchet shrinks to one entry and still passes** — `tests/test_claims.py::test_24`. If it fails,
-   a raw `BEGIN` survived.
-2. **`merge.merge` guard race** — a session abandoned between the old read point and lock
-   acquisition must NOT be revived. Discriminator is who is refused, not final state.
-3. **Abort paths still roll back** — `main_moved` must discard the expired-lock `abandoned` UPDATE.
-   This test fails on any implementation that returns instead of aborting.
-4. **`pull_next` returns the row it claimed**, not the newest attachment (CB-39).
-5. **Ambient-transaction behaviour is asserted, whichever of (i)/(ii) is chosen** — under (i) the
-   assertion raises; under (ii) the abort rolls back to the savepoint.
-6. Full suite (934 baseline) + `ruff check`.
+1. **CB-41, the test that does not exist today:** an expired same-session retry followed by a
+   competing acquisition must not yield `proceed: True` twice. Drive the clock by writing
+   `expires_at` in the past rather than sleeping.
+2. **CB-41 renewal:** an expired self-retry extends `expires_at`; a competing session then gets
+   `lock_held`, not the lock.
+3. **CB-36 guard race:** a session abandoned between the old read point and lock acquisition must
+   not be revived. Discriminator is who is refused.
+4. **`main_moved` performs no writes** — assert the previous holder is NOT abandoned after a
+   `main_moved` refusal. This fails on today's code *and* on revision 1's ordering.
+5. **Ambient refusal:** both functions raise under `db.txn`, unconditionally (not via `assert`).
+6. **CB-39:** `pull_next` returns the row it claimed, not the newest attachment.
+7. **Ratchet** passes with one entry and a counted assertion.
+8. Full suite (934 baseline) + `ruff check`.
 
-## Risks
+## Risks / out of scope
 
-* This is the mutual-exclusion primitive for parallel agents. A wrong rollback here means two agents
-  merging at once — worse than the defect being fixed.
-* `pull_next`'s `_candidates` does per-row blocker/requirement reads inside the lock (CB-31). This
-  change neither improves nor worsens that; it must not silently widen the window further.
-* Out of scope: CB-31, CB-38, CB-37.
+* This is the mutual-exclusion primitive for parallel agents. A wrong rollback means two agents
+  merging at once.
+* CB-41 (b) means the TTL no longer bounds a *retrying* holder — a hung-but-retrying session can
+  hold the gate indefinitely. Accepted deliberately by the user; recorded here because it is the
+  cost side of the choice, and it wants a follow-up (stale-holder detection that is not TTL-based).
+* Out of scope: CB-31, CB-37, CB-38.
+
+---
+
+## Adversarial Review Corrections (revision 2)
+
+Codex/gpt-5.6-sol, confidence 0.95, verdict **NO-GO** on revision 1. Findings, all accepted:
+
+1. **CB-41 discovered** — the idempotent path ignores lease expiry, so two sessions can both be told
+   to proceed. Filed as its own `high` card; verified by the author by reading both branches. This
+   was the single most valuable output of the review.
+2. **`TxnAbort` could return a refusal with the transaction still live**, because `db.txn` swallows a
+   failed `ROLLBACK`. Removed the sentinel entirely — its own design-smell section had the better
+   answer.
+3. **`assert` is stripped under `-O`** — replaced with an unconditional runtime check, and the
+   claims "precedent" was misread: it documents the invariant without enforcing it.
+4. **CB-39 should use `UPDATE … RETURNING`**, not a second SELECT under the lock.
+5. **The ratchet is a filename allowlist**, not a one-site ratchet.
+6. **Stale docs** — CLAUDE.md still declares two raw sites and says `pull_next` follows merge.py's
+   raw pattern.
+
+Codex also judged the guard-move's latency/error-precedence change to be a real but acceptable
+contract change, and confirmed `pull_next`'s fresh-connection concurrency is otherwise preserved.
