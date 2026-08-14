@@ -17,6 +17,7 @@ from codebugs.milestones._spine import (
     _items_with_active_blockers,
     _milestone_exists,
     _row_to_item,
+    _row_to_milestone,
 )
 
 
@@ -174,65 +175,93 @@ def milestone_close(
       - any item has unresolved blockers (unless force=True)
 
     Error messages list the specific blocking items so the caller can act.
+
+    **CROSS-TABLE check-then-act, and the only one in this package (CB-36).** The
+    refusal list is built from a SELECT over ``milestone_items`` while the write lands
+    on ``milestones``. Every other CB-24 site reads and writes one table; here the
+    guard and the thing it guards live apart, which is why a same-table predicate
+    would never have flagged it and why the wrap must span both.
+
+    Without one transaction the gate is defeated by exactly the case it exists to
+    catch: an item is added, reopened, or marked ``branch_only`` between the check and
+    the close, and the release ships as ``shipped`` over work that was not finished.
+    ``db.txn`` takes the write lock before the first read, so a concurrent item writer
+    is serialized either wholly before the check (and is therefore seen) or wholly
+    after the close.
+
+    The ``force`` path is inside the transaction too, even though it performs no
+    check. It still reads ``milestone["state"]`` for the audit row's ``from_state``,
+    and an audit trail that records a transition from a state the milestone had
+    already left is the quiet kind of wrong this package keeps filing cards about.
+
+    Note ``_items_with_active_blockers`` reaches into the blockers domain and swallows
+    its own errors; it is a read either way, so holding the lock across it costs a
+    slightly longer write-lock hold on a rare, human-initiated operation. That is the
+    right trade for a gate.
+
+    Do not restore ``conn.commit()`` — ``db.txn`` owns the commit.
     """
-    milestone = _get_milestone(conn, id)
-    if milestone["kind"] == "stream":
-        raise ValueError(f"streams cannot be closed (milestone={id})")
+    with db.txn(conn):
+        milestone = _get_milestone(conn, id)
+        if milestone["kind"] == "stream":
+            raise ValueError(f"streams cannot be closed (milestone={id})")
 
-    if not force:
-        problems: list[str] = []
-        rows = conn.execute(
-            "SELECT * FROM milestone_items WHERE milestone_id = ?", (id,)
-        ).fetchall()
-        items = [_row_to_item(r) for r in rows]
+        if not force:
+            problems: list[str] = []
+            rows = conn.execute(
+                "SELECT * FROM milestone_items WHERE milestone_id = ?", (id,)
+            ).fetchall()
+            items = [_row_to_item(r) for r in rows]
 
-        unfinished = [
-            i["item_ref"] for i in items
-            if i["status"] in ("open", "in_progress")
-        ]
-        if unfinished:
-            problems.append(
-                f"unfinished items ({len(unfinished)}): {', '.join(unfinished)}"
-            )
+            unfinished = [
+                i["item_ref"] for i in items
+                if i["status"] in ("open", "in_progress")
+            ]
+            if unfinished:
+                problems.append(
+                    f"unfinished items ({len(unfinished)}): {', '.join(unfinished)}"
+                )
 
-        branch_only = [
-            f"{i['item_ref']}@{(i.get('meta') or {}).get('branch', '?')}"
-            for i in items if i["branch_only"]
-        ]
-        if branch_only:
-            problems.append(
-                f"branch-only items ({len(branch_only)}): {', '.join(branch_only)}"
-            )
+            branch_only = [
+                f"{i['item_ref']}@{(i.get('meta') or {}).get('branch', '?')}"
+                for i in items if i["branch_only"]
+            ]
+            if branch_only:
+                problems.append(
+                    f"branch-only items ({len(branch_only)}): {', '.join(branch_only)}"
+                )
 
-        blocked = _items_with_active_blockers(conn, items)
-        if blocked:
-            problems.append(
-                f"items with active blockers ({len(blocked)}): {', '.join(blocked)}"
-            )
+            blocked = _items_with_active_blockers(conn, items)
+            if blocked:
+                problems.append(
+                    f"items with active blockers ({len(blocked)}): {', '.join(blocked)}"
+                )
 
-        if problems:
-            raise ValueError(
-                f"cannot close {id}: " + "; ".join(problems)
-                + "  (use force=True with reason to override)"
-            )
+            if problems:
+                raise ValueError(
+                    f"cannot close {id}: " + "; ".join(problems)
+                    + "  (use force=True with reason to override)"
+                )
 
-    now = utc_now()
-    from_state = milestone["state"]
-    conn.execute(
-        "UPDATE milestones SET state='shipped', closed_at=? WHERE id=?",
-        (now, id),
-    )
-    audit_reason = (f"force:{reason}" if force and reason else
-                    "force" if force else reason)
-    _audit(
-        conn,
-        milestone_id=id,
-        item_ref=None,
-        actor=actor,
-        action="close",
-        from_state=from_state,
-        to_state="shipped",
-        reason=audit_reason,
-    )
-    conn.commit()
-    return _get_milestone(conn, id)
+        now = utc_now()
+        from_state = milestone["state"]
+        conn.execute(
+            "UPDATE milestones SET state='shipped', closed_at=? WHERE id=?",
+            (now, id),
+        )
+        audit_reason = (f"force:{reason}" if force and reason else
+                        "force" if force else reason)
+        _audit(
+            conn,
+            milestone_id=id,
+            item_ref=None,
+            actor=actor,
+            action="close",
+            from_state=from_state,
+            to_state="shipped",
+            reason=audit_reason,
+        )
+        result = conn.execute(
+            "SELECT * FROM milestones WHERE id = ?", (id,)
+        ).fetchone()
+    return _row_to_milestone(result)

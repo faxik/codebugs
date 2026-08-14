@@ -1128,6 +1128,44 @@ class TestBranchTracking:
 # ---------------------------------------------------------------------------
 
 class TestCloseGate:
+    def test_an_ambient_transaction_is_not_committed_by_milestone_close(self, conn):
+        """CB-36 batch 5: the cross-table gate now owns no commit of its own.
+
+        `milestone_close` is the only site in this card whose guard and write live in
+        DIFFERENT tables — it reads `milestone_items` to build its refusal list and
+        writes `milestones`. Both are now in one transaction, so a concurrent item
+        writer is serialized either wholly before the check or wholly after the close,
+        and the gate cannot be stepped over.
+
+        Both writes are asserted — the milestone state AND the audit row. Checking only
+        the state would let a partial rollback pass.
+
+        No race test, for the reason recorded on the sibling sites: driving the
+        interleave leaves the same final state a legal ordering produces (A checks, B
+        adds an item, A closes → shipped with an open item; and "A closes, then B adds"
+        → the same). "No oracle found", not "no oracle exists" — a reviewer found one
+        for `add_claim` after I made the stronger claim.
+        """
+        milestones.create_milestone(
+            conn, id="release/8.8", kind="release", description="gate fixture"
+        )
+
+        with pytest.raises(RuntimeError, match="caller aborts"):
+            with db.txn(conn) as opened:
+                assert opened, "the caller owns this transaction"
+                milestones.milestone_close(conn, id="release/8.8")
+                raise RuntimeError("caller aborts after the nested call")
+
+        state = conn.execute(
+            "SELECT state FROM milestones WHERE id = 'release/8.8'"
+        ).fetchone()["state"]
+        assert state != "shipped", "the close must roll back with its caller"
+        audits = conn.execute(
+            "SELECT COUNT(*) AS c FROM milestone_audit "
+            "WHERE milestone_id = 'release/8.8' AND action = 'close'"
+        ).fetchone()["c"]
+        assert audits == 0, "the audit row must roll back with the close it records"
+
     def test_close_stream_always_refused(self, conn):
         with pytest.raises(ValueError, match="streams cannot be closed"):
             milestones.milestone_close(conn, id="stream/triage")
