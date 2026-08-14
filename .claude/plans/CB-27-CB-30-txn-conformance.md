@@ -3,7 +3,8 @@
 Branch: `fix/cb-27-cb-30-txn-conformance`
 Base: `764edcf` (main)
 Iteration: bugfix-loop, focus `codebugs`, 2026-08-14
-**Revision 2** — rewritten after `adversarial-review-x2`. See the corrections appendix at the end.
+**Revision 3** — rewritten after `adversarial-review-x2`, then patched for the judge's three mandatory
+fixes. See the corrections appendix at the end.
 
 Both cards were **re-scoped before this tree was created** so that each is fully closable here:
 
@@ -21,11 +22,21 @@ shared clustering reference admits such a hit "only under the clustering ceiling
 `capacity.release_item` is a hit of the sweep run for `sweep.mark_items`, and it is an
 already-filed card (CB-30).
 
-**One transformation rule, stated once, applying to both sites:**
+**One transformation rule, plus one corollary that only the row-returning site needs:**
 
-> Take `db.txn(conn)` **before** the first read; keep the read, the Python decision derived from
-> it, and every dependent write inside that one block; delete the function's own `conn.commit()`;
-> convert any returned row **outside** the block.
+> **Rule.** Take `db.txn(conn)` **before** the first read; keep the read, the Python decision
+> derived from it, and every dependent write inside that one block; delete the function's own
+> `conn.commit()`; convert any returned row **outside** the block.
+>
+> **Corollary (row-returning sites only).** A function that returns a row it wrote must *capture*
+> that row inside the block via `RETURNING`, never re-query for it afterwards, and must not parse
+> JSON from any row inside the block.
+
+The corollary is stated separately rather than folded into the rule because revision 1 asserted a
+single flat rule and the clustering argument then survived *as a conclusion* while its premise got
+three times heavier — `release_item` needed a raw-row helper, a `RETURNING` capture, and a
+precedence table, none of which the rule names. `mark_items` needs none of them. The clustering
+decision is unchanged and still correct; the framing is now proportionate to the evidence.
 
 **The split-trigger is resolved and closed.** Revision 1 left a live conditional — "if the review
 reads that as two rules rather than one, split the tree". Cross-model review (Codex/Sol) read the
@@ -172,9 +183,9 @@ Open `with db.txn(conn):` **before** line 263; close it after the audit; delete 
 **1. The opening lookup must return a RAW row.** `_get_item_by_ref` (`_spine.py:83-90`) returns
 `_row_to_item(row)`, and `_row_to_item` (`:21-25`) calls `json.loads` on `meta_json`. Parsing
 therefore happens *before any write*, which is why revision 1's malformed-`meta` verification was
-unreachable. `release_item` consumes only plain columns from that row — `id` (282, 291), `size`
-(302), `milestone_id` (305), `status` (310), `assigned_agent` (264) — and never `meta`. So add to
-`_spine.py`:
+unreachable. `release_item` consumes only plain columns from that row — `id` (`:281`, `:291`),
+`size` (`:302`), `milestone_id` (`:305`), `status` (`:309`), `assigned_agent` (`:264`) — and never
+`meta` or `branch_only`. So add to `_spine.py`:
 
 ```python
 def _get_item_row_by_ref(conn: sqlite3.Connection, item_ref: str) -> sqlite3.Row:
@@ -195,6 +206,13 @@ and refactor `_get_item_by_ref` to `return _row_to_item(_get_item_row_by_ref(con
 place the `ORDER BY id DESC LIMIT 1` selection rule is written, or CB-33's eventual fix has two
 sites to find. `pull_next` (`capacity.py:249`) keeps the converting variant.
 
+**`sqlite3.Row` is not a `dict`.** `capacity.py:264` reads `item.get("assigned_agent")`, and
+`sqlite3.Row` supports only `__getitem__`, `keys()` and iteration — there is no `.get()`. Rewrite it
+as `item["assigned_agent"]`, which is semantically identical here because the column always exists
+and `NULL` converts to `None`. Enumerating the *columns* as plain is not sufficient to conclude the
+raw row is a drop-in; the *access API* changes too, and this line would raise `AttributeError` on
+the first run.
+
 **2. Capture the mutated row with `RETURNING *`; do not re-query for it.** The closing
 `_get_item_by_ref(conn, item_ref)` at `:314` runs *after* the commit at `:313`, so a concurrently
 inserted newer attachment is returned instead of the row just written — the function reports
@@ -203,9 +221,19 @@ inserted newer attachment is returned instead of the row just written — the fu
 `updated_row is None` — unreachable under the write lock, but a `None` would otherwise surface as
 an opaque `TypeError` outside the block.
 
+**Fetch the `RETURNING` row INSIDE the block.** `db.txn` issues `COMMIT` at block exit, and an
+unexhausted `RETURNING` cursor at that moment risks "cannot commit transaction - SQL statements in
+progress". So `cur.fetchone()` immediately after each `execute`; only the `_row_to_item` conversion
+moves outside.
+
 This is compatible with CLAUDE.md's `RETURNING` rule: both UPDATEs discard their cursors entirely
 today, so no `rowcount` read is being broken. Idiom precedent: `claims.py:271`/`:274` and
 `:335`/`:338`, carrying the literal comment `# NEVER rowcount — this statement carries RETURNING`.
+
+**A seam this creates, recorded so CB-38 does not rediscover it:** once these two UPDATEs carry
+`RETURNING`, the same rule forbids ever reading their `rowcount` — which forecloses exactly the
+rowcount-based hardening `_decrement_capacity` is being deferred to CB-38 for. CB-38 must decide
+its idempotency check knowing that.
 
 **3. What the return value now promises — and what it does not.**
 
@@ -246,16 +274,39 @@ avoid taking the lock for a doomed call but would flip missing-item-plus-invalid
    and stays so under the raw-row refactor. Assertion discriminates on state: pre-fix
    `small_held == 0` while item 2 is still assigned; post-fix `small_held == 1`, because once A
    commits, `_live_rows` (`reconcile.py:140-152`) filters `status != target` and the hook no-ops.
+
+   **Two preconditions, and without them this test is vacuous on BOTH sides** — the obvious
+   construction does not reach the assertion:
+   * The reconciliation hook is **stream-scoped**: `_live_rows` filters
+     `milestone_id IN (SELECT id FROM milestones WHERE kind = 'stream')` (`reconcile.py:73`,
+     `:142`). An item in `release/1.1` never fires the hook, so both arms read the same counter.
+     The item must be attached to a **stream** milestone (e.g. `stream/maintenance`).
+   * `triage._auto_route_finding` hardcodes **`size='triage'`** in its INSERT (`triage.py:43`), so
+     an auto-routed finding increments `triage_held`, never `small_held`. Either attach a
+     `size='small'` item explicitly, or assert on `triage_held`.
+
+   This is correction #3 from the revision-2 appendix recurring one section later in a new form:
+   the CB-30 race test was rewritten from scratch to satisfy the deadlock finding and silently
+   inherited revision 1's reproducer prose. Recorded here because that is the section-local
+   fix-application failure this repo documents, caught by the judge rather than avoided.
 2. **Commit-seam test — single-threaded, and it fails on `main`.** Revision 1's multi-attachment
    test could not fail: with a static set of attachments both lookups pick the same row, so `main`
    already returns the row it mutated. The discriminator must be injected *between the commit and
    the re-read*, which no existing helper reaches (`PausingConnection` is one-shot and fires at
    `:263`). Add a `CommitPausingConnection` hooking **both** seams — `commit()` for `main`'s
    `:313` and an `execute()` prefix check for `COMMIT`, which is how `db.txn` closes (`db.py:294`)
-   — because keying on only one gives a vacuous pass on the other. The hook inserts a *newer*
-   attachment for the same `item_ref` on a second connection (`AUTOINCREMENT`, `_schema.py:107`,
-   guarantees it wins `ORDER BY id DESC`). Assert `result["id"] == mutated_id` and
+   — because keying on only one gives a vacuous pass on the other. **The hook must fire AFTER the
+   underlying commit completes** — call `super().commit()` / `super().execute(...)` first, the way
+   the existing `PausingConnection` does (`tests/test_milestones.py:911`); firing before the commit
+   lands leaves the write lock held, so the second connection's INSERT blocks and burns the 5s
+   `busy_timeout` — the same trap the deadlock finding named for the race tests. The hook inserts a
+   *newer* attachment for the same `item_ref` on a second connection (`AUTOINCREMENT`,
+   `_schema.py:107`, guarantees it wins `ORDER BY id DESC`). Assert `result["id"] == mutated_id` and
    `result["status"] == "done"`. Pre-fix the re-read returns the new attachment → `status == "open"`.
+
+   Note what this test can and cannot do: it fails on `main` and passes after, but *after* the fix
+   there is no post-commit read at all, so no injected attachment can affect the result. It is a
+   correct regression pin, not an exercise of the new path.
 3. **Precedence tests** — the four rows of the table above.
 4. **Ambient-transaction test** as for CB-27.
 
@@ -265,9 +316,12 @@ avoid taking the lock for a doomed call but would flip missing-item-plus-invalid
 * Everything in **CB-38** (the other doors that leak a slot).
 * **CB-33** — which attachment `release_item` *should* act on.
 * `pull_next` (`:249`) has the **same post-commit re-read window** as `release_item:314` — it
-  returns `_get_item_by_ref(...)` after its `COMMIT`. Found while verifying this plan; not fixed
-  here because `pull_next` is the other grandfathered raw-`BEGIN IMMEDIATE` site and restructuring
-  it is a separate edit. To be filed.
+  returns `_get_item_by_ref(...)` after its `COMMIT` (`:242`). Found while verifying this plan; not
+  fixed here because `pull_next` is the other grandfathered raw-`BEGIN IMMEDIATE` site and
+  restructuring it is a separate edit, and this tree is at its clustering ceiling. **Filed as
+  CB-39**, which the judge made a precondition of implementing this tree: after this lands,
+  `release_item` returns the row it mutated while `pull_next` three lines above does not, and an
+  unfiled asymmetry inside one file is the CB-17 shape.
 
 ---
 
@@ -335,3 +389,32 @@ explicitly rather than left to parsing.
 
 Found by the author while verifying the defender's citations, and missed by both reviewers:
 `pull_next` (`capacity.py:249`) carries the same post-commit re-read window as `release_item:314`.
+Now **CB-39**.
+
+### Judge verdict (revision 3)
+
+**8/10 — fix mandatory items, then ship.** Confidence **0.82**, discounted for adversarial coverage
+rather than verification: the judge re-derived every code claim itself rather than trusting
+citations, but this was a single-attacker review.
+
+Three mandatory fixes, all applied in revision 3 and all verified against the code by the author
+before applying:
+
+1. **`sqlite3.Row` has no `.get()`.** `capacity.py:264` reads `item.get("assigned_agent")`. The plan
+   had enumerated the *columns* as plain and concluded a raw row was a drop-in, without noticing the
+   *access API* changes. Would have raised `AttributeError` on the first run.
+2. **The CB-30 race test had two unstated preconditions** that make it vacuous on both sides: the
+   reconciliation hook is stream-scoped (`reconcile.py:73`, `:142`), and `_auto_route_finding`
+   hardcodes `size='triage'` (`triage.py:43`), so an auto-routed finding never touches `small_held`.
+   This was the plan's own "tests that cannot fail" correction recurring one section later — the
+   section-local fix-application failure mode, caught rather than avoided.
+3. **File CB-39 before implementing**, so the `release_item` / `pull_next` asymmetry inside one file
+   is tracked rather than latent.
+
+The judge's end-to-end read also found that the "one rule" framing had outgrown its evidence
+(fixed — the rule now carries an explicit corollary), and four recommended fixes, all applied:
+fetch the `RETURNING` row inside the block; make `CommitPausingConnection` fire after the
+underlying commit or it self-deadlocks; record that `RETURNING` forecloses CB-38's rowcount
+hardening; correct two drifted line numbers.
+
+The judge upheld the rejection of the CLI-path finding independently.
