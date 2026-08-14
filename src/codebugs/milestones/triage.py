@@ -16,7 +16,7 @@ from codebugs.milestones._spine import (
     _milestone_exists,
     _row_to_item,
 )
-from codebugs.milestones.reconcile import source_is_terminal
+from codebugs.milestones.reconcile import _table_exists, source_is_terminal
 
 
 def _auto_route_finding(conn: sqlite3.Connection, finding: dict[str, Any]) -> None:
@@ -25,10 +25,7 @@ def _auto_route_finding(conn: sqlite3.Connection, finding: dict[str, Any]) -> No
     Schema-probes first: raw sqlite3.connect() callers (e.g. tests/test_sweep.py)
     may invoke add_finding on a connection that didn't initialize milestones.
     """
-    row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='milestone_items'"
-    ).fetchone()
-    if not row:
+    if not _table_exists(conn, "milestone_items"):
         return
 
     sev = finding.get("severity", "")
