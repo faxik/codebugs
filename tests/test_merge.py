@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -855,42 +856,54 @@ class TestMergeLockLease:
         ).fetchone()["session_id"]
         assert holder == "A", "the lock must not have moved on a refusal"
 
-    def test_a_slow_acquisition_does_not_grant_an_already_expired_lease(self, conn):
+    def test_a_slow_acquisition_does_not_grant_an_already_expired_lease(
+        self, conn, monkeypatch
+    ):
         """CB-41, round two — the defect this fix REINTRODUCED before review caught it.
 
-        The first implementation computed `now` and `now+TTL` once, at the top of the
+        The first implementation computed `now` and `now+TTL` ONCE, at the top of the
         function: before `BEGIN IMMEDIATE` and before `current_main_head_fn`. Both can
         take real time — the lock wait is bounded by `busy_timeout`, and the HEAD
         callback shells out to git. If either consumed the TTL, the lease was written
-        ALREADY EXPIRED, this call returned proceed=True, and a competitor immediately
-        saw the lock as reclaimable and also got proceed=True. Two admissions again,
-        through the fix rather than the original branch disagreement.
+        ALREADY EXPIRED, the call returned proceed=True, and a competitor immediately
+        saw the lock reclaimable and also got proceed=True. Two admissions again,
+        reached through the fix rather than through the original branch disagreement.
 
-        Reproduced deterministically by burning the TTL inside the HEAD callback rather
-        than by sleeping. Both stamps are now sampled at their point of use, so the
-        granted deadline is decided AFTER the callback returns.
+        **The clock is injected, not slept.** A first draft of this test tried to
+        simulate the delay by expiring the pre-existing lock row inside the callback,
+        and it PASSED against the reintroduced defect — because the hoisted stamp was
+        still only microseconds old, so the granted lease looked fresh either way.
+        Nothing short of controlling the clock discriminates here. Verified to fail
+        against a hoisted-stamp mutation.
         """
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        state = {"t": base}
+
+        class _FrozenDatetime:
+            @staticmethod
+            def now(tz=None):
+                return state["t"]
+
+        monkeypatch.setattr(merge, "datetime", _FrozenDatetime)
         merge.start_session(conn, session_id="A", branch="fix/A")
 
         def slow_head():
-            # The callback is where real time goes; simulate it exceeding the TTL.
-            conn.execute(
-                "UPDATE codemerge_locks SET expires_at=? WHERE id=1", (self.PAST,)
-            )
+            # git call that outlives the lease the old code had already computed.
+            state["t"] = base + timedelta(seconds=merge.LOCK_TTL_SECONDS + 1)
             return "H0"
 
-        a = merge.merge(
+        assert merge.merge(
             conn, "A", expected_main_head="H0", current_main_head_fn=slow_head
-        )
-        assert a["proceed"] is True
+        )["proceed"] is True
 
         granted = conn.execute(
             "SELECT expires_at FROM codemerge_locks WHERE id=1"
         ).fetchone()["expires_at"]
-        assert granted > utc_now(), (
-            f"A was granted a lease that had already expired ({granted}). A competitor "
-            "would see the lock reclaimable and also be told to proceed — CB-41 "
-            "reappearing inside its own fix."
+        now_str = state["t"].strftime("%Y-%m-%dT%H:%M:%SZ")
+        assert granted > now_str, (
+            f"A was granted a lease already expired at grant time ({granted} <= "
+            f"{now_str}). A competitor would see the lock reclaimable and also be told "
+            "to proceed — CB-41 reappearing inside its own fix."
         )
 
         merge.start_session(conn, session_id="B", branch="fix/B")
