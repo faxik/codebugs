@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 
 import pytest
 
-from codebugs import merge
+from codebugs import db, merge
 from codebugs.types import utc_now
 
 
@@ -535,3 +536,191 @@ class TestSessionStatusVocabulary:
                 "INSERT INTO codemerge_sessions (session_id, branch, status) VALUES (?,?,?)",
                 ("bad", "b", "not_a_status"),
             )
+
+
+class PausingConnection(sqlite3.Connection):
+    """Fires a one-shot hook right after ``_get_session``'s SELECT.
+
+    The findings, reqs, milestones and sweep suites carry twins of this; each keys on
+    its own read, and the project deliberately has no ``conftest.py``.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.after_select = None
+
+    def execute(self, sql, *args, **kwargs):
+        cur = super().execute(sql, *args, **kwargs)
+        if self.after_select and sql.lstrip().startswith(
+            "SELECT * FROM codemerge_sessions WHERE session_id"
+        ):
+            hook, self.after_select = self.after_select, None
+            hook()
+        return cur
+
+
+class TestSessionLifecycleIsOneTransaction:
+    """CB-36 batch 1: session-state guards decided from a pre-lock read.
+
+    ``start_session``, ``finish`` and ``add_claim`` each read a session row, branch on
+    its ``status``, and then write. Without a transaction spanning the pair the guard
+    is decided against a value another writer has already replaced — and this is the
+    module parallel agents use to detect each other, so the coordination primitive is
+    itself unserialized.
+    """
+
+    def _open(self, path):
+        c = sqlite3.connect(path, factory=PausingConnection)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA busy_timeout=5000")
+        return c
+
+    def _merging_session(self, tmp_path):
+        """A file-backed DB holding one session already in the 'merging' state."""
+        path = str(tmp_path / "merge.db")
+        c = sqlite3.connect(path)
+        c.row_factory = sqlite3.Row
+        try:
+            merge.ensure_schema(c)
+            merge.start_session(c, session_id="s1", branch="fix/x")
+            c.execute("UPDATE codemerge_sessions SET status='merging' WHERE session_id='s1'")
+            c.execute(
+                "UPDATE codemerge_locks SET session_id='s1', acquired_at=?, expires_at=? "
+                "WHERE id=1",
+                (utc_now(), "2099-01-01T00:00:00Z"),
+            )
+            c.commit()
+        finally:
+            c.close()
+        return path
+
+    def test_two_concurrent_finishes_cannot_both_succeed(self, tmp_path):
+        """Exactly one ``finish`` may win — the other must be refused.
+
+        ``finish`` guards on ``status == 'merging'`` and then flips it. Unfixed, both
+        callers read ``merging``, both pass the guard and both write, so both report
+        success and the singleton lock is released twice — the second release freeing a
+        lock the first may already have handed to another session. Fixed, B blocks at
+        ``BEGIN IMMEDIATE``, re-reads ``done``, and raises.
+
+        Note the assertion is on WHO IS REFUSED, not on the final row: the session ends
+        ``done`` either way, so a state assertion would pass against unfixed code.
+
+        KNOWN RESIDUAL, recorded rather than papered over (raised by a Codex/gpt-5.6-sol
+        review of this diff). ``b_started`` is set immediately before B calls ``finish``,
+        so if B is descheduled for longer than the 1.0s wait, A commits first and B then
+        legitimately observes ``done`` and raises — the assertion passes without having
+        proved that ``BEGIN IMMEDIATE`` blocked anything. This is inherent to the
+        bounded-interleave pattern and the reference implementation's own docstring
+        (``tests/test_findings.py``) documents the same gap; ``b_started`` narrows it to
+        B's entry into the call rather than thread startup. The tighter oracle — assert
+        B never reached its own SELECT — was rejected because it converts the false pass
+        into a false FAILURE under the same descheduling. Verified empirically to fail
+        against reverted source.
+        """
+        path = self._merging_session(tmp_path)
+
+        a = self._open(path)
+        a_read, b_started, b_read = (threading.Event() for _ in range(3))
+        b_outcome: list[object] = []
+
+        def competing_finisher():
+            a_read.wait(timeout=10)
+            b = self._open(path)
+            b.after_select = b_read.set
+            b_started.set()
+            try:
+                b_outcome.append(merge.finish(b, "s1", success=True))
+            except BaseException as exc:  # noqa: BLE001 — the refusal IS the result
+                b_outcome.append(exc)
+            finally:
+                b_read.set()
+                b.close()
+
+        a.after_select = lambda: (
+            a_read.set(),
+            b_started.wait(timeout=10),
+            b_read.wait(timeout=1.0),
+        )
+
+        t = threading.Thread(target=competing_finisher)
+        t.start()
+        try:
+            a_result = merge.finish(a, "s1", success=True)
+        finally:
+            t.join(timeout=30)
+            a.close()
+        assert not t.is_alive()
+
+        assert a_result["status"] == "done"
+        assert b_outcome and isinstance(b_outcome[0], ValueError), (
+            "the second finish must be refused once the first has flipped the session "
+            f"out of 'merging'. Got {b_outcome[0]!r} — a success means both callers "
+            "validated against the same stale read"
+        )
+        assert "not in 'merging' state" in str(b_outcome[0])
+
+    # No race test for `add_claim`, and the reason is worth recording rather than
+    # leaving as a gap. Its defect is a claim inserted against a session another writer
+    # abandoned in the window between the guard and the insert. But the two legal serial
+    # orders are "claim then abandon" (claim exists, session abandoned) and "abandon then
+    # claim" (claim refused) — and the FIRST of those is state-identical to the
+    # non-serializable interleaving. There is no assertion over the final tables that
+    # separates them, so any test here would either be timing-based and flaky or would
+    # pass against unfixed code. The ambient-transaction test below is what pins
+    # `add_claim`'s half of this change.
+
+    def test_an_ambient_transaction_is_not_committed_by_start_session(self, conn):
+        with pytest.raises(RuntimeError, match="caller aborts"):
+            with db.txn(conn) as opened:
+                assert opened, "the caller owns this transaction"
+                merge.start_session(conn, session_id="s1", branch="fix/x")
+                raise RuntimeError("caller aborts after the nested call")
+
+        assert conn.execute(
+            "SELECT COUNT(*) AS c FROM codemerge_sessions WHERE session_id='s1'"
+        ).fetchone()["c"] == 0, "the nested call must roll back with its caller"
+
+    def test_an_ambient_transaction_is_not_committed_by_finish(self, conn):
+        """Both of `finish`'s writes must roll back, not just the session row.
+
+        `finish` writes `codemerge_sessions` AND releases the singleton lock in
+        `codemerge_locks`. Asserting only on the session would leave the second write
+        unpinned — a partial rollback would pass. So the lock is held going in and
+        checked on the way out.
+        """
+        merge.start_session(conn, session_id="s1", branch="fix/x")
+        conn.execute("UPDATE codemerge_sessions SET status='merging' WHERE session_id='s1'")
+        conn.execute(
+            "UPDATE codemerge_locks SET session_id='s1', acquired_at=?, expires_at=? WHERE id=1",
+            (utc_now(), "2099-01-01T00:00:00Z"),
+        )
+        conn.commit()
+
+        with pytest.raises(RuntimeError, match="caller aborts"):
+            with db.txn(conn) as opened:
+                assert opened, "the caller owns this transaction"
+                merge.finish(conn, "s1", success=True)
+                raise RuntimeError("caller aborts after the nested call")
+
+        status = conn.execute(
+            "SELECT status FROM codemerge_sessions WHERE session_id='s1'"
+        ).fetchone()["status"]
+        assert status == "merging", "the nested call must roll back with its caller"
+        holder = conn.execute(
+            "SELECT session_id FROM codemerge_locks WHERE id=1"
+        ).fetchone()["session_id"]
+        assert holder == "s1", "the lock release must roll back with the status write"
+
+    def test_an_ambient_transaction_is_not_committed_by_add_claim(self, conn):
+        merge.start_session(conn, session_id="s1", branch="fix/x")
+
+        with pytest.raises(RuntimeError, match="caller aborts"):
+            with db.txn(conn) as opened:
+                assert opened, "the caller owns this transaction"
+                merge.add_claim(conn, "s1", "src/x.py")
+                raise RuntimeError("caller aborts after the nested call")
+
+        assert conn.execute(
+            "SELECT COUNT(*) AS c FROM codemerge_claims WHERE session_id='s1'"
+        ).fetchone()["c"] == 0, "the nested call must roll back with its caller"

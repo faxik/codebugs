@@ -7,6 +7,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from codebugs import db
 from codebugs.types import MERGE_STATUSES, is_vocabulary_filter_active, utc_now
 
 # `MERGE_STATUSES` is imported, not redeclared. It has lived in `types.py` since the
@@ -94,37 +95,45 @@ def start_session(
     repo_root: str = "",
     allow_restart: bool = False,
 ) -> dict[str, Any]:
-    """Register a new working session."""
+    """Register a new working session.
+
+    The restart branch is chosen from ``existing["status"]``, so the read and the
+    write it selects must be one transaction (CB-24): otherwise two callers both see
+    a ``done`` session, both take the restart path, and the second silently deletes
+    the claims the first has already begun recording against the restarted session.
+    ``db.txn`` takes the write lock before the read; do not restore ``conn.commit()``.
+    """
     now = utc_now()
-    if allow_restart:
-        existing = conn.execute(
-            "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
-        ).fetchone()
-        if existing and existing["status"] in ("abandoned", "done"):
-            conn.execute(
-                """UPDATE codemerge_sessions
-                   SET branch=?, description=?, base_commit=?, repo_root=?,
-                       started_at=?, last_activity=?, status='active', finished_at=NULL
-                   WHERE session_id=?""",
-                (branch, description, base_commit, repo_root, now, now, session_id),
-            )
-            conn.execute("DELETE FROM codemerge_claims WHERE session_id = ?", (session_id,))
-            conn.commit()
-            row = conn.execute(
+    with db.txn(conn):
+        restarted = False
+        if allow_restart:
+            existing = conn.execute(
                 "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
             ).fetchone()
-            return dict(row)
+            if existing and existing["status"] in ("abandoned", "done"):
+                conn.execute(
+                    """UPDATE codemerge_sessions
+                       SET branch=?, description=?, base_commit=?, repo_root=?,
+                           started_at=?, last_activity=?, status='active', finished_at=NULL
+                       WHERE session_id=?""",
+                    (branch, description, base_commit, repo_root, now, now, session_id),
+                )
+                conn.execute("DELETE FROM codemerge_claims WHERE session_id = ?", (session_id,))
+                restarted = True
 
-    conn.execute(
-        """INSERT INTO codemerge_sessions
-           (session_id, branch, description, base_commit, repo_root, started_at, last_activity)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (session_id, branch, description, base_commit, repo_root, now, now),
-    )
-    conn.commit()
-    row = conn.execute(
-        "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
-    ).fetchone()
+        if not restarted:
+            conn.execute(
+                """INSERT INTO codemerge_sessions
+                   (session_id, branch, description, base_commit, repo_root, started_at, last_activity)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (session_id, branch, description, base_commit, repo_root, now, now),
+            )
+
+        # Read the result INSIDE the block. Re-reading after the commit returns
+        # whatever another writer has done since, not what this call wrote.
+        row = conn.execute(
+            "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
     return dict(row)
 
 
@@ -155,29 +164,44 @@ def finish(
     *,
     success: bool,
 ) -> dict[str, Any]:
-    """Release lock and mark session done (success) or revert to active (failure)."""
-    row = _get_session(conn, session_id)
-    if row["status"] != "merging":
-        raise ValueError(f"Session '{session_id}' is not in 'merging' state (is '{row['status']}')")
+    """Release lock and mark session done (success) or revert to active (failure).
 
-    now = utc_now()
-    new_status = "done" if success else "active"
-    finished_at = now if success else None
+    The ``merging`` guard is decided from the row read at the top, and the two writes
+    below depend on it, so read and writes are one transaction (CB-24). Without it two
+    callers both observe ``merging``, both pass the guard and both report success for a
+    transition only one of them can legitimately make. ``db.txn`` takes the write lock
+    before the read; do not restore ``conn.commit()``.
 
-    conn.execute(
-        "UPDATE codemerge_sessions SET status=?, finished_at=?, last_activity=? "
-        "WHERE session_id=?",
-        (new_status, finished_at, now, session_id),
-    )
-    conn.execute(
-        "UPDATE codemerge_locks SET session_id=NULL, acquired_at=NULL, expires_at=NULL "
-        "WHERE id=1 AND session_id=?",
-        (session_id,),
-    )
-    conn.commit()
-    return dict(conn.execute(
-        "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
-    ).fetchone())
+    What the double-success does NOT do, stated because an earlier draft of this
+    docstring claimed it did: the second finisher cannot free a lock already handed to
+    another session, because the lock update is guarded by ``AND session_id=?``. The
+    defect is the unserialized guard, not lock theft.
+    """
+    with db.txn(conn):
+        row = _get_session(conn, session_id)
+        if row["status"] != "merging":
+            raise ValueError(
+                f"Session '{session_id}' is not in 'merging' state (is '{row['status']}')"
+            )
+
+        now = utc_now()
+        new_status = "done" if success else "active"
+        finished_at = now if success else None
+
+        conn.execute(
+            "UPDATE codemerge_sessions SET status=?, finished_at=?, last_activity=? "
+            "WHERE session_id=?",
+            (new_status, finished_at, now, session_id),
+        )
+        conn.execute(
+            "UPDATE codemerge_locks SET session_id=NULL, acquired_at=NULL, expires_at=NULL "
+            "WHERE id=1 AND session_id=?",
+            (session_id,),
+        )
+        updated = conn.execute(
+            "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+    return dict(updated)
 
 
 def add_claim(
@@ -185,22 +209,30 @@ def add_claim(
     session_id: str,
     file_path: str,
 ) -> dict[str, Any]:
-    """Record that a session has modified a file. Idempotent."""
-    row = _get_session(conn, session_id)
-    if row["status"] not in ("active", "merging"):
-        raise ValueError(f"Session '{session_id}' is not active (is '{row['status']}')")
+    """Record that a session has modified a file. Idempotent.
 
-    now = utc_now()
-    conn.execute(
-        "INSERT OR IGNORE INTO codemerge_claims (session_id, file_path, claimed_at) "
-        "VALUES (?, ?, ?)",
-        (session_id, file_path, now),
-    )
-    conn.execute(
-        "UPDATE codemerge_sessions SET last_activity=? WHERE session_id=?",
-        (now, session_id),
-    )
-    conn.commit()
+    The active/merging guard is decided from the row read at the top and the claim
+    insert depends on it, so both are one transaction (CB-24). Without it a claim can
+    be recorded against a session another writer abandoned between the check and the
+    insert — the claim then belongs to a dead session and is invisible to overlap
+    detection, which is the one thing this table exists for. ``db.txn`` takes the
+    write lock before the read; do not restore ``conn.commit()``.
+    """
+    with db.txn(conn):
+        row = _get_session(conn, session_id)
+        if row["status"] not in ("active", "merging"):
+            raise ValueError(f"Session '{session_id}' is not active (is '{row['status']}')")
+
+        now = utc_now()
+        conn.execute(
+            "INSERT OR IGNORE INTO codemerge_claims (session_id, file_path, claimed_at) "
+            "VALUES (?, ?, ?)",
+            (session_id, file_path, now),
+        )
+        conn.execute(
+            "UPDATE codemerge_sessions SET last_activity=? WHERE session_id=?",
+            (now, session_id),
+        )
     return {"session_id": session_id, "file_path": file_path, "claimed_at": now}
 
 
@@ -573,7 +605,6 @@ def register_cli(sub, commands) -> None:
     """Register merge CLI subcommands."""
     import argparse
     import sys
-    from codebugs import db
     from codebugs.fmt import format_table
 
     def _cmd_merge_sessions(args: argparse.Namespace) -> None:
