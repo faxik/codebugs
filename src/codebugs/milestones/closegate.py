@@ -12,6 +12,7 @@ from codebugs.types import utc_now
 from codebugs.milestones._spine import (
     _audit,
     _get_item_by_ref,
+    _get_item_row_by_ref,
     _get_milestone,
     _items_with_active_blockers,
     _milestone_exists,
@@ -65,29 +66,42 @@ def mark_integrated(
     actor: str = "user",
 ) -> dict[str, Any]:
     """Mark an item as integrated on main: clears branch_only, sets done_commit,
-    sets status=done. Called by worktree-finish.sh on successful main integration."""
+    sets status=done. Called by worktree-finish.sh on successful main integration.
+
+    The weakest of the CB-36 instances and wrapped anyway: its only guard is on the
+    ``commit`` ARGUMENT, and the row it reads supplies ``id`` / ``milestone_id`` for
+    targeting and ``status`` for the audit trail rather than a branch condition. But
+    the read and the write must still not straddle an unlocked window — otherwise the
+    audit row records a ``from_state`` the item had already left, which is a quiet lie
+    in the one table that exists to say what happened. The result row is captured by
+    numeric ``id`` rather than re-resolved by ``item_ref`` after the commit (CB-39).
+    Do not restore ``conn.commit()``.
+    """
     if not commit.strip():
         raise ValueError("commit is required for integration")
-    item = _get_item_by_ref(conn, item_ref)
-    now = utc_now()
-    conn.execute(
-        """UPDATE milestone_items
-           SET branch_only=0, done_commit=?, status='done', done_at=?, updated_at=?
-           WHERE id=?""",
-        (commit, now, now, item["id"]),
-    )
-    _audit(
-        conn,
-        milestone_id=item["milestone_id"],
-        item_ref=item_ref,
-        actor=actor,
-        action="integrate",
-        from_state=item["status"],
-        to_state="done",
-        reason=f"commit={commit}",
-    )
-    conn.commit()
-    return _get_item_by_ref(conn, item_ref)
+    with db.txn(conn):
+        item = _get_item_row_by_ref(conn, item_ref)
+        now = utc_now()
+        conn.execute(
+            """UPDATE milestone_items
+               SET branch_only=0, done_commit=?, status='done', done_at=?, updated_at=?
+               WHERE id=?""",
+            (commit, now, now, item["id"]),
+        )
+        _audit(
+            conn,
+            milestone_id=item["milestone_id"],
+            item_ref=item_ref,
+            actor=actor,
+            action="integrate",
+            from_state=item["status"],
+            to_state="done",
+            reason=f"commit={commit}",
+        )
+        result = conn.execute(
+            "SELECT * FROM milestone_items WHERE id = ?", (item["id"],)
+        ).fetchone()
+    return _row_to_item(result)
 
 
 def milestone_defer(
@@ -98,39 +112,51 @@ def milestone_defer(
     reason: str = "",
     actor: str = "user",
 ) -> dict[str, Any]:
-    """Move an item to stream/maintenance (or another milestone) with status='deferred'."""
-    item = _get_item_by_ref(conn, item_ref)
-    if not _milestone_exists(conn, to_milestone):
-        raise KeyError(f"Destination milestone not found: {to_milestone}")
-    conflict = conn.execute(
-        """SELECT id FROM milestone_items
-           WHERE milestone_id = ? AND item_kind = ? AND item_ref = ? AND id != ?""",
-        (to_milestone, item["item_kind"], item_ref, item["id"]),
-    ).fetchone()
-    if conflict:
-        raise ValueError(f"{item_ref} already attached to {to_milestone}")
+    """Move an item to stream/maintenance (or another milestone) with status='deferred'.
 
-    from_milestone = item["milestone_id"]
-    from_status = item["status"]
-    now = utc_now()
-    conn.execute(
-        """UPDATE milestone_items
-           SET milestone_id=?, status='deferred', updated_at=?
-           WHERE id=?""",
-        (to_milestone, now, item["id"]),
-    )
-    _audit(
-        conn,
-        milestone_id=to_milestone,
-        item_ref=item_ref,
-        actor=actor,
-        action="defer",
-        from_state=f"{from_milestone}/{from_status}",
-        to_state=f"{to_milestone}/deferred",
-        reason=reason,
-    )
-    conn.commit()
-    return _get_item_by_ref(conn, item_ref)
+    One transaction, opened before the read (CB-24): the conflict query is keyed on
+    ``item_kind`` and ``id`` from the row read at the top, so without the write lock a
+    concurrent attach to the destination lands between the check and the move and
+    violates the UNIQUE constraint the check exists to protect. The audit row's
+    ``from_state`` is likewise composed from that read. The result row is captured by
+    numeric ``id``, not re-resolved by ``item_ref`` after the commit (CB-39). Do not
+    restore ``conn.commit()``.
+    """
+    with db.txn(conn):
+        item = _get_item_row_by_ref(conn, item_ref)
+        if not _milestone_exists(conn, to_milestone):
+            raise KeyError(f"Destination milestone not found: {to_milestone}")
+        conflict = conn.execute(
+            """SELECT id FROM milestone_items
+               WHERE milestone_id = ? AND item_kind = ? AND item_ref = ? AND id != ?""",
+            (to_milestone, item["item_kind"], item_ref, item["id"]),
+        ).fetchone()
+        if conflict:
+            raise ValueError(f"{item_ref} already attached to {to_milestone}")
+
+        from_milestone = item["milestone_id"]
+        from_status = item["status"]
+        now = utc_now()
+        conn.execute(
+            """UPDATE milestone_items
+               SET milestone_id=?, status='deferred', updated_at=?
+               WHERE id=?""",
+            (to_milestone, now, item["id"]),
+        )
+        _audit(
+            conn,
+            milestone_id=to_milestone,
+            item_ref=item_ref,
+            actor=actor,
+            action="defer",
+            from_state=f"{from_milestone}/{from_status}",
+            to_state=f"{to_milestone}/deferred",
+            reason=reason,
+        )
+        result = conn.execute(
+            "SELECT * FROM milestone_items WHERE id = ?", (item["id"],)
+        ).fetchone()
+    return _row_to_item(result)
 
 
 def milestone_close(

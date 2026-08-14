@@ -7,6 +7,7 @@ import sqlite3
 from datetime import date, datetime, timezone
 from typing import Any
 
+from codebugs import db
 from codebugs.types import is_vocabulary_filter_active, utc_now
 
 from codebugs.milestones._schema import (
@@ -19,6 +20,7 @@ from codebugs.milestones._schema import (
 from codebugs.milestones._spine import (
     _audit,
     _get_item_by_ref,
+    _get_item_row_by_ref,
     _get_milestone,
     _items_with_active_blockers,
     _milestone_exists,
@@ -229,38 +231,52 @@ def move_milestone_item(
     actor: str = "user",
 ) -> dict[str, Any]:
     """Move an item to a different milestone. Errors if the destination already
-    has an item with the same (item_kind, item_ref)."""
-    current = _get_item_by_ref(conn, item_ref)
-    if current["milestone_id"] == to_milestone:
-        return current
-    if not _milestone_exists(conn, to_milestone):
-        raise KeyError(f"Destination milestone not found: {to_milestone}")
-    conflict = conn.execute(
-        """SELECT id FROM milestone_items
-           WHERE milestone_id = ? AND item_kind = ? AND item_ref = ?""",
-        (to_milestone, current["item_kind"], item_ref),
-    ).fetchone()
-    if conflict:
-        raise ValueError(
-            f"{item_ref} already attached to {to_milestone}; cannot move"
-        )
-    from_milestone = current["milestone_id"]
-    conn.execute(
-        "UPDATE milestone_items SET milestone_id = ?, updated_at = ? WHERE id = ?",
-        (to_milestone, utc_now(), current["id"]),
-    )
-    _audit(
-        conn,
-        milestone_id=to_milestone,
-        item_ref=item_ref,
-        actor=actor,
-        action="move",
-        from_state=from_milestone,
-        to_state=to_milestone,
-        reason=reason,
-    )
-    conn.commit()
-    return _get_item_by_ref(conn, item_ref)
+    has an item with the same (item_kind, item_ref).
+
+    One transaction, opened before the read (CB-24): the no-op check and the conflict
+    query are both keyed on values from the row read at the top, so without the write
+    lock a concurrent attach to the destination lands between the conflict check and
+    the move, and the UNIQUE constraint the check exists to protect is violated by the
+    very call that checked it. The result row is captured by numeric ``id`` rather than
+    re-resolved by ``item_ref`` after the commit — that re-resolve is ``ORDER BY id DESC
+    LIMIT 1`` and can return a different attachment (CB-39). Do not restore
+    ``conn.commit()``.
+    """
+    with db.txn(conn):
+        current = _get_item_row_by_ref(conn, item_ref)
+        if current["milestone_id"] == to_milestone:
+            result = current
+        else:
+            if not _milestone_exists(conn, to_milestone):
+                raise KeyError(f"Destination milestone not found: {to_milestone}")
+            conflict = conn.execute(
+                """SELECT id FROM milestone_items
+                   WHERE milestone_id = ? AND item_kind = ? AND item_ref = ?""",
+                (to_milestone, current["item_kind"], item_ref),
+            ).fetchone()
+            if conflict:
+                raise ValueError(
+                    f"{item_ref} already attached to {to_milestone}; cannot move"
+                )
+            from_milestone = current["milestone_id"]
+            conn.execute(
+                "UPDATE milestone_items SET milestone_id = ?, updated_at = ? WHERE id = ?",
+                (to_milestone, utc_now(), current["id"]),
+            )
+            _audit(
+                conn,
+                milestone_id=to_milestone,
+                item_ref=item_ref,
+                actor=actor,
+                action="move",
+                from_state=from_milestone,
+                to_state=to_milestone,
+                reason=reason,
+            )
+            result = conn.execute(
+                "SELECT * FROM milestone_items WHERE id = ?", (current["id"],)
+            ).fetchone()
+    return _row_to_item(result)
 
 
 def set_item_status(
@@ -272,44 +288,58 @@ def set_item_status(
     actor: str = "user",
     reason: str = "",
 ) -> dict[str, Any]:
-    """Set an item's status. Records done_commit + done_at when terminal."""
+    """Set an item's status. Records done_commit + done_at when terminal.
+
+    One transaction, opened before the read (CB-24): the no-op branch and the terminal
+    branch are both decided from the row read at the top, so a concurrent writer can
+    move the item between the decision and the write — this call then reports a
+    transition from a state the row no longer held. The result row is captured by
+    numeric ``id``, not re-resolved by ``item_ref`` after the commit (CB-39). Do not
+    restore ``conn.commit()``.
+    """
     if status not in ITEM_STATUSES:
         raise ValueError(f"Invalid status: {status!r}. Must be one of {ITEM_STATUSES}")
-    current = _get_item_by_ref(conn, item_ref)
-    if current["status"] == status:
-        if commit:
-            # The no-op path silently dropped `commit` while the docstring promised
-            # to record it, so a backfill attempt returned success and stored nothing
-            # (CB-28). Refuse rather than invent backfill semantics here: recording a
-            # commit on an already-terminal item is `mark_integrated`'s job.
-            raise ValueError(
-                f"{item_ref} is already {status!r}; commit not recorded. "
-                "Use mark_integrated to record a commit on an existing item."
+    with db.txn(conn):
+        current = _get_item_row_by_ref(conn, item_ref)
+        if current["status"] == status:
+            if commit:
+                # The no-op path silently dropped `commit` while the docstring promised
+                # to record it, so a backfill attempt returned success and stored nothing
+                # (CB-28). Refuse rather than invent backfill semantics here: recording a
+                # commit on an already-terminal item is `mark_integrated`'s job.
+                raise ValueError(
+                    f"{item_ref} is already {status!r}; commit not recorded. "
+                    "Use mark_integrated to record a commit on an existing item."
+                )
+            result = current
+        else:
+            now = utc_now()
+            sets = ["status = ?", "updated_at = ?"]
+            params: list[Any] = [status, now]
+            if status in MILESTONE_ITEM_TERMINAL:
+                sets.append("done_at = ?")
+                params.append(now)
+                if commit:
+                    sets.append("done_commit = ?")
+                    params.append(commit)
+            params.append(current["id"])
+            conn.execute(
+                f"UPDATE milestone_items SET {', '.join(sets)} WHERE id = ?", params
             )
-        return current
-    now = utc_now()
-    sets = ["status = ?", "updated_at = ?"]
-    params: list[Any] = [status, now]
-    if status in MILESTONE_ITEM_TERMINAL:
-        sets.append("done_at = ?")
-        params.append(now)
-        if commit:
-            sets.append("done_commit = ?")
-            params.append(commit)
-    params.append(current["id"])
-    conn.execute(f"UPDATE milestone_items SET {', '.join(sets)} WHERE id = ?", params)
-    _audit(
-        conn,
-        milestone_id=current["milestone_id"],
-        item_ref=item_ref,
-        actor=actor,
-        action="status",
-        from_state=current["status"],
-        to_state=status,
-        reason=reason,
-    )
-    conn.commit()
-    return _get_item_by_ref(conn, item_ref)
+            _audit(
+                conn,
+                milestone_id=current["milestone_id"],
+                item_ref=item_ref,
+                actor=actor,
+                action="status",
+                from_state=current["status"],
+                to_state=status,
+                reason=reason,
+            )
+            result = conn.execute(
+                "SELECT * FROM milestone_items WHERE id = ?", (current["id"],)
+            ).fetchone()
+    return _row_to_item(result)
 
 
 def query_audit(
