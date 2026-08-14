@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -856,62 +855,98 @@ class TestMergeLockLease:
         ).fetchone()["session_id"]
         assert holder == "A", "the lock must not have moved on a refusal"
 
-    def test_a_slow_acquisition_does_not_grant_an_already_expired_lease(
-        self, conn, monkeypatch
-    ):
-        """CB-41, round two — the defect this fix REINTRODUCED before review caught it.
+    def test_the_lease_deadline_is_computed_by_sqlite_not_by_python(self, conn):
+        """CB-41, round three — and the reason the fix became structural.
 
-        The first implementation computed `now` and `now+TTL` ONCE, at the top of the
-        function: before `BEGIN IMMEDIATE` and before `current_main_head_fn`. Both can
-        take real time — the lock wait is bounded by `busy_timeout`, and the HEAD
-        callback shells out to git. If either consumed the TTL, the lease was written
-        ALREADY EXPIRED, the call returned proceed=True, and a competitor immediately
-        saw the lock reclaimable and also got proceed=True. Two admissions again,
-        reached through the fix rather than through the original branch disagreement.
+        THREE review rounds died on one shape: a Python timestamp sampled at one point
+        and written as a lease deadline at another, with something slow in between.
+        Round 1 hoisted it above the lock and the git callback. Round 2 moved it below
+        those but left the stale-holder `abandoned` UPDATE between the sample and the
+        write. Each time the lease landed ALREADY EXPIRED, the call returned
+        proceed=True, and the next contender saw the lock reclaimable and also got
+        proceed=True.
 
-        **The clock is injected, not slept.** A first draft of this test tried to
-        simulate the delay by expiring the pre-existing lock row inside the callback,
-        and it PASSED against the reintroduced defect — because the hoisted stamp was
-        still only microseconds old, so the granted lease looked fresh either way.
-        Nothing short of controlling the clock discriminates here. Verified to fail
-        against a hoisted-stamp mutation.
+        Point-of-use discipline is the wrong layer: it has to be re-established every
+        time a statement is inserted, and twice it silently wasn't. Letting SQLite
+        evaluate `strftime('now')` as part of the UPDATE makes a stale deadline
+        UNREPRESENTABLE — sampling and writing are the same operation.
+
+        So this asserts the SQL TEMPLATE, per the repo rule that a guard of this kind
+        must read the template rather than the executed statement. A behavioural test
+        cannot catch the regression: any Python-sampled deadline still looks fresh
+        unless real time passes during the call, which is exactly what made round 2's
+        first draft pass against the defect it was written for.
         """
-        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        state = {"t": base}
+        captured: list[str] = []
 
-        class _FrozenDatetime:
-            @staticmethod
-            def now(tz=None):
-                return state["t"]
+        class RecordingConnection(sqlite3.Connection):
+            def execute(self, sql, *args, **kwargs):
+                captured.append(sql)
+                return super().execute(sql, *args, **kwargs)
 
-        monkeypatch.setattr(merge, "datetime", _FrozenDatetime)
-        merge.start_session(conn, session_id="A", branch="fix/A")
+        path = ":memory:"
+        rec = sqlite3.connect(path, factory=RecordingConnection)
+        rec.row_factory = sqlite3.Row
+        try:
+            merge.ensure_schema(rec)
+            merge.start_session(rec, session_id="A", branch="fix/A")
+            captured.clear()
+            assert merge.merge(
+                rec, "A", expected_main_head="H0", current_main_head_fn=lambda: "H0"
+            )["proceed"] is True
 
-        def slow_head():
-            # git call that outlives the lease the old code had already computed.
-            state["t"] = base + timedelta(seconds=merge.LOCK_TTL_SECONDS + 1)
-            return "H0"
+            lock_writes = [
+                q for q in captured
+                if "UPDATE codemerge_locks" in q and "expires_at" in q
+            ]
+            assert lock_writes, "no lease write was issued"
+            for q in lock_writes:
+                assert "strftime" in q and "'now'" in q, (
+                    "the lease deadline must be computed by SQLite inside the write "
+                    f"statement, not bound from a Python timestamp: {q!r}"
+                )
 
-        assert merge.merge(
-            conn, "A", expected_main_head="H0", current_main_head_fn=slow_head
-        )["proceed"] is True
+            granted, db_now = rec.execute(
+                "SELECT (SELECT expires_at FROM codemerge_locks WHERE id=1) AS e, "
+                "strftime('%Y-%m-%dT%H:%M:%SZ','now') AS n"
+            ).fetchone()
+            assert granted > db_now, f"lease born expired: {granted} <= {db_now}"
+        finally:
+            rec.close()
 
-        granted = conn.execute(
-            "SELECT expires_at FROM codemerge_locks WHERE id=1"
-        ).fetchone()["expires_at"]
-        now_str = state["t"].strftime("%Y-%m-%dT%H:%M:%SZ")
-        assert granted > now_str, (
-            f"A was granted a lease already expired at grant time ({granted} <= "
-            f"{now_str}). A competitor would see the lock reclaimable and also be told "
-            "to proceed — CB-41 reappearing inside its own fix."
-        )
+    def test_a_stale_holder_takeover_grants_a_live_lease(self, conn):
+        """The specific path round 3 reproduced: the intervening `abandoned` UPDATE.
+
+        B takes over from expired holder A. Between deciding to take the lock and
+        writing it, B must abandon A — and round 2's code had already sampled its
+        deadline before that write. Now both statements compute their own time in SQL,
+        so however long the abandonment takes, B's lease is TTL seconds from the moment
+        it is written. C must then be refused.
+        """
+        self._acquire(conn, "A")
+        self._expire_lock(conn)
 
         merge.start_session(conn, session_id="B", branch="fix/B")
-        b = merge.merge(
+        assert merge.merge(
             conn, "B", expected_main_head="H0", current_main_head_fn=lambda: "H0"
+        )["proceed"] is True
+
+        assert conn.execute(
+            "SELECT status FROM codemerge_sessions WHERE session_id='A'"
+        ).fetchone()["status"] == "abandoned", "the stale holder should have lost it"
+
+        granted, db_now = conn.execute(
+            "SELECT (SELECT expires_at FROM codemerge_locks WHERE id=1) AS e, "
+            "strftime('%Y-%m-%dT%H:%M:%SZ','now') AS n"
+        ).fetchone()
+        assert granted > db_now, f"takeover granted an expired lease: {granted}"
+
+        merge.start_session(conn, session_id="C", branch="fix/C")
+        c = merge.merge(
+            conn, "C", expected_main_head="H0", current_main_head_fn=lambda: "H0"
         )
-        assert b["proceed"] is False and b["reason"] == "lock_held", (
-            "exactly one session may hold the gate after a slow acquisition"
+        assert c["proceed"] is False and c["reason"] == "lock_held", (
+            "a third session must be refused after a stale-holder takeover"
         )
 
     def test_merge_refuses_an_ambient_transaction(self, conn):

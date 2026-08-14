@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from codebugs import db
@@ -306,29 +305,24 @@ def merge(
             "for a lock row that is not yet committed."
         )
 
-    def _stamp() -> tuple[str, str]:
-        """(now, now+TTL), sampled at the moment of use.
-
-        **Never hoist this above the lock or above the HEAD callback (CB-41, round 2).**
-        An earlier revision of this very fix computed both once, before
-        ``BEGIN IMMEDIATE``. Acquiring the write lock can block for ``busy_timeout``,
-        and ``current_main_head_fn`` is an injected callback that shells out to git —
-        either can consume the whole TTL. The lease then lands ALREADY EXPIRED: this
-        call returns ``proceed: True`` while a competitor immediately sees the lock
-        reclaimable and also gets ``proceed: True``. That is the exact double-admission
-        CB-41 was filed for, reintroduced inside its own fix and caught by cross-model
-        review.
-        """
-        dt = datetime.now(timezone.utc)
-        return (
-            dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            (dt + timedelta(seconds=LOCK_TTL_SECONDS)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        )
+    # THE DEADLINE IS COMPUTED BY SQLITE, AT THE MOMENT OF THE WRITE (CB-41, round 3).
+    #
+    # Three review rounds died on the same shape: a Python timestamp sampled at one
+    # point and written as a lease deadline at another, with something slow in
+    # between — first the lock wait and the git callback, then the stale-holder
+    # `abandoned` UPDATE. Each time the lease landed ALREADY EXPIRED, this call
+    # returned `proceed: True`, and the next contender saw the lock reclaimable and
+    # also got `proceed: True`.
+    #
+    # Point-of-use discipline is the wrong layer for that: it has to be re-established
+    # every time a statement is inserted. Letting SQLite evaluate `strftime('now')` as
+    # part of the UPDATE makes a stale deadline UNREPRESENTABLE — there is no window
+    # between sampling and writing, because they are the same operation.
+    ttl = f"+{LOCK_TTL_SECONDS} seconds"
+    _EXPIRES_SQL = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)"
+    _NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
 
     with db.txn(conn):
-        # Sampled INSIDE the lock, so the expiry comparison below reflects when this
-        # transaction actually got the database, not when it asked.
-        now, _ = _stamp()
         row = _get_session(conn, session_id)
         lock = conn.execute("SELECT * FROM codemerge_locks WHERE id=1").fetchone()
 
@@ -336,10 +330,10 @@ def merge(
         # `expires_at` — see CB-41 in the docstring. This branch WRITES, so it must
         # commit; returning from inside the block does exactly that.
         if row["status"] == "merging" and lock and lock["session_id"] == session_id:
-            _, renewed_expires = _stamp()  # granted deadline, sampled at the write
             conn.execute(
-                "UPDATE codemerge_locks SET expires_at=? WHERE id=1 AND session_id=?",
-                (renewed_expires, session_id),
+                f"UPDATE codemerge_locks SET expires_at={_EXPIRES_SQL} "  # noqa: S608
+                "WHERE id=1 AND session_id=?",
+                (ttl, session_id),
             )
             return {"proceed": True, "session_id": session_id}
 
@@ -349,7 +343,11 @@ def merge(
             )
 
         # Held by SOMEONE ELSE on a live lease. No writes; refuse.
-        # ISO 8601 string comparison is safe — the format is fixed-width.
+        # ISO 8601 string comparison is safe — the format is fixed-width. `now` is
+        # sampled HERE, immediately before its only use. Sampling it early would be
+        # conservative rather than unsafe (an early `now` makes a lease look live, so
+        # we refuse rather than over-grant) but there is no reason to accept even that.
+        now = conn.execute(f"SELECT {_NOW_SQL} AS t").fetchone()["t"]  # noqa: S608
         if (lock["session_id"] is not None
                 and lock["expires_at"] and lock["expires_at"] > now):
             return {
@@ -370,25 +368,27 @@ def merge(
                 "current_head": actual_head,
             }
 
-        # Only now do we write, and only now is the granted deadline decided — after
-        # the lock wait AND after the HEAD callback, both of which can burn the TTL.
-        now, expires = _stamp()
-
-        # A stale holder (expired lease) loses its session here.
+        # A stale holder (expired lease) loses its session here. Its timestamp is
+        # computed by SQLite in this statement, so nothing above can make it stale.
         if lock["session_id"] is not None:
             conn.execute(
-                "UPDATE codemerge_sessions SET status='abandoned', last_activity=? "
-                "WHERE session_id=? AND status='merging'",
-                (now, lock["session_id"]),
+                f"UPDATE codemerge_sessions SET status='abandoned', "  # noqa: S608
+                f"last_activity={_NOW_SQL} WHERE session_id=? AND status='merging'",
+                (lock["session_id"],),
             )
 
+        # The granted lease. `acquired_at` and `expires_at` are both evaluated by
+        # SQLite as this statement runs, so however long the abandonment above took,
+        # the deadline is TTL seconds from NOW and cannot be born expired.
         conn.execute(
-            "UPDATE codemerge_locks SET session_id=?, acquired_at=?, expires_at=? WHERE id=1",
-            (session_id, now, expires),
+            f"UPDATE codemerge_locks SET session_id=?, acquired_at={_NOW_SQL}, "  # noqa: S608
+            f"expires_at={_EXPIRES_SQL} WHERE id=1",
+            (session_id, ttl),
         )
         conn.execute(
-            "UPDATE codemerge_sessions SET status='merging', last_activity=? WHERE session_id=?",
-            (now, session_id),
+            f"UPDATE codemerge_sessions SET status='merging', "  # noqa: S608
+            f"last_activity={_NOW_SQL} WHERE session_id=?",
+            (session_id,),
         )
     return {"proceed": True, "session_id": session_id}
 
