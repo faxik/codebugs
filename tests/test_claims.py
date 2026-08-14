@@ -364,16 +364,40 @@ class TestTransactionDiscipline:
         number of raw sites inside an already-allowed file passed — and so did zero.
         That is a filename allowlist, not a one-site ratchet. Since the claim this
         gate now makes is "exactly one executable site, and it is `db.txn`", it counts.
+
+        **Counted from the AST, not from a line scan.** The line-based version missed
+        a multiline `conn.execute(\\n "BEGIN ..." )`, `executescript`, lowercase
+        spelling, and two calls on one line — so a check claiming "exactly one
+        executable site" was enforcing considerably less than it said. Walking the AST
+        for literal-string arguments to `execute`/`executescript` closes all four.
+        Dynamically-built SQL is still invisible to any static check; that limit is
+        stated rather than papered over.
         """
+        import ast as _ast
+
         allowed = {("db.py", "BEGIN IMMEDIATE"): 1}
 
         found: dict[tuple[str, str], int] = {}
         for path in SRC.rglob("*.py"):
-            for line in path.read_text().splitlines():
-                if 'execute("BEGIN' in line or "execute('BEGIN" in line:
-                    stmt = "BEGIN IMMEDIATE" if "BEGIN IMMEDIATE" in line else "BEGIN"
-                    key = (path.name, stmt)
-                    found[key] = found.get(key, 0) + 1
+            tree = _ast.parse(path.read_text())
+            for node in _ast.walk(tree):
+                if not isinstance(node, _ast.Call):
+                    continue
+                fn = node.func
+                if not (isinstance(fn, _ast.Attribute)
+                        and fn.attr in ("execute", "executescript")):
+                    continue
+                if not node.args:
+                    continue
+                arg = node.args[0]
+                if not (isinstance(arg, _ast.Constant) and isinstance(arg.value, str)):
+                    continue  # dynamic SQL — invisible to any static check
+                sql = arg.value.lstrip().upper()
+                if not sql.startswith("BEGIN"):
+                    continue
+                stmt = "BEGIN IMMEDIATE" if sql.startswith("BEGIN IMMEDIATE") else "BEGIN"
+                key = (path.name, stmt)
+                found[key] = found.get(key, 0) + 1
 
         unexpected = {k: v for k, v in found.items() if k not in allowed}
         assert not unexpected, f"new or plain BEGIN: {unexpected}"

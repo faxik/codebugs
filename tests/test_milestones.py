@@ -1631,6 +1631,11 @@ class TestPullNextTransactionBoundary:
         """The refusal path writes nothing, so it just returns and commits an empty
         transaction — no rollback-and-return machinery needed. Pinned because that
         fact is the reason the `TxnAbort` sentinel was rejected.
+
+        **Passes against the old code too** — it rolled back instead of committing an
+        empty transaction, and both leave no capacity row. A third passing-on-both-sides
+        pin, listed here for the same reason as the other two: a reader must be able to
+        tell a regression pin from a test that merely cannot fail.
         """
         _add_finding(conn, "CB-1")
         conn.execute("UPDATE milestone_items SET status='done' WHERE item_ref='CB-1'")

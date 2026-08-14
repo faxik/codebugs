@@ -106,10 +106,22 @@ one executable site", the check counts occurrences and asserts the count.
    `expires_at` in the past rather than sleeping.
 2. **CB-41 renewal:** an expired self-retry extends `expires_at`; a competing session then gets
    `lock_held`, not the lock.
-3. **CB-36 guard race:** a session abandoned between the old read point and lock acquisition must
-   not be revived. Discriminator is who is refused.
+3. **CB-36 guard race — NOT DELIVERED; the promise is withdrawn rather than left standing.**
+   A discriminating reproducer needs the same commit-seam machinery CB-39 needs. The honest
+   position is that the guard-move is verified by line-by-line review — Codex traced it and
+   confirmed that with every authoritative read and write under `BEGIN IMMEDIATE`, a
+   `merging` session without its lock raises and cannot renew another owner's lock — plus the
+   lease tests below. Recorded on CB-36 rather than approximated by a test that cannot fail.
 4. **`main_moved` performs no writes** — assert the previous holder is NOT abandoned after a
-   `main_moved` refusal. This fails on today's code *and* on revision 1's ordering.
+   `main_moved` refusal. **This PASSES against old code**, which wrote and then rolled back;
+   no assertion over these tables separates "never wrote" from "wrote and undid it". It is a
+   regression pin for the new ordering, which reaches the same outcome without depending on a
+   rollback. An earlier draft of this line claimed it fails old code — that was wrong.
+4b. **CB-41 round two** — a slow acquisition must not be GRANTED an already-expired lease.
+   Needs an **injected clock**: a first draft expired the pre-existing lock row inside the
+   HEAD callback and passed against the defect, because the hoisted stamp was still only
+   microseconds old. Monkeypatch `merge.datetime` and burn the TTL inside the callback.
+   Verified to fail against a hoisted-stamp mutation.
 5. **Ambient refusal:** both functions raise under `db.txn`, unconditionally (not via `assert`).
 6. **CB-39:** `pull_next` returns the row it claimed, not the newest attachment.
 7. **Ratchet** passes with one entry and a counted assertion.
@@ -145,3 +157,44 @@ Codex/gpt-5.6-sol, confidence 0.95, verdict **NO-GO** on revision 1. Findings, a
 
 Codex also judged the guard-move's latency/error-precedence change to be a real but acceptable
 contract change, and confirmed `pull_next`'s fresh-connection concurrency is otherwise preserved.
+
+---
+
+## Adversarial Review Corrections (round 2 — on the implemented diff)
+
+Codex/gpt-5.6-sol reviewed the DIFF after revision 2 was implemented, and returned a second
+**NO-GO** at 0.98 confidence with one fatal finding **introduced by this fix**:
+
+**The lease deadline was computed before the write lock and before the HEAD callback.** Both can
+consume real time — the lock wait is bounded by `busy_timeout`, and `current_main_head_fn` shells
+out to git. If either burned the TTL, the lease was written ALREADY EXPIRED, the call returned
+`proceed: True`, and a competitor immediately saw the lock reclaimable and also got `proceed: True`.
+Codex reproduced it deterministically by advancing the clock 301 seconds inside the callback.
+
+That is **CB-41 reappearing inside its own fix** — the defect class this repo has now filed
+repeatedly (the naive predicate reintroducing CB-25; the empty-intersection trap in CB-28). Both
+timestamps are now sampled at their point of use: the expiry comparison inside the lock, the granted
+deadline immediately before each write, after the callback returns.
+
+Also fixed from the same review:
+
+* **The ratchet over-claimed.** A line scan misses multiline calls, `executescript`, lowercase
+  spelling, and two calls on one line — so "exactly one executable site" was enforcing less than it
+  said. Now an AST literal-call census; dynamic SQL remains out of reach of any static check and the
+  docstring says so.
+* **A third test passes on both sides** (`test_no_candidate_returns_none_and_writes_nothing`) and was
+  not labelled. Labelled.
+* **This plan contradicted its own test file** about `main_moved`. Corrected above.
+* **The promised CB-36 race discriminator was never delivered.** Withdrawn explicitly above rather
+  than left as an unmet promise.
+
+What Codex confirmed as sound: dropping `TxnAbort` removed the hazard rather than relocating it (no
+refusal path writes; the empty commit creates no durable state); the ordinary races serialize
+correctly and a `merging` session cannot renew another owner's lock; `pull_next`'s `RETURNING`
+capture and lock timing; and the CLAUDE.md edits apart from the lease claim, which the stale-deadline
+fix now makes true.
+
+One judgement recorded rather than actioned: Codex notes there is no fencing token, so an external
+`abandon_session` can revoke a holder after it was told to proceed. That is a real property of this
+design, pre-existing and unchanged here; it wants a fencing token or an owner acknowledgement, which
+is a larger design question than this tree.
