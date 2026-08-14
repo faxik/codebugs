@@ -17,6 +17,8 @@ net change. Tracker: this repo's own `.codebugs/findings.db`, served by `mcp__co
 | 2026-08-13 | `codebugs` | CB-23 | **fixed** — a named or declared root accepted a `.codebugs/` directory with no database and created one, silently | `6834775` (`e8f0ece`, `222152c`, `e803f78`) | queue: CB-21, CB-25, CB-26, CB-6, CB-27 — CB-25 is the only one needing no decision |
 | 2026-08-13 | `codebugs` | CB-25 | **fixed** — vocabulary filters guarded by truthiness, so a falsey non-string returned the whole table; sweep grew 3 named sites to 9 | `c55f290` (`fd77d00`, `9b9ea2e`, `aac4904`) | filed CB-28, CB-29 — **every remaining card now needs a product decision, and CB-6's CLI-parity policy gates two of them** |
 | 2026-08-13 | `codebugs` | CB-28 | **fixed** — the `deferred` pseudo-status discarded every other filter; forwarded per the April design doc instead of refusing | `a29fd50` | filed none; **CB-6 still the keystone, unanswered** |
+| 2026-08-14 | `codebugs` | CB-26 | **fixed** — a derived queue trusted to a write-time hook alone; 19 of 23 open triage rows pointed at terminal findings. Backfill RUN, not just shipped | `004027e` (`46a96ec`, `ccd4fbb`) | filed CB-30–CB-35; row added retroactively 2026-08-14, the iteration left the table unwritten and its section marked IN FLIGHT after landing |
+| 2026-08-14 | `codebugs` | CB-27 + CB-30 (both re-scoped) | **IN FLIGHT** — CB-24 conformance for the two live unwrapped read-modify-write sites, `sweep.mark_items` and `capacity.release_item` | branch `fix/cb-27-cb-30-txn-conformance` | filed CB-36 (10 more sites, `high`), CB-37 (enforcement, carried from CB-27), CB-38 (capacity policy, carried from CB-30) |
 
 ## 2026-08-13 — CB-16
 
@@ -471,7 +473,7 @@ CB-21), CB-21, CB-26, CB-27, CB-29. `blockers.query_deferred_entities` is now ca
 tests and is marked SUPERSEDED rather than deleted, because those tests pin the ranked ordering the
 forwarded path must also produce.
 
-## 2026-08-14 — CB-26 (re-scoped): terminal source entities left live in derived queues — IN FLIGHT
+## 2026-08-14 — CB-26 (re-scoped): terminal source entities left live in derived queues — LANDED
 
 Focus `codebugs`. Branch `fix/cb-26-triage-projection-reconciliation`. Card claimed `in_progress`.
 
