@@ -366,14 +366,45 @@ class TestTransactionDiscipline:
         gate now makes is "exactly one executable site, and it is `db.txn`", it counts.
 
         **Counted from the AST, not from a line scan.** The line-based version missed
-        a multiline `conn.execute(\\n "BEGIN ..." )`, `executescript`, lowercase
-        spelling, and two calls on one line — so a check claiming "exactly one
-        executable site" was enforcing considerably less than it said. Walking the AST
-        for literal-string arguments to `execute`/`executescript` closes all four.
-        Dynamically-built SQL is still invisible to any static check; that limit is
-        stated rather than papered over.
+        a multiline `conn.execute(\\n "BEGIN ..." )`, lowercase spelling, and two calls
+        on one line.
+
+        **Three further gaps, each found by review rather than by me**, and each closed
+        below: an `executescript` body holds MANY statements, so only checking that the
+        literal *starts* with BEGIN missed `"SELECT 1; BEGIN IMMEDIATE; ..."`; a leading
+        `--` comment hid the statement after it; and a bare `startswith("BEGIN")`
+        over-counted `BEGIN TUTORIAL` and `BEGINNING`.
+
+        **What it still cannot see, stated rather than papered over:** SQL built at
+        runtime (f-strings, concatenation, names) is invisible to any static check, and
+        the receiver is not resolved — `anything.execute("BEGIN")` counts, whether or
+        not it is a sqlite3 connection. This gate is a tripwire against a raw BEGIN
+        being *typed into the source*, not a proof that exactly one can execute.
         """
         import ast as _ast
+
+        def _statements(sql: str, is_script: bool) -> list[str]:
+            """Statements in a literal, comments stripped, upper-cased."""
+            parts = sql.split(";") if is_script else [sql]
+            out = []
+            for part in parts:
+                lines = [
+                    ln for ln in part.splitlines()
+                    if not ln.strip().startswith("--")
+                ]
+                cleaned = " ".join(lines).strip().upper()
+                if cleaned:
+                    out.append(cleaned)
+            return out
+
+        def _classify(stmt: str) -> str | None:
+            """`BEGIN IMMEDIATE` / `BEGIN` / None — token-aware, so BEGINNING is not a hit."""
+            tokens = stmt.replace("(", " ").split()
+            if not tokens or tokens[0] != "BEGIN":
+                return None
+            if len(tokens) > 1 and tokens[1] == "IMMEDIATE":
+                return "BEGIN IMMEDIATE"
+            return "BEGIN"
 
         allowed = {("db.py", "BEGIN IMMEDIATE"): 1}
 
@@ -391,13 +422,13 @@ class TestTransactionDiscipline:
                     continue
                 arg = node.args[0]
                 if not (isinstance(arg, _ast.Constant) and isinstance(arg.value, str)):
-                    continue  # dynamic SQL — invisible to any static check
-                sql = arg.value.lstrip().upper()
-                if not sql.startswith("BEGIN"):
-                    continue
-                stmt = "BEGIN IMMEDIATE" if sql.startswith("BEGIN IMMEDIATE") else "BEGIN"
-                key = (path.name, stmt)
-                found[key] = found.get(key, 0) + 1
+                    continue  # runtime-built SQL — invisible to any static check
+                for statement in _statements(arg.value, fn.attr == "executescript"):
+                    stmt = _classify(statement)
+                    if stmt is None:
+                        continue
+                    key = (path.name, stmt)
+                    found[key] = found.get(key, 0) + 1
 
         unexpected = {k: v for k, v in found.items() if k not in allowed}
         assert not unexpected, f"new or plain BEGIN: {unexpected}"
