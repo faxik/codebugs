@@ -967,6 +967,40 @@ class TestConcurrentItemMetaWritesDoNotLoseEachOther:
         assert not row["branch_only"], "the nested call must roll back with its caller"
         assert "branch" not in json.loads(row["meta_json"]), row["meta_json"]
 
+    def test_an_ambient_transaction_is_not_committed_by_triage_dismiss(self, conn):
+        """CB-36 batch 4: `triage_dismiss` now owns no commit of its own.
+
+        It writes three things — the item row, its audit row, and the propagated
+        finding status — so all three are asserted. A partial rollback would pass a
+        test that checked only the item.
+
+        The sibling test below covers the inverse direction (a failure *inside* the
+        unit rolls the whole unit back). This one covers the caller's frame: under an
+        ambient transaction `db.txn` yields False and the caller keeps ownership, so
+        the caller's abort must discard all three writes.
+        """
+        _add_finding(conn, "CB-1")
+
+        with pytest.raises(RuntimeError, match="caller aborts"):
+            with db.txn(conn) as opened:
+                assert opened, "the caller owns this transaction"
+                milestones.triage_dismiss(conn, bug_id="CB-1", reason="duplicate")
+                raise RuntimeError("caller aborts after the nested call")
+
+        item = conn.execute(
+            "SELECT status FROM milestone_items WHERE item_ref = 'CB-1'"
+        ).fetchone()
+        assert item["status"] != "dismissed", "the dismissal must roll back"
+        audits = conn.execute(
+            "SELECT COUNT(*) AS c FROM milestone_audit "
+            "WHERE item_ref = 'CB-1' AND action = 'dismiss'"
+        ).fetchone()["c"]
+        assert audits == 0, "the audit row must roll back with the dismissal"
+        status = conn.execute(
+            "SELECT status FROM findings WHERE id = 'CB-1'"
+        ).fetchone()["status"]
+        assert status != "not_a_bug", "the propagated entity write must roll back too"
+
     def test_triage_dismiss_is_atomic_when_the_propagated_write_fails(self, conn):
         """The atomicity this change claims for the compound caller, through it.
 
