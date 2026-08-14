@@ -493,4 +493,50 @@ CB-27 re-scoped with the live `sweep.mark_items` site; CB-26 raised low → high
 **My own triage error, recorded because it is the reusable lesson:** I proposed CB-6+CB-21 as one
 tree on an "atomic landing" predicate. It does not hold — CB-21's argument-parity axis does not
 depend on CB-6's operation-coverage question, so that was grouping by theme wearing a predicate's
-name. Disposition and merge SHA below on completion.
+name.
+
+**LANDED** as merge `004027e`. 914 tests pass (886 baseline + 28 new), ruff clean. The backfill was
+RUN, not merely shipped: `milestone-reconcile --apply` closed 19 rows (18 `fixed`→done, CB-10
+`wont_fix`→dismissed); `triage_inbox` went 23 → 4; a re-run reports "(nothing to reconcile)".
+
+**The reusable lesson, and it invalidates two prior ledger entries.** Each card mixes three
+separable things — an **invariant**, a **product choice**, and a **proposed enforcement mechanism**.
+Both previous iterations treated any unresolved element as blocking the whole card, and so recorded
+"the queue is fully decision-blocked" while two cards concealed live, reproducing defects. CB-26 was
+skipped as "a design question" (its *title* asks one; its *projection* was measurably broken), and
+CB-27 was filed as prospective — "this is about the fifth read-modify-write site" — when the fifth
+site already existed in `sweep.mark_items`. **Triage the invariant, not the card's proposed
+solution.**
+
+**Both adversarial reviewers FAILED the first plan, on the same top finding**, and it was one I had
+not considered: mapping `fixed → done` in a RELEASE milestone would silently weaken
+`milestone_close`, whose unfinished gate reads only item status while `done_commit` is never read as
+a gate at all — and `worktree-finish.sh` flips the finding to `fixed` *before* its non-fatal
+`mark_integrated` step, so that refusal is the only thing catching a missed integration. Scoping the
+hook to `kind='stream'` costs nothing today (zero non-stream items exist) and is CB-32.
+
+**Three iterations running, the dangerous line has been the fix's own edge case — that streak now
+holds at four.** Here it was capacity: closing a *pulled* item without decrementing would leak an
+agent's slot permanently. And the review found a second one I had written into the plan as a virtue:
+"an unmapped status raises, the hook logs it, so it stays open — which is visible" is **false** in an
+MCP context, where stderr never reaches the caller and the tool still returns success. That is
+CB-15's success-shaped lie wearing a fail-closed label; the failure is now an audit row.
+
+**Process note.** The first Codex invocation burned 15 minutes producing nothing: `codex exec` with
+the prompt as a positional argument printed "Reading additional input from stdin..." and exited 0.
+**Pipe the prompt on stdin** (`codex exec ... < prompt.md`), and do not pipe its output through
+`tail` — that buffers everything until exit, so a hung run looks identical to a silent one.
+
+**Also corrected on the cards this iteration:** CB-6's headline premise is stale (blockers HAS had
+CLI commands since 5fffe4d) and its 2026-08-13 "CONFIRMED" note re-confirmed the wrong clause;
+CB-27 re-scoped with the live `sweep.mark_items` site; CB-26 raised low → high.
+
+**Filed:** CB-30 (release_item double-decrement race + terminal transitions not centralized),
+CB-31 (no shared "live items" seam; also the N+1 inside `pull_next`'s `BEGIN IMMEDIATE`),
+CB-32 (release-milestone reconciliation + the `done_commit` close-gate question),
+CB-33 (multi-attachment ambiguity in `_get_item_by_ref`),
+CB-34 (blocker-derived deferred queue has the same gap),
+CB-35 (CB-26's original severity-re-routing question, carried forward so closing CB-26 did not bury it).
+
+**Left open:** CB-6, CB-21, CB-27 (live `sweep.mark_items` fix — the strongest next candidate, and it
+needs no decision), CB-29, CB-30–CB-35.
