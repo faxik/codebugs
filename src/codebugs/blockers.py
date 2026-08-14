@@ -302,50 +302,66 @@ def resolve_blocker(
     blocker_id: int,
     action: str,
 ) -> dict[str, Any]:
-    """Cancel or manually resolve a blocker."""
-    row = conn.execute(
-        "SELECT * FROM blockers WHERE id = ?", (blocker_id,)
-    ).fetchone()
-    if not row:
-        raise KeyError(f"Blocker not found: {blocker_id}")
+    """Cancel or manually resolve a blocker.
 
-    b = db.row_to_dict(row)
-    if b["cancelled_at"]:
-        raise ValueError(f"Blocker {blocker_id} is already cancelled.")
+    Every guard here is decided in Python from the row read at the top —
+    ``cancelled_at``, then ``trigger_type`` and ``resolved_at`` — and each selects a
+    different write, so the read and the write are one transaction (CB-24). Without it
+    a concurrent ``cancel`` and ``resolve`` both observe ``cancelled_at IS NULL``, both
+    pass their guard, and the row ends up simultaneously cancelled AND resolved — a
+    state no serial ordering permits, reached with both callers reporting success.
+    ``busy_timeout`` serializes the writes; it never touches the read before them.
 
-    now = utc_now()
+    The response is built inside the block too, so the returned view of this blocker
+    and of the item's remaining active blockers is the state this call actually
+    produced rather than whatever a later writer has since done. ``_evaluate_blocker``
+    is pure computation over a row, so it is safe here. Do not restore
+    ``conn.commit()`` — ``db.txn`` owns the commit.
+    """
+    with db.txn(conn):
+        row = conn.execute(
+            "SELECT * FROM blockers WHERE id = ?", (blocker_id,)
+        ).fetchone()
+        if not row:
+            raise KeyError(f"Blocker not found: {blocker_id}")
 
-    if action == "cancel":
-        conn.execute(
-            "UPDATE blockers SET cancelled_at = ?, updated_at = ? WHERE id = ?",
-            (now, now, blocker_id),
-        )
-    elif action == "resolve":
-        if b["trigger_type"] != "manual":
-            raise ValueError(
-                f"'resolve' is only valid for manual triggers (this is '{b['trigger_type']}')."
+        b = db.row_to_dict(row)
+        if b["cancelled_at"]:
+            raise ValueError(f"Blocker {blocker_id} is already cancelled.")
+
+        now = utc_now()
+
+        if action == "cancel":
+            conn.execute(
+                "UPDATE blockers SET cancelled_at = ?, updated_at = ? WHERE id = ?",
+                (now, now, blocker_id),
             )
-        if b["resolved_at"]:
-            raise ValueError(f"Blocker {blocker_id} is already resolved.")
-        conn.execute(
-            "UPDATE blockers SET resolved_at = ?, updated_at = ? WHERE id = ?",
-            (now, now, blocker_id),
+        elif action == "resolve":
+            if b["trigger_type"] != "manual":
+                raise ValueError(
+                    f"'resolve' is only valid for manual triggers (this is '{b['trigger_type']}')."
+                )
+            if b["resolved_at"]:
+                raise ValueError(f"Blocker {blocker_id} is already resolved.")
+            conn.execute(
+                "UPDATE blockers SET resolved_at = ?, updated_at = ? WHERE id = ?",
+                (now, now, blocker_id),
+            )
+        else:
+            raise ValueError(f"Invalid action: {action}. Must be 'cancel' or 'resolve'.")
+
+        updated = _evaluate_blocker(
+            conn, conn.execute("SELECT * FROM blockers WHERE id = ?", (blocker_id,)).fetchone()
         )
-    else:
-        raise ValueError(f"Invalid action: {action}. Must be 'cancel' or 'resolve'.")
 
-    conn.commit()
-
-    updated = _evaluate_blocker(
-        conn, conn.execute("SELECT * FROM blockers WHERE id = ?", (blocker_id,)).fetchone()
-    )
-
-    # Remaining active blockers for the same item
-    remaining_rows = conn.execute(
-        "SELECT * FROM blockers WHERE item_id = ? AND id != ? AND cancelled_at IS NULL",
-        (b["item_id"], blocker_id),
-    ).fetchall()
-    remaining = [r for r in (_evaluate_blocker(conn, rr) for rr in remaining_rows) if r["is_active"]]
+        # Remaining active blockers for the same item
+        remaining_rows = conn.execute(
+            "SELECT * FROM blockers WHERE item_id = ? AND id != ? AND cancelled_at IS NULL",
+            (b["item_id"], blocker_id),
+        ).fetchall()
+        remaining = [
+            r for r in (_evaluate_blocker(conn, rr) for rr in remaining_rows) if r["is_active"]
+        ]
 
     return {
         "blocker": updated,

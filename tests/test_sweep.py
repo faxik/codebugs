@@ -992,3 +992,50 @@ class TestMarkItemsIsOneTransaction:
             "SELECT state FROM codesweep_items WHERE item = 'x'"
         ).fetchone()["state"]
         assert state == "a", "the nested call must roll back with its caller"
+
+
+class TestAddAndArchiveAreOneTransaction:
+    """CB-36 batch 2: ``add_items`` and ``archive_items`` also guard on a stale read.
+
+    ``add_items`` reads the sweep's ``status`` and ``lifecycle`` ONCE above its loop and
+    feeds `initial_state` plus the starting position into every write in it.
+    ``archive_items`` validates ``where_status`` against the lifecycle and then uses it
+    to select the rows its bulk UPDATE archives.
+
+    Only the ambient-transaction half is pinned here, and that is a deliberate call
+    rather than a gap. For both functions the illegal interleaving (read, competitor
+    archives the sweep, then write) leaves exactly the state the legal "write then
+    archive" ordering leaves, so no assertion over the final tables separates them —
+    the same indistinguishability recorded for `add_claim` in `tests/test_merge.py`.
+    A timing-based test would be flaky in one direction or vacuous in the other.
+    """
+
+    DAG = {"lifecycle": ["a", "b"], "terminal_states": ["b"]}
+
+    def test_an_ambient_transaction_is_not_committed_by_add_items(self, conn):
+        sw = sweep.create_sweep(conn, **self.DAG)
+
+        with pytest.raises(RuntimeError, match="caller aborts"):
+            with db.txn(conn) as opened:
+                assert opened, "the caller owns this transaction"
+                sweep.add_items(conn, sw["sweep_id"], ["x.py"])
+                raise RuntimeError("caller aborts after the nested call")
+
+        assert conn.execute(
+            "SELECT COUNT(*) AS c FROM codesweep_items WHERE item = 'x.py'"
+        ).fetchone()["c"] == 0, "the nested call must roll back with its caller"
+
+    def test_an_ambient_transaction_is_not_committed_by_archive_items(self, conn):
+        sw = sweep.create_sweep(conn, **self.DAG)
+        sweep.add_items(conn, sw["sweep_id"], ["x.py"])
+
+        with pytest.raises(RuntimeError, match="caller aborts"):
+            with db.txn(conn) as opened:
+                assert opened, "the caller owns this transaction"
+                sweep.archive_items(conn, sw["sweep_id"], items=["x.py"])
+                raise RuntimeError("caller aborts after the nested call")
+
+        archived = conn.execute(
+            "SELECT archived_at FROM codesweep_items WHERE item = 'x.py'"
+        ).fetchone()["archived_at"]
+        assert archived is None, "the nested call must roll back with its caller"

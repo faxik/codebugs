@@ -1,5 +1,9 @@
 """Tests for codebugs blockers (dependency tracking) layer."""
 
+import os
+import sqlite3
+import threading
+
 import pytest
 
 from codebugs import blockers, db, findings, reqs
@@ -669,3 +673,116 @@ class TestDeferredEmptyIntersection:
         )
         got = self._q(conn)(status="deferred", ids=[other["id"]])
         assert got["total"] == 0 and got["findings"] == []
+
+
+class PausingConnection(sqlite3.Connection):
+    """Fires a one-shot hook right after ``resolve_blocker``'s row read.
+
+    The findings, reqs, milestones, sweep and merge suites carry twins of this; each
+    keys on its own read, and the project deliberately has no ``conftest.py``.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.after_select = None
+
+    def execute(self, sql, *args, **kwargs):
+        cur = super().execute(sql, *args, **kwargs)
+        if self.after_select and sql.lstrip().startswith("SELECT * FROM blockers WHERE id"):
+            hook, self.after_select = self.after_select, None
+            hook()
+        return cur
+
+
+class TestResolveBlockerIsOneTransaction:
+    """CB-36 batch 2: every guard in ``resolve_blocker`` is decided from a stale read.
+
+    It reads the blocker row, guards on ``cancelled_at``, then branches on
+    ``trigger_type`` and ``resolved_at`` to choose which column to write. Unfixed, a
+    concurrent ``cancel`` and ``resolve`` both observe ``cancelled_at IS NULL``, both
+    pass their guard, and the row ends up **simultaneously cancelled and resolved** —
+    a state no serial ordering can produce, with both callers reporting success.
+    """
+
+    def _open(self, tmp_project):
+        path = os.path.join(tmp_project, ".codebugs", "findings.db")
+        c = sqlite3.connect(path, factory=PausingConnection)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA busy_timeout=5000")
+        return c
+
+    def test_a_blocker_cannot_be_cancelled_and_resolved_at_once(self, tmp_project):
+        """Here the final STATE does discriminate, unlike most races in this repo.
+
+        Cancel and resolve write different columns, so the illegal interleaving leaves
+        a row carrying both timestamps — something neither serial order can produce.
+        That makes the assertion a plain state check rather than a "who was refused"
+        check, and it still fails against unfixed code.
+        """
+        seed = db.connect(tmp_project)
+        try:
+            _add_finding(seed, "CB-1")
+            b = blockers.add_blocker(seed, item_id="CB-1", reason="hold")  # manual trigger
+            blocker_id = b["id"]
+        finally:
+            seed.close()
+
+        a = self._open(tmp_project)
+        a_read, b_started, b_read = (threading.Event() for _ in range(3))
+
+        def competing_resolver():
+            a_read.wait(timeout=10)
+            other = self._open(tmp_project)
+            other.after_select = b_read.set
+            b_started.set()
+            try:
+                blockers.resolve_blocker(other, blocker_id=blocker_id, action="resolve")
+            except Exception:  # noqa: BLE001 — being refused is the fixed behaviour
+                pass
+            finally:
+                b_read.set()
+                other.close()
+
+        a.after_select = lambda: (
+            a_read.set(),
+            b_started.wait(timeout=10),
+            b_read.wait(timeout=1.0),
+        )
+
+        t = threading.Thread(target=competing_resolver)
+        t.start()
+        try:
+            blockers.resolve_blocker(a, blocker_id=blocker_id, action="cancel")
+        finally:
+            t.join(timeout=30)
+            a.close()
+        assert not t.is_alive()
+
+        check = db.connect(tmp_project)
+        try:
+            row = check.execute(
+                "SELECT cancelled_at, resolved_at FROM blockers WHERE id = ?", (blocker_id,)
+            ).fetchone()
+        finally:
+            check.close()
+
+        assert not (row["cancelled_at"] and row["resolved_at"]), (
+            "a blocker cannot be both cancelled and resolved — both writers passed a "
+            "guard decided from the same stale read"
+        )
+        assert row["cancelled_at"], "the cancel that won the lock should have landed"
+
+    def test_an_ambient_transaction_is_not_committed_by_resolve_blocker(self, conn):
+        _add_finding(conn, "CB-1")
+        b = blockers.add_blocker(conn, item_id="CB-1", reason="hold")
+
+        with pytest.raises(RuntimeError, match="caller aborts"):
+            with db.txn(conn) as opened:
+                assert opened, "the caller owns this transaction"
+                blockers.resolve_blocker(conn, blocker_id=b["id"], action="cancel")
+                raise RuntimeError("caller aborts after the nested call")
+
+        row = conn.execute(
+            "SELECT cancelled_at FROM blockers WHERE id = ?", (b["id"],)
+        ).fetchone()
+        assert row["cancelled_at"] is None, "the nested call must roll back with its caller"

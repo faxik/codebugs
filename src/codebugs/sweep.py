@@ -277,54 +277,63 @@ def add_items(
     Returns counts: `added` = newly inserted, `recurrence_bumped` = existing items
     re-detected. `duplicates_skipped` is kept for backward compat — same value as
     `recurrence_bumped`.
+
+    **One transaction for the batch**, opened before the first read (CB-24). The
+    per-item upsert is a single atomic statement, but the values driving it are not:
+    the ``archived`` guard, ``initial_state`` (parsed from the sweep's stored
+    lifecycle) and the starting ``position`` are all read once, above the loop, and
+    then fed into every write in it. Without the write lock taken first, a concurrent
+    ``archive_sweep`` or lifecycle rewrite lands between the read and the writes it
+    governs, and items are inserted into an archived sweep or stamped with a state
+    that is no longer in its lifecycle. Do not restore ``conn.commit()``.
     """
-    sweep_id = _resolve_sweep(conn, sweep_ref)
+    with db.txn(conn):
+        sweep_id = _resolve_sweep(conn, sweep_ref)
 
-    sw_row = conn.execute(
-        "SELECT status, lifecycle FROM codesweep_sweeps WHERE sweep_id = ?",
-        (sweep_id,),
-    ).fetchone()
-    if sw_row["status"] == "archived":
-        raise ValueError(f"Cannot add items to archived sweep: {sweep_id}")
-    initial_state = json.loads(sw_row["lifecycle"])[0]
+        sw_row = conn.execute(
+            "SELECT status, lifecycle FROM codesweep_sweeps WHERE sweep_id = ?",
+            (sweep_id,),
+        ).fetchone()
+        if sw_row["status"] == "archived":
+            raise ValueError(f"Cannot add items to archived sweep: {sweep_id}")
+        initial_state = json.loads(sw_row["lifecycle"])[0]
 
-    now = utc_now()
-    tags_json = json.dumps(tags or [])
-    pos = _next_position(conn, sweep_id)
-    added = 0
-    bumped = 0
+        now = utc_now()
+        tags_json = json.dumps(tags or [])
+        pos = _next_position(conn, sweep_id)
+        added = 0
+        bumped = 0
 
     # Atomic upsert per item:
     # - On insert: recurrence_count=1, first_seen=now, last_seen=now, state=<initial>.
     # - On update: recurrence_count++, last_seen=now, archived_at=NULL (un-archive), tags overwritten.
     #   State is preserved — re-detection doesn't reset progress; consumer calls mark to transition.
-    for item in items:
-        row = conn.execute(
-            """INSERT INTO codesweep_items
-               (sweep_id, item, tags, processed, state, recurrence_count,
-                first_seen, last_seen, archived_at, archive_reason,
-                position, created_at)
-               VALUES (?, ?, ?, 0, ?, 1, ?, ?, NULL, NULL, ?, ?)
-               ON CONFLICT(sweep_id, item) DO UPDATE SET
-                   recurrence_count = codesweep_items.recurrence_count + 1,
-                   last_seen = excluded.last_seen,
-                   archived_at = NULL,
-                   archive_reason = NULL,
-                   tags = excluded.tags
-               RETURNING (recurrence_count = 1) AS was_new""",
-            (sweep_id, item, tags_json, initial_state, now, now, pos, now),
-        ).fetchone()
-        if row["was_new"]:
-            pos += 1
-            added += 1
-        else:
-            bumped += 1
+        for item in items:
+            row = conn.execute(
+                """INSERT INTO codesweep_items
+                   (sweep_id, item, tags, processed, state, recurrence_count,
+                    first_seen, last_seen, archived_at, archive_reason,
+                    position, created_at)
+                   VALUES (?, ?, ?, 0, ?, 1, ?, ?, NULL, NULL, ?, ?)
+                   ON CONFLICT(sweep_id, item) DO UPDATE SET
+                       recurrence_count = codesweep_items.recurrence_count + 1,
+                       last_seen = excluded.last_seen,
+                       archived_at = NULL,
+                       archive_reason = NULL,
+                       tags = excluded.tags
+                   RETURNING (recurrence_count = 1) AS was_new""",
+                (sweep_id, item, tags_json, initial_state, now, now, pos, now),
+            ).fetchone()
+            if row["was_new"]:
+                pos += 1
+                added += 1
+            else:
+                bumped += 1
 
-    conn.execute(
-        "UPDATE codesweep_sweeps SET updated_at = ? WHERE sweep_id = ?",
-        (now, sweep_id),
-    )
-    conn.commit()
+        conn.execute(
+            "UPDATE codesweep_sweeps SET updated_at = ? WHERE sweep_id = ?",
+            (now, sweep_id),
+        )
     return {
         "sweep_id": sweep_id,
         "added": added,
@@ -632,52 +641,57 @@ def archive_items(
             "Use archive_sweep to archive an entire sweep."
         )
 
-    sweep_id = _resolve_sweep(conn, sweep_ref)
-    lifecycle, _terminal, _transitions = _load_sweep_lifecycle(conn, sweep_id)
+    # One transaction, opened before the lifecycle read (CB-24): `where_status` is
+    # validated against the sweep's stored lifecycle and then used to select the rows
+    # the bulk UPDATE archives, so a concurrent lifecycle rewrite between the two would
+    # let this archive rows on a state the sweep no longer declares. Do not restore
+    # `conn.commit()`.
+    with db.txn(conn):
+        sweep_id = _resolve_sweep(conn, sweep_ref)
+        lifecycle, _terminal, _transitions = _load_sweep_lifecycle(conn, sweep_id)
 
-    if where_status is not None and where_status not in lifecycle:
-        raise ValueError(
-            f"State {where_status!r} not in sweep lifecycle: {lifecycle}"
+        if where_status is not None and where_status not in lifecycle:
+            raise ValueError(
+                f"State {where_status!r} not in sweep lifecycle: {lifecycle}"
+            )
+
+        conditions = ["sweep_id = ?", "archived_at IS NULL"]
+        params: list[Any] = [sweep_id]
+
+        if items is not None:
+            if not items:
+                return {"sweep_id": sweep_id, "archived": 0}
+            placeholders = ",".join("?" * len(items))
+            conditions.append(f"item IN ({placeholders})")
+            params.extend(items)
+
+        if where_status is not None:
+            conditions.append("state = ?")
+            params.append(where_status)
+
+        if older_than is not None:
+            delta = _parse_older_than(older_than)
+            cutoff = (datetime.now(timezone.utc) - delta).isoformat()
+            # Use processed_at when available (state-changes), else last_seen, else created_at
+            conditions.append(
+                "COALESCE(processed_at, last_seen, created_at) < ?"
+            )
+            params.append(cutoff)
+
+        where = " AND ".join(conditions)
+        now = utc_now()
+
+        cursor = conn.execute(
+            f"UPDATE codesweep_items SET archived_at = ?, archive_reason = ? "
+            f"WHERE {where}",
+            [now, reason] + params,
         )
+        archived_n = cursor.rowcount
 
-    conditions = ["sweep_id = ?", "archived_at IS NULL"]
-    params: list[Any] = [sweep_id]
-
-    if items is not None:
-        if not items:
-            return {"sweep_id": sweep_id, "archived": 0}
-        placeholders = ",".join("?" * len(items))
-        conditions.append(f"item IN ({placeholders})")
-        params.extend(items)
-
-    if where_status is not None:
-        conditions.append("state = ?")
-        params.append(where_status)
-
-    if older_than is not None:
-        delta = _parse_older_than(older_than)
-        cutoff = (datetime.now(timezone.utc) - delta).isoformat()
-        # Use processed_at when available (state-changes), else last_seen, else created_at
-        conditions.append(
-            "COALESCE(processed_at, last_seen, created_at) < ?"
+        conn.execute(
+            "UPDATE codesweep_sweeps SET updated_at = ? WHERE sweep_id = ?",
+            (now, sweep_id),
         )
-        params.append(cutoff)
-
-    where = " AND ".join(conditions)
-    now = utc_now()
-
-    cursor = conn.execute(
-        f"UPDATE codesweep_items SET archived_at = ?, archive_reason = ? "
-        f"WHERE {where}",
-        [now, reason] + params,
-    )
-    archived_n = cursor.rowcount
-
-    conn.execute(
-        "UPDATE codesweep_sweeps SET updated_at = ? WHERE sweep_id = ?",
-        (now, sweep_id),
-    )
-    conn.commit()
     return {"sweep_id": sweep_id, "archived": archived_n}
 
 
