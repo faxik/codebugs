@@ -605,6 +605,18 @@ class TestSessionLifecycleIsOneTransaction:
 
         Note the assertion is on WHO IS REFUSED, not on the final row: the session ends
         ``done`` either way, so a state assertion would pass against unfixed code.
+
+        KNOWN RESIDUAL, recorded rather than papered over (raised by a Codex/gpt-5.6-sol
+        review of this diff). ``b_started`` is set immediately before B calls ``finish``,
+        so if B is descheduled for longer than the 1.0s wait, A commits first and B then
+        legitimately observes ``done`` and raises — the assertion passes without having
+        proved that ``BEGIN IMMEDIATE`` blocked anything. This is inherent to the
+        bounded-interleave pattern and the reference implementation's own docstring
+        (``tests/test_findings.py``) documents the same gap; ``b_started`` narrows it to
+        B's entry into the call rather than thread startup. The tighter oracle — assert
+        B never reached its own SELECT — was rejected because it converts the false pass
+        into a false FAILURE under the same descheduling. Verified empirically to fail
+        against reverted source.
         """
         path = self._merging_session(tmp_path)
 
@@ -670,8 +682,19 @@ class TestSessionLifecycleIsOneTransaction:
         ).fetchone()["c"] == 0, "the nested call must roll back with its caller"
 
     def test_an_ambient_transaction_is_not_committed_by_finish(self, conn):
+        """Both of `finish`'s writes must roll back, not just the session row.
+
+        `finish` writes `codemerge_sessions` AND releases the singleton lock in
+        `codemerge_locks`. Asserting only on the session would leave the second write
+        unpinned — a partial rollback would pass. So the lock is held going in and
+        checked on the way out.
+        """
         merge.start_session(conn, session_id="s1", branch="fix/x")
         conn.execute("UPDATE codemerge_sessions SET status='merging' WHERE session_id='s1'")
+        conn.execute(
+            "UPDATE codemerge_locks SET session_id='s1', acquired_at=?, expires_at=? WHERE id=1",
+            (utc_now(), "2099-01-01T00:00:00Z"),
+        )
         conn.commit()
 
         with pytest.raises(RuntimeError, match="caller aborts"):
@@ -684,6 +707,10 @@ class TestSessionLifecycleIsOneTransaction:
             "SELECT status FROM codemerge_sessions WHERE session_id='s1'"
         ).fetchone()["status"]
         assert status == "merging", "the nested call must roll back with its caller"
+        holder = conn.execute(
+            "SELECT session_id FROM codemerge_locks WHERE id=1"
+        ).fetchone()["session_id"]
+        assert holder == "s1", "the lock release must roll back with the status write"
 
     def test_an_ambient_transaction_is_not_committed_by_add_claim(self, conn):
         merge.start_session(conn, session_id="s1", branch="fix/x")

@@ -168,9 +168,14 @@ def finish(
 
     The ``merging`` guard is decided from the row read at the top, and the two writes
     below depend on it, so read and writes are one transaction (CB-24). Without it two
-    callers both observe ``merging`` and both release the singleton lock — the second
-    releasing a lock the first has already handed on. ``db.txn`` takes the write lock
+    callers both observe ``merging``, both pass the guard and both report success for a
+    transition only one of them can legitimately make. ``db.txn`` takes the write lock
     before the read; do not restore ``conn.commit()``.
+
+    What the double-success does NOT do, stated because an earlier draft of this
+    docstring claimed it did: the second finisher cannot free a lock already handed to
+    another session, because the lock update is guarded by ``AND session_id=?``. The
+    defect is the unserialized guard, not lock theft.
     """
     with db.txn(conn):
         row = _get_session(conn, session_id)
