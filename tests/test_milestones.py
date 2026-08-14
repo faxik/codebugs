@@ -1759,6 +1759,56 @@ class TestReleaseItemAtomicity:
         finally:
             a.close()
 
+    def test_an_ambient_transaction_is_not_committed_by_the_batch3_item_writers(self, conn):
+        """CB-36 batch 3: four more item writers now own no commit of their own.
+
+        `move_milestone_item`, `set_item_status`, `milestone_defer` and
+        `mark_integrated` each read an item row, decide from it, and write. All four
+        are now wrapped, so under an ambient transaction `db.txn` yields False and the
+        caller keeps ownership. Parameterized in one test because the assertion is
+        identical for all four and the interesting content is the LIST — a fifth writer
+        added later should be added here, which a per-function test makes easy to skip.
+
+        No race tests for these four, and the reason is the same one recorded for
+        `add_items` in tests/test_sweep.py: their illegal interleaving leaves the state
+        a legal ordering also produces. Treat that as "no oracle found", not "no oracle
+        exists" — a reviewer found one for `add_claim` after I claimed the same thing.
+        """
+        _add_finding(conn, "CB-1")
+        milestones.create_milestone(
+            conn, id="release/9.9", kind="release", description="batch-3 fixture"
+        )
+
+        calls = [
+            ("move_milestone_item",
+             lambda: milestones.move_milestone_item(
+                 conn, item_ref="CB-1", to_milestone="release/9.9")),
+            ("set_item_status",
+             lambda: milestones.set_item_status(conn, item_ref="CB-1", status="done")),
+            ("milestone_defer",
+             lambda: milestones.milestone_defer(conn, item_ref="CB-1")),
+            ("mark_integrated",
+             lambda: milestones.mark_integrated(conn, item_ref="CB-1", commit="abc123")),
+        ]
+
+        for name, call in calls:
+            before = dict(conn.execute(
+                "SELECT milestone_id, status, done_commit FROM milestone_items "
+                "WHERE item_ref = 'CB-1'"
+            ).fetchone())
+
+            with pytest.raises(RuntimeError, match="caller aborts"):
+                with db.txn(conn) as opened:
+                    assert opened, f"the caller owns this transaction ({name})"
+                    call()
+                    raise RuntimeError("caller aborts after the nested call")
+
+            after = dict(conn.execute(
+                "SELECT milestone_id, status, done_commit FROM milestone_items "
+                "WHERE item_ref = 'CB-1'"
+            ).fetchone())
+            assert after == before, f"{name} must roll back with its caller"
+
     def test_an_ambient_transaction_is_not_committed_by_release_item(self, conn):
         """``db.txn`` yields False under an ambient transaction, so the caller owns it.
 
