@@ -18,7 +18,7 @@ net change. Tracker: this repo's own `.codebugs/findings.db`, served by `mcp__co
 | 2026-08-13 | `codebugs` | CB-25 | **fixed** — vocabulary filters guarded by truthiness, so a falsey non-string returned the whole table; sweep grew 3 named sites to 9 | `c55f290` (`fd77d00`, `9b9ea2e`, `aac4904`) | filed CB-28, CB-29 — **every remaining card now needs a product decision, and CB-6's CLI-parity policy gates two of them** |
 | 2026-08-13 | `codebugs` | CB-28 | **fixed** — the `deferred` pseudo-status discarded every other filter; forwarded per the April design doc instead of refusing | `a29fd50` | filed none; **CB-6 still the keystone, unanswered** |
 | 2026-08-14 | `codebugs` | CB-26 | **fixed** — a derived queue trusted to a write-time hook alone; 19 of 23 open triage rows pointed at terminal findings. Backfill RUN, not just shipped | `004027e` (`46a96ec`, `ccd4fbb`) | filed CB-30–CB-35; row added retroactively 2026-08-14, the iteration left the table unwritten and its section marked IN FLIGHT after landing |
-| 2026-08-14 | `codebugs` | CB-27 + CB-30 (both re-scoped) | **IN FLIGHT** — CB-24 conformance for the two live unwrapped read-modify-write sites, `sweep.mark_items` and `capacity.release_item` | branch `fix/cb-27-cb-30-txn-conformance` | filed CB-36 (10 more sites, `high`), CB-37 (enforcement, carried from CB-27), CB-38 (capacity policy, carried from CB-30) |
+| 2026-08-14 | `codebugs` | CB-27 + CB-30 (both re-scoped) | **fixed** — CB-24 conformance for the two live unwrapped read-modify-write sites; the sweep found the defect is package-wide (19 instances, 13 still open) | `ae77cba` (`89ae282`, `8a870bf`, `12af24f`, `0a2b3e5`, `4530006`) | filed CB-36 (`high`, the 13 remaining sites), CB-37 (enforcement, carried from CB-27), CB-38 (capacity policy, carried from CB-30, reframed), CB-39 (`pull_next`, same window) |
 
 ## 2026-08-13 — CB-16
 
@@ -542,3 +542,66 @@ CB-35 (CB-26's original severity-re-routing question, carried forward so closing
 
 **Left open:** CB-6, CB-21, CB-27 (live `sweep.mark_items` fix — the strongest next candidate, and it
 needs no decision), CB-29, CB-30–CB-35.
+
+## 2026-08-14 — CB-27 + CB-30 (both re-scoped): CB-24 conformance, and the population problem — LANDED
+
+Focus `codebugs`. Branch `fix/cb-27-cb-30-txn-conformance`. Merge `ae77cba`. 923 tests pass
+(914 baseline + 9 new), `ruff check` clean.
+
+**The headline is not the fix, it is the count.** The queue presented as two cards about
+read-modify-write atomicity. A mechanical sibling sweep — `grep -rn "conn.commit()"` (43 executable
+sites) against `grep -rn "with db.txn"` (7 users), then reading every committing function — found
+**19 instances of the CB-24 shape, 13 of them unfixed**, in `blockers.py`, `merge.py`, `sweep.py`
+and three milestone modules that no card had ever named. CB-24 fixed four; CB-27 was filed as
+"nothing stops a FIFTH". Both were undercounts by an order of magnitude. Filed as CB-36 (`high`).
+
+**Two of fifteen shipped, and that is sequencing rather than substitution** — each wrap is
+independently landable, so all of them would be ~13 independent edits against a clustering ceiling
+of 4. The rest are recorded with `file:line` and reproducers, not deferred silently.
+
+**Both cards were re-scoped BEFORE the tree existed**, so each could actually close. CB-27 → the
+live site only, enforcement carried to CB-37. CB-30 → fault (1) only, fault (2) carried to CB-38.
+Doing this after the fact is what left CB-30 "unclosable" in the first place, and the Codex reviewer
+pointed out that closing CB-27 on its live half without the same split would repeat it.
+
+**The review paid for itself, and the defender conceded 19 of 23 findings with 0 clean defends.**
+What cross-model review caught that I had wrong:
+- **The malformed-`meta` test was unreachable.** `_get_item_by_ref` parses JSON at the *top*, before
+  any write, so "the write lands and the error surfaces" could not be produced by moving only the
+  closing conversion. Needed a raw-row lookup.
+- **Returning by numeric `id` does not fix CB-33.** I claimed it did. It buys self-consistency only.
+- **Three proposed tests could not fail against `main`** — the failure mode this repo has shipped
+  repeatedly. Two race tests would have deadlocked on `busy_timeout`; the multi-attachment test was
+  vacuous because both lookups pick the same newest row.
+- **My batch-transaction rationale was false.** Per-item transactions *would* close the per-item
+  race; the real reasons are batch atomicity and pinning the once-only lifecycle/DAG read.
+- **The plan contradicted itself on the deferred count** (ten vs thirteen).
+
+The judge then found two more that were still wrong after that rewrite: `sqlite3.Row` has no
+`.get()` (would have raised `AttributeError` on the first run), and the rewritten CB-30 race test
+had inherited the old reproducer's preconditions — the hook is stream-scoped and
+`_auto_route_finding` hardcodes `size='triage'`, so it would have been vacuous on both sides.
+**That is the section-local fix-application failure in miniature: the "tests that cannot fail"
+correction recurred one section later, inside its own fix.**
+
+**Process notes.**
+- The Opus adversary ran **one hour** without returning and was killed; it had gone off applying the
+  change to a scratch copy and running full suites. Recorded as a single-attacker review. The
+  defender and judge were Opus, so cross-model diversity survived, but coverage did not — the judge
+  discounted its confidence to 0.82 for exactly this, and noted that a second attacker running
+  suites is precisely what would have surfaced both mandatory fixes first.
+- `ruff format` is **not** an enforced gate here — 27 files on main are already non-conformant — so
+  it was deliberately not run. `ruff check` is the gate.
+- A `cd` to main persisted across Bash calls and nearly committed worktree work to main. It failed
+  safely; absolute `git -C` from then on.
+
+**Found by the author, missed by both reviewers:** `pull_next` (`capacity.py:249`) has the same
+post-commit re-read window as `release_item`. Filed as CB-39 — the judge made filing it a
+precondition of implementing, so the two functions in one file would not sit in a CB-17-shaped
+asymmetry with only one of them tracked.
+
+**Net change: 2 closed, 4 filed (CB-36, CB-37, CB-38, CB-39); open went 10 → 12.** The queue grew,
+and it grew for the right reason: every new card is either a verified defect population the previous
+enumeration had missed, or a decision that was buried inside a card claiming to be a bug. That is
+the review machinery working, not noise. CB-36 (`high`) is the strongest next candidate and needs no
+decision.
