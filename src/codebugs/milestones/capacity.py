@@ -335,8 +335,11 @@ def release_item(
         # Exhaust the cursor inside the block: db.txn issues COMMIT on exit, and an
         # open RETURNING cursor at that point is a statement still in progress.
         updated_row = cur.fetchone()
-        if updated_row is None:  # unreachable under the write lock; a None here would
-            raise KeyError(f"Item vanished during release: {item_ref}")  # be an opaque TypeError
+        if updated_row is None:
+            # Unreachable while the write lock is held — the row was read two
+            # statements ago. Named anyway, because the alternative is an opaque
+            # TypeError from _row_to_item(None) after the block has committed.
+            raise KeyError(f"Item vanished during release: {item_ref}")
 
         if agent:
             _decrement_capacity(conn, agent, item["size"])
