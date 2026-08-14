@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 
 import pytest
 
-from codebugs import sweep
+from codebugs import db, sweep
 
 
 @pytest.fixture
@@ -830,3 +831,164 @@ class TestListItems:
         sweep.archive_items(conn, sw["sweep_id"], items=["a.py"])
         result = sweep.list_items(conn, sw["sweep_id"], archived_only=True)
         assert {i["item"] for i in result["items"]} == {"a.py"}
+
+
+class PausingConnection(sqlite3.Connection):
+    """Fires a one-shot hook right after ``mark_items``' per-item state read.
+
+    The findings, reqs and milestones suites carry twins of this; each keys on its
+    own read, and the project deliberately has no ``conftest.py``. The one-shot reset
+    matters more here than in those: ``mark_items`` issues this SELECT once *per
+    item*, so a re-arming hook would fire mid-batch.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.after_select = None
+
+    def execute(self, sql, *args, **kwargs):
+        cur = super().execute(sql, *args, **kwargs)
+        if self.after_select and sql.lstrip().startswith(
+            "SELECT state, archived_at FROM codesweep_items"
+        ):
+            hook, self.after_select = self.after_select, None
+            hook()
+        return cur
+
+
+class TestMarkItemsIsOneTransaction:
+    """CB-27: the transition decision is made in Python from the row just read.
+
+    ``mark_items`` SELECTs each item's state, calls ``_validate_transition`` against
+    that value, then UPDATEs. Without a transaction spanning the pair, two callers
+    both observe the same source state and each writes a transition the DAG permits
+    only from that state — producing a pair no serial ordering allows.
+    ``busy_timeout`` serializes the *writes*; it does nothing about the reads.
+    """
+
+    DAG = {
+        "lifecycle": ["a", "b", "c"],
+        "terminal_states": ["c"],
+        "transitions": {"a": ["b", "c"], "b": [], "c": []},
+    }
+
+    def _open(self, path):
+        c = sqlite3.connect(path, factory=PausingConnection)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA busy_timeout=5000")
+        return c
+
+    def _seed(self, tmp_path):
+        path = str(tmp_path / "sweep.db")
+        c = sqlite3.connect(path)
+        c.row_factory = sqlite3.Row
+        try:
+            sweep.ensure_schema(c)
+            sw = sweep.create_sweep(c, **self.DAG)
+            sweep.add_items(c, sw["sweep_id"], ["x"])
+            c.commit()
+            return path, sw["sweep_id"]
+        finally:
+            c.close()
+
+    def test_two_writers_cannot_both_transition_out_of_the_same_state(self, tmp_path):
+        """Exactly one writer must be refused — the STATE alone does not discriminate.
+
+        Both before and after the fix the item ends at ``b``, so asserting on the
+        final state would pass either way and pin nothing. What changes is *who is
+        refused*: unfixed, both writers validate against a stale ``a`` and neither
+        raises; fixed, B blocks at ``BEGIN IMMEDIATE`` until A commits, then re-reads
+        ``b`` and is correctly refused because ``transitions["b"]`` is empty.
+        """
+        path, sweep_id = self._seed(tmp_path)
+
+        a = self._open(path)
+        a_read, b_started, b_read = (threading.Event() for _ in range(3))
+        b_error: list[BaseException | None] = []
+
+        def competing_marker():
+            a_read.wait(timeout=10)
+            b = self._open(path)
+            b.after_select = b_read.set
+            b_started.set()
+            try:
+                sweep.mark_items(b, sweep_id, ["x"], state="c")
+                b_error.append(None)
+            except BaseException as exc:  # noqa: BLE001 — the refusal IS the result
+                b_error.append(exc)
+            finally:
+                b_read.set()  # unblock A if B never reached its own read
+                b.close()
+
+        a.after_select = lambda: (
+            a_read.set(),
+            b_started.wait(timeout=10),
+            b_read.wait(timeout=1.0),
+        )
+
+        t = threading.Thread(target=competing_marker)
+        t.start()
+        try:
+            sweep.mark_items(a, sweep_id, ["x"], state="b")
+        finally:
+            t.join(timeout=30)
+            a.close()
+        assert not t.is_alive()
+
+        check = sqlite3.connect(path)
+        check.row_factory = sqlite3.Row
+        try:
+            state = check.execute(
+                "SELECT state FROM codesweep_items WHERE item = 'x'"
+            ).fetchone()["state"]
+        finally:
+            check.close()
+
+        assert state == "b", "A's transition is the one that should have landed"
+        assert b_error and isinstance(b_error[0], ValueError), (
+            "B must be refused: after A's a->b lands, b has no outgoing edges, so "
+            f"b->c is illegal. Got {b_error[0]!r} — None means both writers validated "
+            "against the same stale read"
+        )
+        assert "Transition not allowed" in str(b_error[0])
+
+    def test_a_failing_item_rolls_back_the_whole_batch(self, conn):
+        """The batch is all-or-nothing, as the docstring now promises.
+
+        Unfixed, the earlier item's UPDATE is left *pending* on the connection — it
+        never commits, but it is visible to this same connection and a later caller
+        commit would land it. Fixed, ``db.txn`` rolls it back on the way out.
+        """
+        sw = sweep.create_sweep(conn, **self.DAG)
+        sweep.add_items(conn, sw["sweep_id"], ["x", "y"])
+
+        with pytest.raises(KeyError, match="Item not found"):
+            sweep.mark_items(conn, sw["sweep_id"], ["x", "nope"], state="b")
+
+        state = conn.execute(
+            "SELECT state FROM codesweep_items WHERE item = 'x'"
+        ).fetchone()["state"]
+        assert state == "a", (
+            "the first item must not keep a transition the batch as a whole refused"
+        )
+
+    def test_an_ambient_transaction_is_not_committed_by_mark_items(self, conn):
+        """``db.txn`` yields False under an ambient transaction, so the caller owns it.
+
+        Dormant today — every caller opens a fresh connection — which is exactly when
+        pinning it is cheap. Unfixed, ``mark_items``' own ``conn.commit()`` landed the
+        caller's unrelated write too.
+        """
+        sw = sweep.create_sweep(conn, **self.DAG)
+        sweep.add_items(conn, sw["sweep_id"], ["x"])
+
+        with pytest.raises(RuntimeError, match="caller aborts"):
+            with db.txn(conn) as opened:
+                assert opened, "the caller owns this transaction"
+                sweep.mark_items(conn, sw["sweep_id"], ["x"], state="b")
+                raise RuntimeError("caller aborts after the nested call")
+
+        state = conn.execute(
+            "SELECT state FROM codesweep_items WHERE item = 'x'"
+        ).fetchone()["state"]
+        assert state == "a", "the nested call must roll back with its caller"

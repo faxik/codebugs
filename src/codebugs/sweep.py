@@ -17,6 +17,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from codebugs import db
 from codebugs.types import utc_now
 
 
@@ -425,62 +426,79 @@ def mark_items(
 
     `processed` and `processed_at` are kept in sync with `state IN terminal_states`.
     Archived items raise — un-archive first via re-add or directly.
+
+    **The whole batch is ONE transaction.** If any item is missing, archived, or
+    makes an illegal transition, *no* item in the call is applied. The transaction
+    opens before the first read (CB-24): each item's transition is validated in
+    Python against the state just read, so without the write lock two callers both
+    observe the same state and each writes a transition the DAG permits only one of.
+
+    One transaction for the batch rather than one per item, for two reasons — and
+    neither is "a race between items", of which there is none. First, the batch must
+    roll back as a unit. Second, ``_resolve_sweep`` and ``_load_sweep_lifecycle`` read
+    the lifecycle and ``transitions`` DAG *once, above the loop*; per-item transactions
+    would let a concurrent lifecycle rewrite invalidate the DAG that the remaining
+    items are still being validated against.
+
+    Do not restore a ``conn.commit()`` here: ``db.txn`` owns the commit, and yields
+    ``False`` under an ambient transaction so that committing would land the caller's
+    work.
     """
-    sweep_id = _resolve_sweep(conn, sweep_ref)
-    lifecycle, terminal_states, transitions = _load_sweep_lifecycle(conn, sweep_id)
+    with db.txn(conn):
+        sweep_id = _resolve_sweep(conn, sweep_ref)
+        lifecycle, terminal_states, transitions = _load_sweep_lifecycle(conn, sweep_id)
 
-    if state is not None:
-        if state not in lifecycle:
-            raise ValueError(
-                f"State {state!r} not in sweep lifecycle: {lifecycle}"
-            )
-        target_state = state
-    else:
-        if processed:
-            target_state = terminal_states[0]
-        else:
-            non_terminal = [s for s in lifecycle if s not in terminal_states]
-            if not non_terminal:
+        if state is not None:
+            if state not in lifecycle:
                 raise ValueError(
-                    "Cannot unmark — every state in this sweep's lifecycle is terminal"
+                    f"State {state!r} not in sweep lifecycle: {lifecycle}"
                 )
-            target_state = non_terminal[0]
-
-    target_processed = 1 if target_state in terminal_states else 0
-    now = utc_now()
-
-    for item in items:
-        cur_row = conn.execute(
-            "SELECT state, archived_at FROM codesweep_items "
-            "WHERE sweep_id = ? AND item = ?",
-            (sweep_id, item),
-        ).fetchone()
-        if cur_row is None:
-            raise KeyError(f"Item not found in sweep {sweep_id}: {item}")
-        if cur_row["archived_at"] is not None:
-            raise ValueError(
-                f"Cannot mark archived item {item!r} in {sweep_id}; un-archive first"
-            )
-        _validate_transition(transitions, cur_row["state"], target_state)
-
-        if target_processed:
-            conn.execute(
-                "UPDATE codesweep_items SET state = ?, processed = 1, processed_at = ? "
-                "WHERE sweep_id = ? AND item = ?",
-                (target_state, now, sweep_id, item),
-            )
+            target_state = state
         else:
-            conn.execute(
-                "UPDATE codesweep_items SET state = ?, processed = 0, processed_at = NULL "
-                "WHERE sweep_id = ? AND item = ?",
-                (target_state, sweep_id, item),
-            )
+            if processed:
+                target_state = terminal_states[0]
+            else:
+                non_terminal = [s for s in lifecycle if s not in terminal_states]
+                if not non_terminal:
+                    raise ValueError(
+                        "Cannot unmark — every state in this sweep's lifecycle is terminal"
+                    )
+                target_state = non_terminal[0]
 
-    conn.execute(
-        "UPDATE codesweep_sweeps SET updated_at = ? WHERE sweep_id = ?",
-        (now, sweep_id),
-    )
-    conn.commit()
+        target_processed = 1 if target_state in terminal_states else 0
+        now = utc_now()
+
+        for item in items:
+            cur_row = conn.execute(
+                "SELECT state, archived_at FROM codesweep_items "
+                "WHERE sweep_id = ? AND item = ?",
+                (sweep_id, item),
+            ).fetchone()
+            if cur_row is None:
+                raise KeyError(f"Item not found in sweep {sweep_id}: {item}")
+            if cur_row["archived_at"] is not None:
+                raise ValueError(
+                    f"Cannot mark archived item {item!r} in {sweep_id}; un-archive first"
+                )
+            _validate_transition(transitions, cur_row["state"], target_state)
+
+            if target_processed:
+                conn.execute(
+                    "UPDATE codesweep_items SET state = ?, processed = 1, processed_at = ? "
+                    "WHERE sweep_id = ? AND item = ?",
+                    (target_state, now, sweep_id, item),
+                )
+            else:
+                conn.execute(
+                    "UPDATE codesweep_items SET state = ?, processed = 0, processed_at = NULL "
+                    "WHERE sweep_id = ? AND item = ?",
+                    (target_state, sweep_id, item),
+                )
+
+        conn.execute(
+            "UPDATE codesweep_sweeps SET updated_at = ? WHERE sweep_id = ?",
+            (now, sweep_id),
+        )
     return {
         "sweep_id": sweep_id,
         "updated": len(items),
@@ -973,7 +991,6 @@ def register_cli(sub, commands) -> None:
     """Register sweep CLI subcommands."""
     import argparse
     import sys
-    from codebugs import db
     from codebugs.fmt import format_table
 
     def _parse_csv(value: str | None) -> list[str] | None:

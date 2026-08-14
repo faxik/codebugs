@@ -6,10 +6,16 @@ import json
 import sqlite3
 from typing import Any
 
+from codebugs import db
 from codebugs.types import utc_now
 
 from codebugs.milestones._schema import ITEM_SIZES
-from codebugs.milestones._spine import _audit, _get_item_by_ref
+from codebugs.milestones._spine import (
+    _audit,
+    _get_item_by_ref,
+    _get_item_row_by_ref,
+    _row_to_item,
+)
 from codebugs.milestones.reconcile import source_is_terminal
 
 
@@ -259,59 +265,95 @@ def release_item(
 ) -> dict[str, Any]:
     """Free an agent's capacity slot for the item. status is the terminal
     state to record ('done' or 'abandoned'; 'abandoned' maps to 'open' again
-    so the item is re-pullable)."""
-    item = _get_item_by_ref(conn, item_ref)
-    agent = item.get("assigned_agent")
+    so the item is re-pullable).
 
-    if status == "abandoned" and commit:
-        # Incompatible combination, not a forwarding gap: an abandoned item is
-        # reopened and re-pullable, so there is no landed commit to record and only
-        # `done` has a `done_commit` column to record it in. Silently dropping it
-        # returned success for a commit that was never stored (CB-28).
-        raise ValueError(
-            "commit cannot be recorded with status='abandoned' "
-            "(only 'done' records a commit)"
-        )
+    Returns **the attachment it actually mutated** — it does NOT promise that
+    attachment is the one the caller meant. The opening lookup still resolves
+    ``ORDER BY id DESC LIMIT 1`` and this signature accepts neither an attachment id
+    nor a ``milestone_id``, so with several attachments per ref the selection is
+    arbitrary and the decremented slot may belong to a different one. That is CB-33
+    and it is open; what is closed here is only the *post-commit re-read window*.
 
-    now = utc_now()
-    if status == "abandoned":
-        conn.execute(
-            """UPDATE milestone_items SET status='open', assigned_agent=NULL,
-               pulled_at=NULL, updated_at=? WHERE id=?""",
-            (now, item["id"]),
-        )
-        to_state = "open"
-        action = "release"
-    elif status == "done":
-        sets = ["status='done'", "done_at=?", "updated_at=?", "assigned_agent=NULL"]
-        params: list[Any] = [now, now]
-        if commit:
-            sets.append("done_commit=?")
-            params.append(commit)
-        params.append(item["id"])
-        conn.execute(
-            f"UPDATE milestone_items SET {', '.join(sets)} WHERE id=?",
-            params,
-        )
-        to_state = "done"
-        action = "done"
-    else:
-        raise ValueError(f"Invalid release status: {status!r}. Use 'done' or 'abandoned'.")
+    Three things load-bearing enough to state (CB-24, CB-30):
 
-    if agent:
-        _decrement_capacity(conn, agent, item["size"])
-    _audit(
-        conn,
-        milestone_id=item["milestone_id"],
-        item_ref=item_ref,
-        actor=actor or agent or "user",
-        action=action,
-        from_state=item["status"],
-        to_state=to_state,
-        reason="",
-    )
-    conn.commit()
-    return _get_item_by_ref(conn, item_ref)
+    * The transaction opens BEFORE the read. ``assigned_agent`` is read from the row
+      and then used to decrement a counter, so without the write lock the CB-26
+      reconciliation hook can close the item and decrement between the two, and this
+      call decrements a second time — the agent's other item stays assigned while
+      capacity reports zero.
+    * The row read here is RAW (``_get_item_row_by_ref``), not ``_row_to_item``.
+      Parsing ``meta_json`` inside the block would turn a malformed stored value into
+      a rollback of a write that already succeeded.
+    * The returned row is captured by ``RETURNING`` and converted after the block.
+      Re-querying by ref after the commit returns whatever attachment is newest by
+      then, which is not necessarily the one written. Because these statements carry
+      ``RETURNING``, their ``rowcount`` must never be read (the RETURNING rule) — note
+      that forecloses rowcount-based hardening of ``_decrement_capacity`` (CB-38).
+
+    Do not restore a ``conn.commit()``: ``db.txn`` owns the commit.
+    """
+    with db.txn(conn):
+        # sqlite3.Row is not a dict — no .get(). The column always exists; NULL is None.
+        item = _get_item_row_by_ref(conn, item_ref)
+        agent = item["assigned_agent"]
+
+        if status == "abandoned" and commit:
+            # Incompatible combination, not a forwarding gap: an abandoned item is
+            # reopened and re-pullable, so there is no landed commit to record and only
+            # `done` has a `done_commit` column to record it in. Silently dropping it
+            # returned success for a commit that was never stored (CB-28).
+            raise ValueError(
+                "commit cannot be recorded with status='abandoned' "
+                "(only 'done' records a commit)"
+            )
+
+        now = utc_now()
+        if status == "abandoned":
+            cur = conn.execute(
+                """UPDATE milestone_items SET status='open', assigned_agent=NULL,
+                   pulled_at=NULL, updated_at=? WHERE id=? RETURNING *""",
+                (now, item["id"]),
+            )
+            to_state = "open"
+            action = "release"
+        elif status == "done":
+            sets = ["status='done'", "done_at=?", "updated_at=?", "assigned_agent=NULL"]
+            params: list[Any] = [now, now]
+            if commit:
+                sets.append("done_commit=?")
+                params.append(commit)
+            params.append(item["id"])
+            cur = conn.execute(
+                f"UPDATE milestone_items SET {', '.join(sets)} WHERE id=? RETURNING *",
+                params,
+            )
+            to_state = "done"
+            action = "done"
+        else:
+            raise ValueError(f"Invalid release status: {status!r}. Use 'done' or 'abandoned'.")
+
+        # Exhaust the cursor inside the block: db.txn issues COMMIT on exit, and an
+        # open RETURNING cursor at that point is a statement still in progress.
+        updated_row = cur.fetchone()
+        if updated_row is None:
+            # Unreachable while the write lock is held — the row was read two
+            # statements ago. Named anyway, because the alternative is an opaque
+            # TypeError from _row_to_item(None) after the block has committed.
+            raise KeyError(f"Item vanished during release: {item_ref}")
+
+        if agent:
+            _decrement_capacity(conn, agent, item["size"])
+        _audit(
+            conn,
+            milestone_id=item["milestone_id"],
+            item_ref=item_ref,
+            actor=actor or agent or "user",
+            action=action,
+            from_state=item["status"],
+            to_state=to_state,
+            reason="",
+        )
+    return _row_to_item(updated_row)
 
 
 def get_wip_status(

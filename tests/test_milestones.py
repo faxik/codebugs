@@ -1497,3 +1497,286 @@ class TestUnhonourableCommitIsRefused:
         milestones.set_item_status(conn, item_ref=f["id"], status="done", commit="aaa111")
         again = milestones.set_item_status(conn, item_ref=f["id"], status="done")
         assert again["status"] == "done" and again["done_commit"] == "aaa111"
+
+
+class CommitPausingConnection(sqlite3.Connection):
+    """One-shot hook fired the instant the write transaction closes.
+
+    Distinct from ``PausingConnection`` above, which fires after a SELECT. **Two
+    seams, deliberately**, because the code under test changes which one it uses:
+    unfixed ``release_item`` closes with ``conn.commit()`` and the fixed version with
+    ``db.txn``'s ``conn.execute("COMMIT")``. Keying on only one gives a vacuous pass
+    on the other, which is the whole failure mode this test exists to catch.
+
+    The hook runs AFTER the underlying commit in both cases — firing before it lands
+    would leave the write lock held, so a second connection writing inside the hook
+    would block until ``busy_timeout`` expired.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.after_commit = None
+
+    def _fire(self):
+        if self.after_commit:
+            hook, self.after_commit = self.after_commit, None
+            hook()
+
+    def commit(self):
+        super().commit()
+        self._fire()
+
+    def execute(self, sql, *args, **kwargs):
+        cur = super().execute(sql, *args, **kwargs)
+        if sql.lstrip().upper().startswith("COMMIT"):
+            self._fire()
+        return cur
+
+
+class TestReleaseItemAtomicity:
+    """CB-30 fault (1): ``release_item`` must not decrement from a pre-lock read.
+
+    It reads ``assigned_agent`` off the row and only later uses it to decrement a
+    counter. Without the write lock taken before that read, CB-26's reconciliation
+    hook can close the item and decrement in between, and this call then decrements a
+    second time — the agent's *other* item stays assigned while capacity reports zero,
+    so the agent is handed more work than its declared capacity.
+
+    Two preconditions make the race reachable, and without either the test is vacuous
+    on both sides. The reconciliation hook is **stream-scoped**
+    (``reconcile._STREAM_ONLY``), so a release-milestone item never fires it; and
+    ``_auto_route_finding`` hardcodes ``size='triage'``, so an auto-routed finding
+    moves ``triage_held``, never ``small_held``. Both are set explicitly below.
+    """
+
+    def _open(self, tmp_project, factory=PausingConnection):
+        path = os.path.join(tmp_project, ".codebugs", "findings.db")
+        c = sqlite3.connect(path, factory=factory)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA busy_timeout=5000")
+        return c
+
+    def _seed(self, tmp_project, held=2):
+        """One agent holding two same-size items in a STREAM milestone."""
+        seed = db.connect(tmp_project)
+        try:
+            _add_finding(seed, "CB-1")  # auto-routes into stream/triage
+            _add_finding(seed, "CB-2")
+            seed.execute(
+                "UPDATE milestone_items SET size='small', status='in_progress', "
+                "assigned_agent='agent-A' WHERE item_ref IN ('CB-1', 'CB-2')"
+            )
+            seed.execute(
+                "INSERT INTO agent_capacity (agent_id, small_held) VALUES ('agent-A', ?)",
+                (held,),
+            )
+            seed.commit()
+        finally:
+            seed.close()
+
+    @staticmethod
+    def _small_held(tmp_project):
+        c = db.connect(tmp_project)
+        try:
+            return c.execute(
+                "SELECT small_held FROM agent_capacity WHERE agent_id='agent-A'"
+            ).fetchone()["small_held"]
+        finally:
+            c.close()
+
+    def test_a_concurrent_reconciliation_does_not_cause_a_double_decrement(self, tmp_project):
+        """The CB-30 race, driven through the bounded three-event interleave.
+
+        Pre-fix: B's hook decrements 2->1 while A holds a stale ``assigned_agent``,
+        then A decrements 1->0 — while CB-2 is still assigned. Post-fix: A holds the
+        write lock from before its own read, so B blocks at ``BEGIN IMMEDIATE``, A's
+        bounded wait expires, A commits (2->1), and B's hook then finds CB-1's item
+        already ``done`` — ``_live_rows`` filters ``status != target`` — so it is a
+        no-op. Final count 1, which is the truth: one of two items was released.
+        """
+        self._seed(tmp_project)
+
+        a = self._open(tmp_project)
+        a_read, b_started, b_read = (threading.Event() for _ in range(3))
+
+        def competing_reconciler():
+            a_read.wait(timeout=10)
+            b = self._open(tmp_project)
+            b.after_select = b_read.set
+            b_started.set()
+            try:
+                # Resolving the finding fires reconcile._reconcile_on_terminal.
+                findings.update_finding(b, "CB-1", status="fixed")
+            except Exception:  # noqa: BLE001 — contention is the fixed path's business
+                b_read.set()
+            finally:
+                b.close()
+
+        a.after_select = lambda: (
+            a_read.set(),
+            b_started.wait(timeout=10),
+            b_read.wait(timeout=1.0),
+        )
+
+        t = threading.Thread(target=competing_reconciler)
+        t.start()
+        try:
+            milestones.release_item(a, item_ref="CB-1", status="done")
+        finally:
+            t.join(timeout=30)
+            a.close()
+        assert not t.is_alive()
+
+        assert self._small_held(tmp_project) == 1, (
+            "one of the agent's two items was released, so exactly one slot is free; "
+            "0 means the release and the reconciliation hook each decremented for the "
+            "same item"
+        )
+
+    def test_the_returned_row_is_the_row_that_was_written(self, tmp_project):
+        """CB-30's return-value half — and it fails on unfixed code.
+
+        Unfixed, ``release_item`` commits and *then* re-reads by ``item_ref`` through
+        ``ORDER BY id DESC LIMIT 1``. A newer attachment inserted in that window wins
+        the re-read, so the call reports ``status='open'`` for an item it just marked
+        ``done``. Fixed, the row comes back from the UPDATE's ``RETURNING``, so no
+        post-commit read exists for anything to race.
+
+        Single-threaded on purpose: the discriminator is injected at the commit seam
+        rather than by scheduling, so there is no timing luck and no ``busy_timeout``
+        exposure.
+        """
+        self._seed(tmp_project)
+        before = db.connect(tmp_project)
+        try:
+            mutated_id = before.execute(
+                "SELECT id FROM milestone_items WHERE item_ref='CB-1'"
+            ).fetchone()["id"]
+        finally:
+            before.close()
+
+        path = os.path.join(tmp_project, ".codebugs", "findings.db")
+
+        def insert_newer_attachment():
+            other = sqlite3.connect(path)
+            other.row_factory = sqlite3.Row
+            try:
+                now = "2026-08-14T00:00:00Z"
+                other.execute(
+                    "INSERT INTO milestone_items (milestone_id, item_kind, item_ref, size, "
+                    "priority, status, acceptance, meta_json, created_at, updated_at) "
+                    "VALUES ('release/1.1', 'bug', 'CB-1', 'small', 100, 'open', '', '{}', ?, ?)",
+                    (now, now),
+                )
+                other.commit()
+            finally:
+                other.close()
+
+        a = self._open(tmp_project, factory=CommitPausingConnection)
+        a.after_commit = insert_newer_attachment
+        try:
+            result = milestones.release_item(a, item_ref="CB-1", status="done")
+        finally:
+            a.close()
+
+        assert result["id"] == mutated_id, (
+            "release_item must return the attachment it mutated, not whichever one is "
+            "newest by the time it looks again"
+        )
+        assert result["status"] == "done"
+
+    def test_a_malformed_meta_surfaces_after_the_write_has_landed(self, tmp_project):
+        """CB-24 consequence (2): conversion happens outside the transaction.
+
+        The row is read RAW inside the block, so a malformed ``meta_json`` cannot roll
+        back a write the contract promises has landed. The write commits; the error is
+        raised while building the return value. Unfixed, ``_get_item_by_ref`` parsed at
+        the top and the call died with *no* write attempted — which is why this
+        assertion is about what is in the table afterwards, not about the exception.
+        """
+        self._seed(tmp_project)
+        seed = db.connect(tmp_project)
+        try:
+            seed.execute(
+                "UPDATE milestone_items SET meta_json='{not json' WHERE item_ref='CB-1'"
+            )
+            seed.commit()
+        finally:
+            seed.close()
+
+        a = self._open(tmp_project)
+        try:
+            with pytest.raises(json.JSONDecodeError):
+                milestones.release_item(a, item_ref="CB-1", status="done")
+        finally:
+            a.close()
+
+        check = db.connect(tmp_project)
+        try:
+            row = check.execute(
+                "SELECT status FROM milestone_items WHERE item_ref='CB-1'"
+            ).fetchone()
+        finally:
+            check.close()
+        assert row["status"] == "done", (
+            "the write must have landed — the failure is in serializing the response, "
+            "and reporting it as if nothing happened is the CB-16 lie"
+        )
+
+    def test_an_invalid_status_beats_malformed_meta_to_the_exception(self, tmp_project):
+        """Precedence, stated because the raw-row read deliberately changed it.
+
+        Unfixed, ``_row_to_item`` parsed first and a malformed row raised
+        ``JSONDecodeError`` regardless of the status argument. Now the raw read skips
+        parsing, so the argument check wins. ``JSONDecodeError`` subclasses
+        ``ValueError``, so the two are only distinguishable by exact type — which is
+        why this asserts the message rather than the class alone.
+        """
+        self._seed(tmp_project)
+        seed = db.connect(tmp_project)
+        try:
+            seed.execute(
+                "UPDATE milestone_items SET meta_json='{not json' WHERE item_ref='CB-1'"
+            )
+            seed.commit()
+        finally:
+            seed.close()
+
+        a = self._open(tmp_project)
+        try:
+            with pytest.raises(ValueError, match="Invalid release status"):
+                milestones.release_item(a, item_ref="CB-1", status="bogus")
+        finally:
+            a.close()
+
+    def test_a_missing_item_still_raises_keyerror_before_any_argument_check(self, tmp_project):
+        """The uncontended ordering the change promises to preserve."""
+        self._seed(tmp_project)
+        a = self._open(tmp_project)
+        try:
+            with pytest.raises(KeyError, match="Item not found"):
+                milestones.release_item(a, item_ref="CB-404", status="bogus")
+        finally:
+            a.close()
+
+    def test_an_ambient_transaction_is_not_committed_by_release_item(self, conn):
+        """``db.txn`` yields False under an ambient transaction, so the caller owns it.
+
+        Dormant today — ``release_item``'s only caller is a fresh-connection MCP
+        wrapper — which is exactly when pinning it is cheap. Without this, "do not
+        restore ``conn.commit()``" is prose.
+        """
+        _add_finding(conn, "CB-1")
+        conn.execute("UPDATE milestone_items SET size='small' WHERE item_ref='CB-1'")
+        conn.commit()
+
+        with pytest.raises(RuntimeError, match="caller aborts"):
+            with db.txn(conn) as opened:
+                assert opened, "the caller owns this transaction"
+                milestones.release_item(conn, item_ref="CB-1", status="done")
+                raise RuntimeError("caller aborts after the nested call")
+
+        row = conn.execute(
+            "SELECT status FROM milestone_items WHERE item_ref='CB-1'"
+        ).fetchone()
+        assert row["status"] != "done", "the nested call must roll back with its caller"
