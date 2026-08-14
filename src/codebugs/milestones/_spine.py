@@ -80,14 +80,30 @@ def _audit(
     )
 
 
-def _get_item_by_ref(conn: sqlite3.Connection, item_ref: str) -> dict[str, Any]:
+def _get_item_row_by_ref(conn: sqlite3.Connection, item_ref: str) -> sqlite3.Row:
+    """The raw attachment row — no JSON parsing.
+
+    A caller that parses ``meta_json`` *inside* a write transaction turns a malformed
+    stored value into a rollback of a write the contract promises has landed — CB-24
+    consequence (2), which is the CB-16 lie in a new place. Such a caller reads this
+    and converts with ``_row_to_item`` after its transaction closes.
+
+    This is also the ONLY place the ``ORDER BY id DESC LIMIT 1`` selection rule is
+    written. ``UNIQUE(milestone_id, item_kind, item_ref)`` makes several attachments
+    per ref legal, so that rule silently picks one of them; a second copy would give
+    CB-33's eventual fix two sites to find.
+    """
     row = conn.execute(
         "SELECT * FROM milestone_items WHERE item_ref = ? ORDER BY id DESC LIMIT 1",
         (item_ref,),
     ).fetchone()
     if not row:
         raise KeyError(f"Item not found: {item_ref}")
-    return _row_to_item(row)
+    return row
+
+
+def _get_item_by_ref(conn: sqlite3.Connection, item_ref: str) -> dict[str, Any]:
+    return _row_to_item(_get_item_row_by_ref(conn, item_ref))
 
 
 def _items_with_active_blockers(
