@@ -207,52 +207,79 @@ def pull_next(
     actor: str | None = None,
 ) -> dict[str, Any] | None:
     """Claim the highest-priority eligible item for the calling agent.
-    Returns the item dict (with `_eligibility` annotation) or None if no
-    candidate matches. Atomic under BEGIN IMMEDIATE."""
+
+    Returns the claimed item, or None if no candidate matches. One ``db.txn``
+    (``BEGIN IMMEDIATE``) spans candidate selection, the claim, the capacity
+    increment and the audit row, so two agents cannot both select the same item.
+
+    **No raw ``BEGIN IMMEDIATE`` here any more (CB-40).** The old save/restore
+    pattern opened with ``conn.isolation_level = None``, and assigning
+    ``isolation_level`` COMMITS any open transaction — so calling this under an
+    ambient transaction silently committed the caller's unrelated work. Refusing
+    an ambient transaction outright is now the contract: under one, ``db.txn``
+    would yield ``False`` and this would report a claim no other connection can
+    see. A plain ``raise``, not ``assert`` — ``assert`` is stripped under ``-O``.
+
+    **The claimed row comes back from ``RETURNING`` (CB-39).** It used to end with
+    ``_get_item_by_ref(conn, chosen["item_ref"])`` AFTER the commit, which resolves
+    ``ORDER BY id DESC LIMIT 1`` and could return a newer attachment inserted in
+    that window — reporting an item this call never claimed. The raw row is fetched
+    inside the block and converted after it, because converting inside would let a
+    malformed ``meta_json`` roll back an otherwise successful claim (CB-24
+    consequence 2). Per the RETURNING rule, that statement's ``rowcount`` is never
+    read.
+
+    The no-candidate path writes nothing, so it simply returns and commits an empty
+    transaction — no rollback-and-return machinery is needed.
+    """
+    if conn.in_transaction:
+        raise RuntimeError(
+            "pull_next() must be called on a connection with no open transaction: it is "
+            "an atomic claim, and under an ambient transaction it would report an item "
+            "as claimed before that claim is committed."
+        )
+
     actor = actor or agent_id
 
-    saved_isolation = conn.isolation_level
-    conn.isolation_level = None
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            held = _capacity_for(conn, agent_id)
-            chosen: dict[str, Any] | None = None
-            for item, milestone in _candidates(conn):
-                fail = _eligibility_failure(conn, item, milestone, capacity, held)
-                if fail is None:
-                    chosen = item
-                    break
-            if chosen is None:
-                conn.execute("ROLLBACK")
-                return None
+    with db.txn(conn):
+        held = _capacity_for(conn, agent_id)
+        chosen: dict[str, Any] | None = None
+        for item, milestone in _candidates(conn):
+            fail = _eligibility_failure(conn, item, milestone, capacity, held)
+            if fail is None:
+                chosen = item
+                break
+        if chosen is None:
+            return None
 
-            now = utc_now()
-            conn.execute(
-                """UPDATE milestone_items
-                   SET status='in_progress', assigned_agent=?, pulled_at=?, updated_at=?
-                   WHERE id=? AND status='open'""",
-                (agent_id, now, now, chosen["id"]),
+        now = utc_now()
+        cur = conn.execute(
+            """UPDATE milestone_items
+               SET status='in_progress', assigned_agent=?, pulled_at=?, updated_at=?
+               WHERE id=? AND status='open' RETURNING *""",
+            (agent_id, now, now, chosen["id"]),
+        )
+        claimed_row = cur.fetchone()
+        if claimed_row is None:
+            # Unreachable while the write lock is held — `_candidates` read this row
+            # as 'open' inside this same transaction. Named rather than left to
+            # surface as a TypeError from _row_to_item(None) after the commit.
+            raise RuntimeError(
+                f"item {chosen['item_ref']} was no longer 'open' at claim time"
             )
-            _upsert_capacity_increment(conn, agent_id, chosen["size"])
-            _audit(
-                conn,
-                milestone_id=chosen["milestone_id"],
-                item_ref=chosen["item_ref"],
-                actor=actor,
-                action="pull",
-                from_state="open",
-                to_state="in_progress",
-                reason=f"agent={agent_id} capacity={capacity}",
-            )
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-    finally:
-        conn.isolation_level = saved_isolation
 
-    return _get_item_by_ref(conn, chosen["item_ref"])
+        _upsert_capacity_increment(conn, agent_id, chosen["size"])
+        _audit(
+            conn,
+            milestone_id=chosen["milestone_id"],
+            item_ref=chosen["item_ref"],
+            actor=actor,
+            action="pull",
+            from_state="open",
+            to_state="in_progress",
+            reason=f"agent={agent_id} capacity={capacity}",
+        )
+    return _row_to_item(claimed_row)
 
 
 def release_item(

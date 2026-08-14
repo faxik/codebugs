@@ -350,19 +350,37 @@ class TestTransactionDiscipline:
     def test_24_no_plain_begin_ratchet(self):
         """Deploy gate G6. A plain BEGIN pins a read snapshot and the later write
         upgrade dies with SQLITE_BUSY_SNAPSHOT, which busy_timeout cannot rescue.
-        This allowlist may shrink, never grow."""
-        allowed = {
-            ("db.py", "BEGIN IMMEDIATE"),
-            ("merge.py", "BEGIN IMMEDIATE"),
-            ("capacity.py", "BEGIN IMMEDIATE"),
-        }
-        found = set()
+        This allowlist may shrink, never grow.
+
+        **It shrank to one (CB-40).** `merge.merge` and `capacity.pull_next` both
+        opened their raw transaction with `conn.isolation_level = None`, and assigning
+        `isolation_level` COMMITS any open transaction — so either function, called
+        under an ambient transaction, silently committed the caller's unrelated work.
+        Both now go through `db.txn`, leaving `db.txn` itself as the only executable
+        site in the package.
+
+        **Now counted, not deduplicated.** The old version collected
+        `(filename, statement)` into a SET and asserted `found <= allowed`, so any
+        number of raw sites inside an already-allowed file passed — and so did zero.
+        That is a filename allowlist, not a one-site ratchet. Since the claim this
+        gate now makes is "exactly one executable site, and it is `db.txn`", it counts.
+        """
+        allowed = {("db.py", "BEGIN IMMEDIATE"): 1}
+
+        found: dict[tuple[str, str], int] = {}
         for path in SRC.rglob("*.py"):
             for line in path.read_text().splitlines():
                 if 'execute("BEGIN' in line or "execute('BEGIN" in line:
                     stmt = "BEGIN IMMEDIATE" if "BEGIN IMMEDIATE" in line else "BEGIN"
-                    found.add((path.name, stmt))
-        assert found <= allowed, f"new or plain BEGIN: {found - allowed}"
+                    key = (path.name, stmt)
+                    found[key] = found.get(key, 0) + 1
+
+        unexpected = {k: v for k, v in found.items() if k not in allowed}
+        assert not unexpected, f"new or plain BEGIN: {unexpected}"
+        assert found == allowed, (
+            "the executable BEGIN IMMEDIATE census changed. Fewer is fine — update "
+            f"`allowed` downward. More is the regression this gate exists for. {found}"
+        )
 
 
 class TestContentionClassifier:
