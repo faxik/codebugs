@@ -12,7 +12,6 @@ from codebugs.types import utc_now
 from codebugs.milestones._schema import ITEM_SIZES
 from codebugs.milestones._spine import (
     _audit,
-    _get_item_by_ref,
     _get_item_row_by_ref,
     _row_to_item,
 )
