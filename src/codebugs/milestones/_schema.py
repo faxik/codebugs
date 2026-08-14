@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from codebugs.types import utc_now
+from codebugs.types import ENTITY_FINDING, ENTITY_REQUIREMENT, utc_now
 
 
 MILESTONE_KINDS = ("release", "stream")
@@ -26,6 +26,60 @@ MILESTONE_ITEM_TERMINAL = frozenset({"done", "dismissed"})
 
 
 AUTO_ROUTER_ACTOR = "auto-router"
+
+
+RECONCILER_ACTOR = "auto-reconciler"
+
+
+# --- Terminal-source projection (CB-26) -------------------------------------
+#
+# A milestone item is a PROJECTION of a source entity. When the source reaches a
+# terminal status the item must follow, or the derived queues keep offering work
+# that is already finished.
+#
+# Keyed by (entity kind, source status) rather than by status alone. The two
+# vocabularies happen to be disjoint today, but a flat map would silently pick a
+# winner the day they are not, and this table is exactly the kind of enumeration
+# this repo has repeatedly found drifts from its source of truth.
+#
+# `_outcome_for` FAILS CLOSED on an unknown pair, and
+# `TestTerminalOutcomeMapIsComplete` asserts these keys equal
+# `types.FINDING_TERMINAL` / `types.REQUIREMENT_TERMINAL`, so adding a terminal
+# status without deciding its projection fails CI rather than defaulting.
+TERMINAL_ITEM_OUTCOME: dict[str, dict[str, str]] = {
+    ENTITY_FINDING: {
+        "fixed": "done",
+        "not_a_bug": "dismissed",
+        "wont_fix": "dismissed",
+    },
+    ENTITY_REQUIREMENT: {
+        "implemented": "done",
+        "verified": "done",
+        "superseded": "dismissed",
+        "obsolete": "dismissed",
+    },
+}
+
+
+# An entity kind names its own rows in `milestone_items.item_kind`. Selecting on
+# `item_ref` alone is WRONG: `_validate_item_ref` skips validation for externals
+# and UNIQUE includes `item_kind`, so `(bug, CB-1)` and `(external, CB-1)` are
+# both legal rows and only the first projects the finding CB-1.
+ENTITY_KIND_TO_ITEM_KIND: dict[str, str] = {
+    ENTITY_FINDING: "bug",
+    ENTITY_REQUIREMENT: "requirement",
+}
+
+
+def outcome_for(entity_kind: str, source_status: str) -> str:
+    """Terminal item status for a terminal source status. Raises on an unknown pair."""
+    try:
+        return TERMINAL_ITEM_OUTCOME[entity_kind][source_status]
+    except KeyError:
+        raise ValueError(
+            f"No declared milestone-item projection for {entity_kind} "
+            f"status {source_status!r}. Add it to TERMINAL_ITEM_OUTCOME."
+        ) from None
 
 
 SEED_MILESTONES = [

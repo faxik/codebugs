@@ -52,6 +52,10 @@ EXPECTED_CLI_SUBCOMMANDS = {
     "wip-status",
     "milestone-mark-branch",
     "milestone-mark-integrated",
+    # CB-26 repair tool. CLI-only on purpose: a one-time bulk repair does not
+    # justify a permanent MCP mutator, and the CLI is the curated interactive
+    # surface. It defaults to a dry run and needs --apply to write.
+    "milestone-reconcile",
 }
 
 # Every symbol callers (incl. the test suite) reach via codebugs.milestones.*

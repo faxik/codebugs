@@ -16,6 +16,7 @@ from codebugs.milestones._spine import (
     _milestone_exists,
     _row_to_item,
 )
+from codebugs.milestones.reconcile import _table_exists, source_is_terminal
 
 
 def _auto_route_finding(conn: sqlite3.Connection, finding: dict[str, Any]) -> None:
@@ -24,10 +25,7 @@ def _auto_route_finding(conn: sqlite3.Connection, finding: dict[str, Any]) -> No
     Schema-probes first: raw sqlite3.connect() callers (e.g. tests/test_sweep.py)
     may invoke add_finding on a connection that didn't initialize milestones.
     """
-    row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='milestone_items'"
-    ).fetchone()
-    if not row:
+    if not _table_exists(conn, "milestone_items"):
         return
 
     sev = finding.get("severity", "")
@@ -63,14 +61,26 @@ def triage_inbox(
     *,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    """List items in stream/triage, oldest first."""
+    """List items in stream/triage, oldest first.
+
+    Items whose SOURCE entity is already terminal are filtered out even when the
+    stored row still says ``open`` (CB-26). The reconciliation hook normally keeps
+    the stored status honest, but several writers bypass it — ``add_milestone_item``
+    inserts ``open`` regardless of the source, ``set_item_status`` and
+    ``release_item(status='abandoned')`` can reopen, and the requirement importers
+    write statuses with no hook at all — so the filter here is what actually makes
+    "a resolved finding never appears in the inbox" true.
+
+    The LIMIT is applied AFTER filtering; pushing it into the SQL would silently
+    return fewer than ``limit`` live rows whenever stale ones sort ahead of them.
+    """
     rows = conn.execute(
         """SELECT * FROM milestone_items
            WHERE milestone_id = 'stream/triage' AND status = 'open'
-           ORDER BY created_at ASC LIMIT ?""",
-        (limit,),
+           ORDER BY created_at ASC""",
     ).fetchall()
-    return [_row_to_item(r) for r in rows]
+    live = [r for r in rows if not source_is_terminal(conn, r["item_kind"], r["item_ref"])]
+    return [_row_to_item(r) for r in live[:limit]]
 
 
 def triage_dismiss(
