@@ -13,6 +13,7 @@ from codebugs.milestones._schema import AUTO_ROUTER_ACTOR
 from codebugs.milestones._spine import (
     _audit,
     _get_item_by_ref,
+    _get_item_row_by_ref,
     _milestone_exists,
     _row_to_item,
 )
@@ -95,46 +96,70 @@ def triage_dismiss(
       - bug → finding status='not_a_bug'
       - requirement → requirement status='obsolete'
       - external → no propagation, milestone_item dismissal only
+
+    One transaction, opened before the read (CB-24). The already-dismissed guard and
+    the propagation branch are both decided from the row read at the top, so without
+    the write lock a concurrent writer can move the item between the decision and the
+    write — and the audit row then records a ``from_state`` the item had already left.
+
+    The nested ``update_finding`` / ``update_requirement`` calls open ``db.txn``
+    themselves; under this frame's transaction they yield ``False``, write without
+    committing, and leave the commit to this frame. That is the intended contract, and
+    it is what makes the dismissal, its audit row and the entity's status one unit —
+    before CB-24 wrapped those two, the nested call's own ``conn.commit()`` landed the
+    first two while this function's commit had not yet run.
+
+    Their status-change hook (``reconcile._reconcile_on_terminal``) also fires inside
+    this transaction and would otherwise close the same item a second time; it is a
+    no-op here because ``_live_rows`` filters ``status != target`` and the item is
+    already ``dismissed`` by then. Order matters for that, so the propagation stays
+    AFTER the item update.
+
+    The result row is captured by numeric ``id``, not re-resolved by ``item_ref``
+    after the commit (CB-39). Do not restore ``conn.commit()``.
     """
     if not reason.strip():
         raise ValueError("reason is required for dismissal")
-    item = _get_item_by_ref(conn, bug_id)
-    if item["status"] == "dismissed":
-        return item
+    with db.txn(conn):
+        item = _get_item_row_by_ref(conn, bug_id)
+        if item["status"] == "dismissed":
+            result = item
+        else:
+            now = utc_now()
+            conn.execute(
+                """UPDATE milestone_items SET status='dismissed', done_at=?, updated_at=?
+                   WHERE id=?""",
+                (now, now, item["id"]),
+            )
+            _audit(
+                conn,
+                milestone_id=item["milestone_id"],
+                item_ref=bug_id,
+                actor=actor,
+                action="dismiss",
+                from_state=item["status"],
+                to_state="dismissed",
+                reason=reason,
+            )
 
-    now = utc_now()
-    conn.execute(
-        """UPDATE milestone_items SET status='dismissed', done_at=?, updated_at=?
-           WHERE id=?""",
-        (now, now, item["id"]),
-    )
-    _audit(
-        conn,
-        milestone_id=item["milestone_id"],
-        item_ref=bug_id,
-        actor=actor,
-        action="dismiss",
-        from_state=item["status"],
-        to_state="dismissed",
-        reason=reason,
-    )
+            # Propagate to underlying entity.
+            if item["item_kind"] == "bug":
+                from codebugs.findings import update_finding
+                try:
+                    update_finding(conn, bug_id, status="not_a_bug")
+                except KeyError:
+                    pass  # finding was deleted; dismissal lives in milestone_items only
+            elif item["item_kind"] == "requirement":
+                from codebugs.reqs import update_requirement
+                try:
+                    update_requirement(conn, bug_id, status="obsolete")
+                except KeyError:
+                    pass
 
-    # Propagate to underlying entity.
-    if item["item_kind"] == "bug":
-        from codebugs.findings import update_finding
-        try:
-            update_finding(conn, bug_id, status="not_a_bug")
-        except KeyError:
-            pass  # finding was deleted; dismissal lives in milestone_items only
-    elif item["item_kind"] == "requirement":
-        from codebugs.reqs import update_requirement
-        try:
-            update_requirement(conn, bug_id, status="obsolete")
-        except KeyError:
-            pass
-
-    conn.commit()
-    return _get_item_by_ref(conn, bug_id)
+            result = conn.execute(
+                "SELECT * FROM milestone_items WHERE id = ?", (item["id"],)
+            ).fetchone()
+    return _row_to_item(result)
 
 
 def triage_promote(
