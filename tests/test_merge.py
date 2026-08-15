@@ -724,3 +724,242 @@ class TestSessionLifecycleIsOneTransaction:
         assert conn.execute(
             "SELECT COUNT(*) AS c FROM codemerge_claims WHERE session_id='s1'"
         ).fetchone()["c"] == 0, "the nested call must roll back with its caller"
+
+
+class TestMergeLockLease:
+    """CB-41 / CB-40 / CB-36 — the mutual-exclusion gate itself.
+
+    These three defects all lived in `merge()`'s transaction boundary and are fixed
+    together. The lease tests below did not exist in any form; every prior idempotent
+    -retry test used a FRESH lease, which is exactly the case where the old code's two
+    branches agreed.
+    """
+
+    PAST = "2000-01-01T00:00:00Z"
+
+    def _expire_lock(self, conn):
+        """Drive the clock by writing the past, not by sleeping 300s."""
+        conn.execute("UPDATE codemerge_locks SET expires_at=? WHERE id=1", (self.PAST,))
+        conn.commit()
+
+    def _acquire(self, conn, session_id, head="H0"):
+        merge.start_session(conn, session_id=session_id, branch=f"fix/{session_id}")
+        return merge.merge(
+            conn, session_id,
+            expected_main_head=head, current_main_head_fn=lambda: head,
+        )
+
+    def test_an_expired_holder_and_a_competitor_cannot_both_proceed(self, conn):
+        """CB-41. This is the defect: two agents told to push to main at once.
+
+        Old behaviour: A's idempotent retry matched on `session_id` alone and never
+        read `expires_at`, so A got proceed=True on a dead lease — while B found the
+        lease expired, reclaimed it, and also got proceed=True.
+
+        New behaviour: A's retry RENEWS the lease (the user-chosen remedy), so B is
+        refused with `lock_held`. Exactly one of them proceeds.
+        """
+        assert self._acquire(conn, "A")["proceed"] is True
+        self._expire_lock(conn)
+
+        a_retry = merge.merge(
+            conn, "A", expected_main_head="H0", current_main_head_fn=lambda: "H0"
+        )
+        merge.start_session(conn, session_id="B", branch="fix/B")
+        b = merge.merge(
+            conn, "B", expected_main_head="H0", current_main_head_fn=lambda: "H0"
+        )
+
+        proceeding = [s for s, r in (("A", a_retry), ("B", b)) if r["proceed"]]
+        assert proceeding == ["A"], (
+            f"exactly one session may hold the merge gate; got {proceeding}. "
+            "Both proceeding is CB-41 — the idempotent branch ignoring lease expiry "
+            "while the acquisition branch treats the same lease as reclaimable."
+        )
+        assert b["reason"] == "lock_held"
+
+    def test_a_self_retry_renews_the_lease(self, conn):
+        """The chosen remedy, stated as behaviour: owning the lock extends it."""
+        self._acquire(conn, "A")
+        self._expire_lock(conn)
+        before = conn.execute(
+            "SELECT expires_at FROM codemerge_locks WHERE id=1"
+        ).fetchone()["expires_at"]
+
+        merge.merge(conn, "A", expected_main_head="H0", current_main_head_fn=lambda: "H0")
+
+        after = conn.execute(
+            "SELECT expires_at FROM codemerge_locks WHERE id=1"
+        ).fetchone()["expires_at"]
+        assert after > before, "an expired self-retry must renew, not return a dead lease"
+
+    def test_a_holder_that_lost_its_lock_is_told_so(self, conn):
+        """The interleaving the renewal remedy has to survive.
+
+        If B reclaims during A's expiry window BEFORE A retries, A's self-owned branch
+        must not fire — the lock's session_id is B now. A falls through to the status
+        guard and learns it lost, rather than being handed a lock it does not hold.
+
+        **Passes against the old code as well**, deliberately: this is the half of the
+        lease behaviour the renewal remedy had to PRESERVE, not change. Recorded so a
+        reader can tell it from the tests above, which do discriminate.
+        """
+        self._acquire(conn, "A")
+        self._expire_lock(conn)
+        merge.start_session(conn, session_id="B", branch="fix/B")
+        assert merge.merge(
+            conn, "B", expected_main_head="H0", current_main_head_fn=lambda: "H0"
+        )["proceed"] is True
+
+        with pytest.raises(ValueError, match="not in 'active' state"):
+            merge.merge(
+                conn, "A", expected_main_head="H0", current_main_head_fn=lambda: "H0"
+            )
+
+    def test_main_moved_abandons_nobody(self, conn):
+        """The head check runs BEFORE any write, so this refusal has nothing to undo.
+
+        Old code marked the expired holder `abandoned` and only THEN checked the head,
+        relying on a rollback to unwind it. That is why the raw transaction needed a
+        rollback-and-return path at all. Reordering removed both the write and the
+        need for the machinery.
+
+        **This test PASSES against the old code too, and that is not a defect in it.**
+        The old rollback did correctly undo the abandon, so the end state matches; no
+        assertion over these tables can separate "never wrote" from "wrote and undid
+        it". What it pins is that the new ordering reaches the same outcome WITHOUT
+        depending on a rollback — which is what makes the refusal safe once the
+        function no longer owns a raw transaction. It would fail against an
+        implementation that writes first and returns without rolling back, which is
+        precisely what the rejected `TxnAbort` design would have produced under an
+        ambient transaction.
+        """
+        self._acquire(conn, "A")
+        self._expire_lock(conn)
+        merge.start_session(conn, session_id="B", branch="fix/B")
+
+        result = merge.merge(
+            conn, "B", expected_main_head="H0", current_main_head_fn=lambda: "MOVED"
+        )
+        assert result["reason"] == "main_moved"
+
+        a_status = conn.execute(
+            "SELECT status FROM codemerge_sessions WHERE session_id='A'"
+        ).fetchone()["status"]
+        assert a_status == "merging", (
+            "a main_moved refusal must not have abandoned the previous holder — it "
+            "decided not to proceed, so it must have changed nothing"
+        )
+        holder = conn.execute(
+            "SELECT session_id FROM codemerge_locks WHERE id=1"
+        ).fetchone()["session_id"]
+        assert holder == "A", "the lock must not have moved on a refusal"
+
+    def test_the_lease_deadline_is_computed_by_sqlite_not_by_python(self, conn):
+        """CB-41, round three — and the reason the fix became structural.
+
+        THREE review rounds died on one shape: a Python timestamp sampled at one point
+        and written as a lease deadline at another, with something slow in between.
+        Round 1 hoisted it above the lock and the git callback. Round 2 moved it below
+        those but left the stale-holder `abandoned` UPDATE between the sample and the
+        write. Each time the lease landed ALREADY EXPIRED, the call returned
+        proceed=True, and the next contender saw the lock reclaimable and also got
+        proceed=True.
+
+        Point-of-use discipline is the wrong layer: it has to be re-established every
+        time a statement is inserted, and twice it silently wasn't. Letting SQLite
+        evaluate `strftime('now')` as part of the UPDATE makes a stale deadline
+        UNREPRESENTABLE — sampling and writing are the same operation.
+
+        So this asserts the SQL TEMPLATE, per the repo rule that a guard of this kind
+        must read the template rather than the executed statement. A behavioural test
+        cannot catch the regression: any Python-sampled deadline still looks fresh
+        unless real time passes during the call, which is exactly what made round 2's
+        first draft pass against the defect it was written for.
+        """
+        captured: list[str] = []
+
+        class RecordingConnection(sqlite3.Connection):
+            def execute(self, sql, *args, **kwargs):
+                captured.append(sql)
+                return super().execute(sql, *args, **kwargs)
+
+        path = ":memory:"
+        rec = sqlite3.connect(path, factory=RecordingConnection)
+        rec.row_factory = sqlite3.Row
+        try:
+            merge.ensure_schema(rec)
+            merge.start_session(rec, session_id="A", branch="fix/A")
+            captured.clear()
+            assert merge.merge(
+                rec, "A", expected_main_head="H0", current_main_head_fn=lambda: "H0"
+            )["proceed"] is True
+
+            lock_writes = [
+                q for q in captured
+                if "UPDATE codemerge_locks" in q and "expires_at" in q
+            ]
+            assert lock_writes, "no lease write was issued"
+            for q in lock_writes:
+                assert "strftime" in q and "'now'" in q, (
+                    "the lease deadline must be computed by SQLite inside the write "
+                    f"statement, not bound from a Python timestamp: {q!r}"
+                )
+
+            granted, db_now = rec.execute(
+                "SELECT (SELECT expires_at FROM codemerge_locks WHERE id=1) AS e, "
+                "strftime('%Y-%m-%dT%H:%M:%SZ','now') AS n"
+            ).fetchone()
+            assert granted > db_now, f"lease born expired: {granted} <= {db_now}"
+        finally:
+            rec.close()
+
+    def test_a_stale_holder_takeover_grants_a_live_lease(self, conn):
+        """The specific path round 3 reproduced: the intervening `abandoned` UPDATE.
+
+        B takes over from expired holder A. Between deciding to take the lock and
+        writing it, B must abandon A — and round 2's code had already sampled its
+        deadline before that write. Now both statements compute their own time in SQL,
+        so however long the abandonment takes, B's lease is TTL seconds from the moment
+        it is written. C must then be refused.
+        """
+        self._acquire(conn, "A")
+        self._expire_lock(conn)
+
+        merge.start_session(conn, session_id="B", branch="fix/B")
+        assert merge.merge(
+            conn, "B", expected_main_head="H0", current_main_head_fn=lambda: "H0"
+        )["proceed"] is True
+
+        assert conn.execute(
+            "SELECT status FROM codemerge_sessions WHERE session_id='A'"
+        ).fetchone()["status"] == "abandoned", "the stale holder should have lost it"
+
+        granted, db_now = conn.execute(
+            "SELECT (SELECT expires_at FROM codemerge_locks WHERE id=1) AS e, "
+            "strftime('%Y-%m-%dT%H:%M:%SZ','now') AS n"
+        ).fetchone()
+        assert granted > db_now, f"takeover granted an expired lease: {granted}"
+
+        merge.start_session(conn, session_id="C", branch="fix/C")
+        c = merge.merge(
+            conn, "C", expected_main_head="H0", current_main_head_fn=lambda: "H0"
+        )
+        assert c["proceed"] is False and c["reason"] == "lock_held", (
+            "a third session must be refused after a stale-holder takeover"
+        )
+
+    def test_merge_refuses_an_ambient_transaction(self, conn):
+        """CB-40's replacement contract, and it must be a raise, not an assert.
+
+        Under an ambient transaction `db.txn` yields False and the caller owns the
+        commit, so this would report proceed=True for a lock row no other connection
+        can see. `assert` would be stripped under -O; this is an unconditional raise.
+        """
+        merge.start_session(conn, session_id="A", branch="fix/A")
+        with db.txn(conn) as opened:
+            assert opened
+            with pytest.raises(RuntimeError, match="no open transaction"):
+                merge.merge(
+                    conn, "A", expected_main_head="H0", current_main_head_fn=lambda: "H0"
+                )

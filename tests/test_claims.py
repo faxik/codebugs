@@ -350,19 +350,100 @@ class TestTransactionDiscipline:
     def test_24_no_plain_begin_ratchet(self):
         """Deploy gate G6. A plain BEGIN pins a read snapshot and the later write
         upgrade dies with SQLITE_BUSY_SNAPSHOT, which busy_timeout cannot rescue.
-        This allowlist may shrink, never grow."""
-        allowed = {
-            ("db.py", "BEGIN IMMEDIATE"),
-            ("merge.py", "BEGIN IMMEDIATE"),
-            ("capacity.py", "BEGIN IMMEDIATE"),
-        }
-        found = set()
+        This allowlist may shrink, never grow.
+
+        **It shrank to one (CB-40).** `merge.merge` and `capacity.pull_next` both
+        opened their raw transaction with `conn.isolation_level = None`, and assigning
+        `isolation_level` COMMITS any open transaction — so either function, called
+        under an ambient transaction, silently committed the caller's unrelated work.
+        Both now go through `db.txn`, leaving `db.txn` itself as the only executable
+        site in the package.
+
+        **Now counted, not deduplicated.** The old version collected
+        `(filename, statement)` into a SET and asserted `found <= allowed`, so any
+        number of raw sites inside an already-allowed file passed — and so did zero.
+        That is a filename allowlist, not a one-site ratchet. Since the claim this
+        gate now makes is about the COUNT of raw sites, it counts them.
+
+        **Counted from the AST, not from a line scan.** The line-based version missed
+        a multiline `conn.execute(\\n "BEGIN ..." )`, lowercase spelling, and two calls
+        on one line.
+
+        **Three further gaps, each found by review rather than by me**, and each closed
+        below: an `executescript` body holds MANY statements, so only checking that the
+        literal *starts* with BEGIN missed `"SELECT 1; BEGIN IMMEDIATE; ..."`; a leading
+        `--` comment hid the statement after it; and a bare `startswith("BEGIN")`
+        over-counted `BEGIN TUTORIAL` and `BEGINNING`.
+
+        **What it still cannot see — enumerated, because two rounds of review caught
+        this docstring claiming more than the code enforces:** SQL built at runtime is
+        invisible; the receiver is not resolved, so `anything.execute("BEGIN")` counts;
+        the statement split is a plain `;` split, so it mishandles semicolons inside
+        quoted strings and inside `--` comments, and does not strip `/* block */`
+        comments; and a non-script `execute("BEGIN;")` with a trailing semicolon is
+        missed. It also does NOT verify that the one allowed site is `db.txn` — it
+        records a filename and a classification, nothing more.
+
+        So: this is a tripwire against a raw BEGIN being *typed into the source* in a
+        recognisable form. It is not a proof that exactly one can execute, and the
+        allowlist is the real contract. Tightening it further is tracked rather than
+        claimed.
+        """
+        import ast as _ast
+
+        def _statements(sql: str, is_script: bool) -> list[str]:
+            """Statements in a literal, comments stripped, upper-cased."""
+            parts = sql.split(";") if is_script else [sql]
+            out = []
+            for part in parts:
+                lines = [
+                    ln for ln in part.splitlines()
+                    if not ln.strip().startswith("--")
+                ]
+                cleaned = " ".join(lines).strip().upper()
+                if cleaned:
+                    out.append(cleaned)
+            return out
+
+        def _classify(stmt: str) -> str | None:
+            """`BEGIN IMMEDIATE` / `BEGIN` / None — token-aware, so BEGINNING is not a hit."""
+            tokens = stmt.replace("(", " ").split()
+            if not tokens or tokens[0] != "BEGIN":
+                return None
+            if len(tokens) > 1 and tokens[1] == "IMMEDIATE":
+                return "BEGIN IMMEDIATE"
+            return "BEGIN"
+
+        allowed = {("db.py", "BEGIN IMMEDIATE"): 1}
+
+        found: dict[tuple[str, str], int] = {}
         for path in SRC.rglob("*.py"):
-            for line in path.read_text().splitlines():
-                if 'execute("BEGIN' in line or "execute('BEGIN" in line:
-                    stmt = "BEGIN IMMEDIATE" if "BEGIN IMMEDIATE" in line else "BEGIN"
-                    found.add((path.name, stmt))
-        assert found <= allowed, f"new or plain BEGIN: {found - allowed}"
+            tree = _ast.parse(path.read_text())
+            for node in _ast.walk(tree):
+                if not isinstance(node, _ast.Call):
+                    continue
+                fn = node.func
+                if not (isinstance(fn, _ast.Attribute)
+                        and fn.attr in ("execute", "executescript")):
+                    continue
+                if not node.args:
+                    continue
+                arg = node.args[0]
+                if not (isinstance(arg, _ast.Constant) and isinstance(arg.value, str)):
+                    continue  # runtime-built SQL — invisible to any static check
+                for statement in _statements(arg.value, fn.attr == "executescript"):
+                    stmt = _classify(statement)
+                    if stmt is None:
+                        continue
+                    key = (path.name, stmt)
+                    found[key] = found.get(key, 0) + 1
+
+        unexpected = {k: v for k, v in found.items() if k not in allowed}
+        assert not unexpected, f"new or plain BEGIN: {unexpected}"
+        assert found == allowed, (
+            "the executable BEGIN IMMEDIATE census changed. Fewer is fine — update "
+            f"`allowed` downward. More is the regression this gate exists for. {found}"
+        )
 
 
 class TestContentionClassifier:

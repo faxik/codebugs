@@ -1571,6 +1571,82 @@ class TestUnhonourableCommitIsRefused:
         assert again["status"] == "done" and again["done_commit"] == "aaa111"
 
 
+class TestPullNextTransactionBoundary:
+    """CB-40 + CB-39 — `pull_next` no longer runs a raw `BEGIN IMMEDIATE`."""
+
+    def _open_item(self, conn, ref="CB-1"):
+        _add_finding(conn, ref)
+        conn.execute(
+            "UPDATE milestone_items SET size='small' WHERE item_ref = ?", (ref,)
+        )
+        conn.commit()
+
+    def test_pull_next_refuses_an_ambient_transaction(self, conn):
+        """CB-40. The old save/restore opened with `conn.isolation_level = None`, and
+        assigning `isolation_level` COMMITS any open transaction — so this silently
+        committed the caller's unrelated work. Now it refuses outright, because under
+        an ambient transaction it would report a claim no other connection can see.
+
+        A raise, not an `assert`: `assert` is stripped under `-O`.
+        """
+        self._open_item(conn)
+        with db.txn(conn) as opened:
+            assert opened
+            with pytest.raises(RuntimeError, match="no open transaction"):
+                milestones.pull_next(conn, agent_id="agent-A", capacity={"small": 1})
+
+    def test_pull_next_returns_the_row_it_claimed(self, conn):
+        """CB-39. It used to return `_get_item_by_ref(...)` AFTER the commit, which
+        resolves `ORDER BY id DESC LIMIT 1` and could hand back a newer attachment
+        inserted in that window — an item this call never claimed. The row now comes
+        from the claim UPDATE's `RETURNING`.
+
+        **This PASSES against the old code, and the docstring above would be a lie
+        without saying so.** With a single attachment the post-commit re-resolve finds
+        the same row, so nothing here discriminates. It is a structural regression pin:
+        it fixes the returned row's identity as "the row carrying this agent's claim",
+        which the `RETURNING` implementation guarantees by construction and the
+        re-resolve only happened to satisfy.
+
+        The discriminating version needs a SECOND attachment inserted between the
+        commit and the re-read, via the `CommitPausingConnection` seam below — the
+        same recipe `TestReleaseItemAtomicity` uses for CB-30. Not built here because
+        `pull_next` reaches its commit through `db.txn`'s `COMMIT` while the old code
+        used `conn.commit()`, so the seam needs both hooks and a candidate item that
+        survives `_candidates`' eligibility filter. Recorded on CB-39 rather than
+        approximated.
+        """
+        self._open_item(conn)
+        got = milestones.pull_next(conn, agent_id="agent-A", capacity={"small": 1})
+
+        assert got is not None
+        assert got["assigned_agent"] == "agent-A"
+        assert got["status"] == "in_progress"
+        stored_id = conn.execute(
+            "SELECT id FROM milestone_items WHERE item_ref='CB-1' AND assigned_agent='agent-A'"
+        ).fetchone()["id"]
+        assert got["id"] == stored_id, "the returned row must be the claimed row"
+
+    def test_no_candidate_returns_none_and_writes_nothing(self, conn):
+        """The refusal path writes nothing, so it just returns and commits an empty
+        transaction — no rollback-and-return machinery needed. Pinned because that
+        fact is the reason the `TxnAbort` sentinel was rejected.
+
+        **Passes against the old code too** — it rolled back instead of committing an
+        empty transaction, and both leave no capacity row. A third passing-on-both-sides
+        pin, listed here for the same reason as the other two: a reader must be able to
+        tell a regression pin from a test that merely cannot fail.
+        """
+        _add_finding(conn, "CB-1")
+        conn.execute("UPDATE milestone_items SET status='done' WHERE item_ref='CB-1'")
+        conn.commit()
+
+        assert milestones.pull_next(conn, agent_id="agent-A", capacity={"small": 1}) is None
+        assert conn.execute(
+            "SELECT COUNT(*) AS c FROM agent_capacity WHERE agent_id='agent-A'"
+        ).fetchone()["c"] == 0, "a refusal must not have created a capacity row"
+
+
 class CommitPausingConnection(sqlite3.Connection):
     """One-shot hook fired the instant the write transaction closes.
 

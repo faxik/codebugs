@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from codebugs import db
@@ -245,9 +244,50 @@ def merge(
 ) -> dict[str, Any]:
     """Acquire merge lock with CAS verification.
 
-    Uses BEGIN IMMEDIATE to acquire a SQLite write lock at transaction
-    start, preventing two concurrent processes from both reading the
-    singleton lock as free. This is the critical mutual exclusion point.
+    THE MUTUAL-EXCLUSION POINT for parallel agents pushing to main. One
+    ``db.txn`` (``BEGIN IMMEDIATE``) spans the whole decision: the session read,
+    every guard derived from it, the head check, and the lock write.
+
+    Three defects are fixed here together because they share this one boundary:
+
+    * **CB-36** — the ``status != 'active'`` guard used to be decided BEFORE the
+      lock was taken, so a concurrent ``abandon_session`` could commit in between
+      and this call would revive an abandoned session and hand it the lock.
+    * **CB-40** — the old ``conn.isolation_level = None`` line COMMITS any open
+      transaction, so calling this under an ambient transaction silently committed
+      the caller's unrelated work. There is no raw ``BEGIN IMMEDIATE`` here now.
+    * **CB-41** — the idempotent branch compared only ``session_id`` and never read
+      ``expires_at``, while the acquisition branch treated an expired lease as
+      reclaimable. An expired holder retrying got ``proceed: True`` from the first
+      branch while a competitor reclaimed the lease and got ``proceed: True`` from
+      the second — two agents merging at once.
+
+    **Expired self-retry RENEWS (CB-41).** If the caller already holds the lock it
+    gets a fresh lease, whether or not the old one had lapsed, so expiry no longer
+    decides anything on the self-owned path and the two branches cannot disagree.
+    The TTL still reclaims from a holder that has *died* — a dead holder does not
+    retry — but it no longer bounds one that is alive, wedged and retrying. That is
+    the accepted cost of preserving the documented idempotent contract; bounding a
+    live-but-stuck holder needs liveness detection, not a timestamp.
+
+    **NO REFUSAL PATH WRITES ANYTHING.** The head check runs BEFORE the expired
+    holder is marked abandoned, so ``main_moved`` has nothing to undo and can simply
+    return. That ordering is why this function needs no rollback-and-return
+    machinery — and it is also plainly more correct than abandoning another session
+    and only then deciding not to proceed.
+
+    **Refuses an ambient transaction, unconditionally.** Under one, ``db.txn``
+    yields ``False`` and the caller owns the commit, so this would report
+    ``proceed: True`` for a lock row no other connection can see yet. A gate that
+    says "you hold the lock" before the lock is committed is worse than any defect
+    fixed here. This is a plain ``raise``, not an ``assert`` — ``assert`` is stripped
+    under ``-O``.
+
+    Contract change, accepted: guards are now evaluated under the write lock, so a
+    nonexistent / ``done`` / ``abandoned`` session may wait up to ``busy_timeout``
+    and can surface ``sqlite3.OperationalError`` instead of ``KeyError`` /
+    ``ValueError`` when another writer holds the database. A guard evaluated outside
+    the lock is precisely the defect.
 
     Args:
         session_id: The session requesting merge.
@@ -258,82 +298,110 @@ def merge(
     Returns:
         {proceed: True} or {proceed: False, reason: "...", ...}
     """
-    row = _get_session(conn, session_id)
-
-    # Idempotent: already merging with lock held
-    if row["status"] == "merging":
-        lock = conn.execute("SELECT * FROM codemerge_locks WHERE id=1").fetchone()
-        if lock and lock["session_id"] == session_id:
-            return {"proceed": True, "session_id": session_id}
-
-    if row["status"] != "active":
-        raise ValueError(
-            f"Session '{session_id}' is not in 'active' state (is '{row['status']}')"
+    if conn.in_transaction:
+        raise RuntimeError(
+            "merge() must be called on a connection with no open transaction: it is a "
+            "lock acquisition, and under an ambient transaction it would report success "
+            "for a lock row that is not yet committed."
         )
 
-    now_dt = datetime.now(timezone.utc)
-    now = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-    expires = (now_dt + timedelta(seconds=LOCK_TTL_SECONDS)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    # BEGIN IMMEDIATE acquires a RESERVED lock on the database file,
-    # blocking other IMMEDIATE/EXCLUSIVE transactions from starting.
-    # This prevents the race where two processes both read the lock as free.
+    # THE DEADLINE IS COMPUTED BY SQLITE, AT THE MOMENT OF THE WRITE (CB-41, round 3).
     #
-    # We must disable Python's implicit transaction management to issue
-    # BEGIN IMMEDIATE ourselves. Save and restore isolation_level around
-    # the critical section.
-    saved_isolation = conn.isolation_level
-    conn.isolation_level = None
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            lock = conn.execute("SELECT * FROM codemerge_locks WHERE id=1").fetchone()
+    # Three review rounds died on the same shape: a Python timestamp sampled at one
+    # point and written as a lease deadline at another, with something slow in
+    # between — first the lock wait and the git callback, then the stale-holder
+    # `abandoned` UPDATE. Each time the lease landed ALREADY EXPIRED, this call
+    # returned `proceed: True`, and the next contender saw the lock reclaimable and
+    # also got `proceed: True`.
+    #
+    # Point-of-use discipline is the wrong layer for that: it has to be re-established
+    # every time a statement is inserted. Letting SQLite evaluate `strftime('now')` as
+    # part of the UPDATE makes a stale deadline UNREPRESENTABLE — there is no window
+    # between sampling and writing, because they are the same operation.
+    ttl = f"+{LOCK_TTL_SECONDS} seconds"
+    _EXPIRES_SQL = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)"
+    _NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
 
-            if lock["session_id"] is not None:
-                # Check if lock is expired (ISO 8601 string comparison is safe
-                # because format is fixed-width: YYYY-MM-DDTHH:MM:SSZ)
-                if lock["expires_at"] and lock["expires_at"] > now:
-                    # Lock is held and not expired — rollback and report
-                    conn.execute("ROLLBACK")
-                    return {
-                        "proceed": False,
-                        "reason": "lock_held",
-                        "holder": lock["session_id"],
-                        "held_since": lock["acquired_at"],
-                        "expires_at": lock["expires_at"],
-                    }
-                # Lock expired — mark the holder's session as abandoned
-                conn.execute(
-                    "UPDATE codemerge_sessions SET status='abandoned', last_activity=? "
-                    "WHERE session_id=? AND status='merging'",
-                    (now, lock["session_id"]),
-                )
+    with db.txn(conn):
+        row = _get_session(conn, session_id)
+        lock = conn.execute("SELECT * FROM codemerge_locks WHERE id=1").fetchone()
 
-            actual_head = current_main_head_fn()
-            if actual_head != expected_main_head:
-                conn.execute("ROLLBACK")
-                return {
-                    "proceed": False,
-                    "reason": "main_moved",
-                    "expected_head": expected_main_head,
-                    "current_head": actual_head,
-                }
-
+        # Self-owned: renew and report success. Deliberately does NOT consult
+        # `expires_at` — see CB-41 in the docstring. This branch WRITES, so it must
+        # commit; returning from inside the block does exactly that.
+        if row["status"] == "merging" and lock and lock["session_id"] == session_id:
             conn.execute(
-                "UPDATE codemerge_locks SET session_id=?, acquired_at=?, expires_at=? WHERE id=1",
-                (session_id, now, expires),
+                f"UPDATE codemerge_locks SET expires_at={_EXPIRES_SQL} "  # noqa: S608
+                "WHERE id=1 AND session_id=?",
+                (ttl, session_id),
             )
-            conn.execute(
-                "UPDATE codemerge_sessions SET status='merging', last_activity=? WHERE session_id=?",
-                (now, session_id),
-            )
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-    finally:
-        conn.isolation_level = saved_isolation
+            return {"proceed": True, "session_id": session_id}
 
+        if row["status"] != "active":
+            raise ValueError(
+                f"Session '{session_id}' is not in 'active' state (is '{row['status']}')"
+            )
+
+        # Held by SOMEONE ELSE on a live lease. No writes; refuse.
+        # ISO 8601 string comparison is safe — the format is fixed-width. `now` is
+        # sampled HERE, immediately before its only use. Sampling it early would be
+        # conservative rather than unsafe (an early `now` makes a lease look live, so
+        # we refuse rather than over-grant) but there is no reason to accept even that.
+        now = conn.execute(f"SELECT {_NOW_SQL} AS t").fetchone()["t"]  # noqa: S608
+        if (lock["session_id"] is not None
+                and lock["expires_at"] and lock["expires_at"] > now):
+            return {
+                "proceed": False,
+                "reason": "lock_held",
+                "holder": lock["session_id"],
+                "held_since": lock["acquired_at"],
+                "expires_at": lock["expires_at"],
+            }
+
+        # Head check BEFORE any write, so this refusal has nothing to undo.
+        actual_head = current_main_head_fn()
+        if actual_head != expected_main_head:
+            return {
+                "proceed": False,
+                "reason": "main_moved",
+                "expected_head": expected_main_head,
+                "current_head": actual_head,
+            }
+
+        # A stale holder (expired lease) loses its session here. Its timestamp is
+        # computed by SQLite in this statement, so nothing above can make it stale.
+        if lock["session_id"] is not None:
+            conn.execute(
+                f"UPDATE codemerge_sessions SET status='abandoned', "  # noqa: S608
+                f"last_activity={_NOW_SQL} WHERE session_id=? AND status='merging'",
+                (lock["session_id"],),
+            )
+
+        # Session state BEFORE the lease, so the lease write is the LAST mutation in
+        # this transaction. Every statement between writing a deadline and committing
+        # it is time the deadline is already burning; keeping that list empty is the
+        # only part of that window this code controls.
+        conn.execute(
+            f"UPDATE codemerge_sessions SET status='merging', "  # noqa: S608
+            f"last_activity={_NOW_SQL} WHERE session_id=?",
+            (session_id,),
+        )
+
+        # The granted lease, evaluated by SQLite as this statement runs — so however
+        # long anything above took, the deadline is TTL seconds from NOW.
+        #
+        # RESIDUAL, and it is irreducible here rather than an oversight (CB-42): the
+        # gap between this statement and `COMMIT` is still unaccounted for. A stall
+        # longer than the TTL in that gap commits a lease that is already expired.
+        # Post-commit re-validation does not close it — it only moves the window to
+        # "between the re-validation and the caller acting" — because `proceed: True`
+        # is not a durable capability in a TTL scheme without a fencing token checked
+        # at the protected operation itself. Filed rather than papered over.
+        conn.execute(
+            f"UPDATE codemerge_locks SET session_id=?, acquired_at={_NOW_SQL}, "  # noqa: S608
+            f"expires_at={_EXPIRES_SQL} WHERE id=1",
+            (session_id, ttl),
+        )
     return {"proceed": True, "session_id": session_id}
 
 
