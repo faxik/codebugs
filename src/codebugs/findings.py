@@ -616,9 +616,14 @@ class PostCommitCorruptionError(Exception):
     Distinct from the pre-write ``json.JSONDecodeError`` that ``_bump_row``
     raises on malformed stored ``meta`` — there the transaction rolls back and
     nothing lands. A caller deciding "did the observation land?" must not have
-    to guess between the two (Codex round-3 review). The UPDATE path keeps
-    raising raw ``JSONDecodeError`` deliberately: its CLI re-raise contract is
-    pinned by ``TestRetriageCliContract``.
+    to guess between the two (Codex round-3 review). Raised ONLY when the add's
+    own frame committed: under an ambient transaction nothing has committed yet
+    and the raw ``JSONDecodeError`` propagates to the owning frame instead,
+    which typically abandons the whole unit with it — same contract as
+    ``update_finding``'s conversion (Codex round 4). The UPDATE path keeps
+    raising raw ``JSONDecodeError`` on its own committed path too,
+    deliberately: its CLI re-raise contract is pinned by
+    ``TestRetriageCliContract``.
     """
 
 
@@ -627,11 +632,17 @@ def _finalize_add(
     raw_row: sqlite3.Row | None,
     was_new: bool,
     dedup_action: str,
+    *,
+    committed: bool,
 ) -> dict[str, Any]:
     """Convert an _add_one outcome to the response dict, AFTER the transaction closed.
 
     `was_new` / `dedup_action` are response-only keys (sweep.py's was_new
-    discriminator), not columns.
+    discriminator), not columns. ``committed`` is this frame's ``db.txn``
+    ownership result: only a frame that actually committed may classify a
+    conversion failure as post-commit — under an ambient transaction the owner
+    will normally roll the unit back, so claiming "recorded" would mislead
+    retry/accounting logic.
     """
     if inserted is not None:
         result = inserted
@@ -639,10 +650,12 @@ def _finalize_add(
         try:
             result = db.row_to_dict(raw_row)
         except json.JSONDecodeError as e:
-            raise PostCommitCorruptionError(
-                f"occurrence recorded on {raw_row['id']}, but its stored data "
-                f"could not be serialized: {e}"
-            ) from e
+            if committed:
+                raise PostCommitCorruptionError(
+                    f"occurrence recorded on {raw_row['id']}, but its stored data "
+                    f"could not be serialized: {e}"
+                ) from e
+            raise
     result["was_new"] = was_new
     result["dedup_action"] = dedup_action
     return result
@@ -694,7 +707,7 @@ def add_finding(
     fingerprint = _validate_fingerprint(fingerprint)
     _validate_meta_keys(meta)
 
-    with db.txn(conn):
+    with db.txn(conn) as owned:
         inserted, raw_row, was_new, dedup_action = _add_one(
             conn,
             severity=severity,
@@ -710,7 +723,7 @@ def add_finding(
             fingerprint=fingerprint,
             annotate=annotate,
         )
-    return _finalize_add(inserted, raw_row, was_new, dedup_action)
+    return _finalize_add(inserted, raw_row, was_new, dedup_action, committed=owned)
 
 
 # Member keys accepted by batch_add_findings. The strict-argument middleware guards
@@ -772,7 +785,7 @@ def batch_add_findings(
     # later member bumping an earlier one does not retroactively update the earlier
     # member's returned occurrence_count. Input order is preserved by construction.
     outcomes = []
-    with db.txn(conn):
+    with db.txn(conn) as owned:
         for f, (severity, fingerprint) in zip(findings, validated, strict=True):
             outcomes.append(
                 _add_one(
@@ -790,7 +803,7 @@ def batch_add_findings(
                     fingerprint=fingerprint,
                 )
             )
-    return [_finalize_add(*outcome) for outcome in outcomes]
+    return [_finalize_add(*outcome, committed=owned) for outcome in outcomes]
 
 
 def update_finding(

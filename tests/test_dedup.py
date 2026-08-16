@@ -585,6 +585,37 @@ class TestStoredCorruptionClassification:
         row = conn.execute("SELECT occurrence_count FROM findings").fetchone()
         assert row["occurrence_count"] == 2, "the bump committed before the raise"
 
+    def test_ambient_transaction_add_keeps_raw_jsondecodeerror(self, conn):
+        """Under an ambient transaction the add's frame commits NOTHING, so a
+        malformed-tags conversion failure must stay a raw JSONDecodeError — the
+        owner rolls the unit back, and a PostCommitCorruptionError claiming
+        "recorded" would mislead retry/accounting logic (Codex round 4)."""
+        _add(conn)
+        conn.execute("UPDATE findings SET tags = '[not json' WHERE 1=1")
+        conn.commit()
+        with pytest.raises(json.JSONDecodeError):
+            with db.txn(conn) as mine:
+                assert mine is True
+                _add(conn)  # ambient for the add's own frame
+        row = conn.execute("SELECT occurrence_count FROM findings").fetchone()
+        assert row["occurrence_count"] == 1, "the owner rolled the bump back"
+
+    def test_ambient_transaction_batch_keeps_raw_jsondecodeerror(self, conn):
+        _add(conn)
+        conn.execute("UPDATE findings SET tags = '[not json' WHERE 1=1")
+        conn.commit()
+        member = {
+            "severity": "high",
+            "category": "bug",
+            "file": "a.py",
+            "description": "the failure text",
+        }
+        with pytest.raises(json.JSONDecodeError):
+            with db.txn(conn):
+                findings.batch_add_findings(conn, [member])
+        row = conn.execute("SELECT occurrence_count FROM findings").fetchone()
+        assert row["occurrence_count"] == 1, "the owner rolled the bump back"
+
 
 class TestDiffReviewRegressions:
     """Regression pins for the five findings of the cross-model diff review."""
