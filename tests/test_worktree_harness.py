@@ -227,6 +227,72 @@ class TestMainClean:
         assert "note.md" in result.stderr
 
 
+class TestEnforcementArmed:
+    """Enforcement is per-clone and uncommittable — so it must be checked.
+
+    A fresh clone has no hook and no `merge.ff`, and git skips a missing or
+    dangling hook SILENTLY. Without this guard the harness would let an
+    unarmed clone integrate while looking exactly like an armed one.
+    """
+
+    @staticmethod
+    def _hook_path(repo: Path) -> Path:
+        common = git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        hooks = Path(common) / "hooks"
+        hooks.mkdir(parents=True, exist_ok=True)
+        return hooks / "pre-commit"
+
+    def _arm(self, repo: Path) -> Path:
+        git(repo, "config", "merge.ff", "false")
+        hook = self._hook_path(repo)
+        shutil.copy(REPO_ROOT / "tools" / "pre-commit-hook.sh", hook)
+        hook.chmod(0o755)
+        return hook
+
+    def test_fully_armed_passes(self, repo: Path) -> None:
+        self._arm(repo)
+        assert run_guard("_guard_enforcement_armed", str(repo)).returncode == 0
+
+    def test_fresh_clone_refused(self, repo: Path) -> None:
+        assert run_guard("_guard_enforcement_armed", str(repo)).returncode == 12
+
+    def test_missing_merge_ff_refused(self, repo: Path) -> None:
+        self._arm(repo)
+        git(repo, "config", "--unset", "merge.ff")
+        result = run_guard("_guard_enforcement_armed", str(repo))
+        assert result.returncode == 12
+        assert "merge.ff" in result.stderr
+
+    def test_merge_ff_true_refused(self, repo: Path) -> None:
+        """`true` is not merely 'unset' — someone turned it back on."""
+        self._arm(repo)
+        git(repo, "config", "merge.ff", "true")
+        assert run_guard("_guard_enforcement_armed", str(repo)).returncode == 12
+
+    def test_dangling_hook_symlink_refused(self, repo: Path) -> None:
+        """The real defect this guard was written for.
+
+        The first install-hooks.sh pointed the symlink at the authoring
+        WORKTREE. Removing that worktree would have left a repo that looked
+        armed — the symlink is right there in .git/hooks — and silently was
+        not, because git skips a hook it cannot execute.
+        """
+        self._arm(repo)
+        hook = self._hook_path(repo)
+        hook.unlink()
+        hook.symlink_to(repo / "nonexistent" / "pre-commit-hook.sh")
+        result = run_guard("_guard_enforcement_armed", str(repo))
+        assert result.returncode == 12
+        assert "DANGLING" in result.stderr
+
+    def test_non_executable_hook_refused(self, repo: Path) -> None:
+        self._arm(repo)
+        self._hook_path(repo).chmod(0o644)
+        result = run_guard("_guard_enforcement_armed", str(repo))
+        assert result.returncode == 12
+        assert "not executable" in result.stderr
+
+
 class TestUntrackedPyAtRoot:
     def test_clean_status_passes(self) -> None:
         assert run_guard("_guard_untracked_py_at_root", " M src/codebugs/db.py").returncode == 0

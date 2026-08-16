@@ -21,6 +21,7 @@
 #    4  untracked top-level .py       9  branch carries no change vs main
 #    5  conflict markers             10  HEAD not on a finishable branch
 #    6  base too far behind main     11  main working tree dirty
+#                                    12  enforcement not armed in this clone
 
 # ---------------------------------------------------------------------------
 # Repo root, resolved so every script works from any cwd, including from inside
@@ -284,6 +285,55 @@ _guard_stale_base() {
 # out. In autosorter a parallel session once had a CI branch checked out; the
 # finish merged onto that, printed "Integration complete", and orphaned the
 # commit. A detached HEAD is equally not-main and aborts through the same path.
+# ---------------------------------------------------------------------------
+# NEW vs autosorter: refuse to integrate from a clone whose enforcement is not
+# armed. This closes the hole that everything else in this file sits on.
+#
+# Git hooks and git config are PER-CLONE and cannot be committed. So a fresh
+# clone, a clone made before `tools/install-hooks.sh` existed, or one where the
+# hook symlink has come to dangle, has NO enforcement at all — and loses it
+# SILENTLY, because git skips a missing or non-executable hook without a word.
+# Verified while building this: the first install pointed the symlink at the
+# authoring WORKTREE, so it would have dangled the moment that worktree was
+# removed, leaving a repo that looked armed and was not.
+#
+# Checked at integration time rather than in a test, because this is the only
+# moment where being unarmed can actually cost something, and because failing a
+# contributor's whole suite over local config would be noise.
+_guard_enforcement_armed() {
+    local repo_root="$1"
+    local problems=""
+
+    local ff
+    ff=$(git -C "${repo_root}" config --get merge.ff || true)
+    [[ "${ff}" == "false" ]] || problems="${problems}  merge.ff is '${ff:-unset}', expected 'false'"$'\n'
+
+    local hook
+    hook="$(git -C "${repo_root}" rev-parse --path-format=absolute --git-common-dir)/hooks/pre-commit"
+    if [[ ! -e "${hook}" ]]; then
+        # -e follows symlinks, so a DANGLING symlink lands here, not below.
+        if [[ -L "${hook}" ]]; then
+            problems="${problems}  pre-commit hook is a DANGLING symlink: $(readlink "${hook}")"$'\n'
+        else
+            problems="${problems}  pre-commit hook is not installed (${hook})"$'\n'
+        fi
+    elif [[ ! -x "${hook}" ]]; then
+        problems="${problems}  pre-commit hook is not executable (${hook})"$'\n'
+    fi
+
+    [[ -z "${problems}" ]] && return 0
+
+    echo "ERROR: this clone's enforcement is not armed." >&2
+    printf '%s' "${problems}" >&2
+    echo "" >&2
+    echo "  Hooks and git config are per-clone and are NOT committed state, so a" >&2
+    echo "  fresh clone starts with no enforcement and loses it silently — git" >&2
+    echo "  skips a missing or dangling hook without any message." >&2
+    echo "" >&2
+    echo "  Fix: ${repo_root}/tools/install-hooks.sh" >&2
+    return 12
+}
+
 _guard_workspace_on_main() {
     local repo_root="$1"
     local checked_out

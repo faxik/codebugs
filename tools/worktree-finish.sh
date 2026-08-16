@@ -204,6 +204,7 @@ echo ""
 echo "[7/7] Integrating into main (under lock)..."
 
 # Fail fast before waiting on the lock, then re-assert inside it.
+_guard_enforcement_armed "${REPO_ROOT}" || exit $?
 _guard_workspace_on_main "${REPO_ROOT}" || exit $?
 _guard_main_clean "${REPO_ROOT}" || exit $?
 
