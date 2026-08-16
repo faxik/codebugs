@@ -557,6 +557,35 @@ class TestResponseShape:
         assert "dedup_action" not in json.loads(raw["meta"])
 
 
+class TestStoredCorruptionClassification:
+    """Pre-write vs post-commit corruption must be distinguishable (Codex round 3).
+
+    Malformed stored META raises json.JSONDecodeError from _bump_row BEFORE any
+    write — the transaction rolls back and NOTHING lands. Malformed stored TAGS
+    raises only in _finalize_add, AFTER the bump committed — that arrives as
+    PostCommitCorruptionError so a caller (the CSV import loop) never claims
+    "the write landed" for a rollback, or the reverse.
+    """
+
+    def test_malformed_stored_meta_is_prewrite_and_rolls_back(self, conn):
+        _add(conn)
+        conn.execute("UPDATE findings SET meta = '{not json' WHERE 1=1")
+        conn.commit()
+        with pytest.raises(json.JSONDecodeError):
+            _add(conn)  # same fingerprint -> bump path parses meta pre-write
+        row = conn.execute("SELECT occurrence_count FROM findings").fetchone()
+        assert row["occurrence_count"] == 1, "rolled back — nothing may land"
+
+    def test_malformed_stored_tags_is_postcommit_and_lands(self, conn):
+        _add(conn)
+        conn.execute("UPDATE findings SET tags = '[not json' WHERE 1=1")
+        conn.commit()
+        with pytest.raises(findings.PostCommitCorruptionError):
+            _add(conn)  # bump commits; tags parse fails only at serialization
+        row = conn.execute("SELECT occurrence_count FROM findings").fetchone()
+        assert row["occurrence_count"] == 2, "the bump committed before the raise"
+
+
 class TestDiffReviewRegressions:
     """Regression pins for the five findings of the cross-model diff review."""
 

@@ -610,6 +610,18 @@ def _add_one(
     return result, None, True, dedup_action
 
 
+class PostCommitCorruptionError(Exception):
+    """The dedup write COMMITTED, then the matched row's stored data failed to parse.
+
+    Distinct from the pre-write ``json.JSONDecodeError`` that ``_bump_row``
+    raises on malformed stored ``meta`` — there the transaction rolls back and
+    nothing lands. A caller deciding "did the observation land?" must not have
+    to guess between the two (Codex round-3 review). The UPDATE path keeps
+    raising raw ``JSONDecodeError`` deliberately: its CLI re-raise contract is
+    pinned by ``TestRetriageCliContract``.
+    """
+
+
 def _finalize_add(
     inserted: dict[str, Any] | None,
     raw_row: sqlite3.Row | None,
@@ -621,7 +633,16 @@ def _finalize_add(
     `was_new` / `dedup_action` are response-only keys (sweep.py's was_new
     discriminator), not columns.
     """
-    result = inserted if inserted is not None else db.row_to_dict(raw_row)
+    if inserted is not None:
+        result = inserted
+    else:
+        try:
+            result = db.row_to_dict(raw_row)
+        except json.JSONDecodeError as e:
+            raise PostCommitCorruptionError(
+                f"occurrence recorded on {raw_row['id']}, but its stored data "
+                f"could not be serialized: {e}"
+            ) from e
     result["was_new"] = was_new
     result["dedup_action"] = dedup_action
     return result
@@ -1550,11 +1571,12 @@ def register_cli(sub, commands) -> None:
             )
         except json.JSONDecodeError:
             # MUST stay ahead of the ValueError arm, which it subclasses — the
-            # _cmd_update ordering contract. A bump/reopen COMMITS before
-            # _finalize_add parses the matched row's stored tags/meta, so this
-            # is a corrupt stored row surfacing after a write that landed, not
-            # bad input; exiting 1 here would be a failure-shaped signal for a
-            # successful mutation.
+            # _cmd_update ordering contract. This is _bump_row's PRE-write
+            # parse of the matched row's stored meta: corruption, not bad
+            # input, so it must not print as a tidy usage error. (The
+            # post-commit twin — stored tags failing AFTER the bump landed —
+            # arrives as PostCommitCorruptionError, which no arm here catches
+            # and which therefore also propagates loudly.)
             raise
         except ValueError as e:
             print(str(e), file=sys.stderr)
@@ -1823,18 +1845,25 @@ def register_cli(sub, commands) -> None:
                         fingerprint=fingerprint,
                         annotate=False,  # an import is not an observation (CB-45)
                     )
-                except json.JSONDecodeError as e:
-                    # MUST stay ahead of the ValueError arm, which it subclasses.
-                    # A bump COMMITS before _finalize_add parses the matched
-                    # row's stored tags/meta, so this is stored corruption
-                    # surfacing after a write that LANDED — reporting it as a
-                    # failed CSV row would be a failure-shaped signal for a
-                    # successful mutation (the _cmd_update ordering contract).
+                except PostCommitCorruptionError as e:
+                    # The occurrence bump LANDED; only serializing the matched
+                    # row failed. Reporting it as a failed CSV row would be a
+                    # failure-shaped signal for a successful mutation.
                     corrupt += 1
+                    print(f"Stored-data corruption: {e}", file=sys.stderr)
+                    continue
+                except json.JSONDecodeError as e:
+                    # MUST stay ahead of the ValueError arm, which it
+                    # subclasses. Pre-write corruption: _bump_row parses the
+                    # matched row's stored meta BEFORE writing, so the
+                    # transaction rolled back and NOTHING landed — unlike
+                    # PostCommitCorruptionError above, and the message must
+                    # not claim otherwise (Codex round-3 review).
+                    errors += 1
                     label = row_id or f"row {imported + skipped + merged + errors + corrupt}"
                     print(
-                        f"Stored-data corruption while recording {label}: the write "
-                        f"landed but the matched row could not be serialized: {e}",
+                        f"Error importing {label}: matched row has malformed stored "
+                        f"meta; observation NOT recorded: {e}",
                         file=sys.stderr,
                     )
                     continue
