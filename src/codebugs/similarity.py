@@ -265,6 +265,7 @@ def group_report(
                     )
 
     members: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    recs_by_id = {rec["row"]["id"]: rec for rec in recs}
     for rec in recs:
         members[dsu.find(rec["row"]["id"])].append(rec["row"])
     families = []
@@ -274,11 +275,27 @@ def group_report(
         fam_id_set = {m["id"] for m in fam}
         fam_edges = [e for e in edges if e["a"] in fam_id_set]
         fam_sorted = sorted(fam, key=lambda m: (m["created_at"], m["id"]))
+        # min_pair_score is the family's DIAMETER — the minimum over ALL member
+        # pairs, sub-threshold pairs included, NOT over the recorded edges
+        # (those are >= threshold by construction, so an edge-minimum can never
+        # reveal chaining). Union-find takes the transitive closure: the
+        # corpus's 43-row family holds a 0.393 pair behind >= 0.7 edges, and
+        # CB-46's sample audit needs that number visible.
+        min_pair = 1.0
+        fam_recs = [recs_by_id[m["id"]] for m in fam_sorted]
+        for i in range(len(fam_recs)):
+            for j in range(i + 1, len(fam_recs)):
+                a, b = fam_recs[i], fam_recs[j]
+                if a["vec"] is not None and b["vec"] is not None:
+                    pair = cosine(a["vec"], b["vec"])
+                else:
+                    pair = jaccard(a["tri"], b["tri"])
+                min_pair = min(min_pair, pair)
         families.append(
             {
                 "category": fam_sorted[0]["category"],
                 "size": len(fam_sorted),
-                "min_pair_score": min(e["score"] for e in fam_edges),
+                "min_pair_score": round(min_pair, 3),
                 "edge_count": len(fam_edges),
                 "edges": fam_edges,
                 "members": [

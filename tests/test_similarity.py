@@ -179,6 +179,36 @@ class TestGroupReport:
         assert report["collapse_count"] == 1
         assert report["populations"] == ["all"]
 
+    def test_min_pair_score_is_family_diameter_not_edge_minimum(self, conn):
+        # Union-find takes the transitive closure: A~B and B~C above threshold
+        # merge A with C even when A-C scores far below it. min_pair_score must
+        # expose that diameter — an edge-minimum is >= threshold by construction
+        # and can never reveal chaining (the corpus's 43-row family hides a
+        # 0.393 pair behind 0.7+ edges).
+        base = (
+            "alpha bravo charlie delta echo foxtrot golf hotel india juliet "
+            "kilo lima mike november oscar papa"
+        )
+        tail1 = " quebec romeo sierra tango uniform victor"
+        tail2 = " whiskey xray yankee zulu quartz jumble"
+        # Measured: A-B 0.70, B-C 0.79, A-C 0.55 — at threshold 0.65 the chain
+        # merges while the A-C pair sits well below it.
+        texts = [base, base + tail1, base + tail1 + tail2]
+        for i, d in enumerate(texts):
+            findings.add_finding(
+                conn,
+                severity="low",
+                category="gate",
+                file="f",
+                description=d,
+                finding_id=f"CB-{i + 1}",
+            )
+        report = similarity.group_report(conn, threshold=0.65)
+        [fam] = report["families"]
+        assert fam["size"] == 3  # chained into one family
+        assert fam["min_pair_score"] < report["threshold"]  # the diameter shows it
+        assert all(e["score"] >= report["threshold"] for e in fam["edges"])
+
     def test_short_rows_skipped_and_counted(self, conn):
         for i, d in enumerate(["Bug 1x", "Bug 2x"]):
             findings.add_finding(
