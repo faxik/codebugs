@@ -5,6 +5,7 @@ net change. Tracker: this repo's own `.codebugs/findings.db`, served by `mcp__co
 
 | Date | Focus | Cards | Disposition | Merge | Follow-ups |
 |---|---|---|---|---|---|
+| 2026-08-16 | `CB-44, then CB-43` (user-named) | CB-43 + CB-44 | **CB-43 fixed** — findings identity function (fingerprint upsert, occurrence ring, regression reopen + milestone reopen projection); **CB-44 closed as a ratified decision** (identity is core, no seam — the card's option (b)) | `1e06a80` | filed CB-45 (similarity extension + seam design), CB-46 (backfill, blocker-linked to CB-45). **MCP server restart needed** before the new add semantics are live |
 | 2026-08-13 | `codebugs` | CB-16 | **fixed** — meta clobber in `update_finding` / `update_requirement` | `1d85756`, hardening `63d0658` | CB-18 unblocked |
 | 2026-08-13 | `codebugs` | CB-4, CB-1, CB-5 | **closed stale** with evidence — all three describe code that has since been refactored | `6e5236c`, `63d0658` (doc corrections) | sweep the remaining arch-debt cards |
 | 2026-08-13 | `codebugs` | CB-18, CB-15 | **fixed** — `append_note` unreachable from either surface; unknown argument names silently dropped | `6a1aef2` (`987fc20`, `d6ce8de`) | CB-17 left open by design |
@@ -25,6 +26,58 @@ net change. Tracker: this repo's own `.codebugs/findings.db`, served by `mcp__co
 | 2026-08-14 | `codebugs` | CB-36 batch 2 of N | **partial, card stays `in_progress`** — `blockers.resolve_blocker`, `sweep.add_items`, `sweep.archive_items`; 6 of 13 sites done | `77de4b2` | none filed; batch 3 = the four clean `milestones/` sites |
 | 2026-08-14 | `codebugs` | CB-36 batch 1 of N | **partial, card stays `in_progress`** — `merge.py` session lifecycle (`start_session`, `finish`, `add_claim`); 3 of 13 sites done | `80e8ccf` (`6dc89d1`, `626fa2b`, `b88a646`) | filed CB-40 (both raw `BEGIN IMMEDIATE` sites commit an ambient caller transaction); two test gaps handed forward on the card with recipes |
 | 2026-08-14 | `codebugs` | CB-27 + CB-30 (both re-scoped) | **fixed** — CB-24 conformance for the two live unwrapped read-modify-write sites; the sweep found the defect is package-wide (19 instances, 13 still open) | `ae77cba` (`89ae282`, `8a870bf`, `12af24f`, `0a2b3e5`, `4530006`) | filed CB-36 (`high`, the 13 remaining sites), CB-37 (enforcement, carried from CB-27), CB-38 (capacity policy, carried from CB-30, reframed), CB-39 (`pull_next`, same window) |
+
+## 2026-08-16 — CB-43 + CB-44 (the identity function, and the seam that wasn't built)
+
+User-directed pick ("Fix CB-44, then CB-43"), brainstormed interactively first — the stated
+meta-goal was **preventing codebug number explosion**: grouped rich cards instead of N loose ones.
+Plan: `.claude/plans/CB-44-CB-43-identity-dedup.md` (kept, with the full review appendix).
+
+**The review inverted the iteration's shape, and both inversions were the user's call.**
+adversarial-review-x2 (Opus + Codex/Sol attackers, Opus defender + judge) returned FAIL-REVISE
+with 13 mandatory fixes, and two verdicts went back to the user as scope questions: (1) CB-44
+closes as a **decision, not code** — approach A *is* the card's option (b), the drafted seam had
+zero consumers and its outcome type could not express the semantics it would carry (both models
+independently); (2) the iteration ships the **substrate only**, similarity as the next card.
+
+**The headline empirical finding: the spec's fallback fingerprint collapsed 0 of 6,509… actually
+3,158 corpus rows — including 0 of the 115-row family the card was filed about.** The Opus
+adversary implemented it and measured; the defender reproduced the 0 and refuted the inflated
+denominator and the "so ship similarity first" conclusion; the judge re-measured everything to the
+row. The blocker was the branch slug — declared in every row's own meta, which is what the repaired
+normalization now strips. Honest value: **71/115 of one family, ~2% corpus-wide**; the rest is
+prospective (filer-supplied fingerprints are the primary path). A design premise died in review and
+the fix was one function, not a re-scope — but only because the measurement was made BEFORE landing.
+
+**The judge caught what neither attacker did:** with stale-reopen dropped, `stale` fell through to
+*plain insert* — the branch table was not total, silently resuming the explosion for 43/115 rows.
+Now `stale` is live-and-bumps, and `TestBranchTotality` pins totality over `FINDING_STATUSES`.
+
+**The Codex diff review (after the design review, on the finished code) found 5 more, all real:**
+reopen leaked capacity/ownership for items closed by `set_item_status` rather than the reconciler;
+caller meta could poison the ring (`meta={"occurrences": 1}` → TypeError on the NEXT observation);
+stripping every meta value merged rule_code E501/F401 defects (now volatile-KEY-scoped stripping,
+erring toward split); CSV import dropped the meta column so derived fingerprints did not round-trip;
+add stored stripped fingerprints while query bound them raw. Every fix carries a regression test
+proven to fail against the pre-fix commit (11/11).
+
+**Test-vacuity traps hit twice, both caught:** the batch-order test's first draft used ids whose
+input order coincided with B-tree order (passed against the bug it targets); and the "prove it
+fails on main" run silently tested the FIXED code — `[tool.pytest.ini_options] pythonpath=["src"]`
+prepends the worktree's src ahead of `$PYTHONPATH`, so cross-tree proof runs need
+`-o pythonpath=<other-tree>/src`. Worth never re-deriving.
+
+**Also:** `test_claims.py`'s `_finding` helper wanted N distinct entities from N identical tuples —
+under the ratified contract that is one identity, so the helper now varies its default description
+(the contract-conformant fix, not fixture-whack-a-mole; explicit-id fixtures were already safe by
+the explicit-id bypass). `CountingConn` counted only `conn.commit()` and forwarded no
+`__setattr__` — the single-commit guarantee was pinned by a test that could not fail against
+`db.txn`; it now hooks both seams.
+
+**Net change: 2 closed, 2 filed (CB-45, CB-46, blocker-linked); open queue unchanged in size but
+strictly better-shaped** — both new cards are ratified-scope follow-ups with measured targets, not
+noise. 1004 tests pass (988 baseline + 16 net new), ruff clean. **The running MCP server holds
+pre-identity code until restarted.**
 
 ## 2026-08-13 — CB-16
 
