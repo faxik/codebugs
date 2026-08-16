@@ -1748,6 +1748,7 @@ def register_cli(sub, commands) -> None:
         skipped = 0
         merged = 0
         errors = 0
+        corrupt = 0
         # Loop-invariant: resolver registration happens at module import, which
         # db.connect() above completed, so the union cannot change mid-import.
         dropped_keys = _RESERVED_META_KEYS | db.resolver_reserved_meta_keys()
@@ -1822,9 +1823,24 @@ def register_cli(sub, commands) -> None:
                         fingerprint=fingerprint,
                         annotate=False,  # an import is not an observation (CB-45)
                     )
+                except json.JSONDecodeError as e:
+                    # MUST stay ahead of the ValueError arm, which it subclasses.
+                    # A bump COMMITS before _finalize_add parses the matched
+                    # row's stored tags/meta, so this is stored corruption
+                    # surfacing after a write that LANDED — reporting it as a
+                    # failed CSV row would be a failure-shaped signal for a
+                    # successful mutation (the _cmd_update ordering contract).
+                    corrupt += 1
+                    label = row_id or f"row {imported + skipped + merged + errors + corrupt}"
+                    print(
+                        f"Stored-data corruption while recording {label}: the write "
+                        f"landed but the matched row could not be serialized: {e}",
+                        file=sys.stderr,
+                    )
+                    continue
                 except ValueError as e:
                     errors += 1
-                    label = row_id or f"row {imported + skipped + merged + errors}"
+                    label = row_id or f"row {imported + skipped + merged + errors + corrupt}"
                     print(f"Error importing {label}: {e}", file=sys.stderr)
                     continue
                 # add_finding is an upsert (CB-43): a row whose fingerprint
@@ -1845,9 +1861,11 @@ def register_cli(sub, commands) -> None:
             parts.append(f"{merged} merged into existing findings by fingerprint")
         if errors:
             parts.append(f"{errors} failed (see stderr)")
+        if corrupt:
+            parts.append(f"{corrupt} recorded onto rows with corrupt stored data (see stderr)")
         suffix = f" ({'; '.join(parts)})" if parts else ""
         print(f"Imported {imported} findings.{suffix}")
-        if errors:
+        if errors or corrupt:
             sys.exit(1)
 
     def _cmd_export_csv(args: argparse.Namespace) -> None:

@@ -518,6 +518,12 @@ def register_cli(sub, commands) -> None:
             except json.JSONDecodeError as e:
                 print(f"Error: --meta is not valid JSON: {e}", file=sys.stderr)
                 sys.exit(1)
+            # The domain contract is a dict (normalization iterates .items());
+            # "text" and [1] are valid JSON that would surface as a raw
+            # AttributeError instead of an input error.
+            if meta is not None and not isinstance(meta, dict):
+                print("Error: --meta must be a JSON object", file=sys.stderr)
+                sys.exit(1)
         conn = db.connect()
         # No JSONDecodeError-first arm here (the _cmd_update pattern): these
         # read-only commands parse stored meta through the deliberately
