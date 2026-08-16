@@ -2,6 +2,48 @@
 
 AI-native code finding & requirements tracker. SQLite-backed, exposed via MCP server + CLI.
 
+## Workflow — `main` is never edited directly
+
+**Every code edit happens on a short-lived branch, in a worktree.** Borrowed from `../autosorter`
+(2026-08-16), minus its `tools/worktree-*.sh` harness, which this repo does not have and does not
+need — plain git is enough.
+
+**Read this as a tightening, not as a write-down of what already happened.** The branch workflow is
+the dominant pattern — 24 merges, 22 of them named `fix/cb-NN-*` — but it was never stated anywhere,
+and the exceptions are recent rather than ancient: `git log --first-parent --no-merges` shows
+`a29fd50` (the CB-28 query fix) and `1892b80` (a test refactor) landing straight on `main` on
+2026-08-13, and CB-48 was written into the main checkout on 2026-08-16, which is what prompted this
+section. **A convention that exists only as a pattern in the log is not a rule** — nothing bound it,
+so it held until it didn't, and each lapse looked locally reasonable at the time.
+
+- **Create:** `git worktree add .claude/worktrees/<slug> -b <type>/<slug> main`. Types: `fix/*`,
+  `feature/*`, `refactor/*`, `docs/*`, one concern each. A card-driven branch carries its id
+  (`fix/cb-48-tracker-root-init`). Work already started on main moves over with `git stash push
+  <files>` → `git worktree add` → `git stash pop` in the worktree; the stash is shared across
+  worktrees because it lives in the common git dir.
+- **Then work there, entirely.** Check which checkout you are in before any `Edit`/`Write` to a
+  source file. **A surgical `git checkout <branch> -- <files>` onto main is editing main directly**,
+  wearing a hat. Conflicts get resolved *inside* the worktree, never by committing a resolution on
+  main.
+- **Tests and lint run in the worktree, and it needs its own environment.** `uv run --extra dev
+  python -m pytest tests/ -q` — **`--extra dev` is not optional there.** `pytest` and `ruff` live in
+  `project.optional-dependencies`, which `uv run` does not install by default, so a fresh worktree
+  dies with `No module named pytest` while main — synced long ago — works without the flag; the
+  documented commands under **Testing** below are written for main and are incomplete here. `uv run`
+  does build the worktree's own editable install pointing at the worktree, so once the extra is
+  there, the isolation is real. **Never validate a worktree's changes by running the suite from
+  main**: `pythonpath = ["src"]` resolves against the checkout you run in, so that tests main's
+  source and passes on a tree you did not touch. The mirror-image trap is at the MCP-registration
+  rules — from a worktree, a bare `python` reaches `codebugs` through main's editable install, which
+  is why `tests/dump_schema.py` must be run with `PYTHONPATH=src`.
+- **Integrate from main with `git merge --no-ff -m "Merge <branch>: <what changed> (CB-NN)"`.** The
+  merge commit is what makes a card's whole iteration recoverable as one unit; a fast-forward
+  scatters it. **Never delete the branch** — no merged branch has ever been deleted here, and that
+  is the record.
+- **Session end:** `git status` clean in main *and* in every worktree, then `git worktree remove
+  <path>`. Never `--force`: a removal that refuses is telling you work is uncommitted there.
+- **The only thing that may land on main directly** is a `.claude/plans/*.md` note.
+
 ## Architecture
 
 - **Domain modules** (`src/codebugs/`): `db.py` (findings + shared infra), `reqs.py`, `bench.py`, `blockers.py`, `merge.py`, `sweep.py`, `embeddings.py` (vector storage/similarity search, delegates from reqs), `milestones.py` (releases / streams / capacity-aware pull)
