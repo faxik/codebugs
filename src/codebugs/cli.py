@@ -11,8 +11,28 @@ from codebugs import db
 
 
 def _cmd_init(args: argparse.Namespace) -> None:
+    # WHERE `init` CREATES (CB-48). A declared root always redirects READS.
+    # Whether it also redirects CREATION depends on the CHANNEL, because the two
+    # channels are not the same kind of statement:
+    #
+    #   --tracker-root DIR   is typed on THIS command line, about THIS
+    #                        invocation. `init` honours it and creates DIR.
+    #   $CODEBUGS_ROOT       is ambient — exported into a shell days ago and
+    #                        inherited by an unrelated subprocess. A tracker
+    #                        conjured somewhere else by ambient state is the
+    #                        failure this project refuses everywhere else, so
+    #                        creation stays where the user is standing.
+    #
+    # An explicit positional outranks both, which is the precedence
+    # `db._resolve_db` already applies to reads (argument > flag > env > walk).
+    # Before CB-48 the flag was simply dropped here, and the mismatch warning
+    # below then announced the opposite of what had just happened on disk.
+    declared, source = db.declared_tracker_root()
+    directory = args.directory
+    if directory is None and source == "flag":
+        directory = declared
     try:
-        result = db.init_project(args.directory, force=args.force)
+        result = db.init_project(directory, force=args.force)
     except (ValueError, OSError) as e:
         print(f"codebugs: {e}", file=sys.stderr)
         sys.exit(1)
@@ -22,12 +42,11 @@ def _cmd_init(args: argparse.Namespace) -> None:
             f"from everything under {result['root']}",
             file=sys.stderr,
         )
-    # A declared root redirects READS only: creation stays where the user is
-    # standing, because a tracker conjured somewhere else by ambient state is the
-    # failure this project refuses everywhere else. But the mismatch has to be
-    # said out loud — otherwise `init` reports success for a tracker that every
-    # other command will ignore, which is a success-shaped signal for a dead end.
-    declared, source = db.declared_tracker_root()
+    # Whatever mismatch survives the routing above is announced, because
+    # otherwise `init` reports success for a tracker every other command will
+    # ignore — a success-shaped signal for a dead end. Two cases reach it now:
+    # `$CODEBUGS_ROOT` naming somewhere else, and a positional argument
+    # overriding `--tracker-root`.
     if declared is not None and os.path.realpath(declared) != os.path.realpath(result["root"]):
         print(
             f"codebugs: warning — {db.SOURCE_LABELS[source]} names {declared}, so commands "
@@ -63,7 +82,12 @@ def _register_builtins(sub, commands: dict) -> None:
     in every --mode.
     """
     p = sub.add_parser("init", help=f"Create a {db.DB_DIR}/ tracker in this directory")
-    p.add_argument("directory", nargs="?", default=None, help="Directory (default: cwd)")
+    p.add_argument(
+        "directory",
+        nargs="?",
+        default=None,
+        help="Directory (default: the --tracker-root DIR if given, else cwd)",
+    )
     p.add_argument(
         "--force",
         action="store_true",
@@ -88,7 +112,8 @@ def main() -> None:
         default=None,
         metavar="DIR",
         help=(
-            f"Use the tracker in DIR instead of walking up from the current directory "
+            f"Use the tracker in DIR instead of walking up from the current directory, "
+            f"and with `init`, create it there "
             f"(overrides ${db.ENV_ROOT}; see `codebugs where`)"
         ),
     )

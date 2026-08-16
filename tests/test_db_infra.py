@@ -1005,11 +1005,16 @@ class TestWhereCommand:
 
 
 class TestInitUnderADeclaredRoot:
-    """`init` creates where you stand; the declaration only redirects READS.
+    """Where `init` creates depends on the CHANNEL that declared the root (CB-48).
 
-    Creation driven by ambient state is the failure this project refuses
-    everywhere else, so the declaration is ignored here — but a mismatch would
-    leave a tracker nothing ever reads, so it is announced.
+    `$CODEBUGS_ROOT` is ambient — it may have been exported days ago and
+    inherited by an unrelated subprocess — so creation driven by it is the
+    failure this project refuses everywhere else, and `init` still creates where
+    the user stands. `--tracker-root DIR` is typed on the same command line and
+    is honoured. Either way a surviving mismatch is announced, because a tracker
+    nothing ever reads is a success-shaped dead end.
+
+    These are the ENV half; `TestInitUnderTheTrackerRootFlag` is the flag half.
     """
 
     def test_init_ignores_the_declared_root(self, tmp_path, monkeypatch):
@@ -1049,3 +1054,170 @@ class TestInitUnderADeclaredRoot:
         )
         assert proc.returncode == 0, proc.stderr
         assert "warning" not in proc.stderr.lower()
+
+
+class TestInitUnderTheTrackerRootFlag:
+    """`--tracker-root DIR init` initializes DIR (CB-48).
+
+    The flag half of the split documented on `TestInitUnderADeclaredRoot`: unlike
+    `$CODEBUGS_ROOT`, `--tracker-root` is typed on the very command line being
+    run, so it is an assertion about this invocation rather than ambient state.
+
+    What made the old behaviour worse than a plain ignored flag: the warning
+    `_cmd_init` printed said "commands will read DIR, not CWD" and the process
+    then initialized CWD — two adjacent lines telling the user the opposite of
+    what landed on disk. So every test here asserts on the DIRECTORY THAT DID
+    NOT GET A TRACKER as well as on the one that did; asserting only the target
+    would pass against the defect, which created *both* (cwd's for real, DIR's in
+    the reader's head).
+    """
+
+    def _init(self, cwd, *argv):
+        return subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", *argv],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+        )
+
+    def test_flag_initializes_the_named_directory_not_cwd(self, tmp_path):
+        """The card's reproduction, both directories empty."""
+        here = tmp_path / "here"
+        target = tmp_path / "target"
+        here.mkdir()
+        target.mkdir()
+
+        proc = self._init(here, "--tracker-root", str(target), "init")
+
+        assert proc.returncode == 0, proc.stderr
+        assert (target / ".codebugs" / db.DB_FILE).is_file()
+        assert not (here / ".codebugs").exists(), "must not pollute cwd with an unasked tracker"
+        assert str(target) in proc.stdout
+
+    def test_flag_init_says_nothing_misleading(self, tmp_path):
+        """Flag and result now agree, so the mismatch warning must not fire."""
+        here = tmp_path / "here"
+        target = tmp_path / "target"
+        here.mkdir()
+        target.mkdir()
+
+        proc = self._init(here, "--tracker-root", str(target), "init")
+
+        assert proc.returncode == 0, proc.stderr
+        assert "warning" not in proc.stderr.lower(), proc.stderr
+
+    def test_flag_init_is_unaffected_by_an_already_initialized_cwd(self, tmp_path):
+        """The card's second harm: `Already initialized:` reported for the WRONG tracker.
+
+        `init` is idempotent, so standing in an initialized project used to make
+        the whole call a no-op that still exited 0 — the user reasonably read
+        that as "my scratch tracker is ready" when nothing had been created.
+        """
+        here = tmp_path / "here"
+        target = tmp_path / "target"
+        here.mkdir()
+        target.mkdir()
+        db.init_project(str(here))
+
+        proc = self._init(here, "--tracker-root", str(target), "init")
+
+        assert proc.returncode == 0, proc.stderr
+        assert (target / ".codebugs" / db.DB_FILE).is_file()
+        assert "Initialized" in proc.stdout and "Already initialized" not in proc.stdout
+        assert str(here) not in proc.stdout
+
+    def test_flag_init_then_a_read_verb_agree(self, tmp_path):
+        """The end-to-end property: the next command must find what `init` made.
+
+        The mitigating circumstance on the card was that `where` failed loudly on
+        the following step. That divergence is what this closes.
+        """
+        here = tmp_path / "here"
+        target = tmp_path / "target"
+        here.mkdir()
+        target.mkdir()
+
+        assert self._init(here, "--tracker-root", str(target), "init").returncode == 0
+        proc = self._init(here, "--tracker-root", str(target), "where")
+
+        assert proc.returncode == 0, proc.stderr
+        assert str(target / ".codebugs" / db.DB_FILE) in proc.stdout
+
+    def test_an_explicit_directory_outranks_the_flag_and_is_announced(self, tmp_path):
+        """Argument > flag, the same precedence `_resolve_db` applies to reads.
+
+        This is the one case where the flag is deliberately NOT the create
+        target, so it is also the one that must keep warning: reads will go to
+        the flag's tracker, not the one just made.
+        """
+        here = tmp_path / "here"
+        flagged = _tracker(tmp_path, "flagged")
+        positional = tmp_path / "positional"
+        here.mkdir()
+        positional.mkdir()
+
+        proc = self._init(here, "--tracker-root", str(flagged), "init", str(positional))
+
+        assert proc.returncode == 0, proc.stderr
+        assert (positional / ".codebugs" / db.DB_FILE).is_file()
+        assert "warning" in proc.stderr.lower()
+        assert str(flagged) in proc.stderr
+
+    def test_flag_naming_a_missing_directory_fails_loudly(self, tmp_path):
+        """A typo must not fall back to creating a tracker in cwd."""
+        here = tmp_path / "here"
+        here.mkdir()
+        missing = tmp_path / "nope"
+
+        proc = self._init(here, "--tracker-root", str(missing), "init")
+
+        assert proc.returncode == 1
+        assert str(missing) in proc.stderr
+        assert not (here / ".codebugs").exists()
+        assert not missing.exists()
+
+    def test_env_root_still_does_not_redirect_creation(self, tmp_path):
+        """The split is real: the ambient channel keeps the old behaviour.
+
+        Guards against "fixing" CB-48 by honouring any declaration, which would
+        let a stale export inherited by an unrelated subprocess conjure a tracker
+        somewhere the user never was.
+        """
+        here = tmp_path / "here"
+        target = tmp_path / "target"
+        here.mkdir()
+        target.mkdir()
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", "init"],
+            cwd=str(here),
+            capture_output=True,
+            text=True,
+            env={**os.environ, db.ENV_ROOT: str(target)},
+        )
+
+        assert proc.returncode == 0, proc.stderr
+        assert (here / ".codebugs" / db.DB_FILE).is_file()
+        assert not (target / ".codebugs").exists()
+        assert "warning" in proc.stderr.lower()
+
+    def test_flag_beats_env_for_the_create_target(self, tmp_path):
+        """Precedence is one rule, not a per-verb rule: flag > env on writes too."""
+        here = tmp_path / "here"
+        flagged = tmp_path / "flagged"
+        env_root = tmp_path / "env_root"
+        for d in (here, flagged, env_root):
+            d.mkdir()
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", "--tracker-root", str(flagged), "init"],
+            cwd=str(here),
+            capture_output=True,
+            text=True,
+            env={**os.environ, db.ENV_ROOT: str(env_root)},
+        )
+
+        assert proc.returncode == 0, proc.stderr
+        assert (flagged / ".codebugs" / db.DB_FILE).is_file()
+        assert not (env_root / ".codebugs").exists()
+        assert not (here / ".codebugs").exists()
