@@ -23,6 +23,8 @@ Prose cannot enforce prose. That is CB-50, and the harness below is its fix.
 |---|---|---|
 | Branch carries `fix/`\|`feature/`\|`refactor/`\|`docs/` | `_guard_branch_type` (7) + pre-commit hook (1) | exit 7 / 1 |
 | Nothing but `.claude/plans/*.md` is committed on main | pre-commit hook | exit 1 |
+| A merge onto main comes from a typed branch (or `main`) | pre-merge-commit hook (clean merge) + pre-commit hook (conflicted merge) | exit 1 |
+| Nothing reaches `main` except by merge | `.github/workflows/main-invariants.yml` — **server-side** | CI failure |
 | Integration never fast-forwards | `--no-ff` + `git config merge.ff false` | — |
 | One integration at a time | `flock` on `.worktrees/.integrate.lock` | exit 1 |
 | The tested state is the landed state | in-lock SHA re-check | exit 13 |
@@ -39,21 +41,51 @@ overstated it: it does nothing when the branch is already an ancestor of main (g
 to date" and main does not move, which is harmless), and it is *configuration*, so
 `git config merge.ff true` turns it off without anyone typing `--ff`.
 
-**What this does NOT do, stated plainly because the honest scope is the point.** All of it is
-CLIENT-SIDE and PER-CLONE: hooks and git config cannot be committed, there is no CI and no
-server-side protection on `origin`. A fresh clone has none of it until `tools/install-hooks.sh` is
-run — which is why `_guard_enforcement_armed` refuses to integrate from an unarmed clone, the one
-moment being unarmed can cost anything. Even armed, `git rebase`, `git cherry-pick`, `git revert`,
-`git am`, `git reset --hard`, `git push`, and `core.hooksPath` all move or publish `main` without
-passing the pre-commit hook; a typed branch committed in the *primary* checkout satisfies the hook
-while ignoring the worktree rule entirely; and **`git merge <untyped-branch>` onto main is caught by
-nothing** — `merge.ff=false` gives it a merge commit, but no mechanism reads the branch name,
-because only `pre-commit` is installed and git runs `pre-merge-commit` for merges. A
-`pre-merge-commit` hook would close that in ~10 lines (`worktree-finish.sh` would then have to stop
-passing `--no-verify` to its own merge); deferred deliberately rather than shipped as a
-name-matching heuristic. The remedy for a shared repo is a protected remote
-branch plus required CI; this harness is the local half, and calling it more than that would be the
-same false assurance the prose version gave.
+**The merge gate closed, and CB-57's own prescription turned out to be wrong (verified by running
+it).** The card said to validate "the branch behind `MERGE_HEAD`" in a `pre-merge-commit` hook. On
+git 2.53 **a clean merge never writes `MERGE_HEAD`** — the merge is resolved in memory, the git dir
+holds `AUTO_MERGE`, `ORIG_HEAD` and `COMMIT_EDITMSG`, and `git rev-parse MERGE_HEAD` fails outright.
+A hook keyed on that file exits 0 on every clean merge: a gate that cannot fire, which is worse than
+no gate, because the table above would then claim a rule nothing enforces. What git *does* provide
+is **`GITHEAD_<sha>=<the ref the caller named>`**, set per merge head — git's own record, and what
+the merge strategies themselves read. The ref is then resolved with `git rev-parse
+--symbolic-full-name`, so the hook judges what git says the name *is* rather than the string that
+was typed, and a head that resolves to nothing (a bare SHA, a tag) is **refused** — "I could not
+tell" must never read as "allowed". `tests/…::test_premise_merge_head_is_absent_on_a_clean_merge`
+and `…::test_premise_githead_env_names_the_merged_ref` pin both premises, so a git upgrade that
+changes either turns the suite red instead of silently disarming the hook.
+
+**Two hooks, disjoint halves, neither redundant.** A CONFLICTED merge never reaches
+`pre-merge-commit`: git stops, and the operator finishes with `git commit`, which fires
+`pre-commit`. That path is enforced *inside* `pre-commit-hook.sh`'s merge-in-progress exemption —
+where `MERGE_HEAD` genuinely does exist — because an unconditional exemption would have meant the
+branch-name rule held for every merge onto main **except** the one that had a conflict, i.e.
+enforcement lapsing exactly when the operator is already distracted. `worktree-finish.sh` no longer
+passes `--no-verify` to its own merge: leaving it would have made the harness the single caller
+exempt from the gate.
+
+**What this does NOT do, stated plainly because the honest scope is the point.** The local half is
+CLIENT-SIDE and PER-CLONE: hooks and git config cannot be committed. A fresh clone has none of it
+until `tools/install-hooks.sh` is run — which is why `_guard_enforcement_armed` refuses to integrate
+from an unarmed clone, the one moment being unarmed can cost anything. **It now checks both hooks**,
+and a clone armed before CB-57 will be refused until `install-hooks.sh` is re-run. Even armed,
+`git rebase`, `git cherry-pick`, `git revert`, `git am`, `git reset --hard`, `git push` and
+`core.hooksPath` all move or publish `main` without passing any hook, and a typed branch committed
+in the *primary* checkout satisfies `pre-commit` while ignoring the worktree rule entirely. **Those
+are what the CI job is for** — every one of them puts a non-merge commit on main's first-parent
+line, which is exactly the assertion `.github/workflows/main-invariants.yml` makes.
+
+**The CI job's own limits, because a gate described better than it behaves is the failure this
+section exists to record.** (1) It is scoped to a **pinned baseline SHA**, since main's history
+predates the rule; moving that baseline forward is how a violation would be laundered, so it is a
+deliberate, reviewable edit. (2) It **cannot see a merge of an untyped branch** — that leaves a merge
+commit, which `--no-merges` excludes by construction, and reading the branch name out of the merge
+*message* would be the name-matching heuristic CB-57 refused. That case stays with the local hooks,
+and is therefore bypassable. (3) **A workflow cannot refuse a push by itself.** It reports after the
+fact. The refusal comes from **branch protection on `origin/main` with this check marked required**,
+which is repository configuration, not committed state — until that is switched on, the workflow is
+an alarm, not a gate. Enabling it is the one step in this section that cannot be done from the
+repository, and CB-59 is not fully closed until it is.
 
 - **Create:** `tools/worktree-setup.sh <type>/<slug> [base]`, which validates the name, refuses a
   card already carried by another branch, creates `.worktrees/<type>-<slug>`, primes the worktree's
@@ -112,13 +144,33 @@ composition*) turned on its own harness. Do not read the per-guard tests as cove
 
 Executing the whole script in a test is impractical (it merges onto main and runs the full suite),
 so the wiring tests are structural: they read the script and assert each guard is invoked with
-`|| exit $?`, in the right phase. Said plainly rather than left to look behavioural.
+`|| exit $?`, in the right phase. Said plainly rather than left to look behavioural. Three more
+structural tests landed with CB-57, all of the same kind: the integration merge must **not** carry
+`--no-verify`, the installer must arm the merge hook and point it at main's checkout, and the CI
+workflow must carry a baseline SHA that is a real commit in this repository. Each pins a property
+whose failure mode is silent — a gate present in the tree and absent in effect.
+
+**The branch predicate now exists in THREE copies** — `_guards.sh`, `pre-commit-hook.sh`,
+`pre-merge-commit-hook.sh` — because neither hook may source the library (each runs from
+`.git/hooks/` as a symlink and must work when `tools/` is missing from the checked-out tree). Two
+tests hold them together: one asserts the identical `_BRANCH_TYPES` declaration, the other asserts
+all three use the full-shape regex rather than a prefix test. Same types is *not* the same
+predicate: a prefix test accepts `fix/a/b`, which `_guard_branch_type` refuses, so a divergence
+would let a branch clear the finish guard and then be refused by the merge hook — after the whole
+suite had already run.
 
 **The bootstrap is a real constraint, not an oversight.** `worktree-finish.sh` cannot land the
 commit that first creates `tools/` — `_guard_enforcement_armed` refuses, because main has no
 `tools/pre-commit-hook.sh` for the hook to point at. CB-50 was therefore merged by hand once, with
 `git merge --no-ff`, after the harness had run its whole pipeline on the branch and refused at the
-lock. Every landing after that goes through the harness. If `tools/` is ever rewritten the same way,
+lock. **CB-57 hit the same wall in miniature and was designed around it rather than merged by
+hand**: `_guard_enforcement_armed` checks the pre-merge-commit hook **only once
+`tools/pre-merge-commit-hook.sh` exists in main's tree**, because the guard runs *before* the merge
+that first puts it there — an unconditional check would have made the commit introducing the hook
+unlandable by the harness it extends. Once it is on main the check is unconditional, so **run
+`tools/install-hooks.sh` right after that merge** or the next finish refuses (correctly: a clone
+armed before CB-57 really is missing half its enforcement).
+Every landing after that goes through the harness. If `tools/` is ever rewritten the same way,
 expect the same one-time manual merge.
 
 ## Architecture

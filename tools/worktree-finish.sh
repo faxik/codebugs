@@ -304,10 +304,20 @@ fi
 # merge would silently ff again. --no-ff makes the bad state unrepresentable
 # here; `git config merge.ff false` (set by tools/install-hooks.sh) covers the
 # off-harness case.
-if git -C "${REPO_ROOT}" merge "${BRANCH}" --no-ff --no-verify -m "${MERGE_MSG}"; then
+#
+# --no-verify was REMOVED here (CB-57). It was harmless while no merge hook
+# existed, and became a hole the moment one did: the harness would have been the
+# single caller exempt from the branch-name check, i.e. the gate would apply to
+# every merge except the one this repo actually uses. _guard_branch_type has
+# already refused an untyped branch by this point, so the hook is a second,
+# independent reader of the same rule rather than a new obstacle — and if the
+# two ever disagree, that disagreement is a defect worth failing on, not
+# suppressing.
+if git -C "${REPO_ROOT}" merge "${BRANCH}" --no-ff -m "${MERGE_MSG}"; then
     echo "  ✓ Merged: ${MERGE_MSG}"
 else
-    echo "  ✗ Merge conflicted. Resolve IN THE WORKTREE, never on main:"
+    echo "  ✗ Merge failed (conflict, or the pre-merge-commit hook refused it)."
+    echo "    Resolve IN THE WORKTREE, never on main:"
     echo "      cd ${REPO_ROOT} && git merge --abort"
     echo "      cd ${WORKTREE_PATH} && git merge ${CURRENT_MAIN}"
     echo "      # resolve, git add <files> && git commit"

@@ -357,6 +357,63 @@ _guard_stale_base() {
 # Checked at integration time rather than in a test, because this is the only
 # moment where being unarmed can actually cost something, and because failing a
 # contributor's whole suite over local config would be noise.
+
+# One hook's worth of the armed check, echoed as problem lines (empty = fine).
+#
+# Extracted when the pre-merge-commit hook landed (CB-57), NOT copied: this repo
+# has already been bitten by a check that was duplicated rather than shared
+# (`entities._SAFE_IDENT` vs `types._IDENT`), and two copies of a hook-identity
+# test are two opinions about what "armed" means, one of which will rot.
+#
+# args: <hook_path> <expected_src> <label>
+_hook_problems() {
+    local hook="$1" expected="$2" label="$3"
+    if [[ ! -e "${hook}" ]]; then
+        # -e follows symlinks, so a DANGLING symlink lands here, not below.
+        if [[ -L "${hook}" ]]; then
+            printf '  %s hook is a DANGLING symlink: %s\n' "${label}" "$(readlink "${hook}")"
+        else
+            printf '  %s hook is not installed (%s)\n' "${label}" "${hook}"
+        fi
+        return 0
+    fi
+    if [[ ! -x "${hook}" ]]; then
+        printf '  %s hook is not executable (%s)\n' "${label}" "${hook}"
+        return 0
+    fi
+    # IDENTITY, not merely existence — an executable file at that path is not
+    # evidence that it is THIS hook.
+    #
+    # Two ways existence lies. (1) A symlink into a WORKTREE satisfies -e and -x
+    # today and dangles the moment that worktree is removed — which is the last
+    # thing worktree-finish.sh does, to itself, so a finish could pass this
+    # guard, land, and leave the repo silently unarmed. (2) A hand-written
+    # `#!/bin/sh\nexit 0` at that path passes every existence check while
+    # enforcing nothing. Both were found by cross-model review; the first was
+    # live in this repo at the time.
+    if [[ ! -e "${expected}" ]]; then
+        printf '  %s is missing — cannot verify the %s hook identity\n' "${expected}" "${label}"
+        return 0
+    fi
+    if [[ -L "${hook}" ]]; then
+        # A SYMLINK is judged by its TARGET, never by content. Content equality
+        # is not the property that matters here: a link to an identical file
+        # inside a worktree is byte-for-byte correct today and gone tomorrow.
+        # Only a link into main's own tools/ survives `git worktree remove`.
+        local target want
+        target="$(readlink -f "${hook}" 2>/dev/null || echo "${hook}")"
+        want="$(readlink -f "${expected}" 2>/dev/null || echo "${expected}")"
+        if [[ "${target}" != "${want}" ]]; then
+            printf '  %s hook is not main'"'"'s copy: %s\n' "${label}" "${target}"
+            printf '    expected %s (a link into a worktree dies with it)\n' "${expected}"
+        fi
+    elif ! cmp -s "${hook}" "${expected}"; then
+        # A REGULAR FILE cannot dangle, so content is the right test — and it is
+        # the test that rejects a hand-written `exit 0` impostor.
+        printf '  %s hook differs from %s\n' "${label}" "${expected}"
+    fi
+}
+
 _guard_enforcement_armed() {
     local repo_root="$1"
     local problems=""
@@ -365,49 +422,30 @@ _guard_enforcement_armed() {
     ff=$(git -C "${repo_root}" config --get merge.ff || true)
     [[ "${ff}" == "false" ]] || problems="${problems}  merge.ff is '${ff:-unset}', expected 'false'"$'\n'
 
-    local hook expected
-    hook="$(git -C "${repo_root}" rev-parse --path-format=absolute --git-common-dir)/hooks/pre-commit"
-    expected="${repo_root}/tools/pre-commit-hook.sh"
-    if [[ ! -e "${hook}" ]]; then
-        # -e follows symlinks, so a DANGLING symlink lands here, not below.
-        if [[ -L "${hook}" ]]; then
-            problems="${problems}  pre-commit hook is a DANGLING symlink: $(readlink "${hook}")"$'\n'
-        else
-            problems="${problems}  pre-commit hook is not installed (${hook})"$'\n'
-        fi
-    elif [[ ! -x "${hook}" ]]; then
-        problems="${problems}  pre-commit hook is not executable (${hook})"$'\n'
-    else
-        # IDENTITY, not merely existence — an executable file at that path is
-        # not evidence that it is THIS hook.
-        #
-        # Two ways existence lies. (1) A symlink into a WORKTREE satisfies -e
-        # and -x today and dangles the moment that worktree is removed — which
-        # is the last thing worktree-finish.sh does, to itself, so a finish
-        # could pass this guard, land, and leave the repo silently unarmed.
-        # (2) A hand-written `#!/bin/sh\nexit 0` at that path passes every
-        # existence check while enforcing nothing. Both were found by
-        # cross-model review; the first was live in this repo at the time.
-        if [[ ! -e "${expected}" ]]; then
-            problems="${problems}  ${expected} is missing — cannot verify the hook's identity"$'\n'
-        elif [[ -L "${hook}" ]]; then
-            # A SYMLINK is judged by its TARGET, never by content. Content
-            # equality is not the property that matters here: a link to an
-            # identical file inside a worktree is byte-for-byte correct today
-            # and gone tomorrow. Only a link into main's own tools/ survives
-            # `git worktree remove`.
-            local target want
-            target="$(readlink -f "${hook}" 2>/dev/null || echo "${hook}")"
-            want="$(readlink -f "${expected}" 2>/dev/null || echo "${expected}")"
-            if [[ "${target}" != "${want}" ]]; then
-                problems="${problems}  pre-commit hook is not main's copy: ${target}"$'\n'
-                problems="${problems}    expected ${expected} (a link into a worktree dies with it)"$'\n'
-            fi
-        elif ! cmp -s "${hook}" "${expected}"; then
-            # A REGULAR FILE cannot dangle, so content is the right test —
-            # and it is the test that rejects a hand-written `exit 0` impostor.
-            problems="${problems}  pre-commit hook differs from ${expected}"$'\n'
-        fi
+    local hook_dir
+    hook_dir="$(git -C "${repo_root}" rev-parse --path-format=absolute --git-common-dir)/hooks"
+
+    # Append with an EXPLICIT separator: `$( )` strips trailing newlines, so
+    # concatenating two non-empty results directly would run the last line of
+    # one into the first line of the next and report two faults as one.
+    local _p
+    _p="$(_hook_problems \
+        "${hook_dir}/pre-commit" "${repo_root}/tools/pre-commit-hook.sh" "pre-commit")"
+    [[ -n "${_p}" ]] && problems="${problems}${_p}"$'\n'
+
+    # pre-merge-commit is checked ONLY ONCE ITS SOURCE EXISTS ON MAIN, and that
+    # conditional is the bootstrap, not laziness (CB-57, same shape as CB-50).
+    # This guard runs BEFORE the merge that first brings
+    # tools/pre-merge-commit-hook.sh onto main, so demanding the hook
+    # unconditionally would make the commit that introduces it unlandable by the
+    # very harness it extends. Once it is on main the check is unconditional,
+    # and the next finish refuses until install-hooks.sh has been re-run — which
+    # is correct: a clone armed before CB-57 is genuinely missing enforcement.
+    local merge_hook_src="${repo_root}/tools/pre-merge-commit-hook.sh"
+    if [[ -e "${merge_hook_src}" ]]; then
+        _p="$(_hook_problems \
+            "${hook_dir}/pre-merge-commit" "${merge_hook_src}" "pre-merge-commit")"
+        [[ -n "${_p}" ]] && problems="${problems}${_p}"$'\n'
     fi
 
     [[ -z "${problems}" ]] && return 0
