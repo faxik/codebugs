@@ -19,19 +19,43 @@ from codebugs import db, findings
 
 
 class CountingConn:
-    """sqlite3.Connection proxy that counts commits. (sqlite3.Connection.commit
-    is C-implemented and read-only, so we can't monkeypatch it directly.)"""
+    """sqlite3.Connection proxy that counts commits THROUGH BOTH SEAMS.
+
+    (sqlite3.Connection.commit is C-implemented and read-only, so we can't
+    monkeypatch it directly.)
+
+    Both seams, per CLAUDE.md testing rule (c): plain code commits via
+    ``conn.commit()``; ``db.txn`` commits via ``conn.execute("COMMIT")``. The
+    original counted only the first, so moving add_finding into ``db.txn`` made
+    its count silently drop to 0 — the single-commit guarantee pinned by a test
+    that could not fail. ``__setattr__`` must forward too: ``db.txn`` assigns
+    ``conn.isolation_level``, and without forwarding that lands on the proxy's
+    ``__dict__`` while the real connection keeps its old mode.
+    """
+
+    _OWN = ("_conn", "commit_count")
 
     def __init__(self, conn):
-        self._conn = conn
-        self.commit_count = 0
+        object.__setattr__(self, "_conn", conn)
+        object.__setattr__(self, "commit_count", 0)
 
     def commit(self):
-        self.commit_count += 1
+        object.__setattr__(self, "commit_count", self.commit_count + 1)
         return self._conn.commit()
+
+    def execute(self, sql, *args):
+        if isinstance(sql, str) and sql.strip().rstrip(";").upper() == "COMMIT":
+            object.__setattr__(self, "commit_count", self.commit_count + 1)
+        return self._conn.execute(sql, *args)
 
     def __getattr__(self, name):
         return getattr(self._conn, name)
+
+    def __setattr__(self, name, value):
+        if name in self._OWN:
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._conn, name, value)
 
 
 @pytest.fixture
@@ -83,7 +107,10 @@ class TestPostAddHookAtomicity:
         assert proxy.commit_count == 1
 
     def test_batch_add_findings_fires_hook_per_row_then_one_commit(self, conn):
-        """Hard constraint: N inserts → bulk SELECT → N hook fires → ONE commit."""
+        """Hard constraint: one logical transaction — N inserted members fire N
+        hooks and the whole batch commits exactly ONCE. (Members here have three
+        distinct descriptions, so all three genuinely insert; a deduplicated
+        member fires no hook by design.)"""
         hook_calls: list[str] = []
 
         def hook(c, finding):
