@@ -1,13 +1,17 @@
 # Hand-off — CB-45 similarity extension + pre-add seam, IN FLIGHT (2026-08-16)
 
 Written for a reader with no session context. State as of writing: **implementation complete and
-green on the branch; the pre-merge Codex diff review is still running; nothing is merged.**
+green on the branch; Codex diff review round 1 returned 6 findings (3 Major), ALL fixed in
+`02faaaf`; main advanced under us (CB-48) and was merged back in; round 2+ of the review is
+converging; nothing is merged to main.**
 
 ## Where the work lives
 
 - **Worktree**: `/home/faxik/w/codebugs/.claude/worktrees/cb-45-similarity-seam`, branch
-  `worktree-cb-45-similarity-seam`, based on main `1186314`. Commits `7c0a65f..` (seven feature/
-  docs commits, then this handoff).
+  `worktree-cb-45-similarity-seam`, originally based on main `1186314`; main's CB-48 merge
+  (`ef428f4`) has since been merged INTO the branch, so the diff no longer reverts CB-48's
+  `--tracker-root init` routing (round-2 review finding). Commits `7c0a65f..` (seven feature/
+  docs commits, this handoff, then the round-1 fix commit `02faaaf` and the main merge).
 - **Plan + full adversarial-review appendix**: `.claude/plans/CB-45-similarity-seam.md` — exists
   BOTH in the main checkout (uncommitted) and committed on the branch (identical). The plan is
   the spec; its appendix records the 6.5/10 verdict, 14 mandatory fixes (all encoded), and the
@@ -19,7 +23,18 @@ green on the branch; the pre-merge Codex diff review is still running; nothing i
   — scratchpad is session-scoped; if it is gone, the same facts are all in this handoff and the
   plan appendix.
 
-## What is DONE (verified: 1076 tests pass, `ruff check` clean at pinned 0.15.7)
+## What is DONE (verified: 1093 tests pass post-main-merge, `ruff check` clean at pinned 0.15.7)
+
+0. **Codex diff-review round 1 fixes (`02faaaf`)**: runner-side `_ensure_modules_loaded()` (the
+   `meta=None` add path ran with an empty resolver registry on bare library connections, with a
+   fresh-subprocess regression test); nonce-named savepoints + post-RELEASE transaction check
+   (savepoint-name forgery let a resolver turn the runner's RELEASE into a commit); per-resolver
+   deep-copied observations and snapshotted outcomes (a failing resolver could poison the
+   `resolver_errors` stamp and abort the add); `similarity_candidates(categories=)` exact-value
+   tuple (`category=""` pooled the whole table); type-pinned `"all"` sentinel +
+   `is_vocabulary_filter_active` in `group_report` (mock.ANY silently widened, CB-25's trap);
+   corpus verifier enforces exact tolerance with nonzero exit (reference re-pinned same day at
+   3168 rows, all asserted counts identical).
 
 1. **Pre-add resolver seam** in `db.py` (`register_pre_add_resolver`, `run_pre_add_resolvers`,
    `resolver_reserved_meta_keys`): annotate-only (redirect inexpressible by type), never-commit
