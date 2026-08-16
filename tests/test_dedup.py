@@ -313,12 +313,15 @@ class TestBatchIdentity:
     def test_results_are_input_ordered(self, conn):
         # Ids CB-1, CB-10, CB-2 come back in B-tree order from a bulk SELECT..IN;
         # results must be built from the member loop instead (review SERIOUS-1).
+        # Input order deliberately differs from lexical/B-tree order ("CB-1" <
+        # "CB-10" < "CB-2"): with ids in that order the old bulk-SELECT bug
+        # passes by coincidence — the first draft of this test did exactly that.
         members = [
             {"severity": "low", "category": "c", "file": "f.py", "description": f"d{i}", "id": fid}
-            for i, fid in enumerate(["CB-1", "CB-10", "CB-2"])
+            for i, fid in enumerate(["CB-10", "CB-2", "CB-1"])
         ]
         out = findings.batch_add_findings(conn, members)
-        assert [r["id"] for r in out] == ["CB-1", "CB-10", "CB-2"]
+        assert [r["id"] for r in out] == ["CB-10", "CB-2", "CB-1"]
 
     def test_in_batch_self_dedup(self, conn):
         out = findings.batch_add_findings(
