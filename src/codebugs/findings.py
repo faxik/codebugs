@@ -194,6 +194,7 @@ def _next_id(conn: sqlite3.Connection) -> str:
 # silently falls through to "no match" and the duplicate explosion resumes for exactly
 # that status (the review's judge found `stale` doing this in an earlier draft).
 _LIVE_STATUSES = ("open", "in_progress", "stale")  # same fingerprint -> bump this row
+LIVE_STATUSES = _LIVE_STATUSES  # public: the statuses the partial unique index covers
 _REOPEN_STATUSES = ("fixed",)  # same fingerprint -> regression: reopen this row
 _RECURRENCE_STATUSES = ("wont_fix", "not_a_bug")  # decision stays closed -> new linked row
 
@@ -222,13 +223,22 @@ def _is_volatile_meta_key(key: str) -> bool:
     return any(token in lowered for token in _VOLATILE_KEY_TOKENS)
 
 
-def _validate_meta_keys(meta: dict[str, Any] | None) -> None:
-    """Refuse caller meta that collides with the identity machinery's own keys."""
+def _validate_meta_keys(meta: dict[str, Any] | None, *, updating: bool = False) -> None:
+    """Refuse caller meta colliding with identity-machinery or resolver keys.
+
+    On UPDATE, `similar_to` is deliberately writable: the add-side reservation
+    stops spoofing, but a permanently unrepairable annotation is the CB-26
+    shape — a re-scrub must be able to rewrite or clear it. `resolver_errors`
+    stays refused on both paths.
+    """
     if not meta:
         return
-    reserved = _RESERVED_META_KEYS & set(meta)
-    if reserved:
-        raise ValueError(f"meta keys {sorted(reserved)} are reserved for the identity machinery")
+    reserved = _RESERVED_META_KEYS | db.resolver_reserved_meta_keys()
+    if updating:
+        reserved -= {"similar_to"}
+    hit = reserved & set(meta)
+    if hit:
+        raise ValueError(f"meta keys {sorted(hit)} are reserved for the identity machinery")
 # Hex runs need >= 1 digit: `\b[0-9a-fA-F]{7,}\b` alone eats all-letter words
 # ("defaced", "effaced") and merges two genuinely different descriptions.
 _FP_HEX_RUN = re.compile(r"\b(?=[0-9a-fA-F]*\d)[0-9a-fA-F]{7,}\b")
@@ -296,6 +306,16 @@ def _normalize_for_fingerprint(description: str, meta: dict[str, Any] | None) ->
     text = text.lower()
     text = _FP_HEX_RUN.sub(" ", text)
     return _FP_WS.sub(" ", text).strip()
+
+
+def normalized_identity_text(description: str, meta: dict[str, Any] | None = None) -> str:
+    """Public wrapper over the fallback-fingerprint normalization (CB-43).
+
+    The similarity extension scores over THIS text so grouping and identity
+    agree on what is invariant; the algorithm itself stays private and
+    versioned (`auto:v1`).
+    """
+    return _normalize_for_fingerprint(description, meta)
 
 
 def _derive_fingerprint(
@@ -434,6 +454,7 @@ def _add_one(
     reported_at_commit: str | None,
     reported_at_ref: str | None,
     fingerprint: str | None,
+    annotate: bool = True,
 ) -> tuple[dict[str, Any] | None, sqlite3.Row | None, bool, str]:
     """One observation through the identity function, inside an OPEN transaction.
 
@@ -497,6 +518,31 @@ def _add_one(
     meta_final = dict(meta or {})
     if recurrence_of is not None:
         meta_final["recurrence_of"] = recurrence_of
+    if finding_id is None and annotate:
+        # Pre-add resolvers (CB-45): annotate-only. THE predicate is
+        # `finding_id is None` — an explicit id asserts identity and bypasses
+        # the observation machinery (dedup, hooks, resolvers alike). NOT a
+        # dedup_action test: explicit-id inserts also carry "created".
+        meta_final.update(
+            db.run_pre_add_resolvers(
+                conn,
+                {
+                    "finding_id": fid,
+                    "severity": severity,
+                    "category": category,
+                    "file": file,
+                    "description": description,
+                    "source": source,
+                    "tags": list(tags or []),
+                    "meta": dict(meta or {}),
+                    "fingerprint": fingerprint,
+                    "dedup_action": dedup_action,
+                    "recurrence_of": recurrence_of,
+                    "at": now,
+                },
+                forbidden=_RESERVED_META_KEYS,
+            )
+        )
     conn.execute(
         """INSERT INTO findings (id, severity, category, file, status, description,
            source, tags, meta, reported_at_commit, reported_at_ref, created_at, updated_at,
@@ -555,8 +601,12 @@ def add_finding(
     reported_at_commit: str | None = None,
     reported_at_ref: str | None = None,
     fingerprint: str | None = None,
+    annotate: bool = True,
 ) -> dict[str, Any]:
     """Record an observation. Returns the created OR matched finding as a dict.
+
+    ``annotate=False`` skips the pre-add resolvers (CB-45) for this insert;
+    used by CSV import — an import is not an observation.
 
     Identity (CB-43): an observation whose ``fingerprint`` matches a live finding
     bumps that finding's ``occurrence_count`` and returns it (``was_new: False,
@@ -597,6 +647,7 @@ def add_finding(
             reported_at_commit=reported_at_commit,
             reported_at_ref=reported_at_ref,
             fingerprint=fingerprint,
+            annotate=annotate,
         )
     return _finalize_add(inserted, raw_row, was_new, dedup_action)
 
@@ -731,7 +782,7 @@ def update_finding(
         severity = resolve_severity(severity)
     # Same reservation as on the add path: a meta_update planting "occurrences"
     # or "recurrence_of" would be read back as the identity machinery's own state.
-    _validate_meta_keys(meta_update)
+    _validate_meta_keys(meta_update, updating=True)
 
     with db.txn(conn):
         row = conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
@@ -844,6 +895,65 @@ def update_finding(
     # deliberate: a compound caller such as milestones.triage_dismiss should not keep
     # half its work because the row it touched had unreadable meta.
     return db.row_to_dict(final_row)
+
+
+def similarity_candidates(
+    conn: sqlite3.Connection,
+    *,
+    category: str | None = None,
+    categories: tuple[str, ...] | None = None,
+    status: str | None = None,
+    statuses: tuple[str, ...] | None = None,
+    exclude_id: str | None = None,
+    limit: int | None = None,
+    order: str = "oldest",
+) -> list[dict[str, Any]]:
+    """Candidate records for an out-of-domain grouping pass (CB-45).
+
+    The sanctioned read surface for similarity.py — no other module may SELECT
+    from findings (module-ownership rule). Returns raw rows: ``meta_json`` is
+    the STORED STRING, never parsed here — parsing would raise on legacy rows
+    and make the caller's tolerate-and-degrade policy unimplementable (CB-24
+    consequence 4). Ordered ``created_at, id`` (``order="newest"`` reverses) so
+    any grouping over the result is deterministic despite whole-second
+    timestamps. ``status`` is a vocabulary filter (resolved, CB-19/CB-25);
+    ``statuses`` is an explicit tuple for callers that know their population.
+    ``categories`` is the same explicit-tuple twin for category: findings
+    permit ``category=""``, which the ``category=`` FILTER convention must read
+    as "no filter" — a caller whose category is a VALUE (the resolver matching
+    an observation's own category, "" included) passes ``categories=("",)`` and
+    gets an exact match instead of the whole table (Codex diff review).
+    """
+    conditions: list[str] = []
+    params: list[Any] = []
+    if is_text_filter_active(category):
+        conditions.append("category = ?")
+        params.append(category)
+    if categories:
+        conditions.append(f"category IN ({','.join('?' for _ in categories)})")
+        params.extend(categories)
+    if is_vocabulary_filter_active(status):
+        conditions.append("status = ?")
+        params.append(resolve_finding_status(status))
+    if statuses:
+        conditions.append(f"status IN ({','.join('?' for _ in statuses)})")
+        params.extend(statuses)
+    if exclude_id is not None:
+        conditions.append("id != ?")
+        params.append(exclude_id)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    direction = "DESC" if order == "newest" else "ASC"
+    limit_sql = ""
+    if limit is not None:
+        limit_sql = "LIMIT ?"
+        params.append(limit)
+    rows = conn.execute(
+        f"SELECT id, category, file, status, severity, occurrence_count, created_at, "
+        f"description, meta AS meta_json FROM findings {where} "
+        f"ORDER BY created_at {direction}, id {direction} {limit_sql}",  # noqa: S608
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_finding(conn: sqlite3.Connection, finding_id: str) -> dict[str, Any]:
@@ -1633,9 +1743,14 @@ def register_cli(sub, commands) -> None:
                     except json.JSONDecodeError:
                         stored = {}
                     if isinstance(stored, dict):
-                        meta.update(
-                            {k: v for k, v in stored.items() if k not in _RESERVED_META_KEYS}
-                        )
+                        # Strip the DYNAMIC union, not just the static set: an
+                        # exported similar_to/resolver_errors would otherwise be
+                        # refused by _validate_meta_keys and kill the re-import
+                        # mid-way with earlier rows already committed (CB-45
+                        # review — the enumeration was the letter, "the
+                        # machinery's output is not input" is the intent).
+                        dropped = _RESERVED_META_KEYS | db.resolver_reserved_meta_keys()
+                        meta.update({k: v for k, v in stored.items() if k not in dropped})
                 lines = (row.get("lines") or row.get("Lines") or "").strip()
                 if lines:
                     meta["lines"] = lines
@@ -1656,6 +1771,7 @@ def register_cli(sub, commands) -> None:
                     source=source,
                     meta=meta or None,
                     fingerprint=fingerprint,
+                    annotate=False,  # an import is not an observation (CB-45)
                 )
                 imported += 1
 

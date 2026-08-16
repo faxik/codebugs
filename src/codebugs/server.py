@@ -128,6 +128,7 @@ SERVER_NAMES = {
     "blockers": "codeblockers",
     "milestones": "codemilestones",
     "claims": "codeclaims",
+    "similarity": "codesimilarity",
     "all": "codebugs",
 }
 
