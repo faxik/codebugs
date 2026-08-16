@@ -555,3 +555,133 @@ class TestResponseShape:
         raw = conn.execute("SELECT meta FROM findings").fetchone()
         assert "was_new" not in raw["meta"]
         assert "dedup_action" not in json.loads(raw["meta"])
+
+
+class TestDiffReviewRegressions:
+    """Regression pins for the five findings of the cross-model diff review."""
+
+    def test_reopen_releases_ownership_and_capacity(self, conn):
+        """An item closed via set_item_status (NOT the reconciler) still carries
+        assigned_agent/pulled_at/done_commit. Reopening without releasing leaves
+        the old agent charged for an item a new agent can pull — two agents
+        charged for one item."""
+        from codebugs import milestones
+
+        first = _add(conn)
+        item = milestones.pull_next(conn, agent_id="agent-A", capacity={"triage": 1})
+        assert item is not None and item["item_ref"] == first["id"]
+        milestones.set_item_status(
+            conn, item_ref=first["id"], status="done", commit="abc123def", actor="agent-A"
+        )
+        findings.update_finding(conn, first["id"], status="fixed")
+
+        again = _add(conn)
+        assert again["dedup_action"] == "reopened"
+        row = conn.execute(
+            "SELECT * FROM milestone_items WHERE item_ref = ? AND item_kind = 'bug'",
+            (first["id"],),
+        ).fetchone()
+        assert row["status"] == "open"
+        assert row["assigned_agent"] is None, "old owner must be released on reopen"
+        assert row["pulled_at"] is None
+        assert row["done_commit"] is None, "a regressed item is no longer integrated"
+        held = conn.execute(
+            "SELECT triage_held FROM agent_capacity WHERE agent_id = 'agent-A'"
+        ).fetchone()
+        assert held is None or held["triage_held"] == 0, "capacity slot leaked on reopen"
+
+    @pytest.mark.parametrize("key", ["occurrences", "occurrences_dropped", "regressed", "recurrence_of"])
+    def test_reserved_meta_keys_refused_on_add(self, conn, key):
+        with pytest.raises(ValueError, match="reserved"):
+            _add(conn, meta={key: 1})
+
+    def test_reserved_meta_keys_refused_on_meta_update(self, conn):
+        first = _add(conn)
+        with pytest.raises(ValueError, match="reserved"):
+            findings.update_finding(conn, first["id"], meta_update={"occurrences": 1})
+
+    def test_legacy_poisoned_ring_does_not_crash_the_next_observation(self, conn):
+        first = _add(conn)
+        conn.execute(
+            "UPDATE findings SET meta = ? WHERE id = ?",
+            (json.dumps({"occurrences": 1, "occurrences_dropped": "x"}), first["id"]),
+        )
+        conn.commit()
+        again = _add(conn)  # must not raise TypeError from the poisoned structures
+        assert again["id"] == first["id"] and again["dedup_action"] == "bumped"
+        assert isinstance(again["meta"]["occurrences"], list)
+
+    def test_stable_meta_values_are_not_stripped(self, conn):
+        """Stripping EVERY meta string value merges defects whose discriminator the
+        filer echoes through meta: rule E501 vs rule F401 normalized identically
+        and the second defect silently vanished. Only volatile-looking KEYS strip."""
+        a = _add(conn, desc="rule E501 failed", meta={"rule_code": "E501"})
+        b = _add(conn, desc="rule F401 failed", meta={"rule_code": "F401"})
+        assert b["id"] != a["id"], "distinct rule_codes must stay distinct defects"
+
+    def test_query_matches_the_stripped_stored_token(self, conn):
+        a = _add(conn, fingerprint="  padded-key  ")
+        assert a["fingerprint"] == "padded-key"
+        for spelling in ("padded-key", "  padded-key  "):
+            res = findings.query_findings(conn, fingerprint=spelling)
+            assert [r["id"] for r in res["findings"]] == [a["id"]], spelling
+
+    def test_whitespace_only_fingerprint_filter_raises(self, conn):
+        with pytest.raises(ValueError, match="non-empty"):
+            findings.query_findings(conn, fingerprint="   ")
+
+
+class TestCsvIdentityRoundTrip:
+    def _run(self, cwd, *args):
+        import os as _os
+        import subprocess
+        import sys as _sys
+
+        return subprocess.run(
+            [_sys.executable, "-m", "codebugs.cli", *args],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            env={**_os.environ, "PYTHONPATH": _os.path.join(_os.getcwd(), "src")},
+        )
+
+    def test_auto_fingerprint_rederives_identically_across_trackers(self, tmp_path):
+        """Export from tracker A, import into tracker B: a derived fingerprint must
+        re-derive to the SAME value, which requires the meta column to round-trip
+        (the volatile tokens it strips are declared there). And re-importing into
+        tracker A itself must skip, not resurrect."""
+        a_dir, b_dir = str(tmp_path / "a"), str(tmp_path / "b")
+        for d in (a_dir, b_dir):
+            (tmp_path / d.rsplit("/", 1)[-1]).mkdir()
+            db.init_project(d)
+        ca = db.connect(a_dir)
+        orig = findings.add_finding(
+            ca,
+            severity="high",
+            category="gate",
+            file="tools/gate.sh",
+            description="gate died (slug: fix-cb-9-x) log /tmp/gate-fix-cb-9-x.log",
+            meta={"slug": "fix-cb-9-x", "log": "/tmp/gate-fix-cb-9-x.log"},
+        )
+        ca.close()
+        csv_path = str(tmp_path / "out.csv")
+
+        r = self._run(a_dir, "export-csv", csv_path)
+        assert r.returncode == 0, r.stderr
+
+        r = self._run(b_dir, "import-csv", csv_path)
+        assert r.returncode == 0, r.stderr
+        cb = db.connect(b_dir)
+        imported = cb.execute("SELECT fingerprint FROM findings").fetchone()
+        cb.close()
+        assert imported["fingerprint"] == orig["fingerprint"], (
+            "derived identity must survive a cross-tracker CSV round-trip"
+        )
+
+        r = self._run(a_dir, "import-csv", csv_path)
+        assert r.returncode == 0, r.stderr
+        assert "skipped" in r.stdout
+        ca = db.connect(a_dir)
+        count = ca.execute("SELECT COUNT(*) c FROM findings").fetchone()["c"]
+        ca.close()
+        assert count == 1, "same-tracker re-import must not duplicate or resurrect"

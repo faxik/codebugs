@@ -199,6 +199,36 @@ _RECURRENCE_STATUSES = ("wont_fix", "not_a_bug")  # decision stays closed -> new
 
 _AUTO_FP_PREFIX = "auto:"  # reserved: derived fingerprints only, callers may not supply it
 _FP_MAX_LEN = 256
+
+# Meta keys the identity machinery itself writes. Caller-supplied values under these
+# names would be read back as trusted internal structures — meta={"occurrences": 1}
+# makes the NEXT observation's ring append raise TypeError, and a spoofed
+# "recurrence_of" fabricates a link. Refused at add and at update(meta_update).
+_RESERVED_META_KEYS = frozenset({"occurrences", "occurrences_dropped", "regressed", "recurrence_of"})
+
+# Fallback normalization strips a meta value from the description only when its KEY
+# looks run-scoped. Stripping every string value merges defects whose discriminator
+# the filer echoes through meta — meta={"rule_code": "E501"} vs "F401" normalized
+# identically and the second defect silently vanished (caught in diff review). A
+# key-name allowlist errs toward KEEPING a token, i.e. toward a false split — the
+# conservative direction, since a false merge is invisible and a split is merely
+# today's status quo. The measured 71/115 family collapse came entirely from sha /
+# slug / log values, all covered here.
+_VOLATILE_KEY_TOKENS = ("sha", "commit", "slug", "branch", "log", "run", "time", "duration")
+
+
+def _is_volatile_meta_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(token in lowered for token in _VOLATILE_KEY_TOKENS)
+
+
+def _validate_meta_keys(meta: dict[str, Any] | None) -> None:
+    """Refuse caller meta that collides with the identity machinery's own keys."""
+    if not meta:
+        return
+    reserved = _RESERVED_META_KEYS & set(meta)
+    if reserved:
+        raise ValueError(f"meta keys {sorted(reserved)} are reserved for the identity machinery")
 # Hex runs need >= 1 digit: `\b[0-9a-fA-F]{7,}\b` alone eats all-letter words
 # ("defaced", "effaced") and merges two genuinely different descriptions.
 _FP_HEX_RUN = re.compile(r"\b(?=[0-9a-fA-F]*\d)[0-9a-fA-F]{7,}\b")
@@ -238,16 +268,22 @@ def _validate_fingerprint(fingerprint: object) -> str | None:
 def _normalize_for_fingerprint(description: str, meta: dict[str, Any] | None) -> str:
     """Normalize a description to its invariant part for fallback fingerprinting.
 
-    The load-bearing step is stripping the observation's OWN declared meta values
-    (sha, branch slug, log path...): measured against the real corpus, hex/timestamp
-    stripping alone collapsed 0 of the 115-row family CB-43 cites — the blocker was
-    the branch slug, which only the filer's meta knows. General numbers are KEPT
-    (rc=124 vs rc=1 is a real family split that must stay distinct).
+    The load-bearing step is stripping the observation's OWN declared volatile meta
+    values (sha, branch slug, log path...): measured against the real corpus,
+    hex/timestamp stripping alone collapsed 0 of the 115-row family CB-43 cites —
+    the blocker was the branch slug, which only the filer's meta knows. Only values
+    under volatile-looking KEY names are stripped (see _VOLATILE_KEY_TOKENS for
+    why), and general numbers are KEPT (rc=124 vs rc=1 is a real family split that
+    must stay distinct).
     """
     text = description
     if meta:
         tokens = sorted(
-            (v for v in meta.values() if isinstance(v, str) and len(v) >= 3),
+            (
+                v
+                for k, v in meta.items()
+                if isinstance(v, str) and len(v) >= 3 and _is_volatile_meta_key(k)
+            ),
             key=len,
             reverse=True,
         )
@@ -328,18 +364,25 @@ def _bump_row(
     fails cleanly with nothing landed, which is the honest half of the CB-16 rule.
     """
     meta = json.loads(row["meta"])
-    ring = list(meta.get("occurrences", []))
+    # Defensive re-typing for rows written before the reserved-key guard existed
+    # (or by hand): a non-list "occurrences" must not turn the NEXT observation
+    # into a TypeError. The bad value is displaced, not merged — the guard is what
+    # keeps this path from being reachable for new writes.
+    prior = meta.get("occurrences")
+    ring = list(prior) if isinstance(prior, list) else []
     ring.append(entry)
     overflow = len(ring) - (_OCC_KEEP_FIRST + _OCC_KEEP_LAST)
     if overflow > 0:
-        meta["occurrences_dropped"] = meta.get("occurrences_dropped", 0) + overflow
+        dropped = meta.get("occurrences_dropped")
+        meta["occurrences_dropped"] = (dropped if isinstance(dropped, int) else 0) + overflow
         ring = ring[:_OCC_KEEP_FIRST] + ring[-_OCC_KEEP_LAST:]
     meta["occurrences"] = ring
 
     sets = "occurrence_count = occurrence_count + 1, last_seen_at = ?, updated_at = ?"
     params: list[Any] = [now, now]
     if reopen:
-        regressed = list(meta.get("regressed", []))
+        prior_reg = meta.get("regressed")
+        regressed = list(prior_reg) if isinstance(prior_reg, list) else []
         regressed.append({"at": now, "from_status": row["status"]})
         meta["regressed"] = regressed
         sets += ", status = 'open'"
@@ -538,6 +581,7 @@ def add_finding(
     """
     severity = resolve_severity(severity)
     fingerprint = _validate_fingerprint(fingerprint)
+    _validate_meta_keys(meta)
 
     with db.txn(conn):
         inserted, raw_row, was_new, dedup_action = _add_one(
@@ -604,6 +648,7 @@ def batch_add_findings(
         unknown = set(f) - _BATCH_MEMBER_KEYS
         if unknown:
             raise ValueError(f"findings[{i}]: unknown keys {sorted(unknown)}")
+        _validate_meta_keys(f.get("meta"))
         validated.append(
             (
                 resolve_severity(f.get("severity", "medium")),
@@ -684,6 +729,9 @@ def update_finding(
         status = resolve_finding_status(status)
     if severity is not None:
         severity = resolve_severity(severity)
+    # Same reservation as on the add path: a meta_update planting "occurrences"
+    # or "recurrence_of" would be read back as the identity machinery's own state.
+    _validate_meta_keys(meta_update)
 
     with db.txn(conn):
         row = conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
@@ -835,8 +883,14 @@ def query_findings(
 
     # Free-text filter: exact match on an opaque token, no resolver — so the
     # None/'' convention comes from is_text_filter_active, which itself refuses
-    # non-strings (there is no downstream resolver to do it).
+    # non-strings (there is no downstream resolver to do it). Stripped to match
+    # the write side (_validate_fingerprint stores stripped tokens; an untrimmed
+    # query for the token you just added must not return zero rows), and a
+    # whitespace-only active filter is wrong input, same as on write.
     if is_text_filter_active(fingerprint):
+        fingerprint = fingerprint.strip()
+        if not fingerprint:
+            raise ValueError("fingerprint filter must be non-empty")
         conditions.append("fingerprint = ?")
         params.append(fingerprint)
 
@@ -1567,6 +1621,21 @@ def register_cli(sub, commands) -> None:
                     continue
 
                 meta = {}
+                # Full meta round-trips (export writes it as JSON): without it a
+                # derived fingerprint re-derives DIFFERENTLY on import, because
+                # the volatile tokens it stripped are no longer declared. Reserved
+                # identity keys (an exported ring/regression history) are the
+                # machinery's output, not input — dropped, not refused.
+                meta_json = (row.get("meta") or "").strip()
+                if meta_json:
+                    try:
+                        stored = json.loads(meta_json)
+                    except json.JSONDecodeError:
+                        stored = {}
+                    if isinstance(stored, dict):
+                        meta.update(
+                            {k: v for k, v in stored.items() if k not in _RESERVED_META_KEYS}
+                        )
                 lines = (row.get("lines") or row.get("Lines") or "").strip()
                 if lines:
                     meta["lines"] = lines

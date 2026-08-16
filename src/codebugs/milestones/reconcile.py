@@ -255,11 +255,17 @@ def _reconcile_on_reopen(
 
     Fires on terminal→nonterminal only. Reopens ``done``/``dismissed`` items;
     ``deferred`` is untouched (same reasoning as ``_live_rows``: closing or opening
-    one destroys the deferral record), and ``open`` items need nothing. No capacity
-    accounting: reconciliation to terminal already released the slot and cleared
-    ``assigned_agent``, so the reopened item is simply available again. Same
-    SAVEPOINT + audit-on-failure discipline as the terminal hook, because
-    ``run_status_change_hooks`` swallows and the caller commits anyway.
+    one destroys the deferral record), and ``open`` items need nothing.
+
+    Ownership is NOT assumed clear: only reconciler-closed items had their slot
+    released — an item closed via ``set_item_status(status='done')`` still carries
+    ``assigned_agent``/``pulled_at``/``done_commit``, and reopening it without
+    releasing would leave the old agent charged for an item a new agent can pull
+    (both charged for one item). So this mirrors ``_apply_row``: decrement capacity
+    BEFORE clearing ``assigned_agent``, then clear ownership and ``done_commit``
+    (the reopened item is no longer integrated; the audit reason preserves the old
+    commit). Same SAVEPOINT + audit-on-failure discipline as the terminal hook,
+    because ``run_status_change_hooks`` swallows and the caller commits anyway.
     """
     try:
         ref = entities.EntityRef.of(entity_id)
@@ -286,8 +292,17 @@ def _reconcile_on_reopen(
             (item_kind, entity_id),
         ).fetchall()
         for row in rows:
+            agent = row["assigned_agent"]
+            if agent:
+                from codebugs.milestones.capacity import _decrement_capacity
+
+                _decrement_capacity(conn, agent, row["size"])
+            reason = "source entity reopened"
+            if row["done_commit"]:
+                reason += f" (was integrated at {row['done_commit']})"
             conn.execute(
                 "UPDATE milestone_items SET status = 'open', done_at = NULL, "
+                "assigned_agent = NULL, pulled_at = NULL, done_commit = NULL, "
                 "updated_at = ? WHERE id = ?",
                 (now, row["id"]),
             )
@@ -299,7 +314,7 @@ def _reconcile_on_reopen(
                 action="reconcile_reopen",
                 from_state=row["status"],
                 to_state="open",
-                reason="source entity reopened",
+                reason=reason,
             )
     except Exception as exc:  # noqa: BLE001
         conn.execute("ROLLBACK TO ms_reconcile_reopen")
