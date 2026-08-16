@@ -100,3 +100,35 @@ A parallel session was live in `.claude/worktrees/cb-45-similarity-seam` on the 
 throughout, with uncommitted work. It was messaged before arming; its next commit hit the hook and it
 renamed to `fix/cb-45-post-merge-review`. That is the enforcement working on a real session on its
 first day, and it is also why the merge-safety defect was found by a question rather than an outage.
+
+## Outcome
+
+Landed as `238d125`. Enforcement armed from main; `.git/hooks/pre-commit` →
+`/home/faxik/w/codebugs/tools/pre-commit-hook.sh`, `merge.ff=false`,
+`_guard_enforcement_armed` returns 0. Verified against the real repo: a source edit on main is
+refused, a `.claude/plans/*.md` note is allowed, 1196 tests pass, ruff clean.
+
+**The invariant now holds and is checkable in one command.** `git log --first-parent --no-merges
+fb03d8e..main` returns exactly two commits, both `.claude/plans/*.md` notes. Every line of code that
+landed today arrived through a merge commit.
+
+Follow-ups filed: **CB-57** (a plain `git merge <untyped-branch>` onto main is still caught by
+nothing — the surviving half of this card's own incident), **CB-58** (setup's card "claim" bypasses
+`claims.py` and has no release path), **CB-59** (no branch protection and no CI on a repo that has a
+GitHub remote — both reviewers independently argued this is where the enforcement belongs).
+
+## What this iteration should be remembered for
+
+Not the harness. **Both review rounds found that the fix for a race had reintroduced the defect
+class it was written for**, and the second one was CB-41's shape exactly — a value sampled at the
+wrong end of a window, so the guard compared a state to itself and passed. This repo has now
+recorded that shape at least four times (CB-41 thrice, here once). The rule that keeps coming out of
+it is the same every time: *point-of-use discipline is the wrong enforcement layer; make the bad
+state unrepresentable.* Round 1 wrote the skew guard and re-sampled; round 2 replaced the sample
+with the value itself, so no statement can be inserted between them.
+
+The second thing: **a suite that tests every guard and never runs the script tests nothing about the
+composition.** Deleting the guard *invocations* left 70 tests green — including the branch-type
+guard that exists for the incident this card is about. That is the repo's own "a check that
+validates elements cannot validate their composition", found in the harness built to enforce the
+repo's rules.
