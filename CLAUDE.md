@@ -55,18 +55,6 @@ name-matching heuristic. The remedy for a shared repo is a protected remote
 branch plus required CI; this harness is the local half, and calling it more than that would be the
 same false assurance the prose version gave.
 
-`tests/test_worktree_harness.py` covers every guard on both sides — the state it must refuse and the
-state it must allow — **and separately asserts that `worktree-finish.sh` actually calls each one**.
-That second class exists because it had to: two adversarial reviews deleted guard *invocations* from
-the script, including the branch-type guard that exists for the 2026-08-16 incident, and the whole
-suite stayed green, because nothing executed the script. Every guard was unit-tested and the
-composition was not — this repo's own rule (*a check that validates elements cannot validate their
-composition*) turned on its own harness. Do not read the per-guard tests as covering the wiring.
-
-Executing the whole script in a test is impractical (it merges onto main and runs the full suite),
-so the wiring tests are structural — they read the script and assert each guard is invoked with
-`|| exit $?`, in the right phase. Say that plainly rather than letting them look behavioural.
-
 - **Create:** `tools/worktree-setup.sh <type>/<slug> [base]`, which validates the name, refuses a
   card already carried by another branch, creates `.worktrees/<type>-<slug>`, primes the worktree's
   own dev environment, and flips an `open` card to `in_progress`. **That last part is a
@@ -112,6 +100,26 @@ so the wiring tests are structural — they read the script and assert each guar
 - **The only thing that may land on main directly** is a `.claude/plans/*.md` note — one level, not
   a subtree, and the pre-commit hook holds that line. `git commit --no-verify` remains the escape
   hatch: the hook exists to stop the accident, and an operator typing the flag has stated an intent.
+
+**How the harness itself is tested, and where that stops.**
+`tests/test_worktree_harness.py` covers every guard on both sides — the state it must refuse and the
+state it must allow — **and separately asserts that `worktree-finish.sh` actually calls each one**.
+That second class exists because it had to: two adversarial reviews deleted guard *invocations* from
+the script, including the branch-type guard that exists for the 2026-08-16 incident, and the whole
+suite stayed green, because nothing executed the script. Every guard was unit-tested and the
+composition was not — this repo's own rule (*a check that validates elements cannot validate their
+composition*) turned on its own harness. Do not read the per-guard tests as covering the wiring.
+
+Executing the whole script in a test is impractical (it merges onto main and runs the full suite),
+so the wiring tests are structural: they read the script and assert each guard is invoked with
+`|| exit $?`, in the right phase. Said plainly rather than left to look behavioural.
+
+**The bootstrap is a real constraint, not an oversight.** `worktree-finish.sh` cannot land the
+commit that first creates `tools/` — `_guard_enforcement_armed` refuses, because main has no
+`tools/pre-commit-hook.sh` for the hook to point at. CB-50 was therefore merged by hand once, with
+`git merge --no-ff`, after the harness had run its whole pipeline on the branch and refused at the
+lock. Every landing after that goes through the harness. If `tools/` is ever rewritten the same way,
+expect the same one-time manual merge.
 
 ## Architecture
 
