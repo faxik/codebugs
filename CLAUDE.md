@@ -4,23 +4,83 @@ AI-native code finding & requirements tracker. SQLite-backed, exposed via MCP se
 
 ## Workflow — `main` is never edited directly
 
-**Every code edit happens on a short-lived branch, in a worktree.** Borrowed from `../autosorter`
-(2026-08-16), minus its `tools/worktree-*.sh` harness, which this repo does not have and does not
-need — plain git is enough.
+**Every code edit happens on a short-lived branch, in a worktree, and `tools/` enforces it.**
+Borrowed from `../autosorter` (2026-08-16), including a scaled-down port of its
+`tools/worktree-*.sh` harness.
 
-**Read this as a tightening, not as a write-down of what already happened.** The branch workflow is
-the dominant pattern — 24 merges, 22 of them named `fix/cb-NN-*` — but it was never stated anywhere,
-and the exceptions are recent rather than ancient: `git log --first-parent --no-merges` shows
-`a29fd50` (the CB-28 query fix) and `1892b80` (a test refactor) landing straight on `main` on
-2026-08-13, and CB-48 was written into the main checkout on 2026-08-16, which is what prompted this
-section. **A convention that exists only as a pattern in the log is not a rule** — nothing bound it,
-so it held until it didn't, and each lapse looked locally reasonable at the time.
+**This section previously said the harness was unnecessary — "plain git is enough" — and that claim
+was falsified within two hours by the very rule it was introducing.** The section landed at 13:37 on
+2026-08-16 (`2957070`) mandating a typed branch and `git merge --no-ff`. At 15:30 main was advanced
+by `merge worktree-cb-45-similarity-seam: Fast-forward`: a branch with no type prefix, integrated
+without a merge commit, which by then pointed at main's own SHA so every further merge would
+fast-forward again. Two sentences earlier the same section had already stated the reason — **a
+convention that exists only as a pattern in the log is not a rule** — and then declined to bind it.
+Prose cannot enforce prose. That is CB-50, and the harness below is its fix.
 
-- **Create:** `git worktree add .claude/worktrees/<slug> -b <type>/<slug> main`. Types: `fix/*`,
-  `feature/*`, `refactor/*`, `docs/*`, one concern each. A card-driven branch carries its id
-  (`fix/cb-48-tracker-root-init`). Work already started on main moves over with `git stash push
-  <files>` → `git worktree add` → `git stash pop` in the worktree; the stash is shared across
-  worktrees because it lives in the common git dir.
+**What is now mechanically enforced** (`tools/install-hooks.sh` arms it; run once per clone):
+
+| Rule | Mechanism | Refuses with |
+|---|---|---|
+| Branch carries `fix/`\|`feature/`\|`refactor/`\|`docs/` | `_guard_branch_type` (7) + pre-commit hook (1) | exit 7 / 1 |
+| Nothing but `.claude/plans/*.md` is committed on main | pre-commit hook | exit 1 |
+| Integration never fast-forwards | `--no-ff` + `git config merge.ff false` | — |
+| One integration at a time | `flock` on `.worktrees/.integrate.lock` | exit 1 |
+| The tested state is the landed state | in-lock SHA re-check | exit 13 |
+| This clone is actually armed | `_guard_enforcement_armed` | exit 12 |
+| Main has main checked out, and is clean | `_guard_workspace_on_main`, `_guard_main_clean` | exit 8, 11 |
+| The branch actually carries a change | `_guard_nonempty_diff` | exit 9 |
+| No conflict markers, no scratch `.py`, no stale base | `_guard_conflict_markers`, `_guard_untracked_py_at_root`, `_guard_stale_base` | exit 5, 4, 6 |
+
+`merge.ff=false` is the one no hook could replace: **git fires no hook on a fast-forward at all**,
+because no commit is created, so nothing can catch it after the fact. Verified by replaying the
+incident in a throwaway repo — default config gives `Fast-forward` and zero merge commits;
+`merge.ff=false` gives a merge commit. Two precise limits, because the first draft of this section
+overstated it: it does nothing when the branch is already an ancestor of main (git says "Already up
+to date" and main does not move, which is harmless), and it is *configuration*, so
+`git config merge.ff true` turns it off without anyone typing `--ff`.
+
+**What this does NOT do, stated plainly because the honest scope is the point.** All of it is
+CLIENT-SIDE and PER-CLONE: hooks and git config cannot be committed, there is no CI and no
+server-side protection on `origin`. A fresh clone has none of it until `tools/install-hooks.sh` is
+run — which is why `_guard_enforcement_armed` refuses to integrate from an unarmed clone, the one
+moment being unarmed can cost anything. Even armed, `git rebase`, `git cherry-pick`, `git revert`,
+`git am`, `git reset --hard`, `git push`, and `core.hooksPath` all move or publish `main` without
+passing the pre-commit hook; a typed branch committed in the *primary* checkout satisfies the hook
+while ignoring the worktree rule entirely; and **`git merge <untyped-branch>` onto main is caught by
+nothing** — `merge.ff=false` gives it a merge commit, but no mechanism reads the branch name,
+because only `pre-commit` is installed and git runs `pre-merge-commit` for merges. A
+`pre-merge-commit` hook would close that in ~10 lines (`worktree-finish.sh` would then have to stop
+passing `--no-verify` to its own merge); deferred deliberately rather than shipped as a
+name-matching heuristic. The remedy for a shared repo is a protected remote
+branch plus required CI; this harness is the local half, and calling it more than that would be the
+same false assurance the prose version gave.
+
+`tests/test_worktree_harness.py` covers every guard on both sides — the state it must refuse and the
+state it must allow — **and separately asserts that `worktree-finish.sh` actually calls each one**.
+That second class exists because it had to: two adversarial reviews deleted guard *invocations* from
+the script, including the branch-type guard that exists for the 2026-08-16 incident, and the whole
+suite stayed green, because nothing executed the script. Every guard was unit-tested and the
+composition was not — this repo's own rule (*a check that validates elements cannot validate their
+composition*) turned on its own harness. Do not read the per-guard tests as covering the wiring.
+
+Executing the whole script in a test is impractical (it merges onto main and runs the full suite),
+so the wiring tests are structural — they read the script and assert each guard is invoked with
+`|| exit $?`, in the right phase. Say that plainly rather than letting them look behavioural.
+
+- **Create:** `tools/worktree-setup.sh <type>/<slug> [base]`, which validates the name, refuses a
+  card already carried by another branch, creates `.worktrees/<type>-<slug>`, primes the worktree's
+  own dev environment, and flips an `open` card to `in_progress`. **That last part is a
+  best-effort status write, not a claim** — it does not go through `claims.py`, takes no holder
+  identity, has no release path, and is skipped entirely when the `codebugs` CLI is off `PATH`, so
+  an abandoned branch leaves the card `in_progress` forever. The *branch-name* collision check is
+  the half with teeth, and it is pure git. Wiring this to the claims ledger (which already provides
+  mutual exclusion via a partial unique index) is open work. One concern per branch; a
+  card-driven branch carries its id (`fix/cb-48-tracker-root-init`). Work already started on main
+  moves over with `git stash push <files>` → setup → `git stash pop` in the worktree; the stash is
+  shared across worktrees because it lives in the common git dir.
+- **Worktrees live in `.worktrees/`,** slug = branch with `/`→`-`, matching autosorter. Both that
+  directory and the legacy `.claude/worktrees/` are gitignored; the legacy path still works and
+  `worktree-finish.sh` resolves either, but new worktrees go in `.worktrees/`.
 - **Then work there, entirely.** Check which checkout you are in before any `Edit`/`Write` to a
   source file. **A surgical `git checkout <branch> -- <files>` onto main is editing main directly**,
   wearing a hat. Conflicts get resolved *inside* the worktree, never by committing a resolution on
@@ -36,13 +96,22 @@ so it held until it didn't, and each lapse looked locally reasonable at the time
   source and passes on a tree you did not touch. The mirror-image trap is at the MCP-registration
   rules — from a worktree, a bare `python` reaches `codebugs` through main's editable install, which
   is why `tests/dump_schema.py` must be run with `PYTHONPATH=src`.
-- **Integrate from main with `git merge --no-ff -m "Merge <branch>: <what changed> (CB-NN)"`.** The
-  merge commit is what makes a card's whole iteration recoverable as one unit; a fast-forward
-  scatters it. **Never delete the branch** — no merged branch has ever been deleted here, and that
-  is the record.
+- **Integrate with `tools/worktree-finish.sh <slug> ['commit msg'] [--merge-msg '…']`.** It commits
+  any dirty state, runs the guards, forward-merges main *into the worktree* so conflicts surface in
+  safe space, runs `ruff check` and the full suite there against the combined tree, then merges onto
+  main with `--no-ff` under the lock and removes the worktree. The message follows `Merge <branch>:
+  <what changed> (CB-NN)` and is derived from the branch and last subject when not given. The merge
+  commit is what makes a card's whole iteration recoverable as one unit; a fast-forward scatters it.
+  **Never delete the branch** — no merged branch has ever been deleted here, and that is the record;
+  the script removes the worktree only.
+- **`ruff check` is the lint gate; `ruff format` is deliberately not**, because a large part of the
+  existing tree is non-conformant to it and gating on it would refuse every finish. Pin ruff 0.15.7:
+  0.16.x flags the whole repo.
 - **Session end:** `git status` clean in main *and* in every worktree, then `git worktree remove
   <path>`. Never `--force`: a removal that refuses is telling you work is uncommitted there.
-- **The only thing that may land on main directly** is a `.claude/plans/*.md` note.
+- **The only thing that may land on main directly** is a `.claude/plans/*.md` note — one level, not
+  a subtree, and the pre-commit hook holds that line. `git commit --no-verify` remains the escape
+  hatch: the hook exists to stop the accident, and an operator typing the flag has stated an intent.
 
 ## Architecture
 

@@ -6,3 +6,8 @@ build/
 .venv/
 *.db
 .codebugs/
+
+# Worktrees. `.worktrees/` is the convention (matching ../autosorter);
+# `.claude/worktrees/` is the legacy location and still resolves.
+.worktrees/
+.claude/worktrees/
