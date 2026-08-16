@@ -249,6 +249,164 @@ def run_status_change_hooks(
             sys.stderr.write(f"[status-change hook '{hook.name}' failed] {e}\n")
 
 
+# --- Pre-add resolver seam (CB-45) ---
+
+
+@dataclass(frozen=True)
+class PreAddResolver:
+    """A registered pre-add resolver: annotates a new finding before its INSERT.
+
+    ANNOTATE-ONLY by construction: the resolver returns a meta patch (or None);
+    there is no redirect channel — identity routing is core (CB-44, ratified).
+    """
+
+    name: str
+    fn: Callable[[sqlite3.Connection, dict[str, Any]], dict[str, Any] | None]
+    meta_keys: frozenset[str]
+
+
+_pre_add_resolvers: list[PreAddResolver] = []
+
+_RESOLVER_ERRORS_KEY = "resolver_errors"
+
+
+class _ResolverBrokeTransaction(Exception):
+    """Internal sentinel: a resolver closed the caller's transaction."""
+
+
+def register_pre_add_resolver(
+    name: str,
+    fn: Callable[[sqlite3.Connection, dict[str, Any]], dict[str, Any] | None],
+    *,
+    meta_keys: tuple[str, ...],
+) -> None:
+    """Register a pre-add resolver.
+
+    Same discipline as the other HOOK registries (post-add, status-change): an
+    identical re-registration is a silent no-op so module re-import is safe —
+    but a same-name registration with DIFFERENT meta_keys raises, because a
+    silently ignored contract change is CB-15's failure shape. `meta_keys`
+    declares the ONLY meta keys this resolver's annotation may write; findings
+    reserves the union against caller-supplied meta. Overlap with another
+    resolver's keys is refused (CB-16's last-assignment-wins, at the seam level).
+    """
+    keys = frozenset(meta_keys)
+    for existing in _pre_add_resolvers:
+        if existing.name == name:
+            if existing.meta_keys != keys:
+                raise ValueError(
+                    f"resolver {name!r} re-registered with different meta_keys "
+                    f"{sorted(keys)} (was {sorted(existing.meta_keys)})"
+                )
+            return
+    if _RESOLVER_ERRORS_KEY in keys:
+        raise ValueError(f"meta key {_RESOLVER_ERRORS_KEY!r} is reserved for the runner")
+    for existing in _pre_add_resolvers:
+        overlap = keys & existing.meta_keys
+        if overlap:
+            raise ValueError(
+                f"meta keys {sorted(overlap)} already declared by resolver {existing.name!r}"
+            )
+    _pre_add_resolvers.append(PreAddResolver(name, fn, keys))
+
+
+def resolver_reserved_meta_keys() -> frozenset[str]:
+    """Every meta key any registered resolver may write, plus the runner's own.
+
+    Loads the domain modules first (same as get_tool_providers/get_cli_providers):
+    the reserved set must not depend on which modules a process happened to
+    import — otherwise the same meta is accepted on a bare library connection
+    and refused under the server (CB-45 review, corroborated).
+    """
+    _ensure_modules_loaded()
+    keys = {_RESOLVER_ERRORS_KEY}
+    for r in _pre_add_resolvers:
+        keys |= r.meta_keys
+    return frozenset(keys)
+
+
+def _validate_resolver_outcome(
+    outcome: dict[str, Any], resolver: PreAddResolver, forbidden: frozenset[str]
+) -> None:
+    """Raise unless the outcome is a JSON-serializable dict within declared keys.
+
+    Runs INSIDE the resolver's savepoint/try so a bad outcome takes the queryable
+    failure path — otherwise the later json.dumps(meta_final) in findings would
+    abort the whole add with no resolver_errors stamp (CB-45 review, corroborated).
+    """
+    if not isinstance(outcome, dict) or any(not isinstance(k, str) for k in outcome):
+        raise ValueError("resolver outcome must be a dict with string keys")
+    bad = (set(outcome) - resolver.meta_keys) | (set(outcome) & forbidden)
+    if bad:
+        raise ValueError(f"resolver wrote undeclared/forbidden meta keys {sorted(bad)}")
+    json.dumps(outcome, allow_nan=False)  # validate serializability; discard
+
+
+def run_pre_add_resolvers(
+    conn: sqlite3.Connection,
+    observation: dict[str, Any],
+    *,
+    forbidden: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """Run every resolver against one observation; return the merged meta patch.
+
+    NEVER-COMMIT is enforced, not documented: (1) outside an open transaction a
+    bare SAVEPOINT/RELEASE would BE a commit, so the runner refuses up front —
+    raise, never assert, mirroring merge.merge's ambient-transaction refusal in
+    the opposite direction; (2) a resolver that closes the caller's transaction
+    (commit()/ROLLBACK through the raw connection) is corruption, not an
+    annotation failure — detected after every call, OUTSIDE the swallow;
+    (3) cleanup is guarded so it never masks the real exception and never
+    converts a swallowed annotation failure into a lost finding (db.txn's own
+    cleanup lesson). Each resolver runs in SAVEPOINT sp_pre_add_<idx> —
+    index-named, never an identifier built from resolver-supplied text (the
+    interpolated-identifier discipline). Failures are stamped QUERYABLY into
+    the patch under `resolver_errors` (query(meta_key="resolver_errors")).
+    `forbidden` carries the caller's own reserved keys, because db must not
+    import findings.
+    """
+    if not conn.in_transaction:
+        raise RuntimeError(
+            "run_pre_add_resolvers() requires an OPEN transaction: outside one, "
+            "SAVEPOINT opens a transaction and RELEASE COMMITS it — the runner "
+            "would commit the resolver's writes, the inverse of the never-commits "
+            "contract"
+        )
+    patch: dict[str, Any] = {}
+    errors: list[dict[str, Any]] = []
+    for idx, resolver in enumerate(_pre_add_resolvers):
+        sp = f"sp_pre_add_{idx}"  # index-derived identifier, never resolver text
+        conn.execute(f"SAVEPOINT {sp}")
+        try:
+            outcome = resolver.fn(conn, observation)
+            if not conn.in_transaction:
+                raise _ResolverBrokeTransaction(resolver.name)
+            if outcome is not None:
+                _validate_resolver_outcome(outcome, resolver, forbidden)
+                patch.update(outcome)
+            conn.execute(f"RELEASE {sp}")
+        except _ResolverBrokeTransaction:
+            raise RuntimeError(
+                f"pre-add resolver {resolver.name!r} closed the caller's transaction; "
+                f"the pending INSERT would land outside any transaction"
+            ) from None
+        except Exception as e:  # noqa: BLE001
+            try:
+                conn.execute(f"ROLLBACK TO {sp}")
+                conn.execute(f"RELEASE {sp}")
+            except sqlite3.OperationalError:
+                raise RuntimeError(
+                    f"pre-add resolver {resolver.name!r} corrupted the savepoint stack"
+                ) from e
+            sys.stderr.write(f"[pre-add resolver '{resolver.name}' failed] {e}\n")
+            errors.append(
+                {"resolver": resolver.name, "error": str(e)[:500], "at": observation.get("at")}
+            )
+    if errors:
+        patch[_RESOLVER_ERRORS_KEY] = errors
+    return patch
+
+
 # SQLITE_BUSY (5) and SQLITE_LOCKED (6). Extended codes mask down: 517 & 0xFF == 5.
 _CONTENTION_CODES = frozenset({5, 6})
 
