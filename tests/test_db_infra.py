@@ -898,6 +898,62 @@ class TestDescribeRoot:
             db.set_tracker_root(None)
             os.chdir(original)
 
+    def test_a_relative_env_root_is_reported_absolute(self, tmp_path, monkeypatch):
+        """CB-49: the report is read without knowing the process cwd.
+
+        `init` prints the absolute path (`init_project` abspaths), so a relative
+        report answers about the same binding in a different coordinate system —
+        and the MCP preflight's reader provably cannot know the server's cwd.
+        """
+        _tracker(tmp_path, "declared")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv(db.ENV_ROOT, "declared")
+        info = db.describe_root()
+        assert info["source"] == "env"
+        assert info["root"] == str(tmp_path / "declared")
+        assert info["path"] == str(tmp_path / "declared" / ".codebugs" / "findings.db")
+
+    def test_a_relative_flag_root_is_reported_absolute(self, tmp_path, monkeypatch):
+        """CB-49, the flag channel — same rule as the env channel above."""
+        _tracker(tmp_path, "declared")
+        monkeypatch.chdir(tmp_path)
+        db.set_tracker_root("declared")
+        try:
+            info = db.describe_root()
+            assert info["source"] == "flag"
+            assert info["root"] == str(tmp_path / "declared")
+        finally:
+            db.set_tracker_root(None)
+
+    def test_a_relative_root_error_names_the_absolute_path(self, tmp_path, monkeypatch):
+        """CB-49: the error's `codebugs init <root>` advice must survive a cwd change."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv(db.ENV_ROOT, "nope")
+        info = db.describe_root()
+        assert info["path"] is None
+        assert str(tmp_path / "nope") in info["error"]
+
+    def test_a_relative_declared_root_survives_a_deleted_cwd(self, tmp_path):
+        """Passes on both sides of CB-49 — it pins behaviour the fix must preserve.
+
+        `abspath` on a relative value needs `os.getcwd()`, which raises once the
+        cwd is deleted; normalization must fall back to the raw value rather
+        than let that escape, because `describe_root` may NEVER raise (CB-11).
+        """
+        doomed = tmp_path / "doomed"
+        doomed.mkdir()
+        original = os.getcwd()
+        os.chdir(doomed)
+        try:
+            doomed.rmdir()
+            db.set_tracker_root("../somewhere")
+            info = db.describe_root()  # must not raise
+            assert info["path"] is None
+            assert info["error"]
+        finally:
+            db.set_tracker_root(None)
+            os.chdir(original)
+
 
 class TestOpenCallSitesRatchet:
     """`_open` is the only door to a live connection. Guard how many hold a key.
@@ -983,6 +1039,16 @@ class TestWhereCommand:
         assert proc.returncode == 0, proc.stderr
         assert str(declared) in proc.stdout
         assert "--tracker-root" in proc.stdout
+
+    def test_a_relative_flag_is_printed_absolute(self, tmp_path):
+        """CB-49: `init` and `where` must answer in one coordinate system."""
+        declared = _tracker(tmp_path, "declared")
+        other = tmp_path / "other"
+        other.mkdir()
+        proc = self._where(other, "--tracker-root", "../declared")
+        assert proc.returncode == 0, proc.stderr
+        assert str(declared) in proc.stdout
+        assert "../declared" not in proc.stdout
 
     def test_unbound_is_a_clean_failure(self, tmp_path):
         proc = self._where(tmp_path)

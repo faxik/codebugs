@@ -530,13 +530,37 @@ def declared_tracker_root() -> tuple[str | None, str]:
     discriminator that could tell it otherwise — git itself reports that
     directory as a valid work tree. External metadata is the only thing that can
     disambiguate, so this is it.
+
+    The returned root is absolute — see `_absolutized` for why, and for the one
+    case where it cannot be (CB-49).
     """
     if _tracker_root_override and _tracker_root_override.strip():
-        return _tracker_root_override, "flag"
+        return _absolutized(_tracker_root_override), "flag"
     env = os.environ.get(ENV_ROOT, "")
     if env.strip():
-        return env, "env"
+        return _absolutized(env), "env"
     return None, "discovery"
+
+
+def _absolutized(root: str) -> str:
+    """Make a declared root interpretable outside this process's cwd (CB-49).
+
+    A relative declaration resolves correctly, but it leaks verbatim into every
+    diagnostic — and the MCP preflight's reader cannot know the server's cwd, so
+    `tracker root ../i-b` tells them nothing. Lexical `abspath`, never
+    `realpath`: a declared root is often a deliberately symlinked path, and the
+    job is to pin the coordinate system, not to rewrite the declaration.
+    Normalizing at read time is deliberate too — it is the same moment
+    `_declared_db_path` resolves the value against cwd, so report and resolution
+    cannot disagree. `abspath` on a relative value needs `os.getcwd()`, which
+    raises once the cwd is deleted; fall back to the raw value so
+    `describe_root`'s never-raises contract holds, and resolution then fails
+    closed downstream exactly as before.
+    """
+    try:
+        return os.path.abspath(root)
+    except OSError:
+        return root
 
 
 def _declared_db_path(root: str, source: str) -> str:
