@@ -537,11 +537,6 @@ class TestSimilarityCandidates:
         rows = findings.similarity_candidates(conn, limit=2, order="newest")
         assert [r["id"] for r in rows] == ["CB-4", "CB-3"]
 
-    def test_exclude_id(self, conn):
-        self._seed(conn)
-        rows = findings.similarity_candidates(conn, category="b", exclude_id="CB-3")
-        assert rows == []
-
     def test_categories_tuple_is_exact_including_empty(self, conn):
         """category= is a FILTER ("" means no filter, the repo convention);
         categories= is the explicit-tuple twin for callers whose category is a

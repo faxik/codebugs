@@ -50,6 +50,14 @@ CREATE INDEX IF NOT EXISTS idx_findings_file ON findings(file);
 CREATE INDEX IF NOT EXISTS idx_findings_category ON findings(category);
 """
 
+# The identity branch classes (CB-43). Defined here, above the index DDL that is
+# derived from the live set; the branch-table narrative lives at the Identity
+# section below. The table is TOTAL over types.FINDING_STATUSES —
+# tests/test_dedup.py::TestBranchTotality pins it.
+LIVE_STATUSES = ("open", "in_progress", "stale")  # same fingerprint -> bump this row
+_REOPEN_STATUSES = ("fixed",)  # same fingerprint -> regression: reopen this row
+RECURRENCE_STATUSES = ("wont_fix", "not_a_bug")  # decision stays closed -> new linked row
+
 # Applied AFTER every migration, never inside SCHEMA (sweep.py's pattern). SCHEMA runs
 # first in ensure_schema, so an index here that references a migrated-in column would
 # raise on any pre-existing table — and `_migrate_statuses` rebuilds the table from a
@@ -58,10 +66,14 @@ CREATE INDEX IF NOT EXISTS idx_findings_category ON findings(category);
 #
 # The partial UNIQUE index is the identity guarantee (CB-43): at most one LIVE card per
 # fingerprint is a database fact, not transaction discipline — the claims.py shape. The
-# WHERE must stay in lockstep with _LIVE_STATUSES below.
+# WHERE is DERIVED from LIVE_STATUSES (the rank_case_sql doctrine: SQL built from the
+# tuple cannot drift from it); the values are repo-owned literals, which is why
+# interpolating them into DDL — where parameters cannot bind — is sanctioned.
 _POST_MIGRATION_INDEXES = (
     "CREATE UNIQUE INDEX IF NOT EXISTS ux_findings_fingerprint_live ON findings(fingerprint) "
-    "WHERE fingerprint IS NOT NULL AND status IN ('open', 'in_progress', 'stale')",
+    "WHERE fingerprint IS NOT NULL AND status IN ("
+    + ", ".join(f"'{s}'" for s in LIVE_STATUSES)
+    + ")",
 )
 
 
@@ -188,15 +200,14 @@ def _next_id(conn: sqlite3.Connection) -> str:
 # maps an observation to the finding it belongs to via `fingerprint`, so one defect
 # observed N times is one row with occurrence_count=N instead of N rows.
 #
-# The status branch table below is TOTAL over types.FINDING_STATUSES, and
+# The status branch table (LIVE_STATUSES / _REOPEN_STATUSES / RECURRENCE_STATUSES,
+# defined above the index DDL they feed) is TOTAL over types.FINDING_STATUSES, and
 # tests/test_dedup.py::TestBranchTotality pins that: a new status added to the
-# vocabulary must be classified here or the test fails — the alternative is that it
+# vocabulary must be classified there or the test fails — the alternative is that it
 # silently falls through to "no match" and the duplicate explosion resumes for exactly
 # that status (the review's judge found `stale` doing this in an earlier draft).
-_LIVE_STATUSES = ("open", "in_progress", "stale")  # same fingerprint -> bump this row
-LIVE_STATUSES = _LIVE_STATUSES  # public: the statuses the partial unique index covers
-_REOPEN_STATUSES = ("fixed",)  # same fingerprint -> regression: reopen this row
-_RECURRENCE_STATUSES = ("wont_fix", "not_a_bug")  # decision stays closed -> new linked row
+# LIVE_STATUSES and RECURRENCE_STATUSES are public so consumers (similarity.py's
+# annotation pool) derive from the classified sets instead of re-spelling them.
 
 _AUTO_FP_PREFIX = "auto:"  # reserved: derived fingerprints only, callers may not supply it
 _FP_MAX_LEN = 256
@@ -223,27 +234,36 @@ def _is_volatile_meta_key(key: str) -> bool:
     return any(token in lowered for token in _VOLATILE_KEY_TOKENS)
 
 
-def _validate_meta_keys(meta: dict[str, Any] | None, *, updating: bool = False) -> None:
-    """Refuse caller meta colliding with identity-machinery or resolver keys.
-
-    On UPDATE, `similar_to` is deliberately writable: the add-side reservation
-    stops spoofing, but a permanently unrepairable annotation is the CB-26
-    shape — a re-scrub must be able to rewrite or clear it. `resolver_errors`
-    stays refused on both paths.
-    """
-    if not meta:
-        return
-    reserved = _RESERVED_META_KEYS | db.resolver_reserved_meta_keys()
-    if updating:
-        reserved -= {"similar_to"}
-    hit = reserved & set(meta)
-    if hit:
-        raise ValueError(f"meta keys {sorted(hit)} are reserved for the identity machinery")
 # Hex runs need >= 1 digit: `\b[0-9a-fA-F]{7,}\b` alone eats all-letter words
 # ("defaced", "effaced") and merges two genuinely different descriptions.
 _FP_HEX_RUN = re.compile(r"\b(?=[0-9a-fA-F]*\d)[0-9a-fA-F]{7,}\b")
 _FP_ISO_TS = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?")
 _FP_WS = re.compile(r"\s+")
+
+
+def _validate_meta_keys(meta: dict[str, Any] | None, *, updating: bool = False) -> None:
+    """Refuse caller meta colliding with identity-machinery or resolver keys.
+
+    On UPDATE, keys a resolver declared UPDATABLE at registration (similarity's
+    `similar_to`) are deliberately writable: the add-side reservation stops
+    spoofing, but a permanently unrepairable annotation is the CB-26 shape — a
+    re-scrub must be able to rewrite or clear it. The updatable set comes from
+    the registry, never from a literal here: core findings must not know any
+    one extension's key names (the seam exists so extensions declare their meta
+    contract at registration). `resolver_errors` stays refused on both paths.
+    """
+    if not meta:
+        return
+    reserved = _RESERVED_META_KEYS | db.resolver_reserved_meta_keys()
+    if updating:
+        reserved -= db.resolver_updatable_meta_keys()
+    hit = reserved & set(meta)
+    if hit:
+        raise ValueError(
+            f"meta keys {sorted(hit)} are reserved for the identity machinery "
+            f"(they are its output, not input — strip them before re-submitting)"
+        )
+
 
 # Occurrence ring: keep-first + keep-last, NOT drop-oldest — the earliest observations
 # carry the evidence an un-merge needs, so pure drop-oldest would discard exactly what
@@ -344,15 +364,19 @@ def _occurrence_entry(
     description: str,
     source: str,
     tags: list[str] | None,
+    meta: dict[str, Any] | None,
     reported_at_commit: str | None,
     reported_at_ref: str | None,
 ) -> dict[str, Any]:
     """One bounded record of a deduplicated observation.
 
     Carries enough of the discarded observation (severity, description, file, tags,
-    refs) that a false merge can be un-merged from the ring alone.
+    meta, refs) that a false merge can be un-merged from the ring alone. `meta`
+    matters most: volatile meta values are exactly what fingerprint normalization
+    strips, so without them the ring cannot show WHICH observations a too-coarse
+    fingerprint merged (Codex review of this range).
     """
-    return {
+    entry: dict[str, Any] = {
         "at": now,
         "severity": severity,
         "file": file,
@@ -362,6 +386,9 @@ def _occurrence_entry(
         "reported_at_commit": reported_at_commit,
         "reported_at_ref": reported_at_ref,
     }
+    if meta:
+        entry["meta"] = meta
+    return entry
 
 
 def _bump_row(
@@ -415,6 +442,26 @@ def _bump_row(
     ).fetchone()
 
 
+def _live_row_by_fingerprint(
+    conn: sqlite3.Connection, fingerprint: str, *, exclude_id: str | None = None
+) -> sqlite3.Row | None:
+    """The ONE copy of the live-row-by-fingerprint predicate.
+
+    Its status set must stay in lockstep with the partial unique index's WHERE
+    (both derive from LIVE_STATUSES); three call sites hand-rolling it was three
+    places for that to drift.
+    """
+    sql = (
+        f"SELECT * FROM findings WHERE fingerprint = ? "
+        f"AND status IN ({','.join('?' for _ in LIVE_STATUSES)})"
+    )
+    params: list[Any] = [fingerprint, *LIVE_STATUSES]
+    if exclude_id is not None:
+        sql += " AND id != ?"
+        params.append(exclude_id)
+    return conn.execute(sql, params).fetchone()
+
+
 def _match_fingerprint(
     conn: sqlite3.Connection, fingerprint: str
 ) -> tuple[sqlite3.Row | None, sqlite3.Row | None]:
@@ -425,12 +472,8 @@ def _match_fingerprint(
     reopen-vs-recurrence, and rowid breaks the whole-second updated_at tie
     deterministically.
     """
-    live = conn.execute(
-        f"SELECT * FROM findings WHERE fingerprint = ? "
-        f"AND status IN ({','.join('?' for _ in _LIVE_STATUSES)})",
-        (fingerprint, *_LIVE_STATUSES),
-    ).fetchone()
-    terminal = _REOPEN_STATUSES + _RECURRENCE_STATUSES
+    live = _live_row_by_fingerprint(conn, fingerprint)
+    terminal = _REOPEN_STATUSES + RECURRENCE_STATUSES
     closed = conn.execute(
         f"SELECT * FROM findings WHERE fingerprint = ? "
         f"AND status IN ({','.join('?' for _ in terminal)}) "
@@ -483,6 +526,7 @@ def _add_one(
             description=description,
             source=source,
             tags=tags,
+            meta=meta,
             reported_at_commit=reported_at_commit,
             reported_at_ref=reported_at_ref,
         )
@@ -503,11 +547,7 @@ def _add_one(
         # An explicit id asserts identity, so no dedup matching — but a supplied
         # fingerprint colliding with a live row would otherwise surface as a raw
         # IntegrityError from the partial unique index at INSERT time.
-        live = conn.execute(
-            f"SELECT id FROM findings WHERE fingerprint = ? "
-            f"AND status IN ({','.join('?' for _ in _LIVE_STATUSES)})",
-            (fingerprint, *_LIVE_STATUSES),
-        ).fetchone()
+        live = _live_row_by_fingerprint(conn, fingerprint)
         if live is not None:
             raise ValueError(
                 f"fingerprint already held by live finding {live['id']}; "
@@ -797,15 +837,11 @@ def update_finding(
         # transaction and name the blocking row instead.
         if (
             status is not None
-            and status in _LIVE_STATUSES
-            and row["status"] not in _LIVE_STATUSES
+            and status in LIVE_STATUSES
+            and row["status"] not in LIVE_STATUSES
             and row["fingerprint"] is not None
         ):
-            live = conn.execute(
-                f"SELECT id FROM findings WHERE fingerprint = ? AND id != ? "
-                f"AND status IN ({','.join('?' for _ in _LIVE_STATUSES)})",
-                (row["fingerprint"], finding_id, *_LIVE_STATUSES),
-            ).fetchone()
+            live = _live_row_by_fingerprint(conn, row["fingerprint"], exclude_id=finding_id)
             if live is not None:
                 raise ValueError(
                     f"cannot set {finding_id} to {status}: its fingerprint is held by "
@@ -904,7 +940,6 @@ def similarity_candidates(
     categories: tuple[str, ...] | None = None,
     status: str | None = None,
     statuses: tuple[str, ...] | None = None,
-    exclude_id: str | None = None,
     limit: int | None = None,
     order: str = "oldest",
 ) -> list[dict[str, Any]]:
@@ -938,9 +973,6 @@ def similarity_candidates(
     if statuses:
         conditions.append(f"status IN ({','.join('?' for _ in statuses)})")
         params.extend(statuses)
-    if exclude_id is not None:
-        conditions.append("id != ?")
-        params.append(exclude_id)
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     direction = "DESC" if order == "newest" else "ASC"
     limit_sql = ""
@@ -1516,6 +1548,14 @@ def register_cli(sub, commands) -> None:
                 meta=meta or None,
                 fingerprint=args.fingerprint,
             )
+        except json.JSONDecodeError:
+            # MUST stay ahead of the ValueError arm, which it subclasses — the
+            # _cmd_update ordering contract. A bump/reopen COMMITS before
+            # _finalize_add parses the matched row's stored tags/meta, so this
+            # is a corrupt stored row surfacing after a write that landed, not
+            # bad input; exiting 1 here would be a failure-shaped signal for a
+            # successful mutation.
+            raise
         except ValueError as e:
             print(str(e), file=sys.stderr)
             sys.exit(1)
@@ -1706,6 +1746,11 @@ def register_cli(sub, commands) -> None:
         conn = db.connect()
         imported = 0
         skipped = 0
+        merged = 0
+        errors = 0
+        # Loop-invariant: resolver registration happens at module import, which
+        # db.connect() above completed, so the union cannot change mid-import.
+        dropped_keys = _RESERVED_META_KEYS | db.resolver_reserved_meta_keys()
         with open(args.file, newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
@@ -1749,8 +1794,7 @@ def register_cli(sub, commands) -> None:
                         # mid-way with earlier rows already committed (CB-45
                         # review — the enumeration was the letter, "the
                         # machinery's output is not input" is the intent).
-                        dropped = _RESERVED_META_KEYS | db.resolver_reserved_meta_keys()
-                        meta.update({k: v for k, v in stored.items() if k not in dropped})
+                        meta.update({k: v for k, v in stored.items() if k not in dropped_keys})
                 lines = (row.get("lines") or row.get("Lines") or "").strip()
                 if lines:
                     meta["lines"] = lines
@@ -1762,22 +1806,49 @@ def register_cli(sub, commands) -> None:
                 if fingerprint and fingerprint.startswith(_AUTO_FP_PREFIX):
                     fingerprint = None
 
-                add_finding(
-                    conn,
-                    severity=severity,
-                    category=category,
-                    file=filepath,
-                    description=description,
-                    source=source,
-                    meta=meta or None,
-                    fingerprint=fingerprint,
-                    annotate=False,  # an import is not an observation (CB-45)
-                )
-                imported += 1
+                # Per-row guard: a mid-file bad fingerprint (oversized, live
+                # collision, reserved prefix survives the auto: strip) must not
+                # abort the import with a raw traceback while earlier rows are
+                # already committed — name the row, count it, keep going.
+                try:
+                    result = add_finding(
+                        conn,
+                        severity=severity,
+                        category=category,
+                        file=filepath,
+                        description=description,
+                        source=source,
+                        meta=meta or None,
+                        fingerprint=fingerprint,
+                        annotate=False,  # an import is not an observation (CB-45)
+                    )
+                except ValueError as e:
+                    errors += 1
+                    label = row_id or f"row {imported + skipped + merged + errors}"
+                    print(f"Error importing {label}: {e}", file=sys.stderr)
+                    continue
+                # add_finding is an upsert (CB-43): a row whose fingerprint
+                # matches an existing live card is MERGED into it, not created.
+                # Counting that as "imported" would report full success while
+                # fewer rows exist than the file held; a faithful cross-tracker
+                # restore path is a separate card.
+                if result["was_new"]:
+                    imported += 1
+                else:
+                    merged += 1
 
         conn.close()
-        suffix = f" ({skipped} already present, skipped)" if skipped else ""
+        parts = []
+        if skipped:
+            parts.append(f"{skipped} already present, skipped")
+        if merged:
+            parts.append(f"{merged} merged into existing findings by fingerprint")
+        if errors:
+            parts.append(f"{errors} failed (see stderr)")
+        suffix = f" ({'; '.join(parts)})" if parts else ""
         print(f"Imported {imported} findings.{suffix}")
+        if errors:
+            sys.exit(1)
 
     def _cmd_export_csv(args: argparse.Namespace) -> None:
         conn = db.connect()

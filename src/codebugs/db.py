@@ -265,6 +265,7 @@ class PreAddResolver:
     name: str
     fn: Callable[[sqlite3.Connection, dict[str, Any]], dict[str, Any] | None]
     meta_keys: frozenset[str]
+    updatable_keys: frozenset[str]
 
 
 _pre_add_resolvers: list[PreAddResolver] = []
@@ -281,24 +282,41 @@ def register_pre_add_resolver(
     fn: Callable[[sqlite3.Connection, dict[str, Any]], dict[str, Any] | None],
     *,
     meta_keys: tuple[str, ...],
+    updatable_keys: tuple[str, ...] = (),
 ) -> None:
     """Register a pre-add resolver.
 
     Same discipline as the other HOOK registries (post-add, status-change): an
     identical re-registration is a silent no-op so module re-import is safe —
     but a same-name registration with DIFFERENT meta_keys raises, because a
-    silently ignored contract change is CB-15's failure shape. `meta_keys`
-    declares the ONLY meta keys this resolver's annotation may write; findings
-    reserves the union against caller-supplied meta. Overlap with another
-    resolver's keys is refused (CB-16's last-assignment-wins, at the seam level).
+    silently ignored contract change is CB-15's failure shape, and a same-name
+    registration with a different FUNCTION raises for the same reason: the new
+    implementation would never run while its caller believes it registered
+    (Codex review of this range). `meta_keys` declares the ONLY meta keys this
+    resolver's annotation may write; findings reserves the union against
+    caller-supplied meta. `updatable_keys` (a subset) declares which of those
+    stay writable via update — an annotation that can never be repaired is the
+    CB-26 shape, so a resolver whose stamp is advisory should declare it here.
+    Overlap with another resolver's keys is refused (CB-16's
+    last-assignment-wins, at the seam level).
     """
     keys = frozenset(meta_keys)
+    updatable = frozenset(updatable_keys)
+    if not updatable <= keys:
+        raise ValueError(
+            f"updatable_keys {sorted(updatable - keys)} not declared in meta_keys"
+        )
     for existing in _pre_add_resolvers:
         if existing.name == name:
-            if existing.meta_keys != keys:
+            if existing.meta_keys != keys or existing.updatable_keys != updatable:
                 raise ValueError(
                     f"resolver {name!r} re-registered with different meta_keys "
                     f"{sorted(keys)} (was {sorted(existing.meta_keys)})"
+                )
+            if existing.fn is not fn:
+                raise ValueError(
+                    f"resolver {name!r} already registered with a different function; "
+                    f"a silently ignored implementation would never run"
                 )
             return
     if _RESOLVER_ERRORS_KEY in keys:
@@ -309,7 +327,7 @@ def register_pre_add_resolver(
             raise ValueError(
                 f"meta keys {sorted(overlap)} already declared by resolver {existing.name!r}"
             )
-    _pre_add_resolvers.append(PreAddResolver(name, fn, keys))
+    _pre_add_resolvers.append(PreAddResolver(name, fn, keys, updatable))
 
 
 def resolver_reserved_meta_keys() -> frozenset[str]:
@@ -324,6 +342,20 @@ def resolver_reserved_meta_keys() -> frozenset[str]:
     keys = {_RESOLVER_ERRORS_KEY}
     for r in _pre_add_resolvers:
         keys |= r.meta_keys
+    return frozenset(keys)
+
+
+def resolver_updatable_meta_keys() -> frozenset[str]:
+    """The subset of resolver-reserved keys declared repairable via update.
+
+    Loads the modules first for the same reason as resolver_reserved_meta_keys:
+    which keys are updatable must not depend on which modules a process
+    imported. The runner's own `resolver_errors` is never updatable.
+    """
+    _ensure_modules_loaded()
+    keys: set[str] = set()
+    for r in _pre_add_resolvers:
+        keys |= r.updatable_keys
     return frozenset(keys)
 
 

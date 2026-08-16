@@ -50,9 +50,9 @@ class TestBranchTotality:
 
     def test_branches_partition_the_vocabulary(self):
         branches = (
-            set(findings._LIVE_STATUSES),
+            set(findings.LIVE_STATUSES),
             set(findings._REOPEN_STATUSES),
-            set(findings._RECURRENCE_STATUSES),
+            set(findings.RECURRENCE_STATUSES),
         )
         union = set().union(*branches)
         assert union == set(FINDING_STATUSES), (
@@ -67,7 +67,7 @@ class TestBranchTotality:
             "SELECT sql FROM sqlite_master WHERE name = 'ux_findings_fingerprint_live'"
         ).fetchone()
         assert row is not None, "the identity guarantee index is missing"
-        for status in findings._LIVE_STATUSES:
+        for status in findings.LIVE_STATUSES:
             assert f"'{status}'" in row["sql"]
 
 

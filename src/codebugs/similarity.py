@@ -20,14 +20,19 @@ annotation via update_finding (the reservation is add-side only).
 from __future__ import annotations
 
 import json
-import math
 import re
 import sqlite3
 from collections import defaultdict
 from typing import Any
 
 from codebugs import db
-from codebugs.findings import LIVE_STATUSES, normalized_identity_text, similarity_candidates
+from codebugs.embeddings import cosine_similarity as cosine
+from codebugs.findings import (
+    LIVE_STATUSES,
+    RECURRENCE_STATUSES,
+    normalized_identity_text,
+    similarity_candidates,
+)
 from codebugs.types import (
     is_text_filter_active,
     is_vocabulary_filter_active,
@@ -59,8 +64,11 @@ _WS = re.compile(r"\s+")
 # Annotation pool: live rows plus DECIDED rows — "resembles CB-N, already
 # dismissed" is the most valuable annotation. `fixed` stays out: an exact
 # match already reopens, and a near-match to a fixed card is ambiguous enough
-# to belong in the offline scrub instead.
-_ANNOTATE_STATUSES = LIVE_STATUSES + ("wont_fix", "not_a_bug")
+# to belong in the offline scrub instead. DERIVED from findings' classified
+# branch sets, never re-spelled: TestBranchTotality forces a new vocabulary
+# status to be classified there, and deriving is what makes that guarantee
+# reach this pool.
+_ANNOTATE_STATUSES = LIVE_STATUSES + RECURRENCE_STATUSES
 
 
 def normalize_text(description: str, meta: dict[str, Any] | None = None) -> str:
@@ -85,26 +93,18 @@ def jaccard(a: frozenset[str], b: frozenset[str]) -> float:
     return len(a & b) / len(a | b)
 
 
-def cosine(a: list[float], b: list[float]) -> float:
-    if len(a) != len(b):
-        # zip() would silently truncate the dot product while the norms use all
-        # components — a plausible-looking wrong number instead of an error.
-        raise ValueError(f"vector dimension mismatch: {len(a)} vs {len(b)}")
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(x * x for x in b))
-    if na == 0 or nb == 0:
-        return 0.0
-    return dot / (na * nb)
+# `cosine` is embeddings.cosine_similarity (imported above) — the package's one
+# copy of the math, promoted public when this module needed it a second time.
 
 
-def _validate_score_params(threshold: float, limit: int | None = None) -> None:
+def _validate_score_params(threshold: float, *limits: int | None) -> None:
     if not 0.0 <= threshold <= 1.0:
         raise ValueError(f"threshold must be in [0, 1], got {threshold}")
-    if limit is not None and limit < 0:
-        # A negative limit would negative-slice and silently return the WORST
-        # matches — refuse it.
-        raise ValueError(f"limit must be >= 0, got {limit}")
+    for limit in limits:
+        if limit is not None and limit < 0:
+            # A negative limit would negative-slice and silently return the
+            # WORST matches — refuse it.
+            raise ValueError(f"limit must be >= 0, got {limit}")
 
 
 def _parse_meta(meta_json: str | None) -> dict[str, Any]:
@@ -189,6 +189,18 @@ def find_similar(
     return scored[:limit]
 
 
+def _pair_score(a: dict[str, Any], b: dict[str, Any]) -> float:
+    """The ONE copy of the report's pair-scoring policy.
+
+    Cosine when BOTH members have caller-supplied vectors, lexical trigram
+    Jaccard otherwise — written once so the edge pass and the diameter pass can
+    never disagree about the score they are explaining.
+    """
+    if a["vec"] is not None and b["vec"] is not None:
+        return cosine(a["vec"], b["vec"])
+    return jaccard(a["tri"], b["tri"])
+
+
 class _DSU:
     def __init__(self, ids: list[str]):
         self._parent = {i: i for i in ids}
@@ -228,9 +240,7 @@ def group_report(
     counted. A pair scores by cosine when BOTH members have vectors, lexically
     otherwise.
     """
-    _validate_score_params(threshold, family_limit)
-    if member_limit is not None and member_limit < 0:
-        raise ValueError(f"member_limit must be >= 0, got {member_limit}")
+    _validate_score_params(threshold, family_limit, member_limit)
     if is_text_filter_active(category) and not category.strip():
         raise ValueError("category filter must not be blank")
     # The sentinel test is type-pinned (str.__eq__ on a real str) and the filter
@@ -258,51 +268,53 @@ def group_report(
         recs.append({"row": row, "tri": tri, "vec": (vectors or {}).get(row["id"])})
 
     dsu = _DSU([r["row"]["id"] for r in recs])
-    edges: list[dict[str, Any]] = []
+    edges_by_root: dict[str, list[dict[str, Any]]] = defaultdict(list)
     blocks: dict[str, list[dict]] = defaultdict(list)
     for rec in recs:
         blocks[rec["row"]["category"]].append(rec)
     for block in blocks.values():
+        block_edges = []
         for i in range(len(block)):
             for j in range(i + 1, len(block)):
                 a, b = block[i], block[j]
-                if a["vec"] is not None and b["vec"] is not None:
-                    score = cosine(a["vec"], b["vec"])
-                else:
-                    score = jaccard(a["tri"], b["tri"])
+                score = _pair_score(a, b)
                 if score >= threshold:
                     dsu.union(a["row"]["id"], b["row"]["id"])
-                    edges.append(
+                    block_edges.append(
                         {"a": a["row"]["id"], "b": b["row"]["id"], "score": round(score, 3)}
                     )
+        # Bucketed AFTER the block's unions settle (roots move during union);
+        # an edge implies a union, so both endpoints share a final root and one
+        # bucketing pass replaces a per-family scan of the global edge list.
+        for e in block_edges:
+            edges_by_root[dsu.find(e["a"])].append(e)
 
     members: dict[str, list[dict[str, Any]]] = defaultdict(list)
     recs_by_id = {rec["row"]["id"]: rec for rec in recs}
     for rec in recs:
         members[dsu.find(rec["row"]["id"])].append(rec["row"])
     families = []
-    for fam in members.values():
+    for root, fam in members.items():
         if len(fam) <= 1:
             continue
-        fam_id_set = {m["id"] for m in fam}
-        fam_edges = [e for e in edges if e["a"] in fam_id_set]
+        fam_edges = edges_by_root[root]
         fam_sorted = sorted(fam, key=lambda m: (m["created_at"], m["id"]))
         # min_pair_score is the family's DIAMETER — the minimum over ALL member
         # pairs, sub-threshold pairs included, NOT over the recorded edges
         # (those are >= threshold by construction, so an edge-minimum can never
         # reveal chaining). Union-find takes the transitive closure: the
         # corpus's 43-row family holds a 0.393 pair behind >= 0.7 edges, and
-        # CB-46's sample audit needs that number visible.
+        # CB-46's sample audit needs that number visible. Family pairs WERE
+        # already scored in the block pass, so this re-scores at most 2x the
+        # unavoidable block scan — accepted deliberately: memoizing every pair
+        # score for the diameter would cost O(block^2) memory on a dense block,
+        # while the re-scoring costs only time on the offline path the
+        # docstring already prices.
         min_pair = 1.0
         fam_recs = [recs_by_id[m["id"]] for m in fam_sorted]
         for i in range(len(fam_recs)):
             for j in range(i + 1, len(fam_recs)):
-                a, b = fam_recs[i], fam_recs[j]
-                if a["vec"] is not None and b["vec"] is not None:
-                    pair = cosine(a["vec"], b["vec"])
-                else:
-                    pair = jaccard(a["tri"], b["tri"])
-                min_pair = min(min_pair, pair)
+                min_pair = min(min_pair, _pair_score(fam_recs[i], fam_recs[j]))
         families.append(
             {
                 "category": fam_sorted[0]["category"],
@@ -335,6 +347,12 @@ def group_report(
     if member_limit is not None:
         for f in families:
             f["members"] = f["members"][:member_limit]
+            # Edges follow the member page: a dense family's edge list is
+            # O(size^2), so returning it whole under a member_limit would keep
+            # the response unbounded while claiming to be paginated. edge_count
+            # stays the family total, so truncation is visible.
+            kept = {m["id"] for m in f["members"]}
+            f["edges"] = [e for e in f["edges"] if e["a"] in kept and e["b"] in kept]
     return {
         "threshold": threshold,
         "populations": populations,
@@ -370,7 +388,16 @@ def _annotate_resolver(
     return {"similar_to": matches}
 
 
-db.register_pre_add_resolver("similarity.annotate", _annotate_resolver, meta_keys=("similar_to",))
+# similar_to is declared UPDATABLE: the add-side reservation stops spoofing,
+# but a re-scrub must be able to rewrite or clear a stale annotation (CB-26's
+# unrepairable-annotation shape). Declared here, at the seam, so core findings
+# never learns this extension's key names.
+db.register_pre_add_resolver(
+    "similarity.annotate",
+    _annotate_resolver,
+    meta_keys=("similar_to",),
+    updatable_keys=("similar_to",),
+)
 
 
 def register_tools(mcp, conn_factory) -> None:
@@ -459,6 +486,13 @@ def register_cli(sub, commands) -> None:
     )
     p_check.add_argument("--description", required=True)
     p_check.add_argument("--category", required=True)
+    p_check.add_argument(
+        "--meta",
+        default=None,
+        help="Observation meta as JSON — volatile values are stripped from the "
+        "text before scoring, same as at file time; omitting it for a "
+        "meta-carrying filer previews a DIFFERENT normalization",
+    )
     p_check.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     p_check.add_argument("--limit", type=int, default=MAX_ANNOTATIONS)
     p_check.add_argument("--json", action="store_true", dest="as_json")
@@ -474,20 +508,30 @@ def register_cli(sub, commands) -> None:
     p_report.add_argument("--json", action="store_true", dest="as_json")
 
     def _cmd_similarity_check(args) -> None:
+        # --meta is USER input, parsed before the domain call so its parse
+        # failure reports as bad input — unlike stored-data JSONDecodeError,
+        # which the domain path here structurally cannot raise (see below).
+        meta = None
+        if args.meta:
+            try:
+                meta = json.loads(args.meta)
+            except json.JSONDecodeError as e:
+                print(f"Error: --meta is not valid JSON: {e}", file=sys.stderr)
+                sys.exit(1)
         conn = db.connect()
+        # No JSONDecodeError-first arm here (the _cmd_update pattern): these
+        # read-only commands parse stored meta through the deliberately
+        # tolerant _parse_meta, so a stored-data JSONDecodeError cannot reach
+        # this frame and the arm would assert a hazard that does not exist.
         try:
             matches = find_similar(
                 conn,
                 description=args.description,
                 category=args.category,
+                meta=meta,
                 threshold=args.threshold,
                 limit=args.limit,
             )
-        except json.JSONDecodeError:
-            # Ordering is load-bearing (the _cmd_update pattern): a stored-data
-            # parse failure after reads is NOT bad input, and JSONDecodeError
-            # subclasses ValueError — this arm must come first, and re-raise.
-            raise
         except (KeyError, ValueError) as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
@@ -511,9 +555,9 @@ def register_cli(sub, commands) -> None:
                 family_limit=args.family_limit,
                 member_limit=args.member_limit,
             )
-        except json.JSONDecodeError:
-            raise
         except (KeyError, ValueError) as e:
+            # Same as similarity-check: no stored-data JSONDecodeError can
+            # surface here (_parse_meta is tolerant), so no re-raise arm.
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
         finally:
