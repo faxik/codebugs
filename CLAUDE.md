@@ -2,6 +2,48 @@
 
 AI-native code finding & requirements tracker. SQLite-backed, exposed via MCP server + CLI.
 
+## Workflow — `main` is never edited directly
+
+**Every code edit happens on a short-lived branch, in a worktree.** Borrowed from `../autosorter`
+(2026-08-16), minus its `tools/worktree-*.sh` harness, which this repo does not have and does not
+need — plain git is enough.
+
+**Read this as a tightening, not as a write-down of what already happened.** The branch workflow is
+the dominant pattern — 24 merges, 22 of them named `fix/cb-NN-*` — but it was never stated anywhere,
+and the exceptions are recent rather than ancient: `git log --first-parent --no-merges` shows
+`a29fd50` (the CB-28 query fix) and `1892b80` (a test refactor) landing straight on `main` on
+2026-08-13, and CB-48 was written into the main checkout on 2026-08-16, which is what prompted this
+section. **A convention that exists only as a pattern in the log is not a rule** — nothing bound it,
+so it held until it didn't, and each lapse looked locally reasonable at the time.
+
+- **Create:** `git worktree add .claude/worktrees/<slug> -b <type>/<slug> main`. Types: `fix/*`,
+  `feature/*`, `refactor/*`, `docs/*`, one concern each. A card-driven branch carries its id
+  (`fix/cb-48-tracker-root-init`). Work already started on main moves over with `git stash push
+  <files>` → `git worktree add` → `git stash pop` in the worktree; the stash is shared across
+  worktrees because it lives in the common git dir.
+- **Then work there, entirely.** Check which checkout you are in before any `Edit`/`Write` to a
+  source file. **A surgical `git checkout <branch> -- <files>` onto main is editing main directly**,
+  wearing a hat. Conflicts get resolved *inside* the worktree, never by committing a resolution on
+  main.
+- **Tests and lint run in the worktree, and it needs its own environment.** `uv run --extra dev
+  python -m pytest tests/ -q` — **`--extra dev` is not optional there.** `pytest` and `ruff` live in
+  `project.optional-dependencies`, which `uv run` does not install by default, so a fresh worktree
+  dies with `No module named pytest` while main — synced long ago — works without the flag; the
+  documented commands under **Testing** below are written for main and are incomplete here. `uv run`
+  does build the worktree's own editable install pointing at the worktree, so once the extra is
+  there, the isolation is real. **Never validate a worktree's changes by running the suite from
+  main**: `pythonpath = ["src"]` resolves against the checkout you run in, so that tests main's
+  source and passes on a tree you did not touch. The mirror-image trap is at the MCP-registration
+  rules — from a worktree, a bare `python` reaches `codebugs` through main's editable install, which
+  is why `tests/dump_schema.py` must be run with `PYTHONPATH=src`.
+- **Integrate from main with `git merge --no-ff -m "Merge <branch>: <what changed> (CB-NN)"`.** The
+  merge commit is what makes a card's whole iteration recoverable as one unit; a fast-forward
+  scatters it. **Never delete the branch** — no merged branch has ever been deleted here, and that
+  is the record.
+- **Session end:** `git status` clean in main *and* in every worktree, then `git worktree remove
+  <path>`. Never `--force`: a removal that refuses is telling you work is uncommitted there.
+- **The only thing that may land on main directly** is a `.claude/plans/*.md` note.
+
 ## Architecture
 
 - **Domain modules** (`src/codebugs/`): `db.py` (findings + shared infra), `reqs.py`, `bench.py`, `blockers.py`, `merge.py`, `sweep.py`, `embeddings.py` (vector storage/similarity search, delegates from reqs), `milestones.py` (releases / streams / capacity-aware pull)
@@ -96,7 +138,7 @@ AI-native code finding & requirements tracker. SQLite-backed, exposed via MCP se
 - `cli.py` discovers providers via the registry and filters by `--mode` flag.
 - New modules: define `register_cli(sub, commands)`, call `register_cli_provider("name", register_cli)` at module level.
 - **Two commands are built into `cli.py` rather than owned by a domain module**, registered by `_register_builtins`: `init`, which bootstraps the DB every other command needs, and `where`, which diagnoses the case where that DB cannot be found at all. Both must work in every `--mode` and *before any tracker is reachable*, which is exactly what a domain module cannot promise. `--tracker-root` is likewise global: it lives on the `pre_parser`, so it is parsed before subcommand dispatch and binds every verb, not just `where`.
-- **`init` creates where you stand, and a declared root redirects only reads.** Ambient state must never conjure a tracker in a directory the user is not in. But the mismatch is announced on stderr, because otherwise `init` reports success for a tracker every other command will ignore — a success-shaped signal for a dead end, the same class of lie as CB-15/CB-16.
+- **Where `init` creates is decided by the CHANNEL, not by the fact that a root was declared (CB-48).** This bullet used to read "`init` creates where you stand, and a declared root redirects only reads", and that flattened two channels `db.declared_tracker_root()` already tells apart. `$CODEBUGS_ROOT` is **ambient** — exported into a shell days ago, inherited by an unrelated subprocess — so it still redirects reads only: ambient state must never conjure a tracker in a directory the user is not in. `--tracker-root DIR` is typed on the command line being run, so it is an assertion about *this* invocation, exactly as `project_dir`/`--repo` is, and `--tracker-root DIR init` therefore initializes DIR. Precedence is one rule for reads and writes alike — argument > flag > env > walk — so a positional `init DIR` still outranks the flag. **Any surviving mismatch is announced on stderr**, because otherwise `init` reports success for a tracker every other command will ignore — a success-shaped signal for a dead end, the same class of lie as CB-15/CB-16. **The defect this fixed was worse than the ignored flag itself**: the warning fired on the path where the flag had been dropped, so it printed "commands will read DIR, not CWD" immediately *after* initializing CWD — two adjacent lines asserting the opposite of what was on disk. A test that asserts only "the target got a tracker" cannot see that; `TestInitUnderTheTrackerRootFlag` asserts the directory that must **not** have one on every case.
 
 ## Architecture migration (in progress)
 
