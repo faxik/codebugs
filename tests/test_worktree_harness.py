@@ -248,6 +248,44 @@ class TestMainClean:
         git(repo, "add", "seed.txt")
         assert run_guard("_guard_main_clean", str(repo)).returncode == 11
 
+    def test_untracked_colliding_with_a_branch_added_path_refused(self, repo: Path) -> None:
+        """"git cannot collide with an untracked file" is FALSE.
+
+        That was this guard's original stated rationale, and cross-model review
+        refuted it. If the branch ADDS a path that exists untracked in main,
+        git refuses the merge: "The following untracked working tree files
+        would be overwritten by merge". Verified by running a real merge.
+        Without this the failure lands mid-integration instead of cleanly here.
+        """
+        base = git(repo, "rev-parse", "HEAD")
+        wt = repo.parent / "wt-adds"
+        git(repo, "worktree", "add", "-q", "-b", "fix/cb-1-adds", str(wt), "main")
+        (wt / "src").mkdir()
+        (wt / "src" / "new.py").write_text("from branch\n")
+        git(wt, "add", "-A")
+        git(wt, "commit", "-m", "add new.py")
+        # main stays on main; the colliding path exists there only as untracked.
+        (repo / "src").mkdir(exist_ok=True)
+        (repo / "src" / "new.py").write_text("untracked in main\n")
+        result = run_guard("_guard_main_clean", str(repo), str(wt), base)
+        assert result.returncode == 11
+        assert "src/new.py" in result.stderr
+
+    def test_untracked_not_added_by_branch_still_passes(self, repo: Path) -> None:
+        """The discriminator: only a COLLIDING untracked path is fatal.
+
+        Otherwise the fix would ban the ordinary mid-session plan note, which
+        is the case the warn-only branch exists for.
+        """
+        base = git(repo, "rev-parse", "HEAD")
+        wt = repo.parent / "wt-other"
+        git(repo, "worktree", "add", "-q", "-b", "fix/cb-1-adds", str(wt), "main")
+        (wt / "other.py").write_text("from branch\n")
+        git(wt, "add", "-A")
+        git(wt, "commit", "-m", "add other.py")
+        (repo / "note.md").write_text("plan\n")
+        assert run_guard("_guard_main_clean", str(repo), str(wt), base).returncode == 0
+
     def test_untracked_only_warns_but_passes(self, repo: Path) -> None:
         """A `.claude/plans/*.md` note sits untracked in main mid-session.
 

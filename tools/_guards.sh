@@ -87,14 +87,42 @@ _guard_branch_type() {
 # local changes) or entangles unrelated edits into the integration, and both
 # read as "the harness broke" rather than "main was dirty".
 #
-# UNTRACKED files only WARN. `.claude/plans/*.md` notes legitimately sit
-# untracked in main mid-session (one did while this very card was being built),
-# and a merge cannot collide with a file git does not track.
+# UNTRACKED files usually only WARN: `.claude/plans/*.md` notes legitimately sit
+# untracked in main mid-session (one did while this very card was being built).
+#
+# But "a merge cannot collide with a file git does not track" — which is what an
+# earlier version of this comment claimed — is FALSE, and cross-model review
+# caught it. If the branch ADDS a path that exists untracked in main, git
+# refuses outright: "The following untracked working tree files would be
+# overwritten by merge". Verified by running it. So when the caller supplies the
+# branch context, untracked files are intersected with the paths the branch adds
+# and a collision is a REFUSAL, not a note. Without that context the guard keeps
+# the warn-only behaviour rather than guessing.
+#
+# args: <repo_root> [worktree_path] [base_ref]
 _guard_main_clean() {
-    local repo_root="$1"
+    local repo_root="$1" wt_path="${2:-}" base_ref="${3:-}"
     local tracked untracked
     tracked=$(git -C "${repo_root}" status --porcelain --untracked-files=no)
     untracked=$(git -C "${repo_root}" ls-files --others --exclude-standard)
+
+    if [[ -n "${untracked}" && -n "${wt_path}" && -n "${base_ref}" ]]; then
+        local added collisions
+        # --diff-filter=A: only paths the branch CREATES can collide this way.
+        added=$(git -C "${wt_path}" diff "${base_ref}..HEAD" --name-only --diff-filter=A 2>/dev/null || true)
+        if [[ -n "${added}" ]]; then
+            collisions=$(comm -12 <(sort <<< "${untracked}") <(sort <<< "${added}") || true)
+            if [[ -n "${collisions}" ]]; then
+                echo "ERROR: untracked file(s) in main collide with paths this branch adds:" >&2
+                echo "${collisions}" | sed 's/^/  /' >&2
+                echo "" >&2
+                echo "  git refuses such a merge outright ('untracked working tree files" >&2
+                echo "  would be overwritten by merge'), so this would fail mid-integration" >&2
+                echo "  rather than cleanly here. Move or remove them in main first." >&2
+                return 11
+            fi
+        fi
+    fi
 
     if [[ -n "${untracked}" ]]; then
         echo "  note: main has untracked file(s) — not a blocker, but the" >&2

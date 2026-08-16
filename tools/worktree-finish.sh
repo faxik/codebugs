@@ -210,7 +210,7 @@ echo "[7/7] Integrating into main (under lock)..."
 # Fail fast before waiting on the lock, then re-assert inside it.
 _guard_enforcement_armed "${REPO_ROOT}" || exit $?
 _guard_workspace_on_main "${REPO_ROOT}" || exit $?
-_guard_main_clean "${REPO_ROOT}" || exit $?
+_guard_main_clean "${REPO_ROOT}" "${WORKTREE_PATH}" "${CURRENT_MAIN}" || exit $?
 
 mkdir -p "${WORKTREE_DIR}"
 exec 9>"${LOCK_FILE}"
@@ -224,7 +224,7 @@ echo "  ✓ Lock acquired"
 # Re-assert everything time-dependent inside the lock. Up to 60s passed, and
 # the gates above ran BEFORE the lock existed.
 _guard_workspace_on_main "${REPO_ROOT}" || exit $?
-_guard_main_clean "${REPO_ROOT}" || exit $?
+_guard_main_clean "${REPO_ROOT}" "${WORKTREE_PATH}" "${CURRENT_MAIN}" || exit $?
 CURRENT_MAIN=$(git -C "${REPO_ROOT}" rev-parse main)
 
 # THE LOCK ONLY SERIALIZES THE MERGE, NOT THE TESTING — so verify the tested
