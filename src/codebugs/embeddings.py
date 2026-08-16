@@ -22,8 +22,16 @@ def _unpack_vector(blob: bytes) -> list[float]:
     return list(struct.unpack(f"<{n}f", blob))
 
 
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    """Compute cosine similarity between two vectors."""
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Cosine similarity between two vectors. The package's ONE copy.
+
+    Mismatched dimensions raise: zip() would silently truncate the dot product
+    while the norms use all components — a plausible-looking wrong number
+    instead of an error. (Stored vectors of differing width can only come from
+    corrupt or mixed-model data, which must stay loud.)
+    """
+    if len(a) != len(b):
+        raise ValueError(f"vector dimension mismatch: {len(a)} vs {len(b)}")
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(x * x for x in b))
@@ -113,7 +121,7 @@ def search_similar(
     scored = []
     for row in rows:
         vec = _unpack_vector(row["embedding"])
-        sim = _cosine_similarity(query_embedding, vec)
+        sim = cosine_similarity(query_embedding, vec)
         if sim >= min_similarity:
             d = db.row_to_dict(row)
             d.pop("embedding", None)  # Don't return the blob
