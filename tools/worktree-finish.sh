@@ -172,6 +172,27 @@ else
     echo "  ✓ Already current"
 fi
 
+# SAMPLE THE TESTED STATE HERE — before the gates, not after them.
+#
+# These two values are the definition of "what the gates below are about to run
+# against", and they are only that if nothing can happen between the sample and
+# the run. Sampling them AFTER pytest returns is the CB-41 defect exactly: a
+# concurrent finish landing during the ~70s test window moves main, the
+# post-test sample records the NEW main, and the in-lock comparison then
+# compares new-main to new-main and passes — so the skew guard silently
+# certifies the untested combination it was written to refuse.
+#
+# That is not hypothetical here: round 1 of this card's review wrote the guard
+# with the sample below the gates, and the round-2 adversary reproduced the
+# skew deterministically with a stubbed slow test command. CB-41 took three
+# rounds to learn the same lesson about a lease deadline, and the rule it
+# produced applies verbatim: point-of-use discipline is the wrong enforcement
+# layer, because it has to be re-established every time a statement is inserted
+# between the sample and the use. TESTED_MAIN is now the SAME VALUE the
+# forward-merge used, so it cannot drift from it by construction.
+TESTED_MAIN="${CURRENT_MAIN}"
+TESTED_HEAD=$(git -C "${WORKTREE_PATH}" rev-parse HEAD)
+
 # ---------------------------------------------------------------------------
 # Gates run in the WORKTREE, on the post-forward-merge tree — the combined
 # state that is about to become main, not the branch in isolation.
@@ -198,10 +219,6 @@ else
     fi
     echo "  ✓ tests pass"
 fi
-
-# Exactly what the gates above were run against. Re-checked inside the lock.
-TESTED_MAIN=$(git -C "${REPO_ROOT}" rev-parse main)
-TESTED_HEAD=$(git -C "${WORKTREE_PATH}" rev-parse HEAD)
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -267,7 +284,14 @@ fi
 # (CB-NN)". The merge commit is what makes a card's whole iteration recoverable
 # as one unit — which is exactly what the 2026-08-16 fast-forward destroyed.
 if [[ -z "${MERGE_MSG}" ]]; then
-    _subject=$(git -C "${WORKTREE_PATH}" log -1 --format=%s)
+    # --no-merges: after [5/7] the tip is usually the forward-merge, whose
+    # auto-subject is "Merge commit '<sha>' into <branch>". Using it produced
+    #   Merge fix/cb-99-x: Merge commit '54bfab9…' into fix/cb-99-x (CB-99)
+    # — the "what changed" slot filled with noise, in the common case where the
+    # branch was behind main. The merge commit is the ONE artifact this card
+    # exists to protect, so it gets the last real subject, not the plumbing.
+    _subject=$(git -C "${WORKTREE_PATH}" log -1 --no-merges --format=%s 2>/dev/null || true)
+    [[ -z "${_subject}" ]] && _subject=$(git -C "${WORKTREE_PATH}" log -1 --format=%s)
     _ids=$(printf '%s' "${BRANCH}" | grep -oiE 'cb-?[0-9]+' \
         | tr '[:upper:]' '[:lower:]' | sed -E 's/^cb-?/CB-/' | sort -u | paste -sd, - || true)
     MERGE_MSG="Merge ${BRANCH}: ${_subject}"

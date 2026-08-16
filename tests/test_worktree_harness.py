@@ -84,6 +84,17 @@ class TestBranchType:
             "fix/",  # trailing slash, empty slug
             "fix/a/b",  # nested path is not one of the four shapes
             "Fix/cb-1",  # case-sensitive: the convention is lowercase
+            # PREFIXED types. Without a `^` anchor the regex matches anywhere,
+            # so all of these were accepted — and no case in this table began
+            # with a prefix, so the missing anchor survived mutation testing
+            # until cross-model review found it. CLAUDE.md already carries this
+            # trap for SQL identifiers ("anchor with fullmatch, not ^…$").
+            "my-fix/cb-1",
+            "wip-feature/x",
+            "x-docs/y",
+            # SUFFIXED, the mirror case: a missing `$` would accept these.
+            "fix/cb-1 evil",
+            "fix/cb-1\nmain",
         ],
     )
     def test_off_convention_refused(self, branch: str) -> None:
@@ -189,7 +200,32 @@ class TestConflictMarkers:
         assert run_guard("_guard_conflict_markers", str(repo), base).returncode == 0
 
     def test_deleted_file_does_not_break_the_scan(self, repo: Path) -> None:
-        """A deleted path has no content to read; --diff-filter=d must skip it."""
+        """A deleted path has no content to read; --diff-filter=d must skip it.
+
+        DISCRIMINATION NOTE: an earlier version of this test deleted the only
+        file and asserted rc==0, which passes with or without --diff-filter=d
+        (without it, `git show HEAD:gone.py` fails, `|| continue` skips, and
+        `bad` stays empty — the same rc). Cross-model review flagged it as a
+        test that cannot fail. It now deletes one file AND keeps a marker in
+        another, so dropping the filter changes the outcome: the scan must
+        still reach the surviving file and report it.
+        """
+        (repo / "gone.py").write_text("x = 1\n")
+        git(repo, "add", "gone.py")
+        git(repo, "commit", "-m", "add")
+        base = git(repo, "rev-parse", "HEAD")
+        git(repo, "checkout", "-b", "fix/cb-1-x")
+        git(repo, "rm", "-q", "gone.py")
+        (repo / "kept.py").write_text("<<<<<<< HEAD\na\n=======\nb\n>>>>>>> x\n")
+        git(repo, "add", "kept.py")
+        git(repo, "commit", "-m", "remove one, add a marker in another")
+        result = run_guard("_guard_conflict_markers", str(repo), base)
+        assert result.returncode == 5
+        assert "kept.py" in result.stderr
+        assert "gone.py" not in result.stderr
+
+    def test_pure_deletion_alone_is_clean(self, repo: Path) -> None:
+        """The other half: a branch that ONLY deletes must still pass."""
         (repo / "gone.py").write_text("x = 1\n")
         git(repo, "add", "gone.py")
         git(repo, "commit", "-m", "add")
@@ -198,6 +234,21 @@ class TestConflictMarkers:
         git(repo, "rm", "-q", "gone.py")
         git(repo, "commit", "-m", "remove")
         assert run_guard("_guard_conflict_markers", str(repo), base).returncode == 0
+
+    def test_non_ascii_path_is_scanned(self, repo: Path) -> None:
+        """Default core.quotePath C-quotes non-ASCII names.
+
+        The guard used `--name-only` without -z, so such a path came back as
+        "\\321\\202.py", `git show HEAD:<that>` failed, `|| continue` skipped
+        it, and a committed marker was silently accepted — the same
+        silent-skip shape as the SIGPIPE bug. Found by cross-model review.
+        """
+        base = git(repo, "rev-parse", "HEAD")
+        git(repo, "checkout", "-b", "fix/cb-1-x")
+        (repo / "тест.py").write_text("<<<<<<< HEAD\na\n=======\nb\n>>>>>>> x\n")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-m", "non-ascii path")
+        assert run_guard("_guard_conflict_markers", str(repo), base).returncode == 5
 
 
 class TestStaleBase:
@@ -315,10 +366,22 @@ class TestEnforcementArmed:
         return hooks / "pre-commit"
 
     def _arm(self, repo: Path) -> Path:
+        """Arm the test repo the way install-hooks.sh does.
+
+        The repo needs its OWN tools/pre-commit-hook.sh, because the guard
+        checks the installed hook's IDENTITY against `<repo>/tools/` — file
+        existence alone is not evidence that the hook is this hook.
+        """
         git(repo, "config", "merge.ff", "false")
+        tools = repo / "tools"
+        tools.mkdir(exist_ok=True)
+        canonical = tools / "pre-commit-hook.sh"
+        shutil.copy(REPO_ROOT / "tools" / "pre-commit-hook.sh", canonical)
+        canonical.chmod(0o755)
         hook = self._hook_path(repo)
-        shutil.copy(REPO_ROOT / "tools" / "pre-commit-hook.sh", hook)
-        hook.chmod(0o755)
+        if hook.exists() or hook.is_symlink():
+            hook.unlink()
+        hook.symlink_to(canonical)
         return hook
 
     def test_fully_armed_passes(self, repo: Path) -> None:
@@ -359,10 +422,51 @@ class TestEnforcementArmed:
 
     def test_non_executable_hook_refused(self, repo: Path) -> None:
         self._arm(repo)
-        self._hook_path(repo).chmod(0o644)
+        (repo / "tools" / "pre-commit-hook.sh").chmod(0o644)
         result = run_guard("_guard_enforcement_armed", str(repo))
         assert result.returncode == 12
         assert "not executable" in result.stderr
+
+    def test_hook_symlinked_into_a_worktree_refused(self, repo: Path) -> None:
+        """Existence is not identity — and this state was LIVE in this repo.
+
+        The first install-hooks.sh symlinked the hook into the authoring
+        worktree. Such a link satisfies -e and -x right up until that worktree
+        is removed, which is the last thing worktree-finish.sh does — to
+        itself. So a finish could pass this guard, land, remove its worktree,
+        and leave the repo silently unarmed, with the symlink still sitting in
+        .git/hooks looking correct.
+        """
+        self._arm(repo)
+        stray = repo / "elsewhere"
+        stray.mkdir()
+        impostor = stray / "pre-commit-hook.sh"
+        shutil.copy(REPO_ROOT / "tools" / "pre-commit-hook.sh", impostor)
+        impostor.chmod(0o755)
+        hook = self._hook_path(repo)
+        hook.unlink()
+        hook.symlink_to(impostor)
+        result = run_guard("_guard_enforcement_armed", str(repo))
+        assert result.returncode == 12
+        assert "not main's copy" in result.stderr
+
+    def test_noop_impostor_hook_refused(self, repo: Path) -> None:
+        """A hand-written `exit 0` passes every existence check and enforces nothing."""
+        self._arm(repo)
+        hook = self._hook_path(repo)
+        hook.unlink()
+        hook.write_text("#!/bin/sh\nexit 0\n")
+        hook.chmod(0o755)
+        assert run_guard("_guard_enforcement_armed", str(repo)).returncode == 12
+
+    def test_identical_copy_is_accepted(self, repo: Path) -> None:
+        """Not everyone symlinks. A byte-identical copy is genuinely armed."""
+        self._arm(repo)
+        hook = self._hook_path(repo)
+        hook.unlink()
+        shutil.copy(repo / "tools" / "pre-commit-hook.sh", hook)
+        hook.chmod(0o755)
+        assert run_guard("_guard_enforcement_armed", str(repo)).returncode == 0
 
 
 class TestUntrackedPyAtRoot:
@@ -496,6 +600,86 @@ class TestHarnessIntegrity:
         assert merges, "could not find the integration merge in worktree-finish.sh"
         for line in merges:
             assert "--no-ff" in line, f"integration merge lost --no-ff: {line.strip()}"
+
+
+class TestGuardsAreActuallyInvoked:
+    """Every guard is unit-tested; that does NOT test the COMPOSITION.
+
+    Cross-model review deleted three guard CALLS from worktree-finish.sh —
+    including `_guard_branch_type`, the one that exists for the 2026-08-16
+    incident — and the whole suite stayed green, because nothing here executed
+    the script. That is this repo's own recurring rule turned on its own
+    harness: *a check that validates elements cannot validate their
+    composition.*
+
+    Executing the full script in a test is impractical (it merges onto main and
+    runs a 70-second suite), so these assert the WIRING: each guard is called,
+    with its return code propagated, in the right phase. Structural rather than
+    behavioural, and said so plainly — but it fails when a call is deleted,
+    which the previous suite did not.
+    """
+
+    FINISH = REPO_ROOT / "tools" / "worktree-finish.sh"
+    SETUP = REPO_ROOT / "tools" / "worktree-setup.sh"
+
+    @pytest.mark.parametrize(
+        "guard",
+        [
+            "_guard_finishable_branch",
+            "_guard_branch_type",
+            "_guard_untracked_py_at_root",
+            "_guard_leaked_repr",
+            "_guard_nonempty_diff",
+            "_guard_conflict_markers",
+            "_guard_stale_base",
+            "_guard_enforcement_armed",
+            "_guard_workspace_on_main",
+            "_guard_main_clean",
+        ],
+    )
+    def test_finish_invokes_guard_and_propagates_its_code(self, guard: str) -> None:
+        src = self.FINISH.read_text()
+        calls = [ln.strip() for ln in src.splitlines() if ln.strip().startswith(guard + " ")]
+        assert calls, f"worktree-finish.sh never calls {guard}"
+        for call in calls:
+            assert "|| exit $?" in call, (
+                f"{guard} is called without propagating its exit code: {call}"
+            )
+
+    def test_setup_validates_the_branch_before_creating_anything(self) -> None:
+        """Order matters: a refusal must leave no half-made worktree."""
+        src = self.SETUP.read_text()
+        guard_at = src.index("_guard_branch_type")
+        create_at = src.index("worktree add")
+        assert guard_at < create_at, "branch type is validated after the worktree is created"
+
+    def test_enforcement_armed_runs_before_the_lock_is_opened(self) -> None:
+        """Fail fast, rather than after waiting up to 60s on the lock."""
+        src = self.FINISH.read_text()
+        assert src.index("_guard_enforcement_armed") < src.index("exec 9>")
+
+    def test_skew_check_uses_the_value_the_gates_ran_against(self) -> None:
+        """CB-41's shape, reintroduced by this card's own round-1 fix.
+
+        TESTED_MAIN was sampled AFTER pytest. A concurrent finish landing
+        during the ~70s test window moved main, the post-test sample recorded
+        the NEW main, and the in-lock comparison then compared new-main to
+        new-main and passed — the skew guard silently certifying the untested
+        combination it was written to refuse. Reproduced deterministically by
+        the round-2 adversary with a stubbed slow test command.
+
+        The repair is the CB-41 repair: make it unrepresentable rather than
+        re-establish discipline at the point of use. TESTED_MAIN is now the
+        SAME VALUE the forward-merge consumed, so no statement can be inserted
+        between the sample and the use.
+        """
+        src = self.FINISH.read_text()
+        assert 'TESTED_MAIN="${CURRENT_MAIN}"' in src, (
+            "TESTED_MAIN must be the value the forward-merge used, not a re-sample"
+        )
+        assert "TESTED_MAIN=$(git" not in src, "TESTED_MAIN is re-sampled from git"
+        # And it must be established before the gates, not after them.
+        assert src.index('TESTED_MAIN="${CURRENT_MAIN}"') < src.index("pytest tests/")
 
 
 class TestPreCommitHook:

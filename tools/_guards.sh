@@ -250,10 +250,19 @@ _guard_untracked_py_at_root() {
 # content to scan.
 _guard_conflict_markers() {
     local wt_path="$1" base_ref="$2"
-    local files f bad=""
-    files=$(git -C "${wt_path}" diff "${base_ref}..HEAD" --name-only --diff-filter=d 2>/dev/null || true)
-    [[ -z "${files}" ]] && return 0
-    while IFS= read -r f; do
+    local f bad=""
+    # -z with NUL-delimited reads, fed by PROCESS SUBSTITUTION rather than a
+    # variable: under the default core.quotePath a path with non-ASCII bytes
+    # comes back C-quoted ("\321\202.py"), `git show HEAD:<that>` then fails,
+    # the skip swallows it, and a committed marker is silently ACCEPTED — the
+    # same silent-skip shape as the SIGPIPE bug above (cross-model review found
+    # both).
+    #
+    # It must NOT be captured into a variable first: bash DROPS NUL bytes on
+    # assignment, so `files=$(git … -z)` yields one run-together string and the
+    # loop reads a single bogus path. Caught by this file's own tests going red
+    # the moment -z was introduced.
+    while IFS= read -r -d '' f; do
         [[ -z "${f}" ]] && continue
         # Read from the tree, so an uncommitted local fix cannot mask a marker
         # that is actually committed on the branch.
@@ -266,12 +275,29 @@ _guard_conflict_markers() {
         # small fixtures in the test suite would never have caught it (found by
         # cross-model review). Consume the stream fully and test the captured
         # text instead: no pipe, no early exit, no signal.
+        # FAIL CLOSED on an unreadable file. `--diff-filter=d` has already
+        # excluded deletions, so every path reaching here MUST be readable from
+        # the tree; a failure means a corrupt object, a permissions problem, or
+        # a path this loop mis-parsed. The old code did `|| continue`, which
+        # turned every such case into "no markers here" — a guard reporting
+        # clean because it could not look. Cross-model review flagged three
+        # guards that fail open on a git error; this is the one where the
+        # failure is silent AND the guard is the last line before main.
+        #
+        # This is also what makes `--diff-filter=d` load-bearing rather than an
+        # optimization: with `|| continue`, dropping the filter was a
+        # behaviourally EQUIVALENT mutation (deletions listed, show fails, skip)
+        # and no test could distinguish it.
         local content
-        content=$(git -C "${wt_path}" show "HEAD:${f}" 2>/dev/null) || continue
+        if ! content=$(git -C "${wt_path}" show "HEAD:${f}" 2>/dev/null); then
+            echo "ERROR: cannot read '${f}' from ${wt_path} HEAD — refusing to" >&2
+            echo "  report this branch clean without having scanned it." >&2
+            return 5
+        fi
         if grep -qE '^(<{7}|={7}|>{7})( |$)' <<< "${content}"; then
             bad="${bad}${f}"$'\n'
         fi
-    done <<< "${files}"
+    done < <(git -C "${wt_path}" diff "${base_ref}..HEAD" --name-only --diff-filter=d -z 2>/dev/null || true)
     [[ -z "${bad}" ]] && return 0
     echo "ERROR: unresolved conflict markers committed on this branch:" >&2
     echo "${bad}" | sed '/^$/d; s/^/  /' >&2
@@ -317,14 +343,6 @@ _guard_stale_base() {
 }
 
 # ---------------------------------------------------------------------------
-# Ported from autosorter (CB-2099 there): refuse to integrate when the PRIMARY
-# workspace does not have main checked out.
-#
-# The integration merge lands on whatever branch the main workspace has checked
-# out. In autosorter a parallel session once had a CI branch checked out; the
-# finish merged onto that, printed "Integration complete", and orphaned the
-# commit. A detached HEAD is equally not-main and aborts through the same path.
-# ---------------------------------------------------------------------------
 # NEW vs autosorter: refuse to integrate from a clone whose enforcement is not
 # armed. This closes the hole that everything else in this file sits on.
 #
@@ -347,8 +365,9 @@ _guard_enforcement_armed() {
     ff=$(git -C "${repo_root}" config --get merge.ff || true)
     [[ "${ff}" == "false" ]] || problems="${problems}  merge.ff is '${ff:-unset}', expected 'false'"$'\n'
 
-    local hook
+    local hook expected
     hook="$(git -C "${repo_root}" rev-parse --path-format=absolute --git-common-dir)/hooks/pre-commit"
+    expected="${repo_root}/tools/pre-commit-hook.sh"
     if [[ ! -e "${hook}" ]]; then
         # -e follows symlinks, so a DANGLING symlink lands here, not below.
         if [[ -L "${hook}" ]]; then
@@ -358,6 +377,37 @@ _guard_enforcement_armed() {
         fi
     elif [[ ! -x "${hook}" ]]; then
         problems="${problems}  pre-commit hook is not executable (${hook})"$'\n'
+    else
+        # IDENTITY, not merely existence — an executable file at that path is
+        # not evidence that it is THIS hook.
+        #
+        # Two ways existence lies. (1) A symlink into a WORKTREE satisfies -e
+        # and -x today and dangles the moment that worktree is removed — which
+        # is the last thing worktree-finish.sh does, to itself, so a finish
+        # could pass this guard, land, and leave the repo silently unarmed.
+        # (2) A hand-written `#!/bin/sh\nexit 0` at that path passes every
+        # existence check while enforcing nothing. Both were found by
+        # cross-model review; the first was live in this repo at the time.
+        if [[ ! -e "${expected}" ]]; then
+            problems="${problems}  ${expected} is missing — cannot verify the hook's identity"$'\n'
+        elif [[ -L "${hook}" ]]; then
+            # A SYMLINK is judged by its TARGET, never by content. Content
+            # equality is not the property that matters here: a link to an
+            # identical file inside a worktree is byte-for-byte correct today
+            # and gone tomorrow. Only a link into main's own tools/ survives
+            # `git worktree remove`.
+            local target want
+            target="$(readlink -f "${hook}" 2>/dev/null || echo "${hook}")"
+            want="$(readlink -f "${expected}" 2>/dev/null || echo "${expected}")"
+            if [[ "${target}" != "${want}" ]]; then
+                problems="${problems}  pre-commit hook is not main's copy: ${target}"$'\n'
+                problems="${problems}    expected ${expected} (a link into a worktree dies with it)"$'\n'
+            fi
+        elif ! cmp -s "${hook}" "${expected}"; then
+            # A REGULAR FILE cannot dangle, so content is the right test —
+            # and it is the test that rejects a hand-written `exit 0` impostor.
+            problems="${problems}  pre-commit hook differs from ${expected}"$'\n'
+        fi
     fi
 
     [[ -z "${problems}" ]] && return 0
@@ -373,6 +423,14 @@ _guard_enforcement_armed() {
     return 12
 }
 
+# ---------------------------------------------------------------------------
+# Ported from autosorter (CB-2099 there): refuse to integrate when the PRIMARY
+# workspace does not have main checked out.
+#
+# The integration merge lands on whatever branch the main workspace has checked
+# out. In autosorter a parallel session once had a CI branch checked out; the
+# finish merged onto that, printed "Integration complete", and orphaned the
+# commit. A detached HEAD is equally not-main and aborts through the same path.
 _guard_workspace_on_main() {
     local repo_root="$1"
     local checked_out

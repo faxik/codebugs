@@ -184,7 +184,18 @@ fi
 # ---------------------------------------------------------------------------
 echo "[4/4] Claiming cards..."
 if [[ -z "${_claim_ids}" ]]; then
-    echo "  (nothing to claim)"
+    # Distinguish "nothing to do" from "could not look". They printed the same
+    # line before, so a machine without the CLI silently reported the same
+    # success as a branch carrying no card id — a status write nobody made,
+    # indistinguishable from one nobody needed (cross-model review).
+    if [[ -n "${CB_IDS}" ]] && ! command -v codebugs >/dev/null 2>&1; then
+        echo "  ⚠ codebugs CLI not on PATH — ${CB_IDS//$'\n'/ } NOT claimed."
+        echo "    The branch-name collision guard above still ran; it is pure git."
+    elif [[ -n "${CODEBUGS_SETUP_NO_CLAIM:-}" ]]; then
+        echo "  (claiming disabled by CODEBUGS_SETUP_NO_CLAIM)"
+    else
+        echo "  (nothing to claim)"
+    fi
 fi
 for cb in ${_claim_ids}; do
     if codebugs update "${cb}" --status in_progress >/dev/null 2>&1; then

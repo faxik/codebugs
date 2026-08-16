@@ -21,10 +21,12 @@ Prose cannot enforce prose. That is CB-50, and the harness below is its fix.
 
 | Rule | Mechanism | Refuses with |
 |---|---|---|
-| Branch carries `fix/`\|`feature/`\|`refactor/`\|`docs/` | `_guard_branch_type` + pre-commit hook | exit 7 |
+| Branch carries `fix/`\|`feature/`\|`refactor/`\|`docs/` | `_guard_branch_type` (7) + pre-commit hook (1) | exit 7 / 1 |
 | Nothing but `.claude/plans/*.md` is committed on main | pre-commit hook | exit 1 |
 | Integration never fast-forwards | `--no-ff` + `git config merge.ff false` | — |
 | One integration at a time | `flock` on `.worktrees/.integrate.lock` | exit 1 |
+| The tested state is the landed state | in-lock SHA re-check | exit 13 |
+| This clone is actually armed | `_guard_enforcement_armed` | exit 12 |
 | Main has main checked out, and is clean | `_guard_workspace_on_main`, `_guard_main_clean` | exit 8, 11 |
 | The branch actually carries a change | `_guard_nonempty_diff` | exit 9 |
 | No conflict markers, no scratch `.py`, no stale base | `_guard_conflict_markers`, `_guard_untracked_py_at_root`, `_guard_stale_base` | exit 5, 4, 6 |
@@ -43,20 +45,36 @@ server-side protection on `origin`. A fresh clone has none of it until `tools/in
 run — which is why `_guard_enforcement_armed` refuses to integrate from an unarmed clone, the one
 moment being unarmed can cost anything. Even armed, `git rebase`, `git cherry-pick`, `git revert`,
 `git am`, `git reset --hard`, `git push`, and `core.hooksPath` all move or publish `main` without
-passing the pre-commit hook, and a typed branch committed in the *primary* checkout satisfies the
-hook while ignoring the worktree rule entirely. The remedy for a shared repo is a protected remote
+passing the pre-commit hook; a typed branch committed in the *primary* checkout satisfies the hook
+while ignoring the worktree rule entirely; and **`git merge <untyped-branch>` onto main is caught by
+nothing** — `merge.ff=false` gives it a merge commit, but no mechanism reads the branch name,
+because only `pre-commit` is installed and git runs `pre-merge-commit` for merges. A
+`pre-merge-commit` hook would close that in ~10 lines (`worktree-finish.sh` would then have to stop
+passing `--no-verify` to its own merge); deferred deliberately rather than shipped as a
+name-matching heuristic. The remedy for a shared repo is a protected remote
 branch plus required CI; this harness is the local half, and calling it more than that would be the
 same false assurance the prose version gave.
 
 `tests/test_worktree_harness.py` covers every guard on both sides — the state it must refuse and the
-state it must allow. Each was mutation-checked against a deliberately broken guard; cross-model
-review then found a seventh mutation the suite missed (one of two alternatives in the leaked-repr
-pattern), which is now covered.
+state it must allow — **and separately asserts that `worktree-finish.sh` actually calls each one**.
+That second class exists because it had to: two adversarial reviews deleted guard *invocations* from
+the script, including the branch-type guard that exists for the 2026-08-16 incident, and the whole
+suite stayed green, because nothing executed the script. Every guard was unit-tested and the
+composition was not — this repo's own rule (*a check that validates elements cannot validate their
+composition*) turned on its own harness. Do not read the per-guard tests as covering the wiring.
+
+Executing the whole script in a test is impractical (it merges onto main and runs the full suite),
+so the wiring tests are structural — they read the script and assert each guard is invoked with
+`|| exit $?`, in the right phase. Say that plainly rather than letting them look behavioural.
 
 - **Create:** `tools/worktree-setup.sh <type>/<slug> [base]`, which validates the name, refuses a
   card already carried by another branch, creates `.worktrees/<type>-<slug>`, primes the worktree's
-  own dev environment, and flips an `open` card to `in_progress` — creating the worktree *is* the
-  claim, so the registry stops depending on someone remembering to lock. One concern per branch; a
+  own dev environment, and flips an `open` card to `in_progress`. **That last part is a
+  best-effort status write, not a claim** — it does not go through `claims.py`, takes no holder
+  identity, has no release path, and is skipped entirely when the `codebugs` CLI is off `PATH`, so
+  an abandoned branch leaves the card `in_progress` forever. The *branch-name* collision check is
+  the half with teeth, and it is pure git. Wiring this to the claims ledger (which already provides
+  mutual exclusion via a partial unique index) is open work. One concern per branch; a
   card-driven branch carries its id (`fix/cb-48-tracker-root-init`). Work already started on main
   moves over with `git stash push <files>` → setup → `git stash pop` in the worktree; the stash is
   shared across worktrees because it lives in the common git dir.
