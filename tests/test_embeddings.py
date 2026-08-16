@@ -95,13 +95,13 @@ class TestEmbeddings:
             assert abs(a - b) < 1e-6
 
     def test_cosine_similarity_identical(self):
-        assert embeddings._cosine_similarity([1, 0, 0], [1, 0, 0]) == 1.0
+        assert embeddings.cosine_similarity([1, 0, 0], [1, 0, 0]) == 1.0
 
     def test_cosine_similarity_orthogonal(self):
-        assert embeddings._cosine_similarity([1, 0], [0, 1]) == 0.0
+        assert embeddings.cosine_similarity([1, 0], [0, 1]) == 0.0
 
     def test_cosine_similarity_zero_vector(self):
-        assert embeddings._cosine_similarity([0, 0], [1, 1]) == 0.0
+        assert embeddings.cosine_similarity([0, 0], [1, 1]) == 0.0
 
 
 class TestFalseyStatusFilterDoesNotDisableTheFilter:

@@ -36,6 +36,7 @@ is the deeper fix and is filed as its own card.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from typing import Any
 
 from codebugs import entities
@@ -152,18 +153,64 @@ def _live_rows(
     return conn.execute(sql + " ORDER BY id", params).fetchall()
 
 
-def _apply_row(conn: sqlite3.Connection, row: sqlite3.Row, target: str, actor: str) -> None:
-    """Project one item onto ``target``. Non-committing, by contract.
+def _release_slot(conn: sqlite3.Connection, row: sqlite3.Row) -> None:
+    """Release the capacity slot an item's assigned agent holds, if any.
 
-    Capacity is released BEFORE ``assigned_agent`` is cleared: the row is the only
-    record of who held the slot, so clearing first and then failing would leak the
-    slot unrecoverably.
+    The ONE copy of the ordering rule both reconcile paths depend on: call this
+    BEFORE the UPDATE that clears ``assigned_agent`` — the row is the only
+    record of who held the slot, so clearing first and then failing would leak
+    the slot unrecoverably (CB-26 trap 3).
     """
     agent = row["assigned_agent"]
     if agent:
         from codebugs.milestones.capacity import _decrement_capacity
 
         _decrement_capacity(conn, agent, row["size"])
+
+
+def _run_guarded(
+    conn: sqlite3.Connection,
+    *,
+    savepoint: str,
+    fail_action: str,
+    entity_id: str,
+    old_status: str | None,
+    new_status: str,
+    body: Callable[[], None],
+) -> None:
+    """SAVEPOINT + audit-on-failure scaffold shared by both reconcile hooks.
+
+    ``db.run_status_change_hooks`` SWALLOWS exceptions and the caller's
+    ``db.txn`` then commits anyway, so a mid-loop failure would otherwise
+    commit a partial reconciliation behind a success-shaped return. The body
+    therefore runs inside a SAVEPOINT: either every row moves or none does,
+    and the failure is recorded as an audit row written AFTER the rollback
+    (stderr is invisible to an MCP caller; an audit row is queryable). Shared,
+    not copied per hook: the failure-audit contract must move as one piece.
+    """
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        body()
+    except Exception as exc:  # noqa: BLE001
+        conn.execute(f"ROLLBACK TO {savepoint}")
+        conn.execute(f"RELEASE {savepoint}")
+        _audit(
+            conn,
+            milestone_id="stream/triage",
+            item_ref=entity_id,
+            actor=RECONCILER_ACTOR,
+            action=fail_action,
+            from_state=old_status,
+            to_state=new_status,
+            reason=f"{type(exc).__name__}: {exc}",
+        )
+        raise
+    conn.execute(f"RELEASE {savepoint}")
+
+
+def _apply_row(conn: sqlite3.Connection, row: sqlite3.Row, target: str, actor: str) -> None:
+    """Project one item onto ``target``. Non-committing, by contract."""
+    _release_slot(conn, row)
 
     now = utc_now()
     done_at = now if target == "done" else None
@@ -193,12 +240,7 @@ def _reconcile_on_terminal(
     non-committing — calling ``release_item`` or ``move_milestone_item`` instead
     would commit the CALLER's work (the CB-24 trap).
 
-    ``db.run_status_change_hooks`` SWALLOWS exceptions and the caller's ``db.txn``
-    then commits anyway, so a mid-loop failure would otherwise commit a partial
-    reconciliation behind a success-shaped return. The body therefore runs inside a
-    SAVEPOINT: either every row moves or none does, and the failure is recorded as
-    an audit row written AFTER the rollback (stderr is invisible to an MCP caller;
-    an audit row is queryable).
+    Partial-failure discipline lives in ``_run_guarded`` — see its docstring.
     """
     # Pure-Python checks FIRST. This hook fires on every finding and requirement
     # status change, and most of those are not terminal; probing the schema before
@@ -217,27 +259,21 @@ def _reconcile_on_terminal(
 
     target = outcome_for(ref.kind.name, new_status)
 
-    conn.execute("SAVEPOINT ms_reconcile")
-    try:
+    def body() -> None:
         for row in _live_rows(
             conn, item_kind=item_kind, target=target, item_ref=entity_id
         ):
             _apply_row(conn, row, target, RECONCILER_ACTOR)
-    except Exception as exc:  # noqa: BLE001
-        conn.execute("ROLLBACK TO ms_reconcile")
-        conn.execute("RELEASE ms_reconcile")
-        _audit(
-            conn,
-            milestone_id="stream/triage",
-            item_ref=entity_id,
-            actor=RECONCILER_ACTOR,
-            action="reconcile_failed",
-            from_state=old_status,
-            to_state=new_status,
-            reason=f"{type(exc).__name__}: {exc}",
-        )
-        raise
-    conn.execute("RELEASE ms_reconcile")
+
+    _run_guarded(
+        conn,
+        savepoint="ms_reconcile",
+        fail_action="reconcile_failed",
+        entity_id=entity_id,
+        old_status=old_status,
+        new_status=new_status,
+        body=body,
+    )
 
 
 def _reconcile_on_reopen(
@@ -261,11 +297,11 @@ def _reconcile_on_reopen(
     released — an item closed via ``set_item_status(status='done')`` still carries
     ``assigned_agent``/``pulled_at``/``done_commit``, and reopening it without
     releasing would leave the old agent charged for an item a new agent can pull
-    (both charged for one item). So this mirrors ``_apply_row``: decrement capacity
-    BEFORE clearing ``assigned_agent``, then clear ownership and ``done_commit``
+    (both charged for one item). So: release the slot, then clear ownership and
+    ``done_commit``
     (the reopened item is no longer integrated; the audit reason preserves the old
-    commit). Same SAVEPOINT + audit-on-failure discipline as the terminal hook,
-    because ``run_status_change_hooks`` swallows and the caller commits anyway.
+    commit). Slot release goes through the shared ``_release_slot``; the SAVEPOINT
+    + audit-on-failure discipline is the shared ``_run_guarded``.
     """
     try:
         ref = entities.EntityRef.of(entity_id)
@@ -282,8 +318,8 @@ def _reconcile_on_reopen(
         return
 
     now = utc_now()
-    conn.execute("SAVEPOINT ms_reconcile_reopen")
-    try:
+
+    def body() -> None:
         rows = conn.execute(
             "SELECT * FROM milestone_items "
             f"WHERE milestone_id IN ({_STREAM_ONLY}) "
@@ -292,11 +328,7 @@ def _reconcile_on_reopen(
             (item_kind, entity_id),
         ).fetchall()
         for row in rows:
-            agent = row["assigned_agent"]
-            if agent:
-                from codebugs.milestones.capacity import _decrement_capacity
-
-                _decrement_capacity(conn, agent, row["size"])
+            _release_slot(conn, row)
             reason = "source entity reopened"
             if row["done_commit"]:
                 reason += f" (was integrated at {row['done_commit']})"
@@ -316,21 +348,16 @@ def _reconcile_on_reopen(
                 to_state="open",
                 reason=reason,
             )
-    except Exception as exc:  # noqa: BLE001
-        conn.execute("ROLLBACK TO ms_reconcile_reopen")
-        conn.execute("RELEASE ms_reconcile_reopen")
-        _audit(
-            conn,
-            milestone_id="stream/triage",
-            item_ref=entity_id,
-            actor=RECONCILER_ACTOR,
-            action="reconcile_reopen_failed",
-            from_state=old_status,
-            to_state=new_status,
-            reason=f"{type(exc).__name__}: {exc}",
-        )
-        raise
-    conn.execute("RELEASE ms_reconcile_reopen")
+
+    _run_guarded(
+        conn,
+        savepoint="ms_reconcile_reopen",
+        fail_action="reconcile_reopen_failed",
+        entity_id=entity_id,
+        old_status=old_status,
+        new_status=new_status,
+        body=body,
+    )
 
 
 def reconcile_all(

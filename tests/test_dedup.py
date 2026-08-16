@@ -50,9 +50,9 @@ class TestBranchTotality:
 
     def test_branches_partition_the_vocabulary(self):
         branches = (
-            set(findings._LIVE_STATUSES),
+            set(findings.LIVE_STATUSES),
             set(findings._REOPEN_STATUSES),
-            set(findings._RECURRENCE_STATUSES),
+            set(findings.RECURRENCE_STATUSES),
         )
         union = set().union(*branches)
         assert union == set(FINDING_STATUSES), (
@@ -67,7 +67,7 @@ class TestBranchTotality:
             "SELECT sql FROM sqlite_master WHERE name = 'ux_findings_fingerprint_live'"
         ).fetchone()
         assert row is not None, "the identity guarantee index is missing"
-        for status in findings._LIVE_STATUSES:
+        for status in findings.LIVE_STATUSES:
             assert f"'{status}'" in row["sql"]
 
 
@@ -555,6 +555,66 @@ class TestResponseShape:
         raw = conn.execute("SELECT meta FROM findings").fetchone()
         assert "was_new" not in raw["meta"]
         assert "dedup_action" not in json.loads(raw["meta"])
+
+
+class TestStoredCorruptionClassification:
+    """Pre-write vs post-commit corruption must be distinguishable (Codex round 3).
+
+    Malformed stored META raises json.JSONDecodeError from _bump_row BEFORE any
+    write — the transaction rolls back and NOTHING lands. Malformed stored TAGS
+    raises only in _finalize_add, AFTER the bump committed — that arrives as
+    PostCommitCorruptionError so a caller (the CSV import loop) never claims
+    "the write landed" for a rollback, or the reverse.
+    """
+
+    def test_malformed_stored_meta_is_prewrite_and_rolls_back(self, conn):
+        _add(conn)
+        conn.execute("UPDATE findings SET meta = '{not json' WHERE 1=1")
+        conn.commit()
+        with pytest.raises(json.JSONDecodeError):
+            _add(conn)  # same fingerprint -> bump path parses meta pre-write
+        row = conn.execute("SELECT occurrence_count FROM findings").fetchone()
+        assert row["occurrence_count"] == 1, "rolled back — nothing may land"
+
+    def test_malformed_stored_tags_is_postcommit_and_lands(self, conn):
+        _add(conn)
+        conn.execute("UPDATE findings SET tags = '[not json' WHERE 1=1")
+        conn.commit()
+        with pytest.raises(findings.PostCommitCorruptionError):
+            _add(conn)  # bump commits; tags parse fails only at serialization
+        row = conn.execute("SELECT occurrence_count FROM findings").fetchone()
+        assert row["occurrence_count"] == 2, "the bump committed before the raise"
+
+    def test_ambient_transaction_add_keeps_raw_jsondecodeerror(self, conn):
+        """Under an ambient transaction the add's frame commits NOTHING, so a
+        malformed-tags conversion failure must stay a raw JSONDecodeError — the
+        owner rolls the unit back, and a PostCommitCorruptionError claiming
+        "recorded" would mislead retry/accounting logic (Codex round 4)."""
+        _add(conn)
+        conn.execute("UPDATE findings SET tags = '[not json' WHERE 1=1")
+        conn.commit()
+        with pytest.raises(json.JSONDecodeError):
+            with db.txn(conn) as mine:
+                assert mine is True
+                _add(conn)  # ambient for the add's own frame
+        row = conn.execute("SELECT occurrence_count FROM findings").fetchone()
+        assert row["occurrence_count"] == 1, "the owner rolled the bump back"
+
+    def test_ambient_transaction_batch_keeps_raw_jsondecodeerror(self, conn):
+        _add(conn)
+        conn.execute("UPDATE findings SET tags = '[not json' WHERE 1=1")
+        conn.commit()
+        member = {
+            "severity": "high",
+            "category": "bug",
+            "file": "a.py",
+            "description": "the failure text",
+        }
+        with pytest.raises(json.JSONDecodeError):
+            with db.txn(conn):
+                findings.batch_add_findings(conn, [member])
+        row = conn.execute("SELECT occurrence_count FROM findings").fetchone()
+        assert row["occurrence_count"] == 1, "the owner rolled the bump back"
 
 
 class TestDiffReviewRegressions:
