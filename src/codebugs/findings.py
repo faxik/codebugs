@@ -901,6 +901,7 @@ def similarity_candidates(
     conn: sqlite3.Connection,
     *,
     category: str | None = None,
+    categories: tuple[str, ...] | None = None,
     status: str | None = None,
     statuses: tuple[str, ...] | None = None,
     exclude_id: str | None = None,
@@ -917,12 +918,20 @@ def similarity_candidates(
     any grouping over the result is deterministic despite whole-second
     timestamps. ``status`` is a vocabulary filter (resolved, CB-19/CB-25);
     ``statuses`` is an explicit tuple for callers that know their population.
+    ``categories`` is the same explicit-tuple twin for category: findings
+    permit ``category=""``, which the ``category=`` FILTER convention must read
+    as "no filter" — a caller whose category is a VALUE (the resolver matching
+    an observation's own category, "" included) passes ``categories=("",)`` and
+    gets an exact match instead of the whole table (Codex diff review).
     """
     conditions: list[str] = []
     params: list[Any] = []
     if is_text_filter_active(category):
         conditions.append("category = ?")
         params.append(category)
+    if categories:
+        conditions.append(f"category IN ({','.join('?' for _ in categories)})")
+        params.extend(categories)
     if is_vocabulary_filter_active(status):
         conditions.append("status = ?")
         params.append(resolve_finding_status(status))

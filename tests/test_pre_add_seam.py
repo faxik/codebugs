@@ -1,7 +1,13 @@
 """Pre-add resolver seam (CB-45): registration, SAVEPOINT isolation, the enforced
 never-commit contract, hostile resolvers, and failure surfacing."""
 
+import json
+import os
 import sqlite3
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -21,7 +27,15 @@ def conn():
 def clean_registry(monkeypatch):
     """Snapshot the registry EXCLUDING similarity.annotate: pytest collection imports
     test_similarity.py first, which registers the real resolver process-wide; excluding
-    it by name makes these tests order-independent by construction (review W-8)."""
+    it by name makes these tests order-independent by construction (review W-8).
+
+    The pre-load is load-bearing since the runner started loading modules itself
+    (Codex diff review): without it, the first run_pre_add_resolvers call in a
+    process that never imported similarity would register similarity.annotate into
+    THIS test's monkeypatched snapshot and discard it with the monkeypatch, leaving
+    the real registry permanently missing the resolver behind an already-set
+    modules-loaded flag."""
+    db._ensure_modules_loaded()
     snapshot = [r for r in db._pre_add_resolvers if r.name != "similarity.annotate"]
     monkeypatch.setattr(db, "_pre_add_resolvers", snapshot)
 
@@ -141,6 +155,28 @@ class TestTransactionContract:
                 db.run_pre_add_resolvers(conn, _obs())
             conn.execute("BEGIN IMMEDIATE")
 
+    def test_resolver_cannot_forge_the_savepoint_name(self, conn):
+        """A commit destroys the runner's savepoint; recreating it under a GUESSED
+        name would hand the runner's RELEASE a replacement transaction to commit —
+        the never-commit gate defeated by its own idempotent bookkeeping (Codex
+        diff review). The per-call nonce makes the name unguessable, so the
+        forgery dies loudly in the savepoint-stack arm instead of returning a
+        success-shaped patch with the INSERT headed for autocommit."""
+
+        def hostile(c, o):
+            c.commit()
+            c.execute("SAVEPOINT sp_pre_add_0")  # the old predictable name
+            return {"ka": 1}
+
+        db.register_pre_add_resolver("t.hostile", hostile, meta_keys=("ka",))
+        with db.txn(conn):
+            with pytest.raises(RuntimeError, match="savepoint stack"):
+                db.run_pre_add_resolvers(conn, _obs())
+            # the forged savepoint's transaction is still open — clear it, then
+            # re-open so db.txn's closing COMMIT has a transaction to commit
+            conn.execute("ROLLBACK")
+            conn.execute("BEGIN IMMEDIATE")
+
 
 class TestRunner:
     def test_annotation_merged(self, conn):
@@ -207,6 +243,67 @@ class TestRunner:
         with db.txn(conn):
             patch = db.run_pre_add_resolvers(conn, _obs())
         assert "ka" not in patch and patch["resolver_errors"]
+
+    def test_failing_resolver_cannot_poison_the_error_stamp(self, conn):
+        """Each resolver gets a DEEP COPY of the observation (Codex diff review):
+        with the dict shared, a failing resolver that replaced observation["at"]
+        with a non-JSON value poisoned the runner's own resolver_errors stamp and
+        the add aborted at meta serialization — the exact failure the queryable
+        stamp exists to prevent."""
+
+        def hostile(c, o):
+            o["at"] = object()
+            raise RuntimeError("boom")
+
+        db.register_pre_add_resolver("t.hostile", hostile, meta_keys=("ka",))
+        obs = _obs()
+        with db.txn(conn):
+            patch = db.run_pre_add_resolvers(conn, obs)
+        assert obs["at"] == "2026-08-16T00:00:00Z"  # caller's dict untouched
+        [err] = patch["resolver_errors"]
+        assert err["at"] == "2026-08-16T00:00:00Z"
+        json.dumps(patch)  # this patch becomes the row's meta — must serialize
+
+    def test_resolvers_receive_isolated_observations(self, conn):
+        """One resolver's mutation must not leak into the next resolver's view."""
+
+        def first(c, o):
+            o["meta"]["poison"] = True
+            o["tags"].append("poison")
+            return None
+
+        seen = {}
+
+        def second(c, o):
+            seen["meta"] = dict(o["meta"])
+            seen["tags"] = list(o["tags"])
+            return None
+
+        db.register_pre_add_resolver("t.first", first, meta_keys=("ka",))
+        db.register_pre_add_resolver("t.second", second, meta_keys=("kb",))
+        with db.txn(conn):
+            db.run_pre_add_resolvers(conn, _obs())
+        assert seen["meta"] == {} and seen["tags"] == []
+
+    def test_validated_outcome_is_snapshotted(self, conn):
+        """A resolver holding a reference to its returned outcome must not be able
+        to invalidate the patch AFTER _validate_resolver_outcome ran."""
+        held = {}
+
+        def r1(c, o):
+            held["out"] = {"ka": [1]}
+            return held["out"]
+
+        def r2(c, o):
+            held["out"]["ka"].append(object())  # sabotage after r1's validation
+            return None
+
+        db.register_pre_add_resolver("t.r1", r1, meta_keys=("ka",))
+        db.register_pre_add_resolver("t.r2", r2, meta_keys=("kb",))
+        with db.txn(conn):
+            patch = db.run_pre_add_resolvers(conn, _obs())
+        assert patch["ka"] == [1]
+        json.dumps(patch)
 
 
 LONG_DESC = "a genuinely long description of a defect that clears the guard " * 2
@@ -350,6 +447,54 @@ class TestFindingsIntegration:
     def test_live_statuses_public_alias(self):
         assert findings.LIVE_STATUSES == ("open", "in_progress", "stale")
 
+    def test_fresh_process_meta_none_add_still_annotates(self):
+        """Regression (Codex diff review): resolver registration was import-order
+        dependent on the common meta=None path — _validate_meta_keys returns
+        before touching the registry, so a bare library process (raw sqlite3 +
+        findings.ensure_schema, never db.connect) ran with an EMPTY registry and
+        near-duplicates were silently un-annotated. run_pre_add_resolvers now
+        loads the modules itself; prove it from a fresh interpreter. PYTHONPATH
+        must name THIS tree's src: from a worktree, a bare subprocess resolves
+        codebugs through the editable install pointing at the main checkout."""
+        src_dir = str(Path(findings.__file__).resolve().parents[1])
+        script = textwrap.dedent(
+            """
+            import sqlite3
+
+            from codebugs import findings
+
+            conn = sqlite3.connect(":memory:")
+            conn.row_factory = sqlite3.Row
+            findings.ensure_schema(conn)
+            base = (
+                "post-merge gate failed on main. log tail: wal checkpoint failed"
+                " during close: unable to open database file, worker shutdown aborted"
+            )
+            a = findings.add_finding(
+                conn, severity="low", category="gate", file="f", description=base
+            )
+            b = findings.add_finding(
+                conn,
+                severity="low",
+                category="gate",
+                file="f",
+                description=base.replace("aborted", "was aborted"),
+            )
+            assert b["was_new"], b
+            sim = b["meta"].get("similar_to")
+            assert sim and sim[0]["id"] == a["id"], sim
+            print("ANNOTATED")
+            """
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            env={**os.environ, "PYTHONPATH": src_dir},
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "ANNOTATED" in proc.stdout
+
 
 class TestSimilarityCandidates:
     def _seed(self, conn):
@@ -396,3 +541,24 @@ class TestSimilarityCandidates:
         self._seed(conn)
         rows = findings.similarity_candidates(conn, category="b", exclude_id="CB-3")
         assert rows == []
+
+    def test_categories_tuple_is_exact_including_empty(self, conn):
+        """category= is a FILTER ("" means no filter, the repo convention);
+        categories= is the explicit-tuple twin for callers whose category is a
+        VALUE — findings permit category="", and a ""-category observation must
+        pool against other ""-category rows, never the whole table (Codex diff
+        review)."""
+        self._seed(conn)
+        findings.add_finding(
+            conn,
+            severity="low",
+            category="",
+            file="f",
+            description="empty category row " * 10,
+            finding_id="CB-9",
+        )
+        assert [r["id"] for r in findings.similarity_candidates(conn, categories=("",))] == [
+            "CB-9"
+        ]
+        # the filter spelling still reads "" as no filter — both semantics live
+        assert len(findings.similarity_candidates(conn, category="")) == 5

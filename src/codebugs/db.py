@@ -12,8 +12,10 @@ at runtime to populate the registries.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
+import secrets
 import sqlite3
 import subprocess
 import sys
@@ -358,13 +360,28 @@ def run_pre_add_resolvers(
     annotation failure — detected after every call, OUTSIDE the swallow;
     (3) cleanup is guarded so it never masks the real exception and never
     converts a swallowed annotation failure into a lost finding (db.txn's own
-    cleanup lesson). Each resolver runs in SAVEPOINT sp_pre_add_<idx> —
-    index-named, never an identifier built from resolver-supplied text (the
-    interpolated-identifier discipline). Failures are stamped QUERYABLY into
-    the patch under `resolver_errors` (query(meta_key="resolver_errors")).
-    `forbidden` carries the caller's own reserved keys, because db must not
-    import findings.
+    cleanup lesson). Each resolver runs in SAVEPOINT sp_pre_add_<nonce>_<idx> —
+    the nonce is a per-call secret so a resolver that committed cannot recreate
+    the runner's savepoint by name and have the RELEASE quietly commit its
+    replacement transaction; the identifier is runner-built hex, never
+    resolver-supplied text (the interpolated-identifier discipline), and the
+    post-RELEASE transaction check states the invariant directly rather than
+    relying on name secrecy. Each resolver receives a DEEP COPY of the
+    observation: the runner reads `at` for its own error stamp after resolvers
+    ran, so a shared dict would let a failing resolver poison the stamp and
+    abort the whole add at meta serialization — the exact failure the queryable
+    stamp exists to prevent. Validated outcomes are likewise snapshotted, so a
+    resolver holding a reference cannot invalidate the patch after validation.
+    Failures are stamped QUERYABLY into the patch under `resolver_errors`
+    (query(meta_key="resolver_errors")). `forbidden` carries the caller's own
+    reserved keys, because db must not import findings.
+
+    Loads the domain modules first, same as resolver_reserved_meta_keys and for
+    the same reason: the common meta=None add path otherwise never triggers a
+    load, so a bare library connection (raw sqlite3 + findings.ensure_schema)
+    would silently run with an EMPTY resolver registry (Codex diff review).
     """
+    _ensure_modules_loaded()
     if not conn.in_transaction:
         raise RuntimeError(
             "run_pre_add_resolvers() requires an OPEN transaction: outside one, "
@@ -374,17 +391,24 @@ def run_pre_add_resolvers(
         )
     patch: dict[str, Any] = {}
     errors: list[dict[str, Any]] = []
+    observed_at = observation.get("at")
+    nonce = secrets.token_hex(8)
     for idx, resolver in enumerate(_pre_add_resolvers):
-        sp = f"sp_pre_add_{idx}"  # index-derived identifier, never resolver text
+        sp = f"sp_pre_add_{nonce}_{idx}"  # runner-built identifier, never resolver text
         conn.execute(f"SAVEPOINT {sp}")
         try:
-            outcome = resolver.fn(conn, observation)
+            outcome = resolver.fn(conn, copy.deepcopy(observation))
             if not conn.in_transaction:
                 raise _ResolverBrokeTransaction(resolver.name)
             if outcome is not None:
                 _validate_resolver_outcome(outcome, resolver, forbidden)
-                patch.update(outcome)
+                patch.update(copy.deepcopy(outcome))
             conn.execute(f"RELEASE {sp}")
+            if not conn.in_transaction:
+                # RELEASE ended the transaction => our savepoint had become the
+                # outermost transaction opener, i.e. the caller's transaction is
+                # gone and the pending INSERT would run in autocommit.
+                raise _ResolverBrokeTransaction(resolver.name)
         except _ResolverBrokeTransaction:
             raise RuntimeError(
                 f"pre-add resolver {resolver.name!r} closed the caller's transaction; "
@@ -399,9 +423,7 @@ def run_pre_add_resolvers(
                     f"pre-add resolver {resolver.name!r} corrupted the savepoint stack"
                 ) from e
             sys.stderr.write(f"[pre-add resolver '{resolver.name}' failed] {e}\n")
-            errors.append(
-                {"resolver": resolver.name, "error": str(e)[:500], "at": observation.get("at")}
-            )
+            errors.append({"resolver": resolver.name, "error": str(e)[:500], "at": observed_at})
     if errors:
         patch[_RESOLVER_ERRORS_KEY] = errors
     return patch

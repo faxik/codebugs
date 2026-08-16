@@ -28,7 +28,11 @@ from typing import Any
 
 from codebugs import db
 from codebugs.findings import LIVE_STATUSES, normalized_identity_text, similarity_candidates
-from codebugs.types import is_text_filter_active, resolve_finding_status
+from codebugs.types import (
+    is_text_filter_active,
+    is_vocabulary_filter_active,
+    resolve_finding_status,
+)
 
 # Calibrated on the 3162-row autosorter corpus (2026-08-16, reproducible via
 # tests/manual/verify_similarity_corpus.py): 0.7 collapses 102 rows into 11
@@ -163,9 +167,12 @@ def find_similar(
     if len(query_norm) < MIN_TEXT_LEN:
         return []
     query_tri = trigram_set(query_norm)
+    # categories=, not category=: here category is the observed finding's own
+    # VALUE, not a filter — "" is a legal category and must match exactly, never
+    # widen the pool to every category (Codex diff review).
     rows = similarity_candidates(
         conn,
-        category=category,
+        categories=(category,),
         statuses=_ANNOTATE_STATUSES,
         limit=CANDIDATE_POOL_LIMIT,
         order="newest",
@@ -226,10 +233,15 @@ def group_report(
         raise ValueError(f"member_limit must be >= 0, got {member_limit}")
     if is_text_filter_active(category) and not category.strip():
         raise ValueError("category filter must not be blank")
-    if status == "all":
+    # The sentinel test is type-pinned (str.__eq__ on a real str) and the filter
+    # test is the shared predicate — a bare `== "all"` / `!= ""` here runs
+    # arbitrary user code: unittest.mock.ANY compares equal to BOTH, so it would
+    # silently widen the report to every status instead of raising (CB-25's
+    # trap, re-found by the Codex diff review).
+    if isinstance(status, str) and str.__eq__(status, "all"):
         rows = similarity_candidates(conn, category=category)
         populations = ["all"]
-    elif status is not None and status != "":
+    elif is_vocabulary_filter_active(status):
         resolved = resolve_finding_status(status)
         rows = similarity_candidates(conn, category=category, statuses=(resolved,))
         populations = [resolved]

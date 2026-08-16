@@ -95,6 +95,16 @@ class TestFindSimilar:
         self._add(conn, "CB-1", LONG_A, category="other")
         assert similarity.find_similar(conn, description=LONG_A2, category="gate") == []
 
+    def test_empty_category_is_a_value_not_a_wildcard(self, conn):
+        """Codex diff review: findings permit category="", and the accessor's
+        category= FILTER convention reads "" as "no filter" — so find_similar
+        used to pool a ""-category observation against EVERY category. The
+        observed category is a value; "" must match exactly."""
+        self._add(conn, "CB-1", LONG_A, category="other")
+        self._add(conn, "CB-2", LONG_A, category="")
+        out = similarity.find_similar(conn, description=LONG_A2, category="")
+        assert [m["id"] for m in out] == ["CB-2"]
+
     def test_decided_rows_included_with_status(self, conn):
         # Review CX-smell-2: "resembles CB-N, already dismissed" is the most
         # valuable annotation; wont_fix/not_a_bug are IN the pool, fixed is not.
@@ -177,6 +187,34 @@ class TestGroupReport:
         report = similarity.group_report(conn, status="all")
         assert report["rows_considered"] == 3
         assert report["collapse_count"] == 1
+        assert report["populations"] == ["all"]
+
+    def test_status_garbage_raises_instead_of_widening(self, conn):
+        """Codex diff review, CB-25's trap re-found: unittest.mock.ANY compares
+        equal to BOTH "all" and "", so the old bare == / != tests silently
+        widened the report to every status. Garbage must reach the resolver and
+        raise; an unfiltered report is indistinguishable from a filtered one."""
+        import unittest.mock
+
+        self._seed3(conn)
+        with pytest.raises(ValueError):
+            similarity.group_report(conn, status=unittest.mock.ANY)
+
+    def test_all_sentinel_is_type_pinned(self, conn):
+        """The sentinel test runs str.__eq__ on a type-pinned value, so a str
+        subclass overriding __eq__ cannot flip a genuine "all" out of (or
+        anything else into) the widened branch."""
+
+        class Hostile(str):
+            def __eq__(self, other):  # noqa: PLW3201
+                return False
+
+            __hash__ = str.__hash__
+
+        self._seed3(conn)
+        findings.update_finding(conn, "CB-1", status="fixed")
+        report = similarity.group_report(conn, status=Hostile("all"))
+        assert report["rows_considered"] == 3
         assert report["populations"] == ["all"]
 
     def test_min_pair_score_is_family_diameter_not_edge_minimum(self, conn):
