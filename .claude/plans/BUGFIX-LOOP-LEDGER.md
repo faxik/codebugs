@@ -5,6 +5,8 @@ net change. Tracker: this repo's own `.codebugs/findings.db`, served by `mcp__co
 
 | Date | Focus | Cards | Disposition | Merge | Follow-ups |
 |---|---|---|---|---|---|
+| 2026-08-16 | `CB-45` (handoff-directed) | CB-45 | **fixed** — similarity extension (trigram-Jaccard file-time `similar_to` annotation + auditable `similarity-report`) and the pre-add resolver seam built with its first consumer; the card's 0.95 threshold measured FALSE and shipped as calibrated 0.7 under the letter-fix protocol | `566f547` (`02faaaf`) | CB-46 formally unblocked (its dry-run tool now exists; merge policy still PROPOSED, not ratified — plan D6); reqs-identity decided NO; **pipx server reinstall needed**; autosorter auto-filers still don't pass `fingerprint=` (pre-existing, not this card) |
+| 2026-08-16 | `CB-49` (user-named) | CB-49 | **fixed** — relative declared tracker roots leaked verbatim into `where`, the MCP preflight, and the fail-closed error texts; now absolutized (lexical `abspath`, never `realpath`) at the single read point `declared_tracker_root()`, with a raw-value fallback so `describe_root` still never raises on a deleted cwd | `994ebb7` (`67a5ccd`) | none filed — sweep found the same shape in `_resolve_db`'s `project_dir` branch, but its only reader typed the path in that same cwd, so no harm path. CB-45 branch also touches `db.py`/`cli.py` (different hunks); its merge should rebase-check |
 | 2026-08-16 | `CB-44, then CB-43` (user-named) | CB-43 + CB-44 | **CB-43 fixed** — findings identity function (fingerprint upsert, occurrence ring, regression reopen + milestone reopen projection); **CB-44 closed as a ratified decision** (identity is core, no seam — the card's option (b)) | `1e06a80` | filed CB-45 (similarity extension + seam design), CB-46 (backfill, blocker-linked to CB-45). **MCP server restart needed** before the new add semantics are live |
 | 2026-08-13 | `codebugs` | CB-16 | **fixed** — meta clobber in `update_finding` / `update_requirement` | `1d85756`, hardening `63d0658` | CB-18 unblocked |
 | 2026-08-13 | `codebugs` | CB-4, CB-1, CB-5 | **closed stale** with evidence — all three describe code that has since been refactored | `6e5236c`, `63d0658` (doc corrections) | sweep the remaining arch-debt cards |
@@ -26,6 +28,76 @@ net change. Tracker: this repo's own `.codebugs/findings.db`, served by `mcp__co
 | 2026-08-14 | `codebugs` | CB-36 batch 2 of N | **partial, card stays `in_progress`** — `blockers.resolve_blocker`, `sweep.add_items`, `sweep.archive_items`; 6 of 13 sites done | `77de4b2` | none filed; batch 3 = the four clean `milestones/` sites |
 | 2026-08-14 | `codebugs` | CB-36 batch 1 of N | **partial, card stays `in_progress`** — `merge.py` session lifecycle (`start_session`, `finish`, `add_claim`); 3 of 13 sites done | `80e8ccf` (`6dc89d1`, `626fa2b`, `b88a646`) | filed CB-40 (both raw `BEGIN IMMEDIATE` sites commit an ambient caller transaction); two test gaps handed forward on the card with recipes |
 | 2026-08-14 | `codebugs` | CB-27 + CB-30 (both re-scoped) | **fixed** — CB-24 conformance for the two live unwrapped read-modify-write sites; the sweep found the defect is package-wide (19 instances, 13 still open) | `ae77cba` (`89ae282`, `8a870bf`, `12af24f`, `0a2b3e5`, `4530006`) | filed CB-36 (`high`, the 13 remaining sites), CB-37 (enforcement, carried from CB-27), CB-38 (capacity policy, carried from CB-30, reframed), CB-39 (`pull_next`, same window) |
+
+## 2026-08-16 — CB-45 (the similarity layer, and the seam built with its first consumer)
+
+Handoff-directed pick (the CB-43/CB-44 handoff names CB-45 as the next unit). Plan with the full
+review appendix: `.claude/plans/CB-45-similarity-seam.md`. Merge `566f547`; 1098 tests on merged
+main (which had gained CB-48 and CB-49 in parallel while this iteration ran).
+
+**Measured before designed, and the measurement overturned the card.** The card's ratified target —
+"a 0.95 similarity ratio collapses the 115-row family" — was measured FALSE on the real corpus
+(3162 rows at calibration, 3168 by landing): at 0.95 only 77 rows collapse and the family never
+unifies, because those 115 rows are ~10 genuinely distinct defects (different failure tails: WAL
+checkpoint vs get_ack timeout vs sqlalchemy pool). Threshold 0.7 groups 111/115 into coherent
+subfamilies with zero observed false merges, corpus-wide collapse 102 rows vs exact identity's 71.
+Shipped 0.7 under the letter-fix protocol (one-line notification delivered in-session); the "one
+115-row family" target is dropped as exactly the false merge CB-43's RISK section forbids.
+
+**adversarial-review-x2 on the plan: 6.5/10, 14 mandatory fixes, every one encoded before code.**
+Twelve findings corroborated by BOTH models (highest-confidence set: runner-commits-outside-
+transaction — SAVEPOINT/RELEASE at top level IS a commit, verified empirically by three parties;
+the findings-table reach-in; import-order-dependent reserved keys; unrepairable annotations).
+Codex-only catches: the plan's CSV justification was factually false (`_cmd_import_csv` passes no
+`finding_id`), and a resolver can destroy the caller's transaction through the raw connection —
+the review's sharpest finding. Opus-only: the report grouped terminal rows into a merge dry run;
+cleanup masking the real error. The defender's fresh measurements defused two attacks (calibration
+reproduces identically through the shipped normalization; the 43-row family is ONE defect — all 43
+share the WAL-checkpoint tail, so Codex's false-merge accusation died on inspection while its
+structural chaining point survived). Cross-model pattern: Codex stronger on hostile-input/data-flow,
+Opus on repo-rule archaeology. Neither alone produces the full list.
+
+**What shipped.** (1) `db.register_pre_add_resolver` — the seam CB-44 refused to build
+speculatively, now built against its first consumer with the never-commit contract ENFORCED
+(entry guard, post-resolver corruption check outside the swallow, guarded cleanup, outcome
+validation inside the savepoint). (2) `findings.similarity_candidates` — the sanctioned accessor
+that keeps similarity.py at ZERO SQL (no module reads another's tables; the review caught the plan
+about to become the first violator). (3) `similarity.py` — trigram-Jaccard detector over the
+identity normalization + ANSI strip, file-time `meta.similar_to` annotation (pool = live ∪
+dismissed with status stamped; `fixed` excluded), offline `similarity-report` with per-family
+DIAMETER (`min_pair_score` over all pairs — the corpus's 43-family hides a 0.392 pair behind
+0.7+ edges, and an edge-minimum can never show it), edges, and description excerpts — CB-46's
+sample-auditable dry run. (4) Requirements-parity DECIDED: no identity function for reqs (the card
+delegated it; caller-assigned ids on every write path, zero automated filers, embeddings covers
+similarity). (5) `tests/manual/verify_similarity_corpus.py` — the calibration is a committed,
+reproducible artifact; it reproduces 11 families / 102 collapse exactly, and after the diff review
+it ENFORCES that tolerance with a nonzero exit instead of printing it.
+
+**The Codex diff review took three rounds to APPROVED — six findings, all real, three Major, all
+in the seam's enforcement layer.** The common `meta=None` add path never triggered a module load,
+so a bare library connection (raw sqlite3 + `findings.ensure_schema`, never `db.connect`) ran with
+an EMPTY resolver registry and annotation was silently off — the runner now loads modules itself,
+pinned by a fresh-subprocess test. The index-named savepoint was forgeable: a resolver could
+commit and recreate `sp_pre_add_0`, turning the runner's own RELEASE into a commit of the
+replacement transaction — savepoints are now nonce-named with a post-RELEASE transaction check.
+The shared observation dict let a failing resolver poison the runner's `resolver_errors` stamp
+and abort the very add the stamp exists to save — per-resolver deep copies, snapshotted outcomes.
+Minors: `category=""` pooled the whole table (the accessor gained the `categories=` exact-value
+tuple, mirroring `statuses=`), and `group_report`'s bare `== "all"` re-shipped CB-25's mock.ANY
+trap inside a module written weeks after that rule was documented (type-pinned sentinel now).
+Round 2 also caught main moving under the branch — the exact diff would have reverted CB-48.
+
+**Two defects caught by running, not reviewing:** the trigram memo keyed (id, created_at) collided
+across databases inside one whole-second timestamp (in-memory test DBs surfaced it; a re-created
+tracker would too) — re-keyed by content; and the first `min_pair_score` implementation took the
+minimum over recorded EDGES, which are ≥ threshold by construction and therefore hid the very
+chaining it existed to expose — caught because the corpus run printed 0.701 where the review had
+measured 0.393.
+
+**Net change: CB-45 fixed; CB-46 stays open — its formal blocker is satisfied (the dry-run tool
+exists) but the merge policy is still PROPOSED, not ratified (plan D6); no new cards filed.**
+MCP server restart/pipx reinstall needed before the new annotate semantics are live — same
+operational note as the identity iteration.
 
 ## 2026-08-16 — CB-43 + CB-44 (the identity function, and the seam that wasn't built)
 

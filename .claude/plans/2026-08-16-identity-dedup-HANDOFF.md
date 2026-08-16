@@ -1,5 +1,11 @@
 # Hand-off — findings identity function (CB-43 / CB-44), landed 2026-08-16
 
+> **SUPERSEDED (2026-08-16, same day):** the "next unit" this handoff points at — CB-45, the
+> similarity extension + pre-add seam — has SHIPPED (merge `566f547`; ledger section in
+> `BUGFIX-LOOP-LEDGER.md`, full history in `CB-45-similarity-seam.md`). Still live from this
+> document: the autosorter auto-filer `fingerprint=` adoption (§ "What the next iteration
+> should pick up", item outside CB-45's scope) and CB-46's merge-policy decision.
+
 Written for a reader with no session context. Everything here is verifiable from main.
 
 ## What exists now, in one paragraph

@@ -1,4 +1,10 @@
-# Hand-off — CB-45 similarity extension + pre-add seam, IN FLIGHT (2026-08-16)
+# Hand-off — CB-45 similarity extension + pre-add seam — DONE (2026-08-16)
+
+> **DONE:** merged to main as `566f547` after the Codex diff review reached APPROVED in round 3.
+> CB-45 closed `fixed`, CB-46 annotated (formally unblocked, merge policy still unratified),
+> claim CLM-6 auto-released by the terminal-status hook. 1098 tests green on merged main.
+> Ledger section: `BUGFIX-LOOP-LEDGER.md`. Nothing below is a pending instruction any more;
+> it is kept as the in-flight record.
 
 Written for a reader with no session context. State as of writing: **implementation complete and
 green on the branch; Codex diff review round 1 returned 6 findings (3 Major), ALL fixed in
