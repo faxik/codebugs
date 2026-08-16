@@ -34,8 +34,8 @@ nothing.
 
 ## What landed
 
-`tools/_guards.sh` (11 guards, distinct exit codes 2–13), `worktree-setup.sh`, `worktree-finish.sh`,
-`pre-commit-hook.sh`, `install-hooks.sh`, `tests/test_worktree_harness.py` (70 tests).
+`tools/_guards.sh` (12 guards, distinct exit codes 2–13), `worktree-setup.sh`, `worktree-finish.sh`,
+`pre-commit-hook.sh`, `install-hooks.sh`, `tests/test_worktree_harness.py` (95 tests).
 
 **Deliberate divergences from autosorter, each load-bearing:**
 
@@ -72,9 +72,19 @@ negative above; hook/guard predicate drift (`fix/a/b` accepted at commit, refuse
 the lock serialized the merge but not the testing, so a second finisher could land a combination
 never tested; and a seventh mutation the author's own six missed.
 
-Every guard was mutation-tested. Six of six author mutations were caught by exactly the intended
-test; `-e` vs `-f` in the dangling-symlink check is an **equivalent mutant** (both fail on a dangling
-link and reach the `-L` branch) and was recorded rather than chased.
+**An independent Opus adversary then found eight more**, fixed in `ac9bb65`. Its headline is the one
+worth keeping: round 1's fix for the lock race **reintroduced CB-41's shape** — `TESTED_MAIN` was
+sampled *after* the 70-second test run, so a concurrent land moved main, the sample recorded the new
+main, and the in-lock check compared new-main to new-main and passed, certifying the untested
+combination it was written to refuse. It also proved the suite never executed the scripts: deleting
+guard *invocations* left 70 tests green, the branch-type guard included.
+
+Mutation testing, honestly stated: the author's own six were caught by exactly the intended test,
+but two reviews found six survivors the author's set did not reach. Two of those turned out to be
+**equivalent mutants** (`-e` vs `-f` in the dangling-symlink check; `--diff-filter=d`, which was
+equivalent only because a `|| continue` was swallowing genuine read failures — fixing that made the
+filter load-bearing and the mutation catchable). The rest were real gaps and are now covered. **The
+claim "every guard was mutation-checked" was retracted rather than defended.**
 
 **A defect found in this branch's own installer, by running it:** the first `install-hooks.sh`
 symlinked the hook to the **authoring worktree**, so it would have dangled the moment that worktree
