@@ -958,6 +958,7 @@ def _ensure_modules_loaded() -> None:
             milestones,
             provenance,
             reqs,
+            similarity,
             sweep,
         )
 

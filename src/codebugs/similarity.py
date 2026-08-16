@@ -318,3 +318,31 @@ def group_report(
         "families_total": families_total,
         "members_total": members_total,
     }
+
+
+def _annotate_resolver(
+    conn: sqlite3.Connection, observation: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Pre-add resolver: stamp advisory near-match candidates on a new finding.
+
+    Fires only for genuine no-explicit-id inserts with annotate=True (the
+    seam's firing rule, enforced in findings._add_one). Exists in addition to
+    the similarity_check tool because the population that generated the
+    115-row family is auto-filers that never call a preview tool — annotation
+    must not depend on the filer opting in. Returns None rather than an empty
+    list so unannotated rows stay clean.
+    """
+    matches = find_similar(
+        conn,
+        description=observation["description"],
+        category=observation["category"],
+        meta=observation["meta"],
+    )
+    if not matches:
+        return None
+    return {"similar_to": matches}
+
+
+db.register_pre_add_resolver(
+    "similarity.annotate", _annotate_resolver, meta_keys=("similar_to",)
+)

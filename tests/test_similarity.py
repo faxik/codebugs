@@ -210,3 +210,97 @@ class TestGroupReport:
         vecs = {"CB-1": [1.0, 0.0], "CB-2": [0.96, 0.28]}  # cosine ~ 0.96
         report = similarity.group_report(conn, vectors=vecs, threshold=0.9)
         assert report["collapse_count"] == 1
+
+
+class TestAnnotateResolver:
+    def test_second_similar_add_gets_similar_to(self, conn):
+        first = findings.add_finding(
+            conn, severity="low", category="gate", file="f", description=LONG_A
+        )
+        second = findings.add_finding(
+            conn, severity="low", category="gate", file="f", description=LONG_A2
+        )
+        assert second["was_new"] is True  # near-duplicate, NOT identical: no dedup
+        [entry] = second["meta"]["similar_to"]
+        assert entry["id"] == first["id"]
+        assert entry["status"] == "open"
+        assert entry["score"] == pytest.approx(0.96, abs=0.03)
+
+    def test_first_add_has_no_annotation(self, conn):
+        first = findings.add_finding(
+            conn, severity="low", category="gate", file="f", description=LONG_A
+        )
+        assert "similar_to" not in first["meta"]
+
+    def test_short_description_not_annotated(self, conn):
+        findings.add_finding(
+            conn, severity="low", category="gate", file="f", description="Bug 1x"
+        )
+        second = findings.add_finding(
+            conn, severity="low", category="gate", file="f", description="Bug 2x"
+        )
+        assert "similar_to" not in second["meta"]
+
+    def test_dissimilar_not_annotated(self, conn):
+        findings.add_finding(
+            conn, severity="low", category="gate", file="f", description=LONG_A
+        )
+        second = findings.add_finding(
+            conn, severity="low", category="gate", file="f", description=LONG_B
+        )
+        assert "similar_to" not in second["meta"]
+
+    def test_dismissed_candidate_annotated_with_status(self, conn):
+        first = findings.add_finding(
+            conn, severity="low", category="gate", file="f", description=LONG_A
+        )
+        findings.update_finding(conn, first["id"], status="not_a_bug")
+        # near-duplicate, not identical: identity's recurrence path stays out
+        second = findings.add_finding(
+            conn, severity="low", category="gate", file="f", description=LONG_A2
+        )
+        [entry] = second["meta"]["similar_to"]
+        assert entry["id"] == first["id"] and entry["status"] == "not_a_bug"
+
+    def test_caller_cannot_spoof_similar_to(self, conn):
+        with pytest.raises(ValueError, match="similar_to"):
+            findings.add_finding(
+                conn,
+                severity="low",
+                category="gate",
+                file="f",
+                description="d",
+                meta={"similar_to": []},
+            )
+
+    def test_rescrub_can_rewrite_similar_to_via_update(self, conn):
+        # Review SERIOUS-10: the reservation is add-side only — an unrepairable
+        # annotation would be the CB-26 shape.
+        first = findings.add_finding(
+            conn, severity="low", category="gate", file="f", description=LONG_A
+        )
+        updated = findings.update_finding(
+            conn, first["id"], meta_update={"similar_to": []}
+        )
+        assert updated["meta"]["similar_to"] == []
+
+    def test_suite_annotation_ratchet(self, conn):
+        # Cheap ratchet (review CX-missing-9): if future fixtures start acquiring
+        # annotations unintentionally, this count moves and the diff shows it.
+        findings.add_finding(
+            conn, severity="low", category="gate", file="f", description=LONG_A
+        )
+        findings.add_finding(
+            conn, severity="low", category="gate", file="f", description=LONG_A2
+        )
+        n = conn.execute(
+            "SELECT COUNT(*) AS n FROM findings, json_each(findings.meta) "
+            "WHERE json_each.key = 'similar_to'"
+        ).fetchone()["n"]
+        assert n == 1
+
+    def test_resolver_registered_with_declared_key(self):
+        assert any(
+            r.name == "similarity.annotate" and r.meta_keys == frozenset({"similar_to"})
+            for r in db._pre_add_resolvers
+        )
