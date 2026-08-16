@@ -199,6 +199,10 @@ else
     echo "  ✓ tests pass"
 fi
 
+# Exactly what the gates above were run against. Re-checked inside the lock.
+TESTED_MAIN=$(git -C "${REPO_ROOT}" rev-parse main)
+TESTED_HEAD=$(git -C "${WORKTREE_PATH}" rev-parse HEAD)
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "[7/7] Integrating into main (under lock)..."
@@ -217,10 +221,47 @@ if ! flock -w 60 9; then
 fi
 echo "  ✓ Lock acquired"
 
-# Re-assert inside the lock: up to 60s passed, and both the checked-out branch
-# and main's HEAD can have moved while waiting.
+# Re-assert everything time-dependent inside the lock. Up to 60s passed, and
+# the gates above ran BEFORE the lock existed.
 _guard_workspace_on_main "${REPO_ROOT}" || exit $?
+_guard_main_clean "${REPO_ROOT}" || exit $?
 CURRENT_MAIN=$(git -C "${REPO_ROOT}" rev-parse main)
+
+# THE LOCK ONLY SERIALIZES THE MERGE, NOT THE TESTING — so verify the tested
+# state is still the state being landed (cross-model review).
+#
+# The race, with two finishers: A and B both forward-merge and test against
+# main M0. A takes the lock and lands, producing M1. B takes the lock, and
+# without this check merges into M1 a tree that was never tested against it.
+# That is a green-looking integration of an untested combination, which is the
+# same success-shaped lie the rest of this harness exists to prevent.
+#
+# Refusing and asking for a re-run is correct rather than lazy: the re-run's
+# [5/7] forward-merges the NEW main and re-runs the gates against it, which is
+# precisely the work that would otherwise be skipped. Acquiring the lock before
+# the tests instead would hold it for the whole ~70s suite and serialize every
+# concurrent finish behind it.
+if [[ "${CURRENT_MAIN}" != "${TESTED_MAIN}" ]]; then
+    echo "  ✗ main moved while this finish was running:"
+    echo "      tested against: ${TESTED_MAIN:0:9}"
+    echo "      main is now:    ${CURRENT_MAIN:0:9}"
+    echo "    Landing now would merge a tree that was never tested against the"
+    echo "    current main. Re-run — it will forward-merge and re-test:"
+    echo "      tools/worktree-finish.sh ${SLUG}"
+    flock -u 9
+    exit 13
+fi
+
+# Same argument for the branch: merge the SHA that was tested, not whatever the
+# name points at now (a concurrent session in that worktree can commit).
+CURRENT_HEAD=$(git -C "${WORKTREE_PATH}" rev-parse HEAD)
+if [[ "${CURRENT_HEAD}" != "${TESTED_HEAD}" ]]; then
+    echo "  ✗ ${BRANCH} moved while this finish was running:"
+    echo "      tested: ${TESTED_HEAD:0:9}   now: ${CURRENT_HEAD:0:9}"
+    echo "    Re-run to test what is actually there."
+    flock -u 9
+    exit 13
+fi
 
 # The integration message CLAUDE.md specifies: "Merge <branch>: <what changed>
 # (CB-NN)". The merge commit is what makes a card's whole iteration recoverable

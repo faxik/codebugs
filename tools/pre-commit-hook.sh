@@ -36,6 +36,22 @@ branch=$(git symbolic-ref --short -q HEAD || echo "")
 # that actually matters (shipping from one).
 [[ -z "${branch}" ]] && exit 0
 
+# A merge/cherry-pick/revert IN PROGRESS is being COMPLETED, not authored, and
+# completing a merge onto main is the sanctioned way work lands here.
+#
+# git does not run pre-commit for a merge it can complete by itself (it runs
+# pre-merge-commit, which this repo does not install), so a CLEAN `git merge
+# --no-ff` was always allowed. A CONFLICTED merge is finished by hand with
+# `git commit`, which DOES run pre-commit — so without this check the hook
+# blocked exactly the flow CLAUDE.md documents, and only when there was a
+# conflict. Verified both ways in a throwaway repo before and after this fix;
+# a peer session hit the clean path first, which is why the asymmetry surfaced
+# as a question rather than as an outage.
+git_dir=$(git rev-parse --git-dir)
+for in_progress in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD; do
+    [[ -e "${git_dir}/${in_progress}" ]] && exit 0
+done
+
 if [[ "${branch}" == "main" ]]; then
     # --diff-filter excludes nothing: a deletion on main is as much an edit as
     # an addition. Compare against HEAD, so this reads the staged set only.
@@ -68,9 +84,15 @@ fi
 # Not main: the branch must be one this repo sanctions. Checked at commit time
 # rather than only at finish time, because by the time a branch has commits on
 # it, renaming means every reference to it in a plan or handoff is already stale.
-for pfx in "${_BRANCH_TYPES[@]}"; do
-    [[ "${branch}" == "${pfx}/"* ]] && exit 0
-done
+#
+# The PREDICATE must match tools/_guards.sh:_guard_branch_type exactly, not
+# merely the list of types. A prefix test (`${branch} == ${pfx}/*`) accepts
+# `fix/a/b`, which the finish guard's full-shape regex then REFUSES — so a
+# session could commit for hours and be turned away at the last step, which is
+# the worst possible moment to learn the name is wrong (cross-model review).
+# tests/test_worktree_harness.py drives BOTH through the same case table.
+_IFS_SAVE="$IFS"; IFS='|'; _types="${_BRANCH_TYPES[*]}"; IFS="$_IFS_SAVE"
+[[ "${branch}" =~ ^(${_types})/[A-Za-z0-9._-]+$ ]] && exit 0
 
 echo "ERROR: branch '${branch}' does not carry a sanctioned type." >&2
 echo "  Expected: ${_BRANCH_TYPES[*]/%//*}" >&2

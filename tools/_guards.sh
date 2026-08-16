@@ -22,6 +22,7 @@
 #    5  conflict markers             10  HEAD not on a finishable branch
 #    6  base too far behind main     11  main working tree dirty
 #                                    12  enforcement not armed in this clone
+#                                    13  main or branch moved after testing
 
 # ---------------------------------------------------------------------------
 # Repo root, resolved so every script works from any cwd, including from inside
@@ -228,8 +229,18 @@ _guard_conflict_markers() {
         [[ -z "${f}" ]] && continue
         # Read from the tree, so an uncommitted local fix cannot mask a marker
         # that is actually committed on the branch.
-        if git -C "${wt_path}" show "HEAD:${f}" 2>/dev/null \
-            | grep -qE '^(<{7}|={7}|>{7})( |$)'; then
+        #
+        # NOT `git show … | grep -q`. `grep -q` exits at the FIRST match, which
+        # can SIGPIPE `git show` (exit 141); the caller runs under `set -o
+        # pipefail`, so the whole pipeline reports non-zero and the marker is
+        # silently ACCEPTED. That false negative grows with file size — a
+        # marker near the top of a large file is exactly when it fires — so the
+        # small fixtures in the test suite would never have caught it (found by
+        # cross-model review). Consume the stream fully and test the captured
+        # text instead: no pipe, no early exit, no signal.
+        local content
+        content=$(git -C "${wt_path}" show "HEAD:${f}" 2>/dev/null) || continue
+        if grep -qE '^(<{7}|={7}|>{7})( |$)' <<< "${content}"; then
             bad="${bad}${f}"$'\n'
         fi
     done <<< "${files}"

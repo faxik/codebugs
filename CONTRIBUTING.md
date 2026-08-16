@@ -10,7 +10,14 @@ tools/install-hooks.sh          # once per clone — arms the local enforcement
 ```
 
 `tools/install-hooks.sh` is not optional. Git hooks and git config are per-clone, so they cannot be
-merged in — a clone without it silently loses every guard below. It is idempotent; re-run it freely.
+merged in — a clone without it silently loses every guard below, because git skips a missing or
+dangling hook without a word. It is idempotent; re-run it freely. `worktree-finish.sh` refuses to
+integrate from a clone where it has not been run.
+
+**Scope, stated honestly:** this is client-side only. There is no CI and no server-side protection
+on `origin`, so `git push`, `git rebase`, `git cherry-pick`, `git revert` and `core.hooksPath` are
+outside it. The harness makes the accidental case impossible and the deliberate case explicit; it is
+not a substitute for a protected remote branch.
 
 ## The workflow — `main` is never edited directly
 

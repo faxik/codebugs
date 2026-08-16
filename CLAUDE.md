@@ -29,11 +29,29 @@ Prose cannot enforce prose. That is CB-50, and the harness below is its fix.
 | The branch actually carries a change | `_guard_nonempty_diff` | exit 9 |
 | No conflict markers, no scratch `.py`, no stale base | `_guard_conflict_markers`, `_guard_untracked_py_at_root`, `_guard_stale_base` | exit 5, 4, 6 |
 
-`merge.ff=false` is the one that matters most and the one no hook could replace: **git fires no hook
-on a fast-forward at all**, because no commit is created. Nothing can catch it after the fact, so
-the only repair is to make it unrepresentable. `tests/test_worktree_harness.py` covers every guard
-on both sides — the state it must refuse and the state it must allow — and each test was
-mutation-checked against a deliberately broken guard.
+`merge.ff=false` is the one no hook could replace: **git fires no hook on a fast-forward at all**,
+because no commit is created, so nothing can catch it after the fact. Verified by replaying the
+incident in a throwaway repo — default config gives `Fast-forward` and zero merge commits;
+`merge.ff=false` gives a merge commit. Two precise limits, because the first draft of this section
+overstated it: it does nothing when the branch is already an ancestor of main (git says "Already up
+to date" and main does not move, which is harmless), and it is *configuration*, so
+`git config merge.ff true` turns it off without anyone typing `--ff`.
+
+**What this does NOT do, stated plainly because the honest scope is the point.** All of it is
+CLIENT-SIDE and PER-CLONE: hooks and git config cannot be committed, there is no CI and no
+server-side protection on `origin`. A fresh clone has none of it until `tools/install-hooks.sh` is
+run — which is why `_guard_enforcement_armed` refuses to integrate from an unarmed clone, the one
+moment being unarmed can cost anything. Even armed, `git rebase`, `git cherry-pick`, `git revert`,
+`git am`, `git reset --hard`, `git push`, and `core.hooksPath` all move or publish `main` without
+passing the pre-commit hook, and a typed branch committed in the *primary* checkout satisfies the
+hook while ignoring the worktree rule entirely. The remedy for a shared repo is a protected remote
+branch plus required CI; this harness is the local half, and calling it more than that would be the
+same false assurance the prose version gave.
+
+`tests/test_worktree_harness.py` covers every guard on both sides — the state it must refuse and the
+state it must allow. Each was mutation-checked against a deliberately broken guard; cross-model
+review then found a seventh mutation the suite missed (one of two alternatives in the leaked-repr
+pattern), which is now covered.
 
 - **Create:** `tools/worktree-setup.sh <type>/<slug> [base]`, which validates the name, refuses a
   card already carried by another branch, creates `.worktrees/<type>-<slug>`, primes the worktree's

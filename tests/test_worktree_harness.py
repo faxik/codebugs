@@ -154,6 +154,40 @@ class TestConflictMarkers:
         (repo / "f.py").write_text("a\n")  # fixed locally, NOT committed
         assert run_guard("_guard_conflict_markers", str(repo), base).returncode == 5
 
+    def test_marker_near_top_of_a_large_file(self, repo: Path) -> None:
+        """A marker at the top of a big file — the SIGPIPE false negative.
+
+        The guard used to be `git show … | grep -q`. `grep -q` exits at the
+        first match, which SIGPIPEs `git show` (exit 141); the callers run
+        under `set -o pipefail`, so the pipeline reported non-zero and the
+        marker was silently ACCEPTED. Verified against the old code on a 4 MB
+        file: it missed the marker entirely.
+
+        The failure needs SIZE — every other test in this class uses a
+        five-line fixture, where `git show` finishes before grep exits and the
+        bug cannot appear. Found by cross-model review, not by this suite.
+        """
+        base = git(repo, "rev-parse", "HEAD")
+        git(repo, "checkout", "-b", "fix/cb-1-x")
+        big = repo / "big.py"
+        big.write_text(
+            "<<<<<<< HEAD\na\n=======\nb\n>>>>>>> x\n"
+            + "".join(f"filler line {i}\n" for i in range(200_000))
+        )
+        assert big.stat().st_size > 2_000_000, "fixture too small to provoke SIGPIPE"
+        git(repo, "add", "big.py")
+        git(repo, "commit", "-m", "big")
+        assert run_guard("_guard_conflict_markers", str(repo), base).returncode == 5
+
+    def test_large_clean_file_is_not_a_false_positive(self, repo: Path) -> None:
+        """The other half: consuming the whole stream must not invent markers."""
+        base = git(repo, "rev-parse", "HEAD")
+        git(repo, "checkout", "-b", "fix/cb-1-x")
+        (repo / "big.py").write_text("".join(f"clean line {i}\n" for i in range(200_000)))
+        git(repo, "add", "big.py")
+        git(repo, "commit", "-m", "big")
+        assert run_guard("_guard_conflict_markers", str(repo), base).returncode == 0
+
     def test_deleted_file_does_not_break_the_scan(self, repo: Path) -> None:
         """A deleted path has no content to read; --diff-filter=d must skip it."""
         (repo / "gone.py").write_text("x = 1\n")
@@ -322,6 +356,22 @@ class TestLeakedRepr:
         git(repo, "add", "--", leaked.name)
         assert run_guard("_guard_leaked_repr", str(repo)).returncode == 3
 
+    def test_repr_filename_without_angle_brackets_refused(self, repo: Path) -> None:
+        """The guard's pattern has two alternatives; both need a test.
+
+        The original suite only had the angle-bracketed case, which matches
+        `^<.*>` — so deleting the `Connection object at 0x` alternative left
+        every test passing while that shape stopped being caught. That was
+        found as an uncaught mutation by cross-model review, and it is exactly
+        the "a check that validates elements cannot validate their
+        composition" shape this repo keeps rediscovering: two alternatives,
+        one covered.
+        """
+        leaked = repo / "Connection object at 0x7f00"
+        leaked.write_text("junk\n")
+        git(repo, "add", "--", leaked.name)
+        assert run_guard("_guard_leaked_repr", str(repo)).returncode == 3
+
 
 class TestHarnessIntegrity:
     """The scripts themselves — syntax, and the one constant that must not drift."""
@@ -477,6 +527,78 @@ class TestPreCommitHook:
         git(repo, "checkout", "-q", "-b", "worktree-cb-45-similarity-seam")
         (repo / "src").mkdir()
         (repo / "src" / "mod.py").write_text("x = 1\n")
+        assert self._commit(repo, "src/mod.py").returncode != 0
+
+    def test_clean_no_ff_merge_onto_main_allowed(self, repo: Path) -> None:
+        """The documented landing path must not be blocked by the hook."""
+        self._install(repo)
+        git(repo, "checkout", "-q", "-b", "fix/cb-1-work")
+        (repo / "src").mkdir()
+        (repo / "src" / "mod.py").write_text("x = 1\n")
+        self._commit(repo, "src/mod.py")
+        git(repo, "checkout", "-q", "main")
+        result = subprocess.run(
+            ["git", "-C", str(repo), "merge", "fix/cb-1-work", "--no-ff", "--no-edit"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+
+    def test_conflicted_merge_on_main_can_be_completed(self, repo: Path) -> None:
+        """The asymmetry a peer session found by hitting it.
+
+        git runs `pre-merge-commit` for a merge it completes itself — not
+        installed here, so a CLEAN merge always passed. A CONFLICTED merge is
+        finished by hand with `git commit`, which DOES run pre-commit, and the
+        hook then saw staged source files on main and refused. So the hook was
+        merge-safe only when the merge was clean, i.e. it failed exactly when
+        the operator was already mid-conflict.
+        """
+        self._install(repo)
+        git(repo, "checkout", "-q", "-b", "fix/cb-1-work")
+        (repo / "seed.txt").write_text("branch side\n")
+        self._commit(repo, "seed.txt")
+        git(repo, "checkout", "-q", "main")
+        (repo / "seed.txt").write_text("main side\n")
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "--no-verify", "-am", "main side"], check=True
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "merge", "fix/cb-1-work", "--no-ff", "--no-edit"],
+            capture_output=True,
+        )
+        (repo / "seed.txt").write_text("resolved\n")
+        subprocess.run(["git", "-C", str(repo), "add", "seed.txt"], check=True)
+        result = subprocess.run(
+            ["git", "-C", str(repo), "commit", "--no-edit"], capture_output=True, text=True
+        )
+        assert result.returncode == 0, f"conflicted merge blocked on main: {result.stderr}"
+
+    def test_merge_allowance_did_not_make_the_hook_toothless(self, repo: Path) -> None:
+        """Discriminator for the fix above: no merge in progress, still refused.
+
+        Without this, 'allow when MERGE_HEAD exists' could be widened to
+        'always allow' and every hook test above would still pass.
+        """
+        self._install(repo)
+        (repo / "src").mkdir()
+        (repo / "src" / "mod.py").write_text("x = 1\n")
+        assert self._commit(repo, "src/mod.py").returncode != 0
+
+    def test_hook_and_guard_agree_on_nested_branch(self, repo: Path) -> None:
+        """`fix/a/b` must be refused by BOTH, at the same moment.
+
+        The hook used a loose prefix test while the finish guard used a full
+        shape regex, so `fix/a/b` could accumulate commits for hours and then
+        be refused at integration — the worst moment to learn the name is
+        wrong. Asserted against the guard's own verdict so the two cannot drift
+        apart again without this failing.
+        """
+        self._install(repo)
+        git(repo, "checkout", "-q", "-b", "fix/a/b")
+        (repo / "src").mkdir()
+        (repo / "src" / "mod.py").write_text("x = 1\n")
+        assert run_guard("_guard_branch_type", "fix/a/b").returncode == 7
         assert self._commit(repo, "src/mod.py").returncode != 0
 
     def test_no_verify_still_works(self, repo: Path) -> None:
