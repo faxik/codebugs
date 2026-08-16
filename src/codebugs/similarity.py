@@ -19,16 +19,14 @@ annotation via update_finding (the reservation is add-side only).
 
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import re
 import sqlite3
-import sys
 from collections import defaultdict
 from typing import Any
 
-from codebugs import db, fmt
+from codebugs import db
 from codebugs.findings import LIVE_STATUSES, normalized_identity_text, similarity_candidates
 from codebugs.types import is_text_filter_active, resolve_finding_status
 
@@ -343,6 +341,194 @@ def _annotate_resolver(
     return {"similar_to": matches}
 
 
-db.register_pre_add_resolver(
-    "similarity.annotate", _annotate_resolver, meta_keys=("similar_to",)
-)
+db.register_pre_add_resolver("similarity.annotate", _annotate_resolver, meta_keys=("similar_to",))
+
+
+def register_tools(mcp, conn_factory) -> None:
+    """Register similarity MCP tools.
+
+    The annotate resolver registers at module import (any --mode loads it via
+    _ensure_modules_loaded); this only gates which TOOLS are exposed.
+    """
+
+    @mcp.tool()
+    def similarity_check(
+        description: str,
+        category: str,
+        meta: dict[str, Any] | None = None,
+        threshold: float = DEFAULT_THRESHOLD,
+        limit: int = MAX_ANNOTATIONS,
+    ) -> dict[str, Any]:
+        """Preview what the file-time annotator would stamp for an observation.
+
+        Applies EXACTLY the resolver's policy: same candidate pool (live +
+        dismissed, same category, newest 500), same minimum-text-length gate,
+        same scoring. Advisory only — nothing is written.
+
+        Args:
+            description: The observation's description text
+            category: Category to search within (annotation never crosses it)
+            meta: Optional observation meta (volatile values are stripped from
+                the text before scoring, same as fingerprint normalization)
+            threshold: Minimum similarity in [0, 1] (default 0.7, calibrated)
+            limit: Max matches returned (default 5)
+        """
+        with conn_factory() as conn:
+            matches = find_similar(
+                conn,
+                description=description,
+                category=category,
+                meta=meta,
+                threshold=threshold,
+                limit=limit,
+            )
+        return {"matches": matches, "threshold": threshold}
+
+    @mcp.tool()
+    def similarity_report(
+        threshold: float = DEFAULT_THRESHOLD,
+        category: str | None = None,
+        status: str | None = None,
+        family_limit: int | None = None,
+        member_limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Offline grouping scrub: similarity families as auditable evidence.
+
+        Families are connected components with min_pair_score and edge lists —
+        the dry run for any future backfill/merge (the blocked backfill card);
+        no merge is performed or implied. Default population is LIVE rows;
+        pass status= to widen (the sentinel "all" means every status).
+        Wall-clock is quadratic per category block (~115k pair comparisons on
+        a 3k-row tracker); prefer the CLI for very large trackers.
+
+        Args:
+            threshold: Minimum similarity in [0, 1] (default 0.7, calibrated)
+            category: Restrict to one category
+            status: Widen/narrow the population (default: live statuses; "all")
+            family_limit: Max families returned (totals stay visible)
+            member_limit: Max members per family (totals stay visible)
+        """
+        with conn_factory() as conn:
+            return group_report(
+                conn,
+                threshold=threshold,
+                category=category,
+                status=status,
+                family_limit=family_limit,
+                member_limit=member_limit,
+            )
+
+
+def register_cli(sub, commands) -> None:
+    """Register similarity CLI subcommands."""
+    import sys
+
+    from codebugs.fmt import format_table
+
+    p_check = sub.add_parser(
+        "similarity-check", help="Preview what the file-time annotator would stamp"
+    )
+    p_check.add_argument("--description", required=True)
+    p_check.add_argument("--category", required=True)
+    p_check.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
+    p_check.add_argument("--limit", type=int, default=MAX_ANNOTATIONS)
+    p_check.add_argument("--json", action="store_true", dest="as_json")
+
+    p_report = sub.add_parser(
+        "similarity-report", help="Offline similarity grouping report (backfill dry run)"
+    )
+    p_report.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
+    p_report.add_argument("--category", default=None)
+    p_report.add_argument("--status", default=None)
+    p_report.add_argument("--family-limit", type=int, default=None, dest="family_limit")
+    p_report.add_argument("--member-limit", type=int, default=None, dest="member_limit")
+    p_report.add_argument("--json", action="store_true", dest="as_json")
+
+    def _cmd_similarity_check(args) -> None:
+        conn = db.connect()
+        try:
+            matches = find_similar(
+                conn,
+                description=args.description,
+                category=args.category,
+                threshold=args.threshold,
+                limit=args.limit,
+            )
+        except json.JSONDecodeError:
+            # Ordering is load-bearing (the _cmd_update pattern): a stored-data
+            # parse failure after reads is NOT bad input, and JSONDecodeError
+            # subclasses ValueError — this arm must come first, and re-raise.
+            raise
+        except (KeyError, ValueError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
+        if args.as_json:
+            print(json.dumps({"matches": matches}, indent=2))
+        elif not matches:
+            print("No similar findings.")
+        else:
+            print(format_table(matches, ["id", "status", "score"]))
+
+    def _cmd_similarity_report(args) -> None:
+        conn = db.connect()
+        try:
+            report = group_report(
+                conn,
+                threshold=args.threshold,
+                category=args.category,
+                status=args.status,
+                family_limit=args.family_limit,
+                member_limit=args.member_limit,
+            )
+        except json.JSONDecodeError:
+            raise
+        except (KeyError, ValueError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
+        if args.as_json:
+            print(json.dumps(report, indent=2))
+            return
+        print(
+            f"threshold={report['threshold']} populations={report['populations']} "
+            f"rows={report['rows_considered']} skipped_short={report['rows_skipped_short']} "
+            f"collapse={report['collapse_count']}"
+        )
+        if not report["families"]:
+            print("No similarity families.")
+            return
+        for fam in report["families"]:
+            print(
+                f"\n[{fam['category']}] size={fam['size']} "
+                f"min_pair_score={fam['min_pair_score']:.3f} edges={fam['edge_count']}"
+            )
+            rows = [
+                {
+                    "id": m["id"],
+                    "status": m["status"],
+                    "sev": m["severity"],
+                    "occ": m["occurrence_count"],
+                    "description": m["description_excerpt"],
+                }
+                for m in fam["members"]
+            ]
+            print(
+                format_table(
+                    rows,
+                    ["id", "status", "sev", "occ", "description"],
+                    max_widths={"description": 60},
+                )
+            )
+        shown = len(report["families"])
+        if report["families_total"] > shown:
+            print(f"\n({report['families_total'] - shown} more families truncated; --family-limit)")
+
+    commands["similarity-check"] = _cmd_similarity_check
+    commands["similarity-report"] = _cmd_similarity_report
+
+
+db.register_tool_provider("similarity", register_tools)
+db.register_cli_provider("similarity", register_cli)

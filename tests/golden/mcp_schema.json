@@ -2488,6 +2488,114 @@
     "name": "reqs_verify"
   },
   {
+    "description": "Preview what the file-time annotator would stamp for an observation.\n\nApplies EXACTLY the resolver's policy: same candidate pool (live +\ndismissed, same category, newest 500), same minimum-text-length gate,\nsame scoring. Advisory only \u2014 nothing is written.\n\nArgs:\n    description: The observation's description text\n    category: Category to search within (annotation never crosses it)\n    meta: Optional observation meta (volatile values are stripped from\n        the text before scoring, same as fingerprint normalization)\n    threshold: Minimum similarity in [0, 1] (default 0.7, calibrated)\n    limit: Max matches returned (default 5)\n",
+    "inputSchema": {
+      "properties": {
+        "category": {
+          "title": "Category",
+          "type": "string"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "limit": {
+          "default": 5,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "meta": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Meta"
+        },
+        "threshold": {
+          "default": 0.7,
+          "title": "Threshold",
+          "type": "number"
+        }
+      },
+      "required": [
+        "description",
+        "category"
+      ],
+      "title": "similarity_checkArguments",
+      "type": "object"
+    },
+    "name": "similarity_check"
+  },
+  {
+    "description": "Offline grouping scrub: similarity families as auditable evidence.\n\nFamilies are connected components with min_pair_score and edge lists \u2014\nthe dry run for any future backfill/merge (the blocked backfill card);\nno merge is performed or implied. Default population is LIVE rows;\npass status= to widen (the sentinel \"all\" means every status).\nWall-clock is quadratic per category block (~115k pair comparisons on\na 3k-row tracker); prefer the CLI for very large trackers.\n\nArgs:\n    threshold: Minimum similarity in [0, 1] (default 0.7, calibrated)\n    category: Restrict to one category\n    status: Widen/narrow the population (default: live statuses; \"all\")\n    family_limit: Max families returned (totals stay visible)\n    member_limit: Max members per family (totals stay visible)\n",
+    "inputSchema": {
+      "properties": {
+        "category": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Category"
+        },
+        "family_limit": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Family Limit"
+        },
+        "member_limit": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Member Limit"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        },
+        "threshold": {
+          "default": 0.7,
+          "title": "Threshold",
+          "type": "number"
+        }
+      },
+      "title": "similarity_reportArguments",
+      "type": "object"
+    },
+    "name": "similarity_report"
+  },
+  {
     "description": "Check if findings are stale by comparing against git history.\n\nReturns file_status for each finding:\n- current: file unchanged since finding was reported\n- modified: file changed but still exists\n- renamed: file was renamed/moved\n- deleted: file no longer exists\n- unknown: can't determine (no provenance data, unreachable commit)\n\nArgs:\n    finding_id: Check a single finding (e.g. CB-1)\n    status: Filter by finding status (default: open)\n    category: Filter by category\n    file: Filter by file path (substring match)\n",
     "inputSchema": {
       "properties": {

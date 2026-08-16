@@ -79,9 +79,7 @@ class TestRegistration:
 
     def test_resolver_errors_key_refused(self):
         with pytest.raises(ValueError, match="resolver_errors"):
-            db.register_pre_add_resolver(
-                "t.a", lambda c, o: None, meta_keys=("resolver_errors",)
-            )
+            db.register_pre_add_resolver("t.a", lambda c, o: None, meta_keys=("resolver_errors",))
 
     def test_reserved_union(self):
         db.register_pre_add_resolver("t.a", lambda c, o: None, meta_keys=("ka", "kb"))
@@ -205,9 +203,7 @@ class TestRunner:
         assert "ka" not in patch and patch["resolver_errors"]
 
     def test_nan_outcome_is_failure(self, conn):
-        db.register_pre_add_resolver(
-            "t.a", lambda c, o: {"ka": float("nan")}, meta_keys=("ka",)
-        )
+        db.register_pre_add_resolver("t.a", lambda c, o: {"ka": float("nan")}, meta_keys=("ka",))
         with db.txn(conn):
             patch = db.run_pre_add_resolvers(conn, _obs())
         assert "ka" not in patch and patch["resolver_errors"]
@@ -218,9 +214,7 @@ LONG_DESC = "a genuinely long description of a defect that clears the guard " * 
 
 class TestFindingsIntegration:
     def test_annotation_lands_in_inserted_row(self, conn):
-        db.register_pre_add_resolver(
-            "t.a", lambda c, o: {"ka": o["category"]}, meta_keys=("ka",)
-        )
+        db.register_pre_add_resolver("t.a", lambda c, o: {"ka": o["category"]}, meta_keys=("ka",))
         result = findings.add_finding(
             conn, severity="low", category="cat-x", file="f", description=LONG_DESC
         )
@@ -238,9 +232,7 @@ class TestFindingsIntegration:
 
     def test_reopen_does_not_fire_resolvers(self, conn):
         calls = []
-        db.register_pre_add_resolver(
-            "t.a", lambda c, o: calls.append(1) or None, meta_keys=("ka",)
-        )
+        db.register_pre_add_resolver("t.a", lambda c, o: calls.append(1) or None, meta_keys=("ka",))
         kw = dict(severity="low", category="c", file="f", description=LONG_DESC)
         first = findings.add_finding(conn, **kw)
         findings.update_finding(conn, first["id"], status="fixed")
@@ -351,9 +343,9 @@ class TestFindingsIntegration:
     def test_normalized_identity_text_delegates(self):
         # Pins delegation only — the wrapper exists so similarity never imports
         # the private, versioned normalization.
-        assert findings.normalized_identity_text(
-            "A  B"
-        ) == findings._normalize_for_fingerprint("A  B", None)
+        assert findings.normalized_identity_text("A  B") == findings._normalize_for_fingerprint(
+            "A  B", None
+        )
 
     def test_live_statuses_public_alias(self):
         assert findings.LIVE_STATUSES == ("open", "in_progress", "stale")

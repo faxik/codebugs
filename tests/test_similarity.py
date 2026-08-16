@@ -73,7 +73,11 @@ class TestDetector:
 class TestFindSimilar:
     def _add(self, conn, fid, desc, category="gate", status=None):
         findings.add_finding(
-            conn, severity="low", category=category, file="f", description=desc,
+            conn,
+            severity="low",
+            category=category,
+            file="f",
+            description=desc,
             finding_id=fid,
         )
         if status:
@@ -130,7 +134,11 @@ class TestGroupReport:
     def _seed3(self, conn):
         for i, d in enumerate([LONG_A, LONG_A2, LONG_B]):
             findings.add_finding(
-                conn, severity="low", category="gate", file="f", description=d,
+                conn,
+                severity="low",
+                category="gate",
+                file="f",
+                description=d,
                 finding_id=f"CB-{i + 1}",
             )
 
@@ -174,7 +182,11 @@ class TestGroupReport:
     def test_short_rows_skipped_and_counted(self, conn):
         for i, d in enumerate(["Bug 1x", "Bug 2x"]):
             findings.add_finding(
-                conn, severity="low", category="gate", file="f", description=d,
+                conn,
+                severity="low",
+                category="gate",
+                file="f",
+                description=d,
                 finding_id=f"CB-{i + 1}",
             )
         report = similarity.group_report(conn)
@@ -182,11 +194,19 @@ class TestGroupReport:
 
     def test_category_blocking(self, conn):
         findings.add_finding(
-            conn, severity="low", category="a", file="f", description=LONG_A,
+            conn,
+            severity="low",
+            category="a",
+            file="f",
+            description=LONG_A,
             finding_id="CB-1",
         )
         findings.add_finding(
-            conn, severity="low", category="b", file="f", description=LONG_A,
+            conn,
+            severity="low",
+            category="b",
+            file="f",
+            description=LONG_A,
             finding_id="CB-2",
         )
         assert similarity.group_report(conn)["families"] == []
@@ -200,11 +220,19 @@ class TestGroupReport:
 
     def test_vectors_override_pairs_that_have_them(self, conn):
         findings.add_finding(
-            conn, severity="low", category="a", file="f", description=LONG_A,
+            conn,
+            severity="low",
+            category="a",
+            file="f",
+            description=LONG_A,
             finding_id="CB-1",
         )
         findings.add_finding(
-            conn, severity="low", category="a", file="f", description=LONG_B,
+            conn,
+            severity="low",
+            category="a",
+            file="f",
+            description=LONG_B,
             finding_id="CB-2",
         )
         vecs = {"CB-1": [1.0, 0.0], "CB-2": [0.96, 0.28]}  # cosine ~ 0.96
@@ -233,18 +261,14 @@ class TestAnnotateResolver:
         assert "similar_to" not in first["meta"]
 
     def test_short_description_not_annotated(self, conn):
-        findings.add_finding(
-            conn, severity="low", category="gate", file="f", description="Bug 1x"
-        )
+        findings.add_finding(conn, severity="low", category="gate", file="f", description="Bug 1x")
         second = findings.add_finding(
             conn, severity="low", category="gate", file="f", description="Bug 2x"
         )
         assert "similar_to" not in second["meta"]
 
     def test_dissimilar_not_annotated(self, conn):
-        findings.add_finding(
-            conn, severity="low", category="gate", file="f", description=LONG_A
-        )
+        findings.add_finding(conn, severity="low", category="gate", file="f", description=LONG_A)
         second = findings.add_finding(
             conn, severity="low", category="gate", file="f", description=LONG_B
         )
@@ -279,20 +303,14 @@ class TestAnnotateResolver:
         first = findings.add_finding(
             conn, severity="low", category="gate", file="f", description=LONG_A
         )
-        updated = findings.update_finding(
-            conn, first["id"], meta_update={"similar_to": []}
-        )
+        updated = findings.update_finding(conn, first["id"], meta_update={"similar_to": []})
         assert updated["meta"]["similar_to"] == []
 
     def test_suite_annotation_ratchet(self, conn):
         # Cheap ratchet (review CX-missing-9): if future fixtures start acquiring
         # annotations unintentionally, this count moves and the diff shows it.
-        findings.add_finding(
-            conn, severity="low", category="gate", file="f", description=LONG_A
-        )
-        findings.add_finding(
-            conn, severity="low", category="gate", file="f", description=LONG_A2
-        )
+        findings.add_finding(conn, severity="low", category="gate", file="f", description=LONG_A)
+        findings.add_finding(conn, severity="low", category="gate", file="f", description=LONG_A2)
         n = conn.execute(
             "SELECT COUNT(*) AS n FROM findings, json_each(findings.meta) "
             "WHERE json_each.key = 'similar_to'"
@@ -304,3 +322,50 @@ class TestAnnotateResolver:
             r.name == "similarity.annotate" and r.meta_keys == frozenset({"similar_to"})
             for r in db._pre_add_resolvers
         )
+
+
+class TestSurfaces:
+    def test_tool_provider_registered(self):
+        assert any(p.name == "similarity" for p in db.get_tool_providers(mode="all"))
+
+    def test_cli_provider_registered(self):
+        assert any(p.name == "similarity" for p in db.get_cli_providers(mode="all"))
+
+    def test_tools_forward_arguments(self, conn):
+        # Review CX-missing-6 / CB-28's class: a declared argument must reach its
+        # query — provider presence proves nothing; CALL the tools.
+        import contextlib
+
+        captured = {}
+
+        class FakeMCP:
+            def tool(self):
+                def deco(fn):
+                    captured[fn.__name__] = fn
+                    return fn
+
+                return deco
+
+        @contextlib.contextmanager
+        def conn_factory():
+            yield conn
+
+        similarity.register_tools(FakeMCP(), conn_factory)
+        findings.add_finding(
+            conn,
+            severity="low",
+            category="gate",
+            file="f",
+            description=LONG_A,
+            finding_id="CB-1",
+        )
+        out = captured["similarity_check"](
+            description=LONG_A2, category="gate", threshold=0.9, limit=1
+        )
+        assert [m["id"] for m in out["matches"]] == ["CB-1"]
+        strict = captured["similarity_check"](description=LONG_A2, category="gate", threshold=0.999)
+        assert strict["matches"] == []  # threshold actually forwarded
+        report = captured["similarity_report"](threshold=0.999)
+        assert report["families"] == []  # forwarded here too
+        wide = captured["similarity_report"](threshold=0.9, category="gate")
+        assert wide["rows_considered"] == 1  # category forwarded
