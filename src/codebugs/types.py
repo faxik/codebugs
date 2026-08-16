@@ -99,6 +99,28 @@ def is_vocabulary_filter_active(value: object) -> bool:
     return True
 
 
+def is_text_filter_active(value: object) -> bool:
+    """Free-text twin of ``is_vocabulary_filter_active`` — for filters with no resolver.
+
+    Same convention: ``None`` (not supplied) and ``""`` (the documented empty filter)
+    mean "no filter". The difference is what refuses wrong input: a vocabulary filter
+    forwards to its resolver, which raises on a non-string; a free-text filter has no
+    resolver, so *this predicate* is the only gate and must raise the ``ValueError``
+    itself. Returning ``True`` for a non-string instead would bind it into SQL, where
+    ``fingerprint = 0`` silently matches nothing — an empty page indistinguishable
+    from a real one (the CB-25 shape, on the free-text side CB-29 tracks).
+
+    Type-based for the same reason as its twin: never run ``==``/``len()`` on the
+    value (``unittest.mock.ANY`` compares equal to ``""``; a ``str`` subclass can
+    override ``__ne__``).
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return str.__len__(value) != 0
+    raise ValueError(f"text filter must be a string, got {type(value).__name__}")
+
+
 def _resolve(
     value: str,
     valid: tuple[str, ...],

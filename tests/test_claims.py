@@ -38,13 +38,21 @@ def conn(tmp_project):
     c.close()
 
 
+_finding_seq = 0
+
+
 def _finding(conn, **kw):
+    # Each call means "a distinct entity". Since CB-43, identical
+    # (category, file, description) tuples are the SAME identity and collapse
+    # into one row — so the default description must differ per call.
+    global _finding_seq
+    _finding_seq += 1
     return findings.add_finding(
         conn,
         severity=kw.get("severity", "high"),
         category=kw.get("category", "test"),
         file=kw.get("file", "a.py"),
-        description=kw.get("description", "d"),
+        description=kw.get("description", f"d{_finding_seq}"),
     )
 
 

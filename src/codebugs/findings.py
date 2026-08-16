@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import re
 import sqlite3
@@ -14,6 +15,7 @@ from codebugs.types import (
     ENTITY_FINDING,
     FINDING_ID_PREFIX,
     SEVERITIES,
+    is_text_filter_active,
     is_vocabulary_filter_active,
     rank_case_sql,
     resolve_finding_status,
@@ -36,7 +38,10 @@ CREATE TABLE IF NOT EXISTS findings (
     reported_at_commit TEXT,
     reported_at_ref TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    fingerprint TEXT,
+    occurrence_count INTEGER NOT NULL DEFAULT 1,
+    last_seen_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(status);
@@ -44,6 +49,20 @@ CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings(severity);
 CREATE INDEX IF NOT EXISTS idx_findings_file ON findings(file);
 CREATE INDEX IF NOT EXISTS idx_findings_category ON findings(category);
 """
+
+# Applied AFTER every migration, never inside SCHEMA (sweep.py's pattern). SCHEMA runs
+# first in ensure_schema, so an index here that references a migrated-in column would
+# raise on any pre-existing table — and `_migrate_statuses` rebuilds the table from a
+# hardcoded DDL and recreates only its own hardcoded index list, so an index created
+# earlier would silently vanish on the rebuild path.
+#
+# The partial UNIQUE index is the identity guarantee (CB-43): at most one LIVE card per
+# fingerprint is a database fact, not transaction discipline — the claims.py shape. The
+# WHERE must stay in lockstep with _LIVE_STATUSES below.
+_POST_MIGRATION_INDEXES = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_findings_fingerprint_live ON findings(fingerprint) "
+    "WHERE fingerprint IS NOT NULL AND status IN ('open', 'in_progress', 'stale')",
+)
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -55,6 +74,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
     _migrate_statuses(conn)
     _migrate_findings_add_provenance_columns(conn)
+    _migrate_findings_add_identity_columns(conn)
+    for stmt in _POST_MIGRATION_INDEXES:
+        conn.execute(stmt)
+    conn.commit()
 
 
 def _migrate_statuses(conn: sqlite3.Connection) -> None:
@@ -123,6 +146,26 @@ def _migrate_findings_add_provenance_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_findings_add_identity_columns(conn: sqlite3.Connection) -> None:
+    """Add the CB-43 identity columns to existing databases.
+
+    Columns only — the partial unique index lives in _POST_MIGRATION_INDEXES,
+    because it must be created after BOTH this migration (the column must exist)
+    and _migrate_statuses (whose table rebuild would drop it).
+
+    NULL fingerprints are pre-migration rows (or explicit-id rows); NULL never
+    matches anything, so legacy rows are inert to dedup until re-observed.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(findings)").fetchall()}
+    if "fingerprint" not in cols:
+        conn.execute("ALTER TABLE findings ADD COLUMN fingerprint TEXT")
+    if "occurrence_count" not in cols:
+        conn.execute("ALTER TABLE findings ADD COLUMN occurrence_count INTEGER NOT NULL DEFAULT 1")
+    if "last_seen_at" not in cols:
+        conn.execute("ALTER TABLE findings ADD COLUMN last_seen_at TEXT")
+    conn.commit()
+
+
 def _next_id(conn: sqlite3.Connection) -> str:
     """Generate next CB-N id."""
     prefix_len = len(FINDING_ID_PREFIX) + 1  # 1-based SUBSTR offset past the prefix
@@ -139,6 +182,322 @@ def _next_id(conn: sqlite3.Connection) -> str:
     return f"{FINDING_ID_PREFIX}{n}"
 
 
+# --- Identity (CB-43) ---------------------------------------------------------------
+#
+# A FINDING is a defect; an OCCURRENCE is one observation of it. The identity function
+# maps an observation to the finding it belongs to via `fingerprint`, so one defect
+# observed N times is one row with occurrence_count=N instead of N rows.
+#
+# The status branch table below is TOTAL over types.FINDING_STATUSES, and
+# tests/test_dedup.py::TestBranchTotality pins that: a new status added to the
+# vocabulary must be classified here or the test fails — the alternative is that it
+# silently falls through to "no match" and the duplicate explosion resumes for exactly
+# that status (the review's judge found `stale` doing this in an earlier draft).
+_LIVE_STATUSES = ("open", "in_progress", "stale")  # same fingerprint -> bump this row
+_REOPEN_STATUSES = ("fixed",)  # same fingerprint -> regression: reopen this row
+_RECURRENCE_STATUSES = ("wont_fix", "not_a_bug")  # decision stays closed -> new linked row
+
+_AUTO_FP_PREFIX = "auto:"  # reserved: derived fingerprints only, callers may not supply it
+_FP_MAX_LEN = 256
+# Hex runs need >= 1 digit: `\b[0-9a-fA-F]{7,}\b` alone eats all-letter words
+# ("defaced", "effaced") and merges two genuinely different descriptions.
+_FP_HEX_RUN = re.compile(r"\b(?=[0-9a-fA-F]*\d)[0-9a-fA-F]{7,}\b")
+_FP_ISO_TS = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?")
+_FP_WS = re.compile(r"\s+")
+
+# Occurrence ring: keep-first + keep-last, NOT drop-oldest — the earliest observations
+# carry the evidence an un-merge needs, so pure drop-oldest would discard exactly what
+# the too-coarse-fingerprint mitigation depends on.
+_OCC_KEEP_FIRST = 10
+_OCC_KEEP_LAST = 10
+_OCC_DESC_CAP = 2000
+
+
+def _validate_fingerprint(fingerprint: object) -> str | None:
+    """Validate a caller-supplied fingerprint. None passes through (means: derive/skip).
+
+    Rejects non-strings, empty/whitespace tokens (an empty string would become one
+    global indexed identity that the ''-means-no-filter convention makes unqueryable),
+    oversized values, and the reserved `auto:` prefix (otherwise a caller could collide
+    with the derived namespace and the supplied/derived partition guarantee is false).
+    """
+    if fingerprint is None:
+        return None
+    if not isinstance(fingerprint, str):
+        raise ValueError(f"fingerprint must be a string, got {type(fingerprint).__name__}")
+    fp = fingerprint.strip()
+    if not fp:
+        raise ValueError("fingerprint must be non-empty")
+    if len(fp) > _FP_MAX_LEN:
+        raise ValueError(f"fingerprint exceeds {_FP_MAX_LEN} chars")
+    if fp.startswith(_AUTO_FP_PREFIX):
+        raise ValueError(f"fingerprint prefix {_AUTO_FP_PREFIX!r} is reserved for derived values")
+    return fp
+
+
+def _normalize_for_fingerprint(description: str, meta: dict[str, Any] | None) -> str:
+    """Normalize a description to its invariant part for fallback fingerprinting.
+
+    The load-bearing step is stripping the observation's OWN declared meta values
+    (sha, branch slug, log path...): measured against the real corpus, hex/timestamp
+    stripping alone collapsed 0 of the 115-row family CB-43 cites — the blocker was
+    the branch slug, which only the filer's meta knows. General numbers are KEPT
+    (rc=124 vs rc=1 is a real family split that must stay distinct).
+    """
+    text = description
+    if meta:
+        tokens = sorted(
+            (v for v in meta.values() if isinstance(v, str) and len(v) >= 3),
+            key=len,
+            reverse=True,
+        )
+        for token in tokens:
+            text = text.replace(token, " ")
+    # ISO strip runs BEFORE lowercasing: the pattern anchors on the uppercase
+    # T/Z separators, and lowercased timestamps would survive to split the hash
+    # (caught by test_hex_and_timestamp_variance_collapses failing first try).
+    text = _FP_ISO_TS.sub(" ", text)
+    text = text.lower()
+    text = _FP_HEX_RUN.sub(" ", text)
+    return _FP_WS.sub(" ", text).strip()
+
+
+def _derive_fingerprint(
+    category: str, file: str, description: str, meta: dict[str, Any] | None
+) -> str:
+    """Server-side fallback fingerprint: `auto:v1:` + sha256 of a canonical JSON array.
+
+    A JSON array, not a joined string — category and file are arbitrary text, so any
+    separator is ambiguous (("a|b","c") vs ("a","b|c")). `v1` versions the
+    normalization algorithm so a future correction changes the prefix, not silently
+    every derived hash. The `auto:` namespace cannot collide with supplied
+    fingerprints because _validate_fingerprint refuses the prefix.
+    """
+    canonical = json.dumps(
+        [category, file, _normalize_for_fingerprint(description, meta)],
+        ensure_ascii=False,
+    )
+    return "auto:v1:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+
+
+def _occurrence_entry(
+    *,
+    now: str,
+    severity: str,
+    file: str,
+    description: str,
+    source: str,
+    tags: list[str] | None,
+    reported_at_commit: str | None,
+    reported_at_ref: str | None,
+) -> dict[str, Any]:
+    """One bounded record of a deduplicated observation.
+
+    Carries enough of the discarded observation (severity, description, file, tags,
+    refs) that a false merge can be un-merged from the ring alone.
+    """
+    return {
+        "at": now,
+        "severity": severity,
+        "file": file,
+        "description": description[:_OCC_DESC_CAP],
+        "source": source,
+        "tags": tags or [],
+        "reported_at_commit": reported_at_commit,
+        "reported_at_ref": reported_at_ref,
+    }
+
+
+def _bump_row(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    now: str,
+    entry: dict[str, Any],
+    reopen: bool = False,
+) -> sqlite3.Row:
+    """Record an occurrence on an existing finding; optionally reopen it (regression).
+
+    ONE UPDATE, `meta` composed fully in Python and assigned exactly once (CB-16), the
+    count bumped SQL-side, the mutated row captured via RETURNING and read by fetching
+    — never rowcount (the RETURNING rule). Runs inside the caller's open transaction;
+    the meta read-modify-write is safe only because add's whole body sits in db.txn
+    (CB-24). The raw row is returned for conversion AFTER the transaction closes.
+
+    Raises json.JSONDecodeError on malformed stored meta BEFORE any write — the add
+    fails cleanly with nothing landed, which is the honest half of the CB-16 rule.
+    """
+    meta = json.loads(row["meta"])
+    ring = list(meta.get("occurrences", []))
+    ring.append(entry)
+    overflow = len(ring) - (_OCC_KEEP_FIRST + _OCC_KEEP_LAST)
+    if overflow > 0:
+        meta["occurrences_dropped"] = meta.get("occurrences_dropped", 0) + overflow
+        ring = ring[:_OCC_KEEP_FIRST] + ring[-_OCC_KEEP_LAST:]
+    meta["occurrences"] = ring
+
+    sets = "occurrence_count = occurrence_count + 1, last_seen_at = ?, updated_at = ?"
+    params: list[Any] = [now, now]
+    if reopen:
+        regressed = list(meta.get("regressed", []))
+        regressed.append({"at": now, "from_status": row["status"]})
+        meta["regressed"] = regressed
+        sets += ", status = 'open'"
+    params.append(json.dumps(meta))
+    params.append(row["id"])
+
+    return conn.execute(
+        f"UPDATE findings SET {sets}, meta = ? WHERE id = ? RETURNING *",  # noqa: S608
+        params,
+    ).fetchone()
+
+
+def _match_fingerprint(
+    conn: sqlite3.Connection, fingerprint: str
+) -> tuple[sqlite3.Row | None, sqlite3.Row | None]:
+    """(live_row, newest_closed_row) for a fingerprint, either possibly None.
+
+    The closed lookup is one query over all terminal statuses ordered
+    `updated_at DESC, rowid DESC` — the newest row's own status class decides
+    reopen-vs-recurrence, and rowid breaks the whole-second updated_at tie
+    deterministically.
+    """
+    live = conn.execute(
+        f"SELECT * FROM findings WHERE fingerprint = ? "
+        f"AND status IN ({','.join('?' for _ in _LIVE_STATUSES)})",
+        (fingerprint, *_LIVE_STATUSES),
+    ).fetchone()
+    terminal = _REOPEN_STATUSES + _RECURRENCE_STATUSES
+    closed = conn.execute(
+        f"SELECT * FROM findings WHERE fingerprint = ? "
+        f"AND status IN ({','.join('?' for _ in terminal)}) "
+        f"ORDER BY updated_at DESC, rowid DESC LIMIT 1",
+        (fingerprint, *terminal),
+    ).fetchone()
+    return live, closed
+
+
+def _add_one(
+    conn: sqlite3.Connection,
+    *,
+    severity: str,
+    category: str,
+    file: str,
+    description: str,
+    source: str,
+    tags: list[str] | None,
+    meta: dict[str, Any] | None,
+    finding_id: str | None,
+    reported_at_commit: str | None,
+    reported_at_ref: str | None,
+    fingerprint: str | None,
+) -> tuple[dict[str, Any] | None, sqlite3.Row | None, bool, str]:
+    """One observation through the identity function, inside an OPEN transaction.
+
+    Returns (inserted_dict, matched_raw_row, was_new, dedup_action) — exactly one of
+    the first two is non-None. An inserted row is converted here (its meta is the JSON
+    this call just serialized, so conversion cannot fail) because post-add hooks need
+    the dict; a matched row is returned RAW for conversion after the caller's
+    transaction closes, since its stored meta is legacy data (CB-24 consequence 2).
+
+    `severity` and `fingerprint` arrive already validated — validation must run before
+    the caller opens its transaction, so invalid input raises immediately instead of
+    an OperationalError after a busy_timeout wait under contention.
+    """
+    now = utc_now()
+    dedup_action = "created"
+    recurrence_of: str | None = None
+
+    if finding_id is None:
+        if fingerprint is None:
+            fingerprint = _derive_fingerprint(category, file, description, meta)
+        live, closed = _match_fingerprint(conn, fingerprint)
+        entry = _occurrence_entry(
+            now=now,
+            severity=severity,
+            file=file,
+            description=description,
+            source=source,
+            tags=tags,
+            reported_at_commit=reported_at_commit,
+            reported_at_ref=reported_at_ref,
+        )
+        if live is not None:
+            return None, _bump_row(conn, live, now=now, entry=entry), False, "bumped"
+        if closed is not None and closed["status"] in _REOPEN_STATUSES:
+            raw = _bump_row(conn, closed, now=now, entry=entry, reopen=True)
+            # Fire like update_finding does: the write changed the row, inside this
+            # transaction, so claims/milestone reconciliation land atomically with it.
+            db.run_status_change_hooks(conn, closed["id"], closed["status"], "open")
+            return None, raw, False, "reopened"
+        if closed is not None:
+            # A wont_fix / not_a_bug closure is a DECISION, not a fix — it stays
+            # closed, and the recurrence becomes a new row that keeps the link.
+            recurrence_of = closed["id"]
+            dedup_action = "recurrence_of_closed"
+    elif fingerprint is not None:
+        # An explicit id asserts identity, so no dedup matching — but a supplied
+        # fingerprint colliding with a live row would otherwise surface as a raw
+        # IntegrityError from the partial unique index at INSERT time.
+        live = conn.execute(
+            f"SELECT id FROM findings WHERE fingerprint = ? "
+            f"AND status IN ({','.join('?' for _ in _LIVE_STATUSES)})",
+            (fingerprint, *_LIVE_STATUSES),
+        ).fetchone()
+        if live is not None:
+            raise ValueError(
+                f"fingerprint already held by live finding {live['id']}; "
+                f"omit finding_id to record an occurrence on it instead"
+            )
+
+    fid = finding_id or _next_id(conn)
+    meta_final = dict(meta or {})
+    if recurrence_of is not None:
+        meta_final["recurrence_of"] = recurrence_of
+    conn.execute(
+        """INSERT INTO findings (id, severity, category, file, status, description,
+           source, tags, meta, reported_at_commit, reported_at_ref, created_at, updated_at,
+           fingerprint, last_seen_at)
+           VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            fid,
+            severity,
+            category,
+            file,
+            description,
+            source,
+            json.dumps(tags or []),
+            json.dumps(meta_final),
+            reported_at_commit,
+            reported_at_ref,
+            now,
+            now,
+            fingerprint,
+            now,
+        ),
+    )
+    result = db.row_to_dict(conn.execute("SELECT * FROM findings WHERE id = ?", (fid,)).fetchone())
+    db.run_post_add_hooks(conn, result)
+    return result, None, True, dedup_action
+
+
+def _finalize_add(
+    inserted: dict[str, Any] | None,
+    raw_row: sqlite3.Row | None,
+    was_new: bool,
+    dedup_action: str,
+) -> dict[str, Any]:
+    """Convert an _add_one outcome to the response dict, AFTER the transaction closed.
+
+    `was_new` / `dedup_action` are response-only keys (sweep.py's was_new
+    discriminator), not columns.
+    """
+    result = inserted if inserted is not None else db.row_to_dict(raw_row)
+    result["was_new"] = was_new
+    result["dedup_action"] = dedup_action
+    return result
+
+
 def add_finding(
     conn: sqlite3.Connection,
     *,
@@ -152,94 +511,129 @@ def add_finding(
     finding_id: str | None = None,
     reported_at_commit: str | None = None,
     reported_at_ref: str | None = None,
+    fingerprint: str | None = None,
 ) -> dict[str, Any]:
-    """Add a single finding. Returns the created finding as a dict.
+    """Record an observation. Returns the created OR matched finding as a dict.
+
+    Identity (CB-43): an observation whose ``fingerprint`` matches a live finding
+    bumps that finding's ``occurrence_count`` and returns it (``was_new: False,
+    dedup_action: "bumped"``); a match on a ``fixed`` finding REOPENS it as a
+    regression (``"reopened"``); a match on a ``wont_fix``/``not_a_bug`` finding
+    creates a new row linked via ``meta.recurrence_of`` (``"recurrence_of_closed"``).
+    No fingerprint supplied → a conservative ``auto:v1:`` fallback is derived from
+    (category, file, normalized description). An explicit ``finding_id`` asserts
+    identity and bypasses both derivation and matching.
+
+    ``fingerprint`` is frozen at insert and is NOT settable via ``update_finding`` —
+    deliberately immutable for now (re-keying a live card must renegotiate the
+    partial unique index; that is a future card, not an accident to enable here).
 
     ``severity`` is normalized, not exact-matched: case and surrounding whitespace
     are forgiven, aliases are not (CB-19). The stored value is always canonical.
+
+    The whole body runs in ``db.txn`` — the fingerprint lookup plus conditional
+    write is a read-modify-write (CB-24). Do not restore a ``conn.commit()`` here:
+    ``db.txn`` yields ``False`` under an ambient transaction, and committing then
+    would commit the *caller's* work.
     """
     severity = resolve_severity(severity)
+    fingerprint = _validate_fingerprint(fingerprint)
 
-    fid = finding_id or _next_id(conn)
-    now = utc_now()
-    tags_json = json.dumps(tags or [])
-    meta_json = json.dumps(meta or {})
+    with db.txn(conn):
+        inserted, raw_row, was_new, dedup_action = _add_one(
+            conn,
+            severity=severity,
+            category=category,
+            file=file,
+            description=description,
+            source=source,
+            tags=tags,
+            meta=meta,
+            finding_id=finding_id,
+            reported_at_commit=reported_at_commit,
+            reported_at_ref=reported_at_ref,
+            fingerprint=fingerprint,
+        )
+    return _finalize_add(inserted, raw_row, was_new, dedup_action)
 
-    conn.execute(
-        """INSERT INTO findings (id, severity, category, file, status, description,
-           source, tags, meta, reported_at_commit, reported_at_ref, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            fid,
-            severity,
-            category,
-            file,
-            description,
-            source,
-            tags_json,
-            meta_json,
-            reported_at_commit,
-            reported_at_ref,
-            now,
-            now,
-        ),
-    )
-    result = db.row_to_dict(conn.execute("SELECT * FROM findings WHERE id = ?", (fid,)).fetchone())
-    db.run_post_add_hooks(conn, result)
-    conn.commit()
-    return result
+
+# Member keys accepted by batch_add_findings. The strict-argument middleware guards
+# top-level MCP tool arguments only; per-member dicts pass through it freely, so a
+# typo'd key here ("fingerprit") would otherwise be silently dropped and the fallback
+# fingerprint would engage — a success payload with the caller's identity key
+# discarded, CB-15's failure mode inside CB-43's fix.
+_BATCH_MEMBER_KEYS = frozenset(
+    {
+        "id",
+        "severity",
+        "category",
+        "file",
+        "description",
+        "source",
+        "tags",
+        "meta",
+        "reported_at_commit",
+        "reported_at_ref",
+        "fingerprint",
+    }
+)
 
 
 def batch_add_findings(
     conn: sqlite3.Connection,
     findings: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Add multiple findings at once. Returns list of created findings.
+    """Record multiple observations at once. Returns one result per input, in input
+    order.
 
-    Contract: N INSERTs, one bulk SELECT, N hook fires, exactly ONE commit.
-    MUST NOT delegate to add_finding() in a loop (that produces N commits).
+    Contract: ONE logical transaction, one result per input. (The old contract —
+    "N INSERTs, one bulk SELECT, N hook fires, exactly ONE commit" — is repealed:
+    a deduplicated member does not insert and does not fire hooks, and results are
+    built from the per-member loop rather than a bulk SELECT, which returned
+    B-tree order and silently shrank when two members shared an id.)
+
+    Members go through the same identity function as ``add_finding``, within the
+    single transaction — so two members of one batch sharing a fingerprint yield
+    one insert plus one bump. MUST NOT delegate to add_finding() in a loop (that
+    produces N commits).
     """
-    now = utc_now()
-    results = []
-    for f in findings:
-        severity = resolve_severity(f.get("severity", "medium"))
-
-        fid = f.get("id") or _next_id(conn)
-        tags_json = json.dumps(f.get("tags", []))
-        meta_json = json.dumps(f.get("meta", {}))
-        reported_at_commit = f.get("reported_at_commit")
-        reported_at_ref = f.get("reported_at_ref")
-
-        conn.execute(
-            """INSERT INTO findings (id, severity, category, file, status, description,
-               source, tags, meta, reported_at_commit, reported_at_ref, created_at, updated_at)
-               VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)""",
+    # Validate EVERY member before the transaction opens: invalid input raises
+    # immediately, not after a busy_timeout wait, and never half-applies a batch.
+    validated: list[tuple[str, str | None]] = []
+    for i, f in enumerate(findings):
+        unknown = set(f) - _BATCH_MEMBER_KEYS
+        if unknown:
+            raise ValueError(f"findings[{i}]: unknown keys {sorted(unknown)}")
+        validated.append(
             (
-                fid,
-                severity,
-                f["category"],
-                f["file"],
-                f["description"],
-                f.get("source", "human"),
-                tags_json,
-                meta_json,
-                reported_at_commit,
-                reported_at_ref,
-                now,
-                now,
-            ),
+                resolve_severity(f.get("severity", "medium")),
+                _validate_fingerprint(f.get("fingerprint")),
+            )
         )
-        results.append(fid)
 
-    rows = conn.execute(
-        f"SELECT * FROM findings WHERE id IN ({','.join('?' for _ in results)})",
-        results,
-    ).fetchall()
-    finding_dicts = [db.row_to_dict(r) for r in rows]
-    for fd in finding_dicts:
-        db.run_post_add_hooks(conn, fd)
-    conn.commit()
-    return finding_dicts
+    # Each member's result is the row AS OBSERVED when that member was processed: a
+    # later member bumping an earlier one does not retroactively update the earlier
+    # member's returned occurrence_count. Input order is preserved by construction.
+    outcomes = []
+    with db.txn(conn):
+        for f, (severity, fingerprint) in zip(findings, validated, strict=True):
+            outcomes.append(
+                _add_one(
+                    conn,
+                    severity=severity,
+                    category=f["category"],
+                    file=f["file"],
+                    description=f["description"],
+                    source=f.get("source", "human"),
+                    tags=f.get("tags"),
+                    meta=f.get("meta"),
+                    finding_id=f.get("id"),
+                    reported_at_commit=f.get("reported_at_commit"),
+                    reported_at_ref=f.get("reported_at_ref"),
+                    fingerprint=fingerprint,
+                )
+            )
+    return [_finalize_add(*outcome) for outcome in outcomes]
 
 
 def update_finding(
@@ -295,6 +689,29 @@ def update_finding(
         row = conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
         if not row:
             raise KeyError(f"Finding not found: {finding_id}")
+
+        # Re-triaging a closed card back to a live status is VALID input, but if a
+        # live recurrence already carries this row's fingerprint the write would hit
+        # ux_findings_fingerprint_live and surface as a raw IntegrityError — outside
+        # the ValueError/KeyError contract, unclassifiable by db.is_contention (code
+        # 19, not 5/6), and uncaught by every CLI handler. Pre-check inside this
+        # transaction and name the blocking row instead.
+        if (
+            status is not None
+            and status in _LIVE_STATUSES
+            and row["status"] not in _LIVE_STATUSES
+            and row["fingerprint"] is not None
+        ):
+            live = conn.execute(
+                f"SELECT id FROM findings WHERE fingerprint = ? AND id != ? "
+                f"AND status IN ({','.join('?' for _ in _LIVE_STATUSES)})",
+                (row["fingerprint"], finding_id, *_LIVE_STATUSES),
+            ).fetchone()
+            if live is not None:
+                raise ValueError(
+                    f"cannot set {finding_id} to {status}: its fingerprint is held by "
+                    f"live finding {live['id']} (resolve or close that one first)"
+                )
 
         updates = []
         params: list[Any] = []
@@ -404,6 +821,7 @@ def query_findings(
     meta_value: str | None = None,
     commit: str | None = None,
     ref: str | None = None,
+    fingerprint: str | None = None,
     group_by: str | None = None,
     limit: int = 100,
     offset: int = 0,
@@ -414,6 +832,13 @@ def query_findings(
     """
     conditions: list[str] = []
     params: list[Any] = []
+
+    # Free-text filter: exact match on an opaque token, no resolver — so the
+    # None/'' convention comes from is_text_filter_active, which itself refuses
+    # non-strings (there is no downstream resolver to do it).
+    if is_text_filter_active(fingerprint):
+        conditions.append("fingerprint = ?")
+        params.append(fingerprint)
 
     if id:
         conditions.append("id = ?")
@@ -517,7 +942,8 @@ def get_stats(
         raise ValueError(f"Invalid group_by: {group_by}. Must be one of {valid_groups}")
 
     rows = conn.execute(
-        f"""SELECT {group_by} as grp, severity, COUNT(*) as cnt
+        f"""SELECT {group_by} as grp, severity, COUNT(*) as cnt,
+                   SUM(occurrence_count) as occ
             FROM findings
             GROUP BY grp, severity
             ORDER BY grp, severity"""
@@ -527,9 +953,19 @@ def get_stats(
     for r in rows:
         grp = r["grp"]
         if grp not in groups:
-            groups[grp] = {"critical": 0, "high": 0, "medium": 0, "low": 0, "total": 0}
+            groups[grp] = {
+                "critical": 0,
+                "high": 0,
+                "medium": 0,
+                "low": 0,
+                "total": 0,
+                # Row counts under-report once dedup collapses a family into one
+                # row; the occurrence sum is the observation count.
+                "occurrences": 0,
+            }
         groups[grp][r["severity"]] = r["cnt"]
         groups[grp]["total"] += r["cnt"]
+        groups[grp]["occurrences"] += r["occ"]
 
     return {"group_by": group_by, "groups": groups}
 
@@ -537,6 +973,11 @@ def get_stats(
 def get_summary(conn: sqlite3.Connection) -> dict[str, Any]:
     """Dashboard-style overview."""
     total = conn.execute("SELECT COUNT(*) as c FROM findings").fetchone()["c"]
+    occ = conn.execute(
+        "SELECT COALESCE(SUM(occurrence_count), 0) as t, "
+        "COALESCE(SUM(CASE WHEN status = 'open' THEN occurrence_count ELSE 0 END), 0) as o "
+        "FROM findings"
+    ).fetchone()
     by_status = {}
     for r in conn.execute("SELECT status, COUNT(*) as c FROM findings GROUP BY status"):
         by_status[r["status"]] = r["c"]
@@ -581,6 +1022,10 @@ def get_summary(conn: sqlite3.Connection) -> dict[str, Any]:
         "total": total,
         "open": open_count,
         "resolved": total - open_count,
+        # Observation counts — row counts under-report exactly the families dedup
+        # collapses (a 40-occurrence defect is one row).
+        "total_occurrences": occ["t"],
+        "open_occurrences": occ["o"],
         "by_status": by_status,
         "open_by_severity": by_severity,
         "top_categories": top_categories,
@@ -614,8 +1059,17 @@ def register_tools(mcp, conn_factory) -> None:
         meta: dict[str, Any] | None = None,
         reported_at_commit: str | None = None,
         reported_at_ref: str | None = None,
+        fingerprint: str | None = None,
     ) -> dict[str, Any]:
-        """Add a code finding.
+        """Record a code finding observation (deduplicated by fingerprint).
+
+        If the fingerprint matches a live finding, that finding's occurrence count
+        is bumped and IT is returned (`was_new: false`, `dedup_action: "bumped"`);
+        a match on a `fixed` finding reopens it as a regression (`"reopened"`); a
+        match on a `wont_fix`/`not_a_bug` finding creates a new row linked via
+        `meta.recurrence_of`. Check `was_new` to tell create from match. Without a
+        fingerprint a conservative server-side one is derived from category, file
+        and the normalized description.
 
         Args:
             severity: critical, high, medium, or low (case-insensitive, no aliases)
@@ -628,6 +1082,11 @@ def register_tools(mcp, conn_factory) -> None:
             meta: Optional JSON metadata (lines, module, rule_code, etc.)
             reported_at_commit: Git SHA when finding was created (auto-detected from HEAD if omitted)
             reported_at_ref: Version/tag label (e.g. "v2.1.0"), always caller-supplied
+            fingerprint: Stable identity token for this defect, computed from the
+                         INVARIANT part of the observation (normalized error
+                         signature + failing test + anchor file — no timestamps,
+                         SHAs, run ids). Same defect → same fingerprint. The
+                         `auto:` prefix is reserved for server-derived values.
         """
         if reported_at_commit is None:
             reported_at_commit = db.git_rev_parse("HEAD", silent=True)
@@ -643,6 +1102,7 @@ def register_tools(mcp, conn_factory) -> None:
                 meta=meta,
                 reported_at_commit=reported_at_commit,
                 reported_at_ref=reported_at_ref,
+                fingerprint=fingerprint,
             )
 
     @mcp.tool()
@@ -651,12 +1111,17 @@ def register_tools(mcp, conn_factory) -> None:
         reported_at_commit: str | None = None,
         reported_at_ref: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Add multiple findings at once.
+        """Record multiple finding observations at once (deduplicated by fingerprint).
+
+        Members are deduplicated exactly like `add` — including against each other,
+        so two members sharing a fingerprint yield one insert plus one bump. One
+        result per input, in input order; check each result's `was_new` /
+        `dedup_action`. Unknown member keys are refused.
 
         Args:
             findings: List of finding objects, each with keys:
                 severity, category, file, description, and optionally:
-                source, tags, meta, reported_at_commit, reported_at_ref
+                source, tags, meta, reported_at_commit, reported_at_ref, fingerprint
             reported_at_commit: Default commit SHA for all findings (auto-detected if omitted).
                                 Per-finding values override this.
             reported_at_ref: Default version label for all findings.
@@ -741,6 +1206,7 @@ def register_tools(mcp, conn_factory) -> None:
         meta_value: str | None = None,
         commit: str | None = None,
         ref: str | None = None,
+        fingerprint: str | None = None,
         group_by: str | None = None,
         limit: int = 100,
         offset: int = 0,
@@ -765,6 +1231,7 @@ def register_tools(mcp, conn_factory) -> None:
             meta_value: Filter by metadata value (requires meta_key)
             commit: Filter by reported_at_commit (prefix match, hex validated)
             ref: Filter by reported_at_ref (exact match)
+            fingerprint: Filter by identity fingerprint (exact match)
             group_by: Group results by: file, category, severity, status, source
             limit: Max results (default 100)
             offset: Pagination offset
@@ -806,6 +1273,7 @@ def register_tools(mcp, conn_factory) -> None:
                 meta_value=meta_value,
                 commit=commit,
                 ref=ref,
+                fingerprint=fingerprint,
                 group_by=group_by,
                 limit=limit,
                 offset=offset,
@@ -872,18 +1340,34 @@ def register_cli(sub, commands) -> None:
 
         tags = [t.strip() for t in args.tags.split(",")] if args.tags else []
 
-        result = add_finding(
-            conn,
-            severity=args.severity,
-            category=args.category,
-            file=args.file,
-            description=args.description,
-            source=args.source or "human",
-            tags=tags,
-            meta=meta or None,
-        )
-        conn.close()
-        print(f"Added: {result['id']}")
+        try:
+            result = add_finding(
+                conn,
+                severity=args.severity,
+                category=args.category,
+                file=args.file,
+                description=args.description,
+                source=args.source or "human",
+                tags=tags,
+                meta=meta or None,
+                fingerprint=args.fingerprint,
+            )
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
+        # A bump is not a creation — saying "Added" for a non-write is the CB-15
+        # class of success-shaped lie, on the human surface.
+        action = result["dedup_action"]
+        if action == "bumped":
+            print(f"Bumped: {result['id']} (occurrence {result['occurrence_count']})")
+        elif action == "reopened":
+            print(f"Reopened as regression: {result['id']} (occurrence {result['occurrence_count']})")
+        elif action == "recurrence_of_closed":
+            print(f"Added: {result['id']} (recurrence of closed {result['meta']['recurrence_of']})")
+        else:
+            print(f"Added: {result['id']}")
 
     def _cmd_update(args: argparse.Namespace) -> None:
         conn = db.connect()
@@ -925,6 +1409,7 @@ def register_cli(sub, commands) -> None:
                 category=args.category,
                 file=args.file,
                 source=args.source,
+                fingerprint=args.fingerprint,
                 group_by=args.group_by,
                 limit=args.limit or 100,
             )
@@ -1056,6 +1541,7 @@ def register_cli(sub, commands) -> None:
     def _cmd_import_csv(args: argparse.Namespace) -> None:
         conn = db.connect()
         imported = 0
+        skipped = 0
         with open(args.file, newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
@@ -1069,10 +1555,28 @@ def register_cli(sub, commands) -> None:
                 if not filepath or not description or not category:
                     continue
 
+                # Re-importing this tracker's own export must be a no-op, not a
+                # mass-resurrection: identical descriptions derive identical
+                # fingerprints, so without this guard every since-fixed card in
+                # the CSV would REOPEN as a phantom regression.
+                row_id = (row.get("id") or "").strip()
+                if row_id and conn.execute(
+                    "SELECT 1 FROM findings WHERE id = ?", (row_id,)
+                ).fetchone():
+                    skipped += 1
+                    continue
+
                 meta = {}
                 lines = (row.get("lines") or row.get("Lines") or "").strip()
                 if lines:
                     meta["lines"] = lines
+
+                fingerprint = (row.get("fingerprint") or "").strip() or None
+                # Exported auto-derived fingerprints carry the reserved prefix,
+                # which add_finding refuses from callers; passing None re-derives
+                # the same value server-side.
+                if fingerprint and fingerprint.startswith(_AUTO_FP_PREFIX):
+                    fingerprint = None
 
                 add_finding(
                     conn,
@@ -1082,11 +1586,13 @@ def register_cli(sub, commands) -> None:
                     description=description,
                     source=source,
                     meta=meta or None,
+                    fingerprint=fingerprint,
                 )
                 imported += 1
 
         conn.close()
-        print(f"Imported {imported} findings.")
+        suffix = f" ({skipped} already present, skipped)" if skipped else ""
+        print(f"Imported {imported} findings.{suffix}")
 
     def _cmd_export_csv(args: argparse.Namespace) -> None:
         conn = db.connect()
@@ -1109,6 +1615,9 @@ def register_cli(sub, commands) -> None:
                     "meta",
                     "created_at",
                     "updated_at",
+                    "fingerprint",
+                    "occurrence_count",
+                    "last_seen_at",
                 ]
             )
             for finding in result["findings"]:
@@ -1125,6 +1634,9 @@ def register_cli(sub, commands) -> None:
                         json.dumps(finding["meta"]),
                         finding["created_at"],
                         finding["updated_at"],
+                        finding["fingerprint"],
+                        finding["occurrence_count"],
+                        finding["last_seen_at"],
                     ]
                 )
         print(f"Exported {len(result['findings'])} findings to {output}")
@@ -1138,6 +1650,10 @@ def register_cli(sub, commands) -> None:
     p.add_argument("--source", help="Source (default: human)")
     p.add_argument("--tags", help="Comma-separated tags")
     p.add_argument("--meta", help="JSON metadata string")
+    p.add_argument(
+        "--fingerprint",
+        help="Stable identity token; same defect -> same fingerprint (dedup key)",
+    )
 
     p = sub.add_parser("update", help="Update a finding")
     p.add_argument("id", help="Finding ID")
@@ -1153,6 +1669,7 @@ def register_cli(sub, commands) -> None:
     p.add_argument("--category", "-c", help="Filter by category")
     p.add_argument("--file", "-f", help="Filter by file (substring)")
     p.add_argument("--source", help="Filter by source")
+    p.add_argument("--fingerprint", help="Filter by identity fingerprint (exact)")
     p.add_argument("--group-by", help="Group by: file|category|severity|status|source")
     p.add_argument("--limit", type=int, help="Max results")
 

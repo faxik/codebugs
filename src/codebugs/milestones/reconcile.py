@@ -240,6 +240,84 @@ def _reconcile_on_terminal(
     conn.execute("RELEASE ms_reconcile")
 
 
+def _reconcile_on_reopen(
+    conn: sqlite3.Connection, entity_id: str, old_status: str | None, new_status: str
+) -> None:
+    """Reopen a source entity's stream milestone items when the source reopens.
+
+    The inverse of ``_reconcile_on_terminal``, and it exists because that hook's
+    nonterminal early-return makes terminal→open a projection NO-OP: the finding
+    goes back to ``open`` while its triage item stays ``done``, so the reopened card
+    is invisible to ``triage_inbox`` and ``pull_next`` — strictly worse than the
+    duplicate row it replaced (CB-43's regression path). Re-running the add-side
+    router cannot fix it: ``_auto_route_finding`` is ``INSERT OR IGNORE`` and the
+    row already exists as ``done``.
+
+    Fires on terminal→nonterminal only. Reopens ``done``/``dismissed`` items;
+    ``deferred`` is untouched (same reasoning as ``_live_rows``: closing or opening
+    one destroys the deferral record), and ``open`` items need nothing. No capacity
+    accounting: reconciliation to terminal already released the slot and cleared
+    ``assigned_agent``, so the reopened item is simply available again. Same
+    SAVEPOINT + audit-on-failure discipline as the terminal hook, because
+    ``run_status_change_hooks`` swallows and the caller commits anyway.
+    """
+    try:
+        ref = entities.EntityRef.of(entity_id)
+    except ValueError:
+        return
+    if old_status is None or old_status not in ref.kind.terminal:
+        return
+    if new_status in ref.kind.terminal:
+        return
+    item_kind = ENTITY_KIND_TO_ITEM_KIND.get(ref.kind.name)
+    if item_kind is None:
+        return
+    if not _milestones_ready(conn):
+        return
+
+    now = utc_now()
+    conn.execute("SAVEPOINT ms_reconcile_reopen")
+    try:
+        rows = conn.execute(
+            "SELECT * FROM milestone_items "
+            f"WHERE milestone_id IN ({_STREAM_ONLY}) "
+            "AND item_kind = ? AND item_ref = ? AND status IN ('done', 'dismissed') "
+            "ORDER BY id",
+            (item_kind, entity_id),
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                "UPDATE milestone_items SET status = 'open', done_at = NULL, "
+                "updated_at = ? WHERE id = ?",
+                (now, row["id"]),
+            )
+            _audit(
+                conn,
+                milestone_id=row["milestone_id"],
+                item_ref=row["item_ref"],
+                actor=RECONCILER_ACTOR,
+                action="reconcile_reopen",
+                from_state=row["status"],
+                to_state="open",
+                reason="source entity reopened",
+            )
+    except Exception as exc:  # noqa: BLE001
+        conn.execute("ROLLBACK TO ms_reconcile_reopen")
+        conn.execute("RELEASE ms_reconcile_reopen")
+        _audit(
+            conn,
+            milestone_id="stream/triage",
+            item_ref=entity_id,
+            actor=RECONCILER_ACTOR,
+            action="reconcile_reopen_failed",
+            from_state=old_status,
+            to_state=new_status,
+            reason=f"{type(exc).__name__}: {exc}",
+        )
+        raise
+    conn.execute("RELEASE ms_reconcile_reopen")
+
+
 def reconcile_all(
     conn: sqlite3.Connection,
     *,

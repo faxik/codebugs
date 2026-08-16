@@ -60,6 +60,7 @@ from codebugs.milestones.capacity import (  # noqa: F401
     release_item,
 )
 from codebugs.milestones.reconcile import (  # noqa: F401
+    _reconcile_on_reopen,
     _reconcile_on_terminal,
     reconcile_all,
     source_is_terminal,
@@ -684,3 +685,6 @@ register_post_add_hook("milestones.auto_route", _auto_route_finding)
 # The update-side twin of the router above. Without it, routing happened once at
 # add time and a resolved finding stayed live in its stream forever (CB-26).
 register_status_change_hook("milestones.reconcile_terminal", _reconcile_on_terminal)
+# The inverse: a terminal source reopening (a dedup-detected regression, CB-43)
+# must reopen its stream items, or the reopened card is invisible to every queue.
+register_status_change_hook("milestones.reconcile_reopen", _reconcile_on_reopen)
