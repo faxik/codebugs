@@ -997,3 +997,83 @@ class TestImportMarkdownReadIsEagerPremise:
         )
         # The read must precede the first write, not merely exist.
         assert src.index("readlines()") < src.index("INSERT"), src
+
+
+class TestVerifyAmbientCwd:
+    """CB-79 — `verify_requirements` read an ambient `os.getcwd()` that can raise.
+
+    `test_a_deleted_cwd_*` and `test_a_check_that_does_not_need_a_root_*` MUST
+    fail against the pre-fix tree; `TestVerifyAmbientCwdCompatibility` below
+    passes on both sides by design.
+    """
+
+    def _no_cwd(self, monkeypatch):
+        def gone():
+            raise FileNotFoundError(2, "No such file or directory")
+
+        monkeypatch.setattr(os, "getcwd", gone)
+
+    def test_a_check_that_does_not_need_a_root_still_runs(self, conn, monkeypatch):
+        """The LAZY half, and the reason eager resolution was wrong: `root` is
+        consumed by the "tests" check and by nothing else, so resolving it at
+        the top of the function made `checks=["ids"]` fail from a deleted cwd
+        for a check that never looks at a directory.
+
+        Recorded run at 4ee8c6c: FileNotFoundError from reqs.py:442.
+        """
+        self._no_cwd(monkeypatch)
+        result = reqs.verify_requirements(conn, checks=["ids"])
+        assert "issues" in result
+        result = reqs.verify_requirements(conn, checks=["status"])
+        assert "issues" in result
+
+    def test_the_tests_check_refuses_with_an_actionable_message(self, conn, monkeypatch):
+        """The check that DOES need a root raises rather than degrading, because
+        this function has no "unknown" vocabulary — reporting no issues because
+        we could not look for the tests directory would be a false clean."""
+        self._no_cwd(monkeypatch)
+        with pytest.raises(ValueError, match="cannot determine the current directory"):
+            reqs.verify_requirements(conn, checks=["tests"])
+
+    def test_an_explicit_project_dir_never_touches_the_ambient_cwd(self, conn, monkeypatch):
+        self._no_cwd(monkeypatch)
+        result = reqs.verify_requirements(conn, checks=["tests"], project_dir="/tmp")
+        assert "issues" in result
+
+    def test_the_cli_reports_it_as_one_line_not_a_traceback(self, tmp_path):
+        """Recorded run at 4ee8c6c: a raw FileNotFoundError traceback.
+
+        `"Traceback" not in stderr` is the assertion that DISCRIMINATES —
+        `returncode == 1` does not, since an uncaught traceback also exits 1.
+        """
+        project = str(tmp_path / "proj")
+        os.makedirs(project)
+        db.init_project(project)
+        doomed = str(tmp_path / "doomed")
+        os.makedirs(doomed)
+        script = (
+            "import os,sys;"
+            f"sys.path.insert(0, {os.path.join(os.getcwd(), 'src')!r});"
+            f"os.chdir({doomed!r}); os.rmdir({doomed!r});"
+            "from codebugs import cli;"
+            f"sys.argv=['codebugs','--tracker-root',{project!r},'reqs-verify'];"
+            "cli.main()"
+        )
+        r = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True
+        )
+        assert "Traceback" not in r.stderr, r.stderr
+        assert "codebugs:" in r.stderr, r.stderr
+        assert r.returncode == 1, r.stdout + r.stderr
+
+
+class TestVerifyAmbientCwdCompatibility:
+    """Passes on BOTH sides — pins behaviour the change preserves."""
+
+    def test_a_normal_verify_is_unchanged(self, conn):
+        result = reqs.verify_requirements(conn)
+        assert "issues" in result and "total_requirements" in result
+
+    def test_all_three_checks_still_run_together(self, conn, tmp_path):
+        result = reqs.verify_requirements(conn, project_dir=str(tmp_path))
+        assert "issues" in result
