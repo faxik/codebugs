@@ -12,11 +12,13 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 import re
 import sqlite3
 from collections.abc import Mapping
 from typing import Any
 
+from codebugs import db
 from codebugs.types import utc_now
 
 
@@ -175,7 +177,8 @@ def import_csv(
     """Import benchmark results from CSV string.
 
     Convention: first column is the row label, remaining columns are metrics.
-    All metric columns must contain numeric values.
+    All metric columns must contain finite numeric values, and each
+    (row label, metric) pair may appear only once per import.
 
     Args:
         benchmark: Benchmark name (e.g. "search-perf")
@@ -189,13 +192,24 @@ def import_csv(
         run_id: Optional explicit run ID (default: auto-generated)
 
     Raises:
-        ValueError: csv_data is not a str (CB-75), or the CSV has fewer than
-            two columns, no data rows, an empty row label, or a non-numeric
-            metric. The type is checked POSITIVELY and up-front rather than by
+        ValueError: csv_data is not a str (CB-75); the CSV cannot be parsed;
+            it has fewer than two columns or no data rows; a row label is
+            empty; a metric is non-numeric or non-finite; two cells would
+            write the same (row label, metric); or the run id already exists.
+            The type is checked POSITIVELY and up-front rather than by
             rewrapping ``TypeError`` from the parser below — a blanket rewrap
             would also convert a POST-COMMIT failure into a ValueError, which
             the CLI arm then reports as bad input for a write that landed
             (the CB-15/CB-16 lie, and the same reasoning as import_json's).
+
+    Atomicity (CB-81): every fault the payload can carry is decided BEFORE the
+    first INSERT, and the writes run inside a single ``db.txn``. On a
+    connection with no open transaction that makes a refusal leave the
+    database untouched. Under an AMBIENT transaction ``db.txn`` yields False
+    and starts nothing, so the caller keeps both the writes and the commit
+    decision — deliberate, because an import is not an acquisition and must
+    not refuse to run inside a caller's transaction the way ``merge.merge``
+    and ``capacity.pull_next`` do.
     """
     # An empty string is SUPPLIED CONTENT and must reach the parser to raise its
     # own "at least 2 columns" — that is CB-67's ratified distinction, so this
@@ -244,31 +258,58 @@ def import_csv(
     tags_json = _require_json_text("tags", tags, list, [])
     meta_json = _require_json_text("meta", meta, dict, {})
 
+    # `_csv.Error` is NOT a ValueError — measured, not assumed — so an
+    # unparseable CSV escapes BOTH `_cmd_bench_import`'s (ValueError,
+    # JSONDecodeError) arm and cli.main as a raw traceback. A field over the
+    # 131072-char limit is enough, so this is reachable from a plain data file:
+    # the same user-visible shape as the IntegrityError this card is about
+    # (CB-81), through a door the card did not enumerate.
+    #
+    # Rewrapping is safe HERE and would not be twenty lines lower: parsing
+    # happens before the first write, so it cannot convert a landed import into
+    # "bad input" — the CB-15/CB-16 lie the docstring above refuses a blanket
+    # rewrap for. The two try blocks are separate to keep the ORDER of refusals
+    # unchanged: a one-column CSV must still report "at least 2 columns" even
+    # when a later row would also fail to parse.
     reader = csv.DictReader(io.StringIO(csv_data))
-    if not reader.fieldnames or len(reader.fieldnames) < 2:
+    try:
+        fieldnames = reader.fieldnames
+    except csv.Error as e:
+        raise ValueError(f"CSV could not be parsed: {e}") from e
+    if not fieldnames or len(fieldnames) < 2:
         raise ValueError("CSV must have at least 2 columns (row_label + one metric)")
 
-    label_col = reader.fieldnames[0]
-    metric_cols = reader.fieldnames[1:]
+    label_col = fieldnames[0]
+    metric_cols = fieldnames[1:]
 
-    rows = list(reader)
+    try:
+        rows = list(reader)
+    except csv.Error as e:
+        raise ValueError(f"CSV could not be parsed: {e}") from e
     if not rows:
         raise ValueError("CSV contains no data rows")
 
-    # `is None`, not truthiness — the guard above has already refused every
-    # falsey wrong type, and re-testing truthiness here would let a future edit
-    # reintroduce the defect at the one line that decides the stored value.
-    rid = _next_run_id(conn) if run_id is None else run_id
-    run_date = utc_now()[:10] if date is None else date
-    now = utc_now()
-
-    conn.execute(
-        "INSERT INTO codebench_runs (run_id, benchmark, date, tags, meta, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (rid, benchmark, run_date, tags_json, meta_json, now),
-    )
-
-    result_count = 0
+    # THE PRE-PASS (CB-81). Every payload fault is decided here, before the
+    # first INSERT, and the exact triples that will be written are built once.
+    # Before this, validation was interleaved with the writes: the run row went
+    # in, then each cell was checked inside the loop that inserted it, so any
+    # fault below the first two columns was discovered mid-write and the
+    # SCHEMA was the only thing checking the payload — which meant the failure
+    # arrived as sqlite3.IntegrityError, a class no arm in cli.py handles.
+    #
+    # THE DUPLICATE CHECK IS ON (row_label, metric) PAIRS, which is exactly
+    # UNIQUE(run_id, row_label, metric) evaluated earlier, and NOT on duplicate
+    # row labels or duplicate headers as the card's wording proposed. Refusing
+    # those by name would reject payloads that import cleanly today, both
+    # measured: `m,v,w` with rows `a,1,` and `a,,2` repeats the label while
+    # writing two disjoint cells, and `m,v,v` with `a,,` has a duplicate header
+    # and writes nothing at all. The pair check still catches both of the
+    # card's cases, because both of them actually collide. Note a duplicate
+    # header collapses to ONE key in each row dict (last value wins) while
+    # metric_cols still lists it twice, so the same cell is read twice and the
+    # second read is the collision.
+    pending: list[tuple[str, str, float]] = []
+    seen: set[tuple[str, str]] = set()
     for row in rows:
         row_label = row[label_col]
         if not row_label:
@@ -283,14 +324,71 @@ def import_csv(
                 raise ValueError(
                     f"Non-numeric value '{raw}' in column '{metric}', row '{row_label}'"
                 )
-            conn.execute(
-                "INSERT INTO codebench_results (run_id, row_label, metric, value) "
-                "VALUES (?, ?, ?, ?)",
-                (rid, row_label, metric, value),
-            )
-            result_count += 1
+            # float() accepts nan/inf, and an overflowing literal like 1e400
+            # BECOMES inf, so this cannot be a text check. SQLite binds NaN as
+            # NULL, which the NOT NULL constraint caught in constraint
+            # vocabulary after a write; inf bound as a float and imported
+            # silently. Neither is a measurement.
+            if not math.isfinite(value):
+                raise ValueError(
+                    f"Non-finite value '{raw}' in column '{metric}', row '{row_label}'"
+                )
+            key = (row_label, metric)
+            if key in seen:
+                raise ValueError(
+                    f"Duplicate metric '{metric}' for row '{row_label}': "
+                    "(row label, metric) must be unique within one import"
+                )
+            seen.add(key)
+            pending.append((row_label, metric, value))
 
-    conn.commit()
+    run_date = utc_now()[:10] if date is None else date
+    now = utc_now()
+
+    # ONE transaction over the read that feeds the write and the writes
+    # themselves. `_next_run_id` reads the highest BE-n and the INSERT below
+    # writes BE-n+1 — the CB-24 read-modify-write shape, which CB-36's sweep of
+    # that population did not reach. Outside a transaction two importers derive
+    # the same id and the loser gets IntegrityError on codebench_runs.run_id;
+    # db.txn takes the write lock (BEGIN IMMEDIATE) before the read.
+    #
+    # No conn.commit() here, deliberately: db.txn commits, and yields False
+    # under an ambient transaction so a caller that owns one keeps owning it.
+    # Committing here would commit the caller's unrelated work (CB-24).
+    with db.txn(conn):
+        # `is None`, not truthiness — the guard above has already refused every
+        # falsey wrong type, and re-testing truthiness here would let a future
+        # edit reintroduce the defect at the one line that decides the stored
+        # value.
+        rid = _next_run_id(conn) if run_id is None else run_id
+        # Checked for BOTH origins. An explicit id is library-reachable only
+        # (no CLI flag, no MCP parameter exposes run_id), but a GENERATED id
+        # can collide too: _next_run_id orders by CAST(SUBSTR(run_id,4) AS
+        # INTEGER), which saturates at 2**63-1, so ids beyond that range tie
+        # and the increment can land on a row that already exists. Checking
+        # the final id covers both without relying on that analysis being
+        # exhaustive.
+        if conn.execute(
+            "SELECT 1 FROM codebench_runs WHERE run_id = ?", (rid,)
+        ).fetchone():
+            if run_id is None:
+                raise ValueError(
+                    f"Generated run_id '{rid}' already exists; pass an explicit run_id"
+                )
+            raise ValueError(f"run_id '{rid}' already exists")
+
+        conn.execute(
+            "INSERT INTO codebench_runs (run_id, benchmark, date, tags, meta, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (rid, benchmark, run_date, tags_json, meta_json, now),
+        )
+        conn.executemany(
+            "INSERT INTO codebench_results (run_id, row_label, metric, value) "
+            "VALUES (?, ?, ?, ?)",
+            [(rid, label, metric, value) for label, metric, value in pending],
+        )
+
+    result_count = len(pending)
     return {
         "run_id": rid,
         "benchmark": benchmark,
@@ -314,7 +412,9 @@ def import_json(
     """Import benchmark results from JSON string or list.
 
     Expected format: list of objects, each with a row_label key (first key)
-    and metric keys with numeric values.
+    and metric keys with finite numeric values. Every payload guard in
+    ``import_csv`` applies here too, because this converts to CSV and
+    delegates to it.
 
     Args:
         benchmark: Benchmark name
@@ -730,10 +830,13 @@ def register_tools(mcp, conn_factory) -> None:
         """Import benchmark results from CSV or JSON.
 
         CSV convention: first column is the row label, remaining columns are
-        metric names with numeric values.
+        metric names with finite numeric values.
 
         JSON convention: array of objects, first key is the row label, rest
-        are metric keys with numeric values.
+        are metric keys with finite numeric values.
+
+        Each (row label, metric) pair may appear only once per import, and
+        NaN/Infinity are refused: a non-finite measurement is not one.
 
         Args:
             benchmark: Benchmark name (e.g. "search-perf")
