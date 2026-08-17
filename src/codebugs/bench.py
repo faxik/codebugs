@@ -14,6 +14,7 @@ import io
 import json
 import re
 import sqlite3
+from collections.abc import Mapping
 from typing import Any
 
 from codebugs.types import utc_now
@@ -175,7 +176,7 @@ def import_json(
     conn: sqlite3.Connection,
     *,
     benchmark: str,
-    json_data: str | list,
+    json_data: str | bytes | bytearray | list,
     date: str | None = None,
     tags: list[str] | None = None,
     meta: dict[str, Any] | None = None,
@@ -188,20 +189,64 @@ def import_json(
 
     Args:
         benchmark: Benchmark name
-        json_data: JSON array string or pre-parsed list of dicts
+        json_data: JSON array as text (str/bytes/bytearray) or a pre-parsed
+            list of objects. bytes and bytearray are accepted because
+            json.loads accepts them and callers already rely on it; the
+            annotation says so rather than the guard below refusing what
+            works (CB-72).
         date: Run date (default: now)
         tags: Optional tags
         meta: Optional metadata
         run_id: Optional explicit run ID
+
+    Raises:
+        ValueError: json_data is not one of the accepted types (CB-72); or it
+            does not hold a non-empty JSON array; or an element of that array
+            is not an object (CB-74). The shape is checked POSITIVELY and
+            up-front, never by rewrapping TypeError/AttributeError from the
+            code below — a blanket rewrap would also convert a POST-COMMIT
+            failure inside import_csv into a ValueError, which the CLI arm
+            then reports as bad input for a write that already landed.
     """
     if isinstance(json_data, list):
-        if not json_data:
+        # MATERIALIZE ONCE, then validate and consume only this snapshot. The
+        # check below iterates while the code after it INDEXES (data[0]) and
+        # iterates again (writerows), and a list subclass whose __iter__
+        # disagrees with __getitem__ presents mappings to the check and a
+        # non-mapping to data[0] — reproducing the exact AttributeError this
+        # guard exists to replace. Validating one view while consuming another
+        # is not a guard.
+        data = list(json_data)
+        if not data:
             raise ValueError("JSON must be a non-empty array of objects")
-        data = json_data
-    else:
+    elif isinstance(json_data, (str, bytes, bytearray)):
+        # No snapshot needed: json.loads always returns a builtin list, whose
+        # __iter__ and __getitem__ cannot disagree.
         data = json.loads(json_data)
         if not isinstance(data, list) or not data:
             raise ValueError("JSON must be a non-empty array of objects")
+    else:
+        raise ValueError(
+            "json_data must be a JSON array as str/bytes/bytearray, or a list "
+            f"of objects, not {type(json_data).__name__}"
+        )
+
+    # EVERY element, not just data[0]: an object at index 0 followed by a
+    # non-object clears a first-element check and then dies in writerows()
+    # below with the same AttributeError this refusal exists to replace.
+    #
+    # Mapping rather than dict, so mappings that work today (MappingProxyType,
+    # OrderedDict) are not newly refused. This IS a narrowing, stated rather
+    # than glossed: an object that merely duck-types .keys()/.get() without
+    # registering as a Mapping imports on the old code and is refused here.
+    # That is deliberate — "an array of objects" is the documented contract,
+    # the refusal is loud and at the boundary, and no caller sends such a row.
+    for index, element in enumerate(data):
+        if not isinstance(element, Mapping):
+            raise ValueError(
+                f"JSON array element {index} must be an object, "
+                f"not {type(element).__name__}"
+            )
 
     # Convert JSON to CSV and delegate
     keys = list(data[0].keys())
