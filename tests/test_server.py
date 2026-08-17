@@ -26,8 +26,6 @@ from contextlib import contextmanager
 
 import pytest
 from mcp.server.mcpserver import MCPServer
-
-from codebugs import server
 from mcp.shared.exceptions import MCPError
 
 from codebugs import db, findings, server
