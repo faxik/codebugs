@@ -30,6 +30,44 @@ leaves the card's own symptom half-open (a post-commit `BrokenPipeError` on the 
 `print`), which is an unresolved design question. Under the hostage test, two
 trivially-correct guards must not wait on it.
 
+## Round 3 — the diff review, and the defect the guard reintroduced
+
+A Codex review of the implemented diff found a **MUST-FIX that the plan's own
+claim had ruled out**: "every accepted-list element is checked" was false,
+because the check *iterated* while the code after it *indexed*.
+
+```python
+class SplitList(list):
+    def __iter__(self): return iter([{"method": "bm25", "score": 0.5}])
+import_json(json_data=SplitList([1]))   # AttributeError at data[0].keys()
+```
+
+CB-74's exact exception, reproduced **through its own fix**. The repair is to
+materialize the list once and validate and consume only that snapshot — the
+general form being this repo's recurring lesson in a new place: *validating one
+view while consuming another is not a guard*, the same shape as "sharing an
+implementation does not share a decision if the callers supply different
+inputs".
+
+Three smaller corrections from the same round, plus one the run found:
+
+- Refusal messages are anchored **whole** with `re.escape`. The first draft's
+  `"element 0 .*not int"` also matches a message that names the accepted set
+  wrongly — a regex loose enough to certify a bug it was written to catch.
+- `test_the_unfixed_exception_is_not_a_value_error` was **deleted**. It asserted
+  `not issubclass(TypeError, ValueError)` — a property of Python, not of this
+  code, so it could never fail. A cannot-fail test dressed as a premise pin is
+  exactly what this repo treats as worse than no test; the real non-vacuity
+  evidence is the recorded run against main, which belongs in the docstring.
+- The `Mapping` guard's **narrowing is now stated and pinned** rather than
+  implied: a row duck-typing `.keys()`/`.get()` without registering as a
+  `Mapping` imports on main and is refused here, deliberately.
+- **The regression test's first draft asserted the wrong outcome** — caught by
+  running it, not by review. With the snapshot in place `SplitList` no longer
+  raises at all: the one materialized view is both validated and consumed, so
+  the payload is coherent and imports the row it validated. The discriminator
+  is *no `AttributeError`*, not a refusal.
+
 ## The `bytes` decision, made once and stated once
 
 **`bytes` and `bytearray` are ACCEPTED, and the annotation widens to say so.** Measured on
