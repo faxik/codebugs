@@ -10,8 +10,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`import_csv` refuses a non-text payload instead of leaking a `TypeError`**
   (CB-75). `csv_data` went straight to `io.StringIO`, so `csv_data=5` raised
   `TypeError: initial_value must be str or None, not int` rather than the
-  `ValueError` the module contract promises. The CSV twin of CB-72, and the last
-  door in that family reachable through a payload argument.
+  `ValueError` the module contract promises. The CSV twin of CB-72.
+
+  Scope is the **wrong-type** door only. An ordinary `str` payload can still
+  raise `sqlite3.IntegrityError` from inside the insert loop (duplicate row
+  labels, duplicate headers, a `nan` metric); that is a different defect, filed
+  separately, and an earlier draft of this entry wrongly called this "the last
+  door in that family".
+
+  The guard reads `issubclass(type(csv_data), str)` and **not** `isinstance`,
+  which is spoofable: CPython honours a `__class__` property, so an object
+  declaring `__class__ -> str` — `unittest.mock.MagicMock(spec=str)` is one —
+  satisfies `isinstance` and then hits `io.StringIO`'s `TypeError` anyway, i.e.
+  the leak surviving its own fix. The rule, which is CB-74's lesson in a second
+  form: *the guard's predicate must be identical to the consumer's requirement*.
 
   Two deliberate asymmetries with `import_json`, both stated because they look
   like inconsistencies otherwise. **Bytes are refused, not decoded**:

@@ -137,12 +137,28 @@ def import_csv(
     # surfaced as "CSV must have at least 2 columns" — a message describing the
     # wrong fault.
     #
+    # `issubclass(type(...))` and NOT `isinstance(...)`, which is spoofable:
+    # CPython's isinstance honours a `__class__` property, so an object
+    # declaring `__class__ -> str` passed an isinstance guard and then hit
+    # io.StringIO's own TypeError anyway — the very leak this refusal replaces.
+    # Not hypothetical: `unittest.mock.MagicMock(spec=str)` is exactly such an
+    # object, and this repo already pins a mock-shaped trap for the same reason
+    # (CB-25's mock.ANY case in tests/test_types.py). type() reads the real
+    # type, which is what StringIO itself checks.
+    #
+    # That is the general rule, and it is CB-74's lesson in a second form: the
+    # guard's predicate must be IDENTICAL to the consumer's requirement.
+    # StringIO accepts exactly a real str or subclass, so this accepts exactly
+    # that — no wider (a spoofer would break at the consumer) and no narrower
+    # (a genuine subclass must keep working).
+    #
     # No snapshot is taken, deliberately, and the asymmetry with import_json is
     # the point: that guard must materialize its list because __iter__ and
     # __getitem__ can disagree (CB-74). A str cannot present two views — its
-    # content is fixed at construction and StringIO reads that content — so
-    # there is nothing here for a subclass to desynchronize.
-    if not isinstance(csv_data, str):
+    # content is fixed at construction and StringIO reads that content, not
+    # __str__ — so there is nothing here for a subclass to desynchronize.
+    # Verified by running both halves.
+    if not issubclass(type(csv_data), str):
         raise ValueError(
             f"csv_data must be CSV text as str, not {type(csv_data).__name__}"
         )
@@ -775,7 +791,7 @@ def register_cli(sub, commands) -> None:
             is_json = json_flag_given or path.endswith(".json")
             # The read is guarded on its own, NOT by a handler-wide `except
             # OSError` (CB-71). It is the only OSError source that runs BEFORE
-            # import_csv/import_json commit (bench.py:164), and a wider arm would
+            # import_csv/import_json commit, and a wider arm would
             # also catch a failure raised AFTER that commit — reporting a landed
             # import as bad input, the CB-15/CB-16 success-shaped lie.
             try:
