@@ -1,45 +1,26 @@
 """Dump MCP tool schemas as a flat sorted list for regression diffing.
 
 Regenerate the golden file with:
-    uv run python tests/dump_schema.py > tests/golden/mcp_schema.json
+    PYTHONPATH=src uv run python tests/dump_schema.py > tests/golden/mcp_schema.json
+
+PYTHONPATH=src is not optional from a worktree: without it a bare `python`
+resolves `codebugs` through the editable install pointing at the MAIN checkout,
+and the golden would snapshot a tree you did not touch.
+
+The collection itself lives in `tests/_mcp_schema.py`, shared with the gate in
+`tests/test_boundary.py` so the two cannot disagree about what the surface is.
 """
 
-import asyncio
 import json
-from contextlib import contextmanager
+import pathlib
+import sys
 
-from mcp.server.mcpserver import MCPServer
+# Run as a script, sys.path[0] is tests/, not the repo root — so the package
+# spelling `tests._mcp_schema` would not resolve. Add the root and use that one
+# spelling everywhere rather than importing the same module two different ways.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from codebugs import db
+from tests._mcp_schema import collect_tool_schemas  # noqa: E402
 
-
-@contextmanager
-def _conn():
-    conn = db.connect()
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-
-async def main():
-    all_tools = []
-    for provider in db.get_tool_providers(mode="all"):
-        server = MCPServer(provider.name)
-        provider.register_fn(server, _conn)
-        tools = await server.list_tools()
-        for t in tools:
-            all_tools.append(
-                {
-                    "name": t.name,
-                    "description": t.description,
-                    # mcp 2.0 renamed the attribute to input_schema; the wire
-                    # field is still inputSchema, so the golden keeps that name.
-                    "inputSchema": t.input_schema,
-                }
-            )
-    all_tools.sort(key=lambda x: x["name"])
-    print(json.dumps(all_tools, indent=2, sort_keys=True))
-
-
-asyncio.run(main())
+if __name__ == "__main__":
+    print(json.dumps(collect_tool_schemas(), indent=2, sort_keys=True))
