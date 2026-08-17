@@ -8,6 +8,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -106,6 +107,133 @@ class TestImportCsv:
         assert result["results_stored"] == 1  # MRR skipped
 
 
+class TestImportCsvTypeGuard:
+    """CB-75. `import_csv` fed csv_data straight to `io.StringIO`, so a non-str
+    leaked "TypeError: initial_value must be str or None, not int" instead of the
+    ValueError the module contract promises ("Domain functions raise ValueError
+    for invalid input"). The CSV twin of CB-72.
+
+    Scope, stated precisely because the first draft of this docstring overclaimed
+    and a cross-model review caught it: this closes the WRONG-TYPE door only. An
+    ordinary str payload can still raise sqlite3.IntegrityError (duplicate row
+    labels, duplicate headers, a `nan` metric) from inside the insert loop — a
+    different defect, filed separately, and NOT fixed here.
+
+    NON-VACUITY, measured rather than asserted: every payload below except None
+    was run against main's bench.py on 2026-08-17 (commit 41058c5) and raised a
+    stdlib TypeError. `None` is the exception and is called out in its own test —
+    it already raised a ValueError, just the wrong one.
+
+    ASSERTIONS ARE EXACT EQUALITY, not `match=`. `pytest.raises(match=...)` runs
+    re.SEARCH, and `re.escape` only escapes metacharacters — it adds no anchors —
+    so a `match=` test also passes for a message with junk prefixed or appended,
+    including a contradictory one. (The import_json class below still says
+    `re.escape` "anchors the WHOLE message"; that claim is wrong for the same
+    reason and is corrected there.) Exactness is what makes these tests
+    distinguish this positive up-front guard from a blanket
+    `except TypeError: raise ValueError(<same text>)` around the body — a rewrap
+    that would also convert a post-commit failure into bad input.
+
+    Reachability is IN-PROCESS ONLY — the MCP wire type is `csv_data: str | None`
+    (a pydantic refusal precedes the wrapper body), which is why this is `low`.
+    """
+
+    _MSG = "csv_data must be CSV text as str, not "
+
+    def _refusal(self, conn, payload) -> str:
+        with pytest.raises(ValueError) as excinfo:
+            bench.import_csv(conn, benchmark="a", csv_data=payload)
+        return str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        ("payload", "type_name"),
+        [
+            pytest.param(5, "int", id="int"),
+            pytest.param([], "list", id="empty list"),
+            pytest.param(["a,b", "1,2"], "list", id="list of lines"),
+            pytest.param(b"x,y\n1,2\n", "bytes", id="bytes"),
+            pytest.param(bytearray(b"x,y\n1,2\n"), "bytearray", id="bytearray"),
+            pytest.param(None, "NoneType", id="None"),
+            pytest.param({"a": 1}, "dict", id="dict"),
+        ],
+    )
+    def test_non_str_payload_raises_value_error_naming_the_type(
+        self, conn, payload, type_name
+    ):
+        assert self._refusal(conn, payload) == self._MSG + type_name
+
+    def test_bytes_are_refused_rather_than_decoded(self, conn):
+        """Deliberate divergence from import_json, which WIDENED its annotation to
+        accept bytes because json.loads already took them. io.StringIO never
+        accepted bytes, so no caller can be importing that way today — refusing
+        them is a contract fix, whereas decoding them would be a new feature
+        wearing a bugfix costume. Pinned so a future "consistency" change has to
+        argue with this test.
+        """
+        assert self._refusal(conn, b"method,score\nbm25,0.7\n") == self._MSG + "bytes"
+
+    def test_none_is_refused_instead_of_reporting_the_wrong_fault(self, conn):
+        """`None` did NOT leak a TypeError — io.StringIO(None) is legal and yields
+        an empty stream, so this already raised ValueError, just the wrong one:
+        "CSV must have at least 2 columns" describes a malformed header, not a
+        missing payload. So this test passes on both trees by exception TYPE and
+        discriminates only on the MESSAGE. Said plainly because a reader cannot
+        otherwise tell it from a broken test.
+        """
+        assert self._refusal(conn, None) == self._MSG + "NoneType"
+
+    def test_a_class_spoofing_str_is_refused_not_left_to_leak_typeerror(self, conn):
+        """The guard reads `type(x)`, never `isinstance`, and this is the test that
+        makes the difference visible.
+
+        CPython's isinstance honours a `__class__` property, so an object
+        declaring `__class__ -> str` satisfies `isinstance(x, str)` and then hits
+        io.StringIO's own TypeError anyway — CB-75's exact leak surviving its own
+        fix. Not a contrived threat: `unittest.mock.MagicMock(spec=str)` is
+        precisely such an object, and this repo already pins a mock-shaped trap
+        for the same reason (CB-25's mock.ANY case in tests/test_types.py).
+
+        The general rule this pins: the guard's predicate must be IDENTICAL to
+        the consumer's requirement. StringIO checks the real type, so the guard
+        must too. Found by a Codex diff review; verified by running both spellings.
+        """
+        class SpoofsStr:
+            @property
+            def __class__(self):
+                return str
+
+        payload = SpoofsStr()
+        assert isinstance(payload, str), "premise: this payload defeats an isinstance guard"
+        assert self._refusal(conn, payload) == self._MSG + "SpoofsStr"
+
+    def test_a_mock_specced_as_str_is_refused(self, conn):
+        """The realistic form of the case above — a test double, not an attacker."""
+        payload = MagicMock(spec=str)
+        assert isinstance(payload, str), "premise: spec=str defeats an isinstance guard"
+        assert self._refusal(conn, payload).startswith(self._MSG)
+
+    def test_a_str_subclass_still_imports(self, conn):
+        """`issubclass(type(x), str)`, not `type(x) is str`: a str subclass is CSV
+        text and must keep working. There is no split-view hazard to guard against
+        here — the reason import_json needs `list(json_data)` and this does not
+        (CB-74). Verified: StringIO reads the real content, not __str__.
+        """
+        class Csv(str):
+            pass
+
+        result = bench.import_csv(conn, benchmark="a", csv_data=Csv(SCALAR_CSV))
+        assert result["rows"] == 1
+
+    def test_empty_string_still_reaches_the_parser(self, conn):
+        """CB-67's ratified rule: an empty DATA PAYLOAD is supplied content, so it
+        must reach the parser and raise ITS ValueError. A truthiness guard
+        (`if not csv_data`) would refuse it with the type message instead, which
+        is why the check tests the type and nothing else.
+        """
+        with pytest.raises(ValueError, match="at least 2 columns"):
+            bench.import_csv(conn, benchmark="a", csv_data="")
+
+
 class TestImportJson:
     def test_basic_import(self, conn):
         result = bench.import_json(conn, benchmark="search-perf", json_data=SAMPLE_JSON)
@@ -149,8 +277,14 @@ class TestImportJsonShapeGuard:
     data[0].keys() at all, but later inside csv.DictWriter, which is exactly
     the door a data[0]-only guard would leave open.
 
-    `match=` is load-bearing, not decoration, and it anchors the WHOLE message
-    via re.escape. Without it the class passes against a blanket
+    `match=` is load-bearing, not decoration: it pins the whole message TEXT via
+    re.escape, so a message naming the accepted type wrongly does not pass.
+    (Correction, 2026-08-17: this used to claim re.escape "anchors" the message.
+    It does not — `match=` runs re.SEARCH and re.escape adds no anchors, so a
+    message with text prefixed or appended still passes. The claim was wrong, not
+    the tests; TestImportCsvTypeGuard above asserts exact equality instead, which
+    is the stronger form to copy.) Without a message assertion the class passes
+    against a blanket
     `except (TypeError, AttributeError): raise ValueError(...)` around the
     function body — a shape that would ALSO convert a post-commit failure
     inside import_csv into a ValueError, which _cmd_bench_import's arm then

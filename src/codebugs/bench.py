@@ -112,12 +112,57 @@ def import_csv(
 
     Args:
         benchmark: Benchmark name (e.g. "search-perf")
-        csv_data: CSV content as string (header + data rows)
+        csv_data: CSV content as string (header + data rows). Text only —
+            unlike ``import_json``, bytes are refused rather than decoded,
+            because ``io.StringIO`` never accepted them, so nothing can be
+            importing that way today (CB-75).
         date: Run date (default: now, ISO format)
         tags: Optional tags
         meta: Optional metadata (git_sha, ci_url, etc.)
         run_id: Optional explicit run ID (default: auto-generated)
+
+    Raises:
+        ValueError: csv_data is not a str (CB-75), or the CSV has fewer than
+            two columns, no data rows, an empty row label, or a non-numeric
+            metric. The type is checked POSITIVELY and up-front rather than by
+            rewrapping ``TypeError`` from the parser below — a blanket rewrap
+            would also convert a POST-COMMIT failure into a ValueError, which
+            the CLI arm then reports as bad input for a write that landed
+            (the CB-15/CB-16 lie, and the same reasoning as import_json's).
     """
+    # An empty string is SUPPLIED CONTENT and must reach the parser to raise its
+    # own "at least 2 columns" — that is CB-67's ratified distinction, so this
+    # tests the TYPE and never the truthiness. `None` is refused here too: it is
+    # not a str, and io.StringIO(None) silently yields an EMPTY stream, which
+    # surfaced as "CSV must have at least 2 columns" — a message describing the
+    # wrong fault.
+    #
+    # `issubclass(type(...))` and NOT `isinstance(...)`, which is spoofable:
+    # CPython's isinstance honours a `__class__` property, so an object
+    # declaring `__class__ -> str` passed an isinstance guard and then hit
+    # io.StringIO's own TypeError anyway — the very leak this refusal replaces.
+    # Not hypothetical: `unittest.mock.MagicMock(spec=str)` is exactly such an
+    # object, and this repo already pins a mock-shaped trap for the same reason
+    # (CB-25's mock.ANY case in tests/test_types.py). type() reads the real
+    # type, which is what StringIO itself checks.
+    #
+    # That is the general rule, and it is CB-74's lesson in a second form: the
+    # guard's predicate must be IDENTICAL to the consumer's requirement.
+    # StringIO accepts exactly a real str or subclass, so this accepts exactly
+    # that — no wider (a spoofer would break at the consumer) and no narrower
+    # (a genuine subclass must keep working).
+    #
+    # No snapshot is taken, deliberately, and the asymmetry with import_json is
+    # the point: that guard must materialize its list because __iter__ and
+    # __getitem__ can disagree (CB-74). A str cannot present two views — its
+    # content is fixed at construction and StringIO reads that content, not
+    # __str__ — so there is nothing here for a subclass to desynchronize.
+    # Verified by running both halves.
+    if not issubclass(type(csv_data), str):
+        raise ValueError(
+            f"csv_data must be CSV text as str, not {type(csv_data).__name__}"
+        )
+
     reader = csv.DictReader(io.StringIO(csv_data))
     if not reader.fieldnames or len(reader.fieldnames) < 2:
         raise ValueError("CSV must have at least 2 columns (row_label + one metric)")
@@ -746,9 +791,9 @@ def register_cli(sub, commands) -> None:
             is_json = json_flag_given or path.endswith(".json")
             # The read is guarded on its own, NOT by a handler-wide `except
             # OSError` (CB-71). It is the only OSError source that runs BEFORE
-            # import_csv/import_json commit (bench.py:164), and a wider arm would
-            # also catch a failure raised AFTER that commit — reporting a landed
-            # import as bad input, the CB-15/CB-16 success-shaped lie.
+            # import_csv/import_json commit, and a wider arm would also catch a
+            # failure raised AFTER that commit — reporting a landed import as bad
+            # input, the CB-15/CB-16 success-shaped lie.
             try:
                 with open(path) as f:
                     data = f.read()
