@@ -517,7 +517,7 @@
     "name": "codebench_delete"
   },
   {
-    "description": "Import benchmark results from CSV or JSON.\n\nCSV convention: first column is the row label, remaining columns are\nmetric names with numeric values.\n\nJSON convention: array of objects, first key is the row label, rest\nare metric keys with numeric values.\n\nArgs:\n    benchmark: Benchmark name (e.g. \"search-perf\")\n    csv_data: CSV string (header + data rows). Provide csv_data OR json_data.\n    json_data: JSON array string. Provide csv_data OR json_data.\n    date: Run date (default: today, ISO format YYYY-MM-DD)\n    tags: Optional tags (e.g. [\"nightly\", \"v2.1\"])\n    meta: Optional metadata (e.g. {\"git_sha\": \"abc123\", \"ci_url\": \"...\"})\n",
+    "description": "Import benchmark results from CSV or JSON.\n\nCSV convention: first column is the row label, remaining columns are\nmetric names with finite numeric values.\n\nJSON convention: array of objects, first key is the row label, rest\nare metric keys with finite numeric values.\n\nEach (row label, metric) pair may appear only once per import, and\nNaN/Infinity are refused: a non-finite measurement is not one.\n\nArgs:\n    benchmark: Benchmark name (e.g. \"search-perf\")\n    csv_data: CSV string (header + data rows). Provide csv_data OR json_data.\n    json_data: JSON array string. Provide csv_data OR json_data.\n    date: Run date (default: today, ISO format YYYY-MM-DD)\n    tags: Optional tags (e.g. [\"nightly\", \"v2.1\"])\n    meta: Optional metadata (e.g. {\"git_sha\": \"abc123\", \"ci_url\": \"...\"})\n",
     "inputSchema": {
       "properties": {
         "benchmark": {

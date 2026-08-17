@@ -7,6 +7,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **A benchmark CSV no longer kills `bench-import` with a raw
+  `sqlite3.IntegrityError` traceback** (CB-81). Validation used to be
+  interleaved with the writes: the run row went in, then each cell was checked
+  inside the loop that inserted it, so the database's own constraints were the
+  only thing checking the payload — and a constraint failure is an
+  `IntegrityError`, which no error arm in the CLI handles. Three ordinary
+  payloads reproduced it: duplicate row labels, a duplicate header, and `nan`
+  (SQLite stores NaN as NULL, so it tripped `NOT NULL`). A malformed CSV did the
+  same through `_csv.Error`, which is not a `ValueError` either.
+
+  Every payload fault is now decided **before the first INSERT** and reported as
+  an ordinary input error naming the row and column, and the writes — with the
+  run-id read that feeds them — run inside a single transaction. Nothing was
+  being left behind on the CLI or MCP paths (both discard the connection on
+  failure), but the atomicity was accidental rather than intended, and the
+  run-id read was an unlocked read-modify-write that could collide between two
+  concurrent imports.
+
+  **Behaviour change:** a metric value of `inf`, `-inf`, `Infinity`, or a literal
+  that overflows to infinity such as `1e400` imported silently before and is now
+  refused — a non-finite measurement is not a measurement. `nan` was already
+  refused, just in constraint vocabulary and after a write. This applies to
+  metric *values* only; the `meta` field's NaN/Infinity policy is unchanged.
+
+  Two things that still import exactly as before, and are pinned so they stay
+  that way: a repeated row label whose cells are disjoint, and a duplicate
+  header column whose cells are blank. The duplicate check is on
+  `(row label, metric)` pairs, which is the existing uniqueness rule applied
+  earlier, so it refuses nothing that used to work.
+
 - **MCP tool descriptions no longer depend on which Python built the server**
   (CB-73). The SDK reads `Tool.description` from `__doc__`, and CPython 3.13
   dedents docstrings at compile time while 3.11 and 3.12 do not — so on the
