@@ -106,8 +106,30 @@ jobs:
             exit 1
           fi
 
+          # How many commits SHOULD be examined. Computed separately from the
+          # loop so the loop can be checked against it below.
+          if [ -z "${commits}" ]; then
+            expected=0
+          else
+            expected=$(printf '%s\n' "${commits}" | grep -c .)
+          fi
+          echo "first-parent non-merge commits since baseline: ${expected}"
+
+          # `while read` over a here-string, NOT `for sha in ${commits}`. The
+          # for-loop depends on IFS word-splitting, which bash does and other
+          # shells do not — the author reproduced this assertion by hand under
+          # zsh, where the unquoted expansion did not split, the loop body ran
+          # ONCE with every SHA concatenated, `git show` failed, and the script
+          # printed "clean" having examined NOTHING. GitHub Actions runs bash so
+          # the for-loop was in fact correct here, but a gate whose correctness
+          # depends on which shell invokes it is one `shell:` key away from
+          # vacuous, and this whole change exists because of gates that cannot
+          # fire.
           violations=0
-          for sha in ${commits}; do
+          examined=0
+          while IFS= read -r sha || [ -n "${sha}" ]; do
+            [ -z "${sha}" ] && continue
+            examined=$((examined + 1))
             # --no-renames IS LOAD-BEARING. With rename detection on (the
             # default) `--name-only` prints ONLY the destination path, so
             # `git mv src/keep.py .claude/plans/keep.md` shows one allowlisted
@@ -127,7 +149,20 @@ jobs:
               echo "::error::direct commit on main: ${sha} $(git log -1 --format=%s "${sha}")"
               printf '%s\n' "${offending}" | sed 's/^/    /'
             fi
-          done
+          done <<EOF
+          ${commits}
+          EOF
+
+          # PROVE THE GATE LOOKED. Without this, every failure mode that makes
+          # the loop run fewer times than it should — a shell that does not split,
+          # a mangled capture, a future refactor — reports "clean" instead of
+          # reporting that it could not check. That is the single defect class
+          # this whole change was built to remove, and the check costs two lines.
+          if [ "${examined}" -ne "${expected}" ]; then
+            echo "::error::examined ${examined} of ${expected} commits — refusing to"
+            echo "report main clean on a partial scan."
+            exit 1
+          fi
 
           if [ "${violations}" -ne 0 ]; then
             echo ""
@@ -137,4 +172,4 @@ jobs:
             echo ".claude/plans/*.md note."
             exit 1
           fi
-          echo "clean: every change since ${BASELINE:0:12} arrived by merge."
+          echo "clean: examined ${examined} commit(s) since ${BASELINE:0:12}; all arrived by merge."
