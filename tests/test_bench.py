@@ -914,3 +914,277 @@ class TestImportArgumentCompat:
         stored = conn.execute("SELECT meta FROM codebench_runs").fetchone()["meta"]
         assert "NaN" in stored
         assert json.loads(stored)["x"] != json.loads(stored)["x"]  # NaN != NaN
+
+
+class RecordingConnection(sqlite3.Connection):
+    """Captures SQL TEMPLATES, not executed statements.
+
+    `set_trace_callback` reports parameters already expanded, so a guard reading
+    it cannot tell a real statement from the same text inside a value. Same
+    reasoning as the RecordingConnection in tests/test_findings.py.
+    """
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.sql_log: list[str] = []
+
+    def execute(self, sql, *a, **kw):
+        self.sql_log.append(sql)
+        return super().execute(sql, *a, **kw)
+
+    def executemany(self, sql, *a, **kw):
+        self.sql_log.append(sql)
+        return super().executemany(sql, *a, **kw)
+
+
+# (label, csv_data, kwargs, expected message fragment). Every one of these
+# raised sqlite3.IntegrityError, csv.Error or a MID-WRITE ValueError before
+# CB-81; each is now a clean pre-write ValueError.
+PAYLOAD_FAULTS = [
+    ("duplicate row labels", "m,v\na,1\na,2\n", {}, "Duplicate metric 'v' for row 'a'"),
+    ("duplicate headers", "m,v,v\na,1,2\n", {}, "Duplicate metric 'v' for row 'a'"),
+    ("nan", "m,v\na,nan\n", {}, "Non-finite value 'nan'"),
+    ("inf", "m,v\na,inf\n", {}, "Non-finite value 'inf'"),
+    ("-inf", "m,v\na,-inf\n", {}, "Non-finite value '-inf'"),
+    ("Infinity", "m,v\na,Infinity\n", {}, "Non-finite value 'Infinity'"),
+    ("overflowing literal", "m,v\na,1e400\n", {}, "Non-finite value '1e400'"),
+    ("empty label after a valid row", "m,v\na,1\n,2\n", {}, "Row label"),
+    ("non-numeric after a valid row", "m,v\na,1\nb,x\n", {}, "Non-numeric value 'x'"),
+    ("unparseable csv", 'm,v\n"' + "x" * 200_000 + "\n", {}, "CSV could not be parsed"),
+]
+
+
+class TestImportPreWriteValidation:
+    """CB-81 — every payload fault is decided BEFORE the first INSERT.
+
+    Before this, validation was interleaved with the writes: the run row went in,
+    then each cell was checked inside the loop that inserted it, so the SCHEMA
+    was the only thing checking the payload. A plain CSV therefore killed
+    `bench-import` with a raw `sqlite3.IntegrityError` traceback — a class no arm
+    in cli.py handles.
+
+    On the shipping surfaces nothing LANDED (the CLI closes the connection in a
+    `finally` and the MCP wrapper uses `with conn_factory()`, so the implicit
+    transaction was discarded), which is why the discriminating assertion here is
+    the exception TYPE AND MESSAGE, never the row counts: `runs=0 results=0` is
+    already the outcome today and would pass against the unfixed tree.
+    """
+
+    @pytest.mark.parametrize(
+        "csv_data,kwargs,fragment",
+        [pytest.param(c, k, f, id=label) for label, c, k, f in PAYLOAD_FAULTS],
+    )
+    def test_payload_fault_is_a_pre_write_value_error(self, conn, csv_data, kwargs, fragment):
+        with pytest.raises(ValueError) as excinfo:
+            bench.import_csv(conn, benchmark="b", csv_data=csv_data, **kwargs)
+        assert fragment in str(excinfo.value), str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        "csv_data,kwargs",
+        [pytest.param(c, k, id=label) for label, c, k, _ in PAYLOAD_FAULTS],
+    )
+    def test_a_refused_payload_writes_nothing(self, conn, csv_data, kwargs):
+        """Snapshot-and-compare on a CLEAN connection, never "the tables are
+        empty": the duplicate-run-id case below legitimately requires a first
+        successful import, and an assertion that cannot hold for one member of
+        the family is an assertion nobody can extend.
+
+        Scope: `db.txn` yields False under an AMBIENT transaction and starts
+        nothing, so this guarantee is about a connection with none open.
+        """
+        before = self._counts(conn)
+        with pytest.raises(ValueError):
+            bench.import_csv(conn, benchmark="b", csv_data=csv_data, **kwargs)
+        assert self._counts(conn) == before
+        assert not conn.in_transaction
+
+    def test_an_existing_run_id_is_refused_before_the_write(self, conn):
+        """Library-reachable only — no CLI flag and no MCP parameter exposes
+        run_id — so this pins the domain contract, not a user-facing door."""
+        bench.import_csv(conn, benchmark="b", csv_data="m,v\na,1\n", run_id="BE-9")
+        before = self._counts(conn)
+        with pytest.raises(ValueError, match="already exists"):
+            bench.import_csv(conn, benchmark="b", csv_data="m,v\nz,1\n", run_id="BE-9")
+        assert self._counts(conn) == before == (1, 1)
+
+    def test_import_json_inherits_every_guard(self, conn):
+        """It converts to CSV and delegates, so the guards must reach it. A
+        JSON document cannot express a duplicate key, so this uses the
+        non-finite path, which it can."""
+        with pytest.raises(ValueError, match="Non-finite value"):
+            bench.import_json(
+                conn, benchmark="b", json_data=json.dumps([{"m": "a", "v": float("inf")}])
+            )
+        assert self._counts(conn) == (0, 0)
+
+    @staticmethod
+    def _counts(conn):
+        return (
+            conn.execute("SELECT count(*) FROM codebench_runs").fetchone()[0],
+            conn.execute("SELECT count(*) FROM codebench_results").fetchone()[0],
+        )
+
+
+class TestImportPairCheckNarrowsNothing:
+    """CB-81 — the duplicate check is on (row_label, metric) PAIRS, which is
+    exactly UNIQUE(run_id,row_label,metric) evaluated earlier.
+
+    The card's wording said to refuse duplicate row labels and duplicate headers.
+    Refusing either BY NAME would reject payloads that import cleanly today, and
+    these two are those payloads — measured on main before the change. They are
+    the reason the implementation does not follow the card's letter.
+
+    Passes on BOTH sides by design: they pin behaviour the change preserves.
+    """
+
+    def test_a_repeated_label_with_disjoint_cells_still_imports(self, conn):
+        r = bench.import_csv(conn, benchmark="b", csv_data="m,v,w\na,1,\na,,2\n")
+        assert r["results_stored"] == 2
+        rows = conn.execute(
+            "SELECT row_label, metric, value FROM codebench_results ORDER BY metric"
+        ).fetchall()
+        assert [tuple(x) for x in rows] == [("a", "v", 1.0), ("a", "w", 2.0)]
+
+    def test_a_duplicate_header_with_blank_cells_still_imports(self, conn):
+        r = bench.import_csv(conn, benchmark="b", csv_data="m,v,v\na,,\n")
+        assert r["results_stored"] == 0
+
+    def test_a_short_row_is_still_skipped_not_refused(self, conn):
+        """DictReader fills a missing field with restval=None, which the blank
+        skip has always swallowed."""
+        r = bench.import_csv(conn, benchmark="b", csv_data="m,v,w\na,1\n")
+        assert r["results_stored"] == 1
+
+
+class TestImportAtomicity:
+    """CB-81 — the writes and the read that feeds them are ONE transaction.
+
+    `_next_run_id` reads the highest BE-n and the INSERT writes BE-n+1: the CB-24
+    read-modify-write shape, which CB-36's sweep of that population did not
+    reach.
+    """
+
+    CSV = "m,v\na,1\nb,2\n"
+
+    def test_begin_immediate_precedes_the_run_id_read(self, tmp_path):
+        """The ORDER is the point, and only a template log can see it: moving
+        just the INSERTs inside the transaction would pass every functional test
+        in this file while leaving the race exactly where it was.
+
+        Against main this fails on the first assertion — there is no
+        BEGIN IMMEDIATE anywhere in the call.
+        """
+        conn = sqlite3.connect(
+            str(tmp_path / "t.db"), factory=RecordingConnection
+        )
+        conn.row_factory = sqlite3.Row
+        bench.ensure_schema(conn)
+        conn.sql_log.clear()
+        bench.import_csv(conn, benchmark="b", csv_data=self.CSV)
+
+        begins = [i for i, s in enumerate(conn.sql_log) if s.startswith("BEGIN IMMEDIATE")]
+        reads = [i for i, s in enumerate(conn.sql_log) if "SELECT run_id FROM codebench_runs" in s]
+        assert begins, f"no BEGIN IMMEDIATE was issued: {conn.sql_log}"
+        assert reads, f"the run-id read did not happen: {conn.sql_log}"
+        assert begins[0] < reads[0], conn.sql_log
+        conn.close()
+
+    def test_a_failure_mid_insert_rolls_back_the_run_row(self, conn):
+        """An ENVIRONMENTAL failure, not a payload one — the pre-pass cannot see
+        this, which is why the transaction is the other half of the fix and not
+        belt-and-braces.
+
+        Injected with a trigger so the failure arrives from SQLite during the
+        result inserts, exactly where a disk error would. Against main the run
+        row is still visible on this connection afterwards (uncommitted, but the
+        caller holds it); after the fix both tables are empty.
+        """
+        conn.execute(
+            "CREATE TRIGGER boom BEFORE INSERT ON codebench_results "
+            "WHEN (SELECT count(*) FROM codebench_results) >= 1 "
+            "BEGIN SELECT RAISE(ABORT, 'boom'); END"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            bench.import_csv(conn, benchmark="b", csv_data=self.CSV)
+        assert conn.execute("SELECT count(*) FROM codebench_runs").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM codebench_results").fetchone()[0] == 0
+        assert not conn.in_transaction
+
+    def test_an_ambient_transaction_is_not_committed(self, tmp_path):
+        """`db.txn` yields False under an ambient transaction and starts
+        nothing, so the CALLER keeps the commit decision. Before this,
+        `import_csv` ended in a bare `conn.commit()`, which committed the
+        caller's unrelated work too (CB-24 consequence 1) — that is what the
+        unrelated row below detects.
+        """
+        path = str(tmp_path / "t.db")
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        bench.ensure_schema(conn)
+        conn.execute("CREATE TABLE unrelated (x TEXT)")
+        conn.commit()
+
+        conn.execute("INSERT INTO unrelated VALUES ('caller-owned')")
+        assert conn.in_transaction
+        bench.import_csv(conn, benchmark="b", csv_data=self.CSV)
+        assert conn.in_transaction, "import_csv committed the caller's transaction"
+        conn.rollback()
+
+        assert conn.execute("SELECT count(*) FROM unrelated").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM codebench_runs").fetchone()[0] == 0
+        conn.close()
+
+    def test_a_standalone_import_is_committed(self, tmp_path):
+        """Passes on BOTH sides — pins behaviour the change preserves. Read back
+        through a SECOND connection, because querying through the connection
+        that wrote does not distinguish a commit from an open transaction.
+        """
+        path = str(tmp_path / "t.db")
+        writer = sqlite3.connect(path)
+        writer.row_factory = sqlite3.Row
+        bench.ensure_schema(writer)
+        bench.import_csv(writer, benchmark="b", csv_data=self.CSV)
+
+        reader = sqlite3.connect(path)
+        assert reader.execute("SELECT count(*) FROM codebench_results").fetchone()[0] == 2
+        writer.close()
+        reader.close()
+
+
+class TestImportCliContract:
+    """CB-81's reported symptom is specifically the CLI traceback."""
+
+    @staticmethod
+    def _cli(project, *args):
+        return subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", *args],
+            capture_output=True, text=True, cwd=str(project),
+            env={**os.environ, "PYTHONPATH": os.path.join(os.getcwd(), "src")},
+        )
+
+    def test_a_duplicate_pair_is_a_clean_error_not_a_traceback(self, tmp_path):
+        """Against main this prints a full `sqlite3.IntegrityError` traceback."""
+        db.init_project(str(tmp_path))
+        (tmp_path / "dup.csv").write_text("m,v\na,1\na,2\n")
+        r = self._cli(tmp_path, "bench-import", "dup.csv", "-b", "Q")
+        assert "Traceback" not in r.stderr, r.stderr
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "Duplicate metric" in r.stderr, r.stderr
+
+    def test_an_unparseable_csv_is_a_clean_error_not_a_traceback(self, tmp_path):
+        """`_csv.Error` is NOT a ValueError, so against main it escaped both the
+        handler's arm and cli.main as a raw traceback."""
+        db.init_project(str(tmp_path))
+        (tmp_path / "bad.csv").write_text('m,v\n"' + "x" * 200_000 + "\n")
+        r = self._cli(tmp_path, "bench-import", "bad.csv", "-b", "Q")
+        assert "Traceback" not in r.stderr, r.stderr
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "CSV could not be parsed" in r.stderr, r.stderr
+
+    def test_a_refused_import_leaves_the_tracker_untouched(self, tmp_path):
+        db.init_project(str(tmp_path))
+        (tmp_path / "dup.csv").write_text("m,v\na,1\na,2\n")
+        self._cli(tmp_path, "bench-import", "dup.csv", "-b", "Q")
+        c = sqlite3.connect(str(tmp_path / ".codebugs" / "findings.db"))
+        assert c.execute("SELECT count(*) FROM codebench_runs").fetchone()[0] == 0
+        c.close()
