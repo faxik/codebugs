@@ -433,6 +433,22 @@ _guard_enforcement_armed() {
     # --git-path follows the redirect and --git-common-dir does not.
     hook_dir="$(git -C "${repo_root}" rev-parse --path-format=absolute --git-path hooks)"
 
+    # A RELATIVE core.hooksPath is refused outright, because it cannot be
+    # verified: git resolves it against the top of EACH working tree, so
+    # `core.hooksPath=.githooks` means a different directory in the primary
+    # checkout and in every linked worktree. Review reproduced the consequence —
+    # armed in the primary, main checked out in a linked worktree with no
+    # .githooks there, guard rc=0, and `git commit` of a source file straight onto
+    # main rc=0. "This clone is armed" is not a statement this guard can make
+    # about a per-worktree path, so it declines to make it.
+    local _hooks_cfg
+    _hooks_cfg=$(git -C "${repo_root}" config --get core.hooksPath || true)
+    if [[ -n "${_hooks_cfg}" && "${_hooks_cfg}" != /* ]]; then
+        problems="${problems}  core.hooksPath is RELATIVE ('${_hooks_cfg}'), which resolves"$'\n'
+        problems="${problems}    per working tree — arming one checkout leaves the others bare."$'\n'
+        problems="${problems}    Set an absolute path, or unset it."$'\n'
+    fi
+
     # Append with an EXPLICIT separator: `$( )` strips trailing newlines, so
     # concatenating two non-empty results directly would run the last line of
     # one into the first line of the next and report two faults as one.
@@ -457,7 +473,16 @@ _guard_enforcement_armed() {
     # identity" instead of vanishing.
     local merge_hook_src="${repo_root}/tools/pre-merge-commit-hook.sh"
     local merge_hook_known
-    merge_hook_known=$(git -C "${repo_root}" log -1 --format=%H main \
+    # `--all`, NOT the literal ref `main`. Reading `main` looked monotonic and was
+    # not: in any clone WITHOUT A LOCAL branch named main — `git clone
+    # --single-branch --branch fix/…` is enough, and origin/main being present
+    # does not help — `git log -1 main -- <path>` fatals, the variable empties,
+    # and the condition collapses back to `-e <src>`. That is precisely the
+    # flagless disarm this gate was rewritten to close: review reproduced
+    # install-hooks → rm the source → guard rc=0 → an untyped branch merged onto
+    # main. `--all` consults every ref, so no checkout shape can make the history
+    # invisible.
+    merge_hook_known=$(git -C "${repo_root}" log -1 --format=%H --all \
         -- tools/pre-merge-commit-hook.sh 2>/dev/null || true)
     if [[ -n "${merge_hook_known}" || -e "${merge_hook_src}" ]]; then
         _p="$(_hook_problems \

@@ -23,8 +23,8 @@ Prose cannot enforce prose. That is CB-50, and the harness below is its fix.
 |---|---|---|
 | Branch carries `fix/`\|`feature/`\|`refactor/`\|`docs/` | `_guard_branch_type` (7) + pre-commit hook (1) | exit 7 / 1 |
 | Nothing but `.claude/plans/*.md` is committed on main | pre-commit hook | exit 1 |
-| A merge onto main comes from a typed branch (or `main`) | pre-merge-commit hook (clean merge) + pre-commit hook (conflicted merge) | exit 1 |
-| Nothing reaches `main` except by a merge or a plan note | `.github/workflows/main-invariants.yml` — **server-side, alarm-only until `origin/main` is protected** | CI failure |
+| A merge onto main comes from a typed local branch, or from main's own upstream `main` | pre-merge-commit hook (clean merge) + pre-commit hook (conflicted merge) | exit 1 |
+| Cherry-pick / revert get **no** exemption on main | pre-commit hook | exit 1 |
 | Integration never fast-forwards | `--no-ff` + `git config merge.ff false` | — |
 | One integration at a time | `flock` on `.worktrees/.integrate.lock` | exit 1 |
 | The tested state is the landed state | in-lock SHA re-check | exit 13 |
@@ -32,6 +32,13 @@ Prose cannot enforce prose. That is CB-50, and the harness below is its fix.
 | Main has main checked out, and is clean | `_guard_workspace_on_main`, `_guard_main_clean` | exit 8, 11 |
 | The branch actually carries a change | `_guard_nonempty_diff` | exit 9 |
 | No conflict markers, no scratch `.py`, no stale base | `_guard_conflict_markers`, `_guard_untracked_py_at_root`, `_guard_stale_base` | exit 5, 4, 6 |
+
+**`.github/workflows/main-invariants.yml` is deliberately NOT in that table**, and the reason is the
+table's own title. It asserts that main's first-parent line carries nothing but merges and plan notes
+— but a workflow **cannot refuse a push**, it reports afterwards, so listing it under *"what is now
+mechanically enforced"* with a *"refuses with"* column was a category error inside the very table
+meant to be precise (round-3 review). It is an **alarm**. The gate is branch protection on
+`origin/main`; see the CI limits below.
 
 `merge.ff=false` is the one no hook could replace: **git fires no hook on a fast-forward at all**,
 because no commit is created, so nothing can catch it after the fact. Verified by replaying the
@@ -83,15 +90,20 @@ only to recognise a pull. Concretely:
 - Only a **configured** remote's name is stripped. A blind `${rest#*/}` collapsed
   `refs/remotes/junk/main` to the accepted literal `main`.
 
-**And one limit that cannot be closed here, stated rather than papered over.** A remote-tracking
-`main` is **trusted**, and nothing local can prove it arrived by fetch: `git update-ref
-refs/remotes/origin/main <any-sha>` then `git merge origin/main` lands anything in two commands with
-no `--no-verify` (reproduced against both a junk remote and the real `origin`). There is no local
-discriminator, and refusing remote refs instead would break `git pull` — the worse failure. This is
-the same shape as the `--separate-git-dir` misbinding: **when a rule cannot be decided from local
+**And one limit that cannot be closed here, stated rather than papered over.** *Main's own upstream*
+`main` is **trusted** — `branch.main.remote`, defaulting to `origin` — and nothing local can prove
+what it contains or how it got there: `git update-ref refs/remotes/origin/main <any-sha>`, a mistyped
+fetch refspec, a rewritten `remote.origin.fetch` (which then re-arms on every ordinary `git fetch`),
+or simply an upstream whose `main` holds untyped work all land content here. Reproduced. There is no
+local discriminator, and refusing remote refs instead would break `git pull` — the worse failure.
+Same shape as the `--separate-git-dir` misbinding: **when a rule cannot be decided from local
 evidence, supply external metadata rather than deepening the guess.** The external metadata is
-CB-59's server-side protection, and `TestKnownLimits` pins that the bypass still reproduces, so the
-day it stops being true someone re-reads the comment instead of trusting a stale one.
+CB-59's server-side protection, and `TestKnownLimits` pins that the bypass still reproduces so the day
+it stops being true someone re-reads this instead of trusting a stale claim.
+
+Note the scope was narrowed twice under review. It first trusted **any** `<remote>/main`, then any
+**configured** remote's — at which point `git remote add junk <anything>` plus a fetch was still a
+two-command bypass. Only main's declared upstream counts now.
 
 **`MERGE_HEAD` is read fail-closed, and it was not at first.** The conflicted-merge gate is a `while
 read` over that file, and two states made it run **zero** times, leave the refusal flag at `0`, and
@@ -109,7 +121,19 @@ because that guard's entire job is *this clone is actually armed*. It resolved
 `--git-common-dir`/hooks, which does **not** follow the redirect, so `git config core.hooksPath
 <empty-dir>` left the guard returning `0` while nothing was installed and a commit of arbitrary
 content on main then succeeded. Both the guard and `install-hooks.sh` now use `git rev-parse
---git-path hooks`, which does follow it (verified both ways).
+--git-path hooks`, which does follow it (verified both ways) — **and a RELATIVE value is refused
+outright**, because git resolves one against the top of *each* working tree, so
+`core.hooksPath=.githooks` names a different directory in the primary checkout and in every linked
+worktree. Round 3 reproduced that too: armed in the primary, main checked out in a linked worktree
+with no `.githooks` there, guard `0`, source commit onto main `0`. "This clone is armed" is not a
+statement the guard can make about a per-worktree path, so it declines to make it.
+
+**The bootstrap gate's "monotonic" condition lost to an ordinary clone, twice-fixed.** It read the
+literal ref `main`, so in any clone with no *local* main — `git clone --single-branch --branch fix/…`
+is enough, and `origin/main` being present does not help — `git log -1 main -- <path>` fatals, the
+value empties, and the condition collapses back to the file-existence test that round 2 had killed.
+Round 3 reproduced the full disarm again through that door. It reads `--all` now, so no checkout shape
+can hide the history.
 
 **A non-ASCII plan note could not land on main** — a false refusal, and the mirror image of a bug
 this repo already had. `git diff --cached --name-only` C-quotes such a path by default, the allowlist
@@ -238,6 +262,17 @@ suite stayed green, because nothing executed the script. Every guard was unit-te
 composition was not — this repo's own rule (*a check that validates elements cannot validate their
 composition*) turned on its own harness. Do not read the per-guard tests as covering the wiring.
 
+**A test can be worse than absent: it can be vacuous AND leave litter.** `TestKnownLimits` — the pin
+for the one limit this design chose to document — passed `"--git-path hooks"` to `git rev-parse` as a
+single argv token. `rev-parse` echoes an unrecognised option-looking argument back and exits 0, so the
+"hooks directory" resolved to a *relative path with that literal name*, the hook was copied into a
+directory called `--git-path hooks` in the repo root, the test repo got no hook at all, and asserting
+`rc == 0` could never fail. It stayed green even with the entire merge hook reverted. Worse, the suite
+**committed** that 11 KB directory to the branch, and `git status` stayed clean because every run
+regenerated it byte-identically. Found by round-3 review, not by the suite. Two lessons worth keeping:
+a test that sets up its own fixture must **assert the fixture exists**, and `git rev-parse` is not a
+safe place to be sloppy with argv.
+
 Executing the whole script in a test is impractical (it merges onto main and runs the full suite),
 so the wiring tests are structural: they read the script and assert each guard is invoked with
 `|| exit $?`, in the right phase. Said plainly rather than left to look behavioural. Three more
@@ -246,14 +281,36 @@ structural tests landed with CB-57, all of the same kind: the integration merge 
 workflow must carry a baseline SHA that is a real commit in this repository. Each pins a property
 whose failure mode is silent — a gate present in the tree and absent in effect.
 
-**The branch predicate now exists in THREE copies** — `_guards.sh`, `pre-commit-hook.sh`,
-`pre-merge-commit-hook.sh` — because neither hook may source the library (each runs from
-`.git/hooks/` as a symlink and must work when `tools/` is missing from the checked-out tree). Two
-tests hold them together: one asserts the identical `_BRANCH_TYPES` declaration, the other asserts
-all three use the full-shape regex rather than a prefix test. Same types is *not* the same
-predicate: a prefix test accepts `fix/a/b`, which `_guard_branch_type` refuses, so a divergence
-would let a branch clear the finish guard and then be refused by the merge hook — after the whole
-suite had already run.
+**The branch predicate is constructed FOUR times across THREE files** — `_guards.sh` once,
+`pre-commit-hook.sh` twice (its own branch check, plus the copy inside the shared merge-gate block),
+`pre-merge-commit-hook.sh` once — because neither hook may source the library (each runs from
+`.git/hooks/` as a symlink and must work when `tools/` is missing from the checked-out tree). This
+sentence used to say "three copies", which was the *file* count; the test it credited counted per
+file too, and round-3 review showed the consequence: degrading `pre-commit-hook.sh`'s own regex to a
+prefix test left that test **green**, because the shared block's copy still matched the grep. It now
+counts constructions per site. Same types is *not* the same predicate — a prefix test accepts
+`fix/a/b`, which `_guard_branch_type` refuses — so a divergence would let a branch clear the finish
+guard and then be refused by the merge hook, after the whole suite had already run.
+
+**Byte-identical is not the same claim as "the two hooks agree", and that cost a round.** The shared
+predicate used to take a second argument — what the caller typed, from `GITHEAD_` — and judge that
+ref alone when it resolved. Identical code, two different rules, because only `pre-merge-commit`
+*has* that argument: review reproduced `git branch fix/tmp <untyped-sha>; git merge fix/tmp --no-ff`
+landing on the clean path while the identical state was refused on the conflicted one, and the
+byte-identity test structurally could not see it because the divergence lived in the arguments. The
+predicate now takes only the merge head, so both callers pass identical information. **The general
+form, which this repo keeps relearning: sharing an implementation does not share a decision if the
+callers supply different inputs.**
+
+**Cherry-pick and revert lost their exemption on main.** The merge-in-progress exemption used to fire
+on mere existence of `MERGE_HEAD`, `CHERRY_PICK_HEAD` *or* `REVERT_HEAD`. Only the first was hardened,
+and review reproduced the rest: `: > .git/CHERRY_PICK_HEAD` then `git commit` landed arbitrary staged
+content on main **and** skipped the branch-type check, so one empty file turned off both of this
+hook's rules — reachable the same way empty `MERGE_HEAD` was, since a conflicted cherry-pick leaves
+the file until `--continue`/`--abort`. The fix was not to harden them but to stop exempting them:
+completing a *merge* onto main is the sanctioned landing path, while cherry-picking or reverting
+directly onto main is the thing the hook exists to refuse. `--no-verify` remains the way to state that
+intent deliberately.
 
 **The bootstrap is a real constraint, not an oversight.** `worktree-finish.sh` cannot land the
 commit that first creates `tools/` — `_guard_enforcement_armed` refuses, because main has no

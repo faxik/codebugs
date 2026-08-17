@@ -469,6 +469,68 @@ class TestEnforcementArmed:
         assert not (repo / "tools" / "pre-merge-commit-hook.sh").exists()
         assert run_guard("_guard_enforcement_armed", str(repo)).returncode == 0
 
+    def test_relative_core_hookspath_is_refused(self, repo: Path) -> None:
+        """A relative core.hooksPath resolves PER WORKING TREE, so it is unverifiable.
+
+        `core.hooksPath=.githooks` means one directory in the primary checkout and
+        a different one in every linked worktree. Review reproduced: armed in the
+        primary, main checked out in a linked worktree with no .githooks there,
+        guard rc=0, and a source commit straight onto main rc=0. The guard cannot
+        honestly say "this clone is armed" about a per-worktree path, so it
+        declines.
+        """
+        self._arm(repo)
+        githooks = repo / ".githooks"
+        githooks.mkdir()
+        shutil.copy(repo / "tools" / "pre-commit-hook.sh", githooks / "pre-commit")
+        (githooks / "pre-commit").chmod(0o755)
+        git(repo, "config", "core.hooksPath", ".githooks")
+        result = run_guard("_guard_enforcement_armed", str(repo))
+        assert result.returncode == 12, "a relative core.hooksPath passed as verifiable"
+        assert "RELATIVE" in result.stderr
+
+    def test_disarm_still_refused_in_a_clone_without_a_local_main(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """The 'monotonic' gate read the literal ref `main` — and lost to a clone.
+
+        `git clone --single-branch --branch fix/…` gives a clone with no LOCAL
+        main. `git log -1 main -- <path>` then fatals, the condition collapses to
+        file-existence, and review reproduced the full round-2 disarm again: rm
+        the source, guard rc=0, untyped branch merged onto main. `--all` consults
+        every ref, so no checkout shape hides the history.
+        """
+        self._arm(repo)
+        self._arm_merge_hook(repo)
+        git(repo, "add", "-A")
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "--no-verify", "-m", "land the hooks"],
+            check=True,
+            capture_output=True,
+        )
+        git(repo, "branch", "fix/cb-57-work")
+        clone = tmp_path / "clone2"
+        subprocess.run(
+            ["git", "clone", "-q", "--single-branch", "--branch", "fix/cb-57-work",
+             str(repo), str(clone)],
+            check=True,
+        )
+        assert "main" not in git(clone, "branch", "--format=%(refname:short)").split()
+        git(clone, "config", "merge.ff", "false")
+        hooks = Path(git(clone, "rev-parse", "--path-format=absolute", "--git-path", "hooks"))
+        for name in ("pre-commit", "pre-merge-commit"):
+            link = hooks / name
+            if link.exists() or link.is_symlink():
+                link.unlink()
+            link.symlink_to(clone / "tools" / f"{name}-hook.sh")
+        assert run_guard("_guard_enforcement_armed", str(clone)).returncode == 0
+
+        (clone / "tools" / "pre-merge-commit-hook.sh").unlink()
+        result = run_guard("_guard_enforcement_armed", str(clone))
+        assert result.returncode == 12, (
+            "a clone with no local main let deleting the hook source disarm the check"
+        )
+
     def test_deleting_the_merge_hook_source_does_not_disarm_the_check(self, repo: Path) -> None:
         """The disarm path adversarial review reproduced end to end.
 
@@ -952,10 +1014,19 @@ class TestKnownLimits:
         refusing remote refs — breaks `git pull`, which is the worse failure. The
         remedy is CB-59's server-side protection.
         """
-        hooks = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-path hooks"))
+        # `"--git-path hooks"` as ONE argv token is what made the first version of
+        # this test VACUOUS: `git rev-parse` echoes an unrecognised option-looking
+        # argument back verbatim and exits 0, so this resolved to the RELATIVE
+        # path "--git-path hooks", the hook was copied into a directory of that
+        # name in the repo root, the test repo got no hook at all, and asserting
+        # rc == 0 could never fail. Worse, the suite then COMMITTED that directory
+        # to the branch — and `git status` stayed clean because every run
+        # regenerated it identically. Two tokens, and resolve against the repo.
+        hooks = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-path", "hooks"))
         hooks.mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO_ROOT / "tools" / "pre-merge-commit-hook.sh", hooks / "pre-merge-commit")
         (hooks / "pre-merge-commit").chmod(0o755)
+        assert (hooks / "pre-merge-commit").exists(), "the hook was not installed in the test repo"
         git(repo, "remote", "add", "origin", str(tmp_path / "nowhere.git"))
 
         git(repo, "checkout", "-q", "-b", "worktree-untyped")
@@ -1105,23 +1176,71 @@ class TestHarnessIntegrity:
         assert a == b, "the shared merge-gate predicate has drifted between the two hooks"
         assert "_head_is_acceptable()" in a, "the block no longer defines the predicate"
 
-    def test_all_three_branch_predicates_use_the_full_shape(self) -> None:
+    def test_every_branch_predicate_construction_uses_the_full_shape(self) -> None:
         """Same types is NOT the same predicate, and the difference has teeth.
 
         A prefix test (`${branch} == fix/*`) accepts `fix/a/b`, which the
-        full-shape regex refuses. `_guards.sh` is not covered by the
-        byte-identical test above (it is a library, not a hook), so its shape is
-        pinned here — and behaviourally by TestBranchType.
+        full-shape regex refuses.
+
+        COUNTED PER SITE, not per file. The earlier version asserted the shape
+        appeared *somewhere* in each file, and review showed that was blind:
+        `pre-commit-hook.sh` constructs the regex TWICE (its own branch check, and
+        the copy inside the shared block), so degrading the first to a prefix test
+        left this test green. Note also that the count is four across three files
+        — CLAUDE.md used to say "three copies", which was the file count, not the
+        construction count.
         """
         shape = "/[A-Za-z0-9._-]+$"
-        for rel in (
-            "tools/_guards.sh",
-            "tools/pre-commit-hook.sh",
-            "tools/pre-merge-commit-hook.sh",
-        ):
-            assert shape in (REPO_ROOT / rel).read_text(), (
-                f"{rel} does not use the full-shape branch predicate"
+        expected = {
+            "tools/_guards.sh": 1,
+            "tools/pre-commit-hook.sh": 2,
+            "tools/pre-merge-commit-hook.sh": 1,
+        }
+        for rel, n in expected.items():
+            text = (REPO_ROOT / rel).read_text()
+            # Count only real assignments, not the prose that explains them.
+            sites = [
+                ln
+                for ln in text.splitlines()
+                if shape in ln and not ln.lstrip().startswith("#")
+            ]
+            assert len(sites) == n, (
+                f"{rel}: expected {n} full-shape construction(s), found {len(sites)}: {sites}"
             )
+
+    def test_installer_and_guard_agree_on_where_hooks_live(self) -> None:
+        """Both must use `--git-path hooks`, or one arms where git will not look.
+
+        Round 3's vacuity sweep found the installer's half of this unpinned: only
+        the guard's switch was covered by a test, so the installer could regress to
+        `--git-common-dir`/hooks and silently install into a directory git ignores
+        when `core.hooksPath` is set.
+        """
+        for rel in ("tools/install-hooks.sh", "tools/_guards.sh"):
+            text = (REPO_ROOT / rel).read_text()
+            sites = [
+                ln
+                for ln in text.splitlines()
+                if "hooks" in ln and "rev-parse" in ln and not ln.lstrip().startswith("#")
+            ]
+            assert sites, f"{rel} does not resolve a hooks directory"
+            for ln in sites:
+                assert "--git-path" in ln, (
+                    f"{rel} resolves hooks without --git-path, so core.hooksPath is ignored: {ln}"
+                )
+
+    def test_both_readers_disable_path_quoting(self) -> None:
+        """The CI half of the C-quoting fix was unpinned while the hook's was not.
+
+        `test_ci_and_hook_both_defeat_rename_detection` covers `--no-renames` in
+        both readers, but `core.quotePath=false` was asserted only for the hook —
+        the elements-vs-composition asymmetry inside a test whose own name says
+        "both". Round 3 caught it.
+        """
+        wf = (REPO_ROOT / ".github" / "workflows" / "main-invariants.yml").read_text()
+        assert "core.quotePath=false" in wf, (
+            "the CI job will C-quote non-ASCII paths and misread a legitimate plan note"
+        )
 
     def test_installer_targets_the_main_checkout_not_the_invoking_one(self) -> None:
         """The hook symlink must point at REPO_ROOT/tools, never $_SCRIPT_DIR.
@@ -1594,6 +1713,71 @@ class TestPreCommitHook:
             text=True,
         )
         assert result.returncode != 0, "an unterminated MERGE_HEAD line was dropped"
+
+    @pytest.mark.parametrize("marker", ["CHERRY_PICK_HEAD", "REVERT_HEAD"])
+    @pytest.mark.parametrize("body", ["", "deadbeef\n"])
+    def test_cherry_pick_and_revert_markers_do_not_exempt_main(
+        self, repo: Path, marker: str, body: str
+    ) -> None:
+        """The MERGE_HEAD hardening left its two siblings untouched.
+
+        The exemption used to exit 0 on mere EXISTENCE of any of the three
+        markers, so `: > .git/CHERRY_PICK_HEAD` waved arbitrary staged content
+        onto main — and skipped the branch-type check too. Reachable the same way
+        empty MERGE_HEAD was: a conflicted cherry-pick leaves the file in place
+        until --continue/--abort.
+
+        Completing a MERGE onto main is the sanctioned landing path; cherry-pick
+        and revert directly onto main are 'editing main directly', so they get no
+        exemption at all now.
+        """
+        self._install(repo)
+        (repo / ".git" / marker).write_text(body)
+        (repo / "backdoor.py").write_text("x = 1\n")
+        result = self._commit(repo, "backdoor.py")
+        assert result.returncode != 0, f"{marker} waved a source commit onto main"
+
+    def test_cherry_pick_marker_does_not_exempt_the_branch_type_rule(
+        self, repo: Path
+    ) -> None:
+        """The same empty marker also disabled the hook's OTHER rule.
+
+        The exemption returned before the branch-type check, so a commit on an
+        untyped branch succeeded while the marker sat there. Two rules off from
+        one empty file.
+        """
+        self._install(repo)
+        git(repo, "checkout", "-q", "-b", "totally-untyped")
+        (repo / ".git" / "CHERRY_PICK_HEAD").write_text("")
+        (repo / "src.py").write_text("x = 1\n")
+        assert self._commit(repo, "src.py").returncode != 0
+
+    def test_a_conflicted_merge_is_still_exempt(self, repo: Path) -> None:
+        """Discriminator for the change above: MERGE_HEAD must STILL exempt.
+
+        Narrowing the exemption to MERGE_HEAD could have been over-narrowed into
+        'no exemption at all', which would break the documented landing path
+        exactly when there is a conflict. This is the case that must keep passing.
+        """
+        self._install(repo)
+        git(repo, "checkout", "-q", "-b", "fix/cb-57-conflict")
+        (repo / "seed.txt").write_text("branch side\n")
+        self._commit(repo, "seed.txt")
+        git(repo, "checkout", "-q", "main")
+        (repo / "seed.txt").write_text("main side\n")
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "--no-verify", "-am", "main side"], check=True
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "merge", "fix/cb-57-conflict", "--no-ff", "--no-edit"],
+            capture_output=True,
+        )
+        (repo / "seed.txt").write_text("resolved\n")
+        subprocess.run(["git", "-C", str(repo), "add", "seed.txt"], check=True)
+        result = subprocess.run(
+            ["git", "-C", str(repo), "commit", "--no-edit"], capture_output=True, text=True
+        )
+        assert result.returncode == 0, f"conflicted merge blocked on main: {result.stderr}"
 
     def test_non_ascii_plan_note_can_land_on_main(self, repo: Path) -> None:
         """A false REFUSAL, and the mirror of a bug this repo already had.

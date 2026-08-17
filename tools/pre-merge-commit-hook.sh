@@ -72,70 +72,71 @@ _BRANCH_TYPES=(fix feature refactor docs)
 # duplicated rather than sourced because each hook runs from .git/hooks and must
 # not depend on tools/ being present in the checked-out tree.
 #
-# Decides whether one merge head may land on main. Two inputs, because two
-# callers know different things:
-#   sha    — the merge head (always known)
-#   named  — what the caller wrote on the command line, when that is known
-#            (pre-merge-commit has it from GITHEAD_; pre-commit, completing a
-#            conflicted merge in a separate process, does not)
+# Decides whether one merge head may land on main. ONE input, the merge head —
+# and that is a deliberate narrowing, not a simplification for its own sake.
 #
-# THE RULE, after two rounds of adversarial review taught it the hard way:
+# IT USED TO TAKE `named` TOO (what the caller typed, from GITHEAD_) and judge
+# THAT ref alone when it resolved. Byte-identical code then still produced two
+# DIFFERENT rules, because the two callers pass different arguments:
+# pre-merge-commit knows the typed name, pre-commit (a separate `git commit`
+# process completing a conflicted merge) does not. Review reproduced the
+# divergence — `git branch fix/tmp <untyped-sha>; git merge fix/tmp --no-ff`
+# landed on the clean path while the identical state was refused on the
+# conflicted path — so "the predicate is byte-identical" was NOT the same claim
+# as "the two hooks agree", and the byte-identity test structurally could not see
+# it. A named ref is by definition a ref AT the merge head, so collecting refs
+# at the head loses nothing and makes the callers pass identical information.
 #
-#   THE SANCTIONED-TYPE RULE GOVERNS LOCAL BRANCHES. Remote-tracking refs are
-#   UPSTREAM's namespace, which this repo does not name, so they are consulted
-#   only to recognise a pull — a remote `main` at the head means upstream's main
-#   is what is being merged.
+# THE RULE: the sanctioned-type rule governs LOCAL branches. Remote-tracking
+# refs are UPSTREAM's namespace, which this repo does not name, so exactly one of
+# them is consulted — main's own upstream — and only to recognise a pull.
 #
-# Why it is shaped that way, case by case:
+# Why each clause, all of it earned in review:
 #   * EVERY local branch at the head must qualify, not just one. With "any", a
-#     typed branch created at the same commit launders an untyped merge, which
-#     review reproduced in three commands: `git merge untyped` (refused), `git
-#     branch fix/tmp untyped`, `git commit`. Git does not abort after a refusal —
-#     it leaves the merge in progress and routes the operator into pre-commit.
-#   * A NON-main remote ref neither qualifies nor disqualifies. Requiring ALL
-#     refs to qualify refused a legitimate `git pull` whenever upstream happened
-#     to have another branch cut at that commit (`origin/release-1.0`), and
-#     `refs/remotes/<r>/HEAD` — an alias for the default branch — disqualified
-#     the very pull the fallback existed to allow. Both reproduced.
-#   * A remote `main` WINS over a non-qualifying local branch, so a local
-#     bookmark left at the commit being pulled cannot refuse the pull.
-#   * Only a CONFIGURED remote's name is stripped. A blind `${rest#*/}`
-#     collapsed refs/remotes/junk/main to the accepted literal `main`.
+#     typed branch created at the same commit launders an untyped merge. Git does
+#     not abort after a refusal — it leaves the merge in progress and says "use
+#     `git commit` to complete the merge", routing the operator into pre-commit.
+#   * A NON-upstream-main remote ref neither qualifies nor disqualifies.
+#     Requiring ALL refs to qualify refused a legitimate `git pull` whenever
+#     upstream had another branch cut at that commit (`origin/release-1.0`), and
+#     `refs/remotes/<r>/HEAD` — the default-branch alias — disqualified the very
+#     pull the fallback existed to allow.
+#   * Upstream main WINS over a non-qualifying local branch, so a stray local
+#     bookmark at the commit being pulled cannot refuse the pull.
+#   * ONLY `refs/remotes/<main's upstream>/main` counts, resolved from
+#     `branch.main.remote` and defaulting to `origin`. Trusting *any* configured
+#     remote's `main` meant `git remote add junk <anything>` plus a fetch was a
+#     two-command bypass; an earlier version trusting any `<r>/main` at all was
+#     worse still.
 #
-# KNOWN LIMIT, stated rather than papered over: a remote-tracking `main` is
-# TRUSTED, and nothing local can prove it arrived by fetch — `git update-ref
-# refs/remotes/origin/main <any-sha>` then `git merge origin/main` lands
-# anything, in two commands, with no --no-verify. There is no local
-# discriminator, and inventing one would be a deeper guess, not a fix (the same
-# reasoning as the --separate-git-dir misbinding in CLAUDE.md). The remedy is
-# CB-59's server-side protection; TestKnownLimits pins that this reproduces, so
-# the day it stops being true someone re-reads this comment.
+# KNOWN LIMIT, stated rather than papered over: upstream's `main` is TRUSTED, and
+# nothing local can prove what it contains or how it got there. `git update-ref
+# refs/remotes/origin/main <any-sha>`, a mistyped fetch refspec, a rewritten
+# `remote.origin.fetch` (which then re-arms on every ordinary `git fetch`), or
+# simply an upstream whose main holds untyped work — all land content here. There
+# is no local discriminator, and refusing remote refs instead would break `git
+# pull`, which is the worse failure. The remedy is CB-59's server-side
+# protection. TestKnownLimits pins that this reproduces.
 _head_is_acceptable() {
-    local sha="$1" named="${2:-}"
+    local sha="$1"
     local _ifs_save _types _re
     _ifs_save="$IFS"; IFS='|'; _types="${_BRANCH_TYPES[*]}"; IFS="$_ifs_save"
     # The full SHAPE, not a prefix test: a prefix test accepts `fix/a/b`, which
     # _guard_branch_type refuses, and the two must not disagree.
     _re="^(${_types})/[A-Za-z0-9._-]+$"
 
-    local _remotes _candidates _full
-    _remotes=$(git remote)
+    local _upstream _candidates
+    _upstream=$(git config --get branch.main.remote 2>/dev/null || true)
+    [[ -z "${_upstream}" ]] && _upstream="origin"
 
-    _candidates=""
-    if [[ -n "${named}" ]]; then
-        _full=$(git rev-parse --symbolic-full-name "${named}" 2>/dev/null || true)
-        [[ -n "${_full}" ]] && _candidates="${_full}"
-    fi
-    if [[ -z "${_candidates}" ]]; then
-        _candidates=$(git for-each-ref --points-at "${sha}" --format='%(refname)' \
-            refs/heads/ refs/remotes/ 2>/dev/null | sort -u)
-    fi
+    _candidates=$(git for-each-ref --points-at "${sha}" --format='%(refname)' \
+        refs/heads/ refs/remotes/ 2>/dev/null | sort -u)
     if [[ -z "${_candidates}" ]]; then
         echo "  ${sha:0:12} resolves to no branch at all — a bare SHA or a tag." >&2
         return 1
     fi
 
-    local _ref _name _rest _r _local_ok="" _local_bad="" _upstream_main=""
+    local _ref _name _local_ok="" _local_bad="" _upstream_main=""
     while read -r _ref; do
         [[ -z "${_ref}" ]] && continue
         case "${_ref}" in
@@ -147,14 +148,8 @@ _head_is_acceptable() {
                     _local_bad="${_local_bad}    ${_ref}"$'\n'
                 fi
                 ;;
-            refs/remotes/*)
-                _rest="${_ref#refs/remotes/}"
-                _name=""
-                while read -r _r; do
-                    [[ -z "${_r}" ]] && continue
-                    if [[ "${_rest}" == "${_r}/"* ]]; then _name="${_rest#"${_r}"/}"; break; fi
-                done <<< "${_remotes}"
-                [[ "${_name}" == "main" ]] && _upstream_main=1
+            "refs/remotes/${_upstream}/main")
+                _upstream_main=1
                 ;;
         esac
     done <<< "${_candidates}"
@@ -201,7 +196,7 @@ rc=0
 for _var in ${_githead_vars}; do
     sha="${_var#GITHEAD_}"
     named="${!_var}"
-    _head_is_acceptable "${sha}" "${named}" || rc=1
+    _head_is_acceptable "${sha}" || rc=1
 done
 
 if [[ "${rc}" -ne 0 ]]; then
