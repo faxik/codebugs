@@ -866,6 +866,7 @@ def register_cli(sub, commands) -> None:
     import sys
     from codebugs import db
     from codebugs.fmt import format_table
+    from codebugs.fsio import atomic_write
     from codebugs.types import REQUIREMENT_STATUSES, PRIORITIES
 
     def _cmd_reqs_add(args: argparse.Namespace) -> None:
@@ -1044,8 +1045,16 @@ def register_cli(sub, commands) -> None:
         conn.close()
 
         if args.file:
-            with open(args.file, "w") as f:
-                f.write(md)
+            # CB-76, twin of findings._cmd_export_csv. The stdout branch below
+            # stays OUTSIDE both the helper and the guard: wrapping it would
+            # turn a BrokenPipeError on a closed pipe into `codebugs: ...` +
+            # exit 1, which is CB-78's open question, not this card's.
+            try:
+                with atomic_write(args.file) as f:
+                    f.write(md)
+            except OSError as e:
+                print(f"codebugs: {e}", file=sys.stderr)
+                sys.exit(1)
             print(f"Exported to {args.file}")
         else:
             print(md)

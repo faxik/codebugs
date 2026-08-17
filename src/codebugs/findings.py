@@ -1559,6 +1559,7 @@ def register_cli(sub, commands) -> None:
     """Register findings CLI subcommands."""
     import argparse
     from codebugs.fmt import format_table
+    from codebugs.fsio import atomic_write
 
     def _cmd_add(args: argparse.Namespace) -> None:
         conn = db.connect()
@@ -1931,45 +1932,54 @@ def register_cli(sub, commands) -> None:
         conn.close()
 
         output = args.file or "codebugs_export.csv"
-        with open(output, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "id",
-                    "severity",
-                    "category",
-                    "file",
-                    "status",
-                    "description",
-                    "source",
-                    "tags",
-                    "meta",
-                    "created_at",
-                    "updated_at",
-                    "fingerprint",
-                    "occurrence_count",
-                    "last_seen_at",
-                ]
-            )
-            for finding in result["findings"]:
+        # CB-76: `open(output, "w")` truncated the destination before the first
+        # byte, so any write failure destroyed the previous export, and no arm
+        # caught the OSError either. The success print below stays OUTSIDE the
+        # guard — a post-write failure reported as bad input is the CB-15/CB-16
+        # lie CB-71 measured live.
+        try:
+            with atomic_write(output, newline="") as f:
+                writer = csv.writer(f)
                 writer.writerow(
                     [
-                        finding["id"],
-                        finding["severity"],
-                        finding["category"],
-                        finding["file"],
-                        finding["status"],
-                        finding["description"],
-                        finding["source"],
-                        json.dumps(finding["tags"]),
-                        json.dumps(finding["meta"]),
-                        finding["created_at"],
-                        finding["updated_at"],
-                        finding["fingerprint"],
-                        finding["occurrence_count"],
-                        finding["last_seen_at"],
+                        "id",
+                        "severity",
+                        "category",
+                        "file",
+                        "status",
+                        "description",
+                        "source",
+                        "tags",
+                        "meta",
+                        "created_at",
+                        "updated_at",
+                        "fingerprint",
+                        "occurrence_count",
+                        "last_seen_at",
                     ]
                 )
+                for finding in result["findings"]:
+                    writer.writerow(
+                        [
+                            finding["id"],
+                            finding["severity"],
+                            finding["category"],
+                            finding["file"],
+                            finding["status"],
+                            finding["description"],
+                            finding["source"],
+                            json.dumps(finding["tags"]),
+                            json.dumps(finding["meta"]),
+                            finding["created_at"],
+                            finding["updated_at"],
+                            finding["fingerprint"],
+                            finding["occurrence_count"],
+                            finding["last_seen_at"],
+                        ]
+                    )
+        except OSError as e:
+            print(f"codebugs: {e}", file=sys.stderr)
+            sys.exit(1)
         print(f"Exported {len(result['findings'])} findings to {output}")
 
     p = sub.add_parser("add", help="Add a finding")
