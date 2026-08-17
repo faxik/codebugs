@@ -131,6 +131,85 @@ class TestImportJson:
             bench.import_json(conn, benchmark="a", json_data=[])
 
 
+class TestImportJsonShapeGuard:
+    """CB-72 + CB-74. import_json accepted its argument without checking its
+    shape, so two inputs walked past the module's own contract ("domain
+    functions raise ValueError for invalid input") and out as stdlib
+    exceptions: a non-str/non-list payload as TypeError from json.loads
+    (CB-72, in-process only), and an array of non-objects as AttributeError
+    from `data[0].keys()` (CB-74, reachable from an MCP client because the
+    wire type is `str | list | None`).
+
+    Every case below carries the exception the UNFIXED tree raises, measured
+    2026-08-17 against 3cd23d0 — none of them is a ValueError, so no row here
+    can pass on both trees.
+
+    `match=` is load-bearing, not decoration. Without it, the whole class
+    passes against a blanket `except (TypeError, AttributeError): raise
+    ValueError(...)` around the function body — a shape that would ALSO
+    convert a post-commit failure inside import_csv into a ValueError, which
+    _cmd_bench_import's arm then reports as bad input for a write that already
+    landed (the CB-15/CB-16 lie). The index in the element cases is what
+    proves the check is per-element rather than data[0]-only.
+    """
+
+    # (case id, payload, unfixed exception, regex the refusal must match)
+    REFUSED = [
+        ("dict", {}, TypeError, "str/bytes/bytearray.*not dict"),
+        ("int", 5, TypeError, "str/bytes/bytearray.*not int"),
+        ("list of ints", [1, 2], AttributeError, "element 0 .*not int"),
+        ("string of ints", "[1, 2]", AttributeError, "element 0 .*not int"),
+        ("string of null", "[null]", AttributeError, "element 0 .*not NoneType"),
+        # The object-then-non-object case never reaches data[0].keys() at all —
+        # unfixed, it dies later inside writer.writerows(). A data[0]-only guard
+        # would leave exactly this door open.
+        ("object then int", [{"a": 1, "b": 2}, 5], AttributeError, "element 1 .*not int"),
+    ]
+
+    @pytest.mark.parametrize(
+        ("payload", "pattern"),
+        [pytest.param(p, r, id=i) for i, p, _, r in REFUSED],
+    )
+    def test_bad_shape_raises_value_error_naming_what_was_wrong(self, conn, payload, pattern):
+        with pytest.raises(ValueError, match=pattern):
+            bench.import_json(conn, benchmark="a", json_data=payload)
+
+    @pytest.mark.parametrize(
+        ("payload", "unfixed"),
+        [pytest.param(p, u, id=i) for i, p, u, _ in REFUSED],
+    )
+    def test_the_unfixed_exception_is_not_a_value_error(self, payload, unfixed):
+        """Pins the premise the class rests on: each payload's OLD failure was
+        outside ValueError, so `pytest.raises(ValueError)` above discriminates.
+        If a future refactor makes one of these a ValueError for an unrelated
+        reason, this row goes red rather than the suite going quietly vacuous.
+        """
+        assert not issubclass(unfixed, ValueError)
+
+    # --- accepted shapes: these worked before the guard and must still work ---
+
+    def test_bytes_and_bytearray_still_import(self, conn):
+        """The guard's accepted set is exactly what json.loads already takes.
+        Both of these import successfully on the unfixed tree, so refusing them
+        would have been a behaviour change smuggled in as a bugfix — this test
+        is the pin for that decision, and it passes on BOTH trees deliberately.
+        """
+        payload = b'[{"method": "bm25", "score": 0.5}]'
+        assert bench.import_json(conn, benchmark="a", json_data=payload)["rows"] == 1
+        assert bench.import_json(conn, benchmark="a", json_data=bytearray(payload))["rows"] == 1
+
+    def test_mappings_that_are_not_dicts_still_import(self, conn):
+        """Guard on collections.abc.Mapping, not dict. `isinstance(el, dict)`
+        would newly refuse MappingProxyType, which imports fine today —
+        csv.DictWriter needs only .keys()/.get(), both guaranteed by Mapping.
+        Passes on both trees by design, for the same reason as above.
+        """
+        from types import MappingProxyType
+
+        data = [MappingProxyType({"method": "bm25", "score": 0.5})]
+        assert bench.import_json(conn, benchmark="a", json_data=data)["rows"] == 1
+
+
 class TestQuery:
     @pytest.fixture(autouse=True)
     def _seed(self, conn):
