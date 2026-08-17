@@ -143,7 +143,10 @@ def _row_norm_tri(row: dict[str, Any]) -> tuple[str, frozenset[str]]:
     norm = normalize_text(row["description"], _parse_meta(row["meta_json"]))
     value = (norm, trigram_set(norm))
     if len(_norm_memo) >= _MEMO_CAP:
-        _norm_memo.pop(next(iter(_norm_memo)))
+        # Tolerant pop: next(iter)/pop is not atomic, and external read-only
+        # consumers (codashboard) call this from a threadpool — two threads can
+        # pick the same oldest key and the loser must no-op, not KeyError.
+        _norm_memo.pop(next(iter(_norm_memo)), None)
     _norm_memo[key] = value
     return value
 
