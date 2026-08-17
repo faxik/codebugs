@@ -7,6 +7,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **A file whose existence could not be checked is no longer reported as
+  `deleted`** (CB-85). `staleness_check` used `os.path.isfile`, which returns
+  `False` for *any* stat failure — an unreadable parent directory, a symlink
+  loop, a stale network handle — not only for "the file is absent". That `False`
+  skipped the `modified` branch and the code below then stated `deleted` as a
+  fact about a file that was still there. Measured: `chmod 000` on the parent
+  directory turned `modified` into `deleted` for the same file.
+
+  It now reports `unknown` / `stat_error` when the stat cannot answer, and keeps
+  reporting `deleted` when it genuinely can. This is the second route to that
+  wrong answer; CB-79 closed the first one line below, where a git failure was
+  swallowed into an empty rename result.
+
 - **A benchmark import no longer invents a date or run id from a falsey wrong
   type** (CB-82). `import_csv` resolved two of its arguments with truthiness —
   `date or utc_now()[:10]` and `run_id or _next_run_id(conn)` — so `date=[]`,

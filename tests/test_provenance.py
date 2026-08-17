@@ -485,3 +485,80 @@ class TestNarrowTupleCompatibility:
                 file_path="src/auth.py", reported_at_commit=sha, project_dir=project
             )
             assert result["file_status"] == "unknown", (exc, result)
+
+
+class TestStatErrorIsNotDeleted:
+    """CB-85 — an unanswerable stat must not become a confident `deleted`.
+
+    MUST fail against 8ba8c2a: `os.path.isfile` swallows every OSError into
+    False, so the same still-present file reported `modified` when readable and
+    `deleted` when its parent directory was not. The second route to the answer
+    CB-79 closed one line below.
+    """
+
+    def _modified_file(self, project):
+        """Give the tracked file a later commit, so file_status reaches the
+        existence check instead of returning `current` first."""
+        path = os.path.join(project, "src", "auth.py")
+        with open(path, "a") as f:
+            f.write("# changed\n")
+        subprocess.run(["git", "add", "-A"], cwd=project, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "change"], cwd=project, check=True, capture_output=True
+        )
+        return path
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
+    def test_an_unreadable_parent_directory_reports_unknown_not_deleted(self, git_project):
+        project, sha = git_project
+        self._modified_file(project)
+        parent = os.path.join(project, "src")
+
+        os.chmod(parent, 0o000)
+        try:
+            result = provenance.file_status(
+                file_path="src/auth.py", reported_at_commit=sha, project_dir=project
+            )
+        finally:
+            os.chmod(parent, 0o755)
+
+        assert result["file_status"] != "deleted", (
+            "reported a file as deleted on the strength of a stat it could not perform"
+        )
+        assert result == {"file_status": "unknown", "reason": "stat_error"}, result
+
+    def test_a_genuinely_deleted_file_is_still_reported_deleted(self, git_project):
+        """The other half, and the reason FileNotFoundError keeps today's path:
+        the `deleted` answer is correct when the stat actually answers."""
+        project, sha = git_project
+        path = self._modified_file(project)
+        os.remove(path)
+        subprocess.run(["git", "add", "-A"], cwd=project, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "delete"], cwd=project, check=True, capture_output=True
+        )
+
+        result = provenance.file_status(
+            file_path="src/auth.py", reported_at_commit=sha, project_dir=project
+        )
+        assert result["file_status"] == "deleted", result
+
+    def test_a_present_modified_file_is_unchanged(self, git_project):
+        """Compatibility pin — passes on both sides. `S_ISREG` must agree with
+        `isfile` for every case where the stat succeeds."""
+        project, sha = git_project
+        self._modified_file(project)
+        result = provenance.file_status(
+            file_path="src/auth.py", reported_at_commit=sha, project_dir=project
+        )
+        assert result["file_status"] == "modified", result
+
+    def test_a_directory_where_a_file_is_expected_is_not_regular(self, git_project):
+        """`isfile` is False for a directory and `S_ISREG` must match that, or
+        the swap would change an unrelated case."""
+        project, sha = git_project
+        self._modified_file(project)
+        result = provenance.file_status(
+            file_path="src", reported_at_commit=sha, project_dir=project
+        )
+        assert result["file_status"] != "modified", result
