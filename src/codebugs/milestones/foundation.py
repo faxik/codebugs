@@ -8,6 +8,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from codebugs import db
+from codebugs.milestones import reconcile
 from codebugs.types import is_vocabulary_filter_active, utc_now
 
 from codebugs.milestones._schema import (
@@ -121,6 +122,60 @@ def list_milestones(
         f"SELECT * FROM milestones {where} ORDER BY kind, id", params
     ).fetchall()
     return [_row_to_milestone(r) for r in rows]
+
+
+def list_milestone_items(
+    conn: sqlite3.Connection,
+    *,
+    milestone_id: str,
+    statuses: tuple[str, ...] | None = None,
+    live_only: bool = False,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Items of one milestone as converted dicts (see ``_row_to_item``), ordered
+    open/in_progress first, then ``priority ASC, created_at ASC``.
+
+    The public read counterpart to ``get_milestone_status`` for external
+    read-only consumers (codashboard). ``live_only`` applies the canonical
+    terminal-source filter (``reconcile.source_is_terminal``) — the CB-26
+    guarantee — making this safe for queue-shaped reads; without it, rows are
+    reported as stored, the same contract ``get_milestone_status`` keeps. The
+    filter runs BEFORE ``limit``/``offset`` so a page is never silently short
+    (the same ordering ``triage_inbox`` documents for its own LIMIT).
+    """
+    if not _milestone_exists(conn, milestone_id):
+        raise KeyError(f"Milestone not found: {milestone_id}")
+    conditions = ["milestone_id = ?"]
+    params: list[Any] = [milestone_id]
+    if statuses is not None:
+        for status in statuses:
+            if status not in ITEM_STATUSES:
+                raise ValueError(
+                    f"Invalid status: {status!r}. Must be one of {ITEM_STATUSES}"
+                )
+        if not statuses:
+            return []
+        conditions.append(f"status IN ({','.join('?' * len(statuses))})")
+        params.extend(statuses)
+    rows = conn.execute(
+        "SELECT * FROM milestone_items "
+        f"WHERE {' AND '.join(conditions)} "
+        "ORDER BY CASE WHEN status IN ('open','in_progress') THEN 0 ELSE 1 END, "
+        "priority ASC, created_at ASC",
+        params,
+    ).fetchall()
+    items = [_row_to_item(r) for r in rows]
+    if live_only:
+        items = [
+            i for i in items
+            if not reconcile.source_is_terminal(conn, i["item_kind"], i["item_ref"])
+        ]
+    if offset:
+        items = items[offset:]
+    if limit is not None:
+        items = items[:limit]
+    return items
 
 
 def get_milestone_status(conn: sqlite3.Connection, *, id: str) -> dict[str, Any]:

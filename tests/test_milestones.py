@@ -1978,3 +1978,65 @@ class TestReleaseItemAtomicity:
             "SELECT status FROM milestone_items WHERE item_ref='CB-1'"
         ).fetchone()
         assert row["status"] != "done", "the nested call must roll back with its caller"
+
+
+# ---------------------------------------------------------------------------
+# list_milestone_items (public read API — added for external read-only
+# consumers like codashboard; the CB-26 live_only filter is the point)
+# ---------------------------------------------------------------------------
+
+class TestListMilestoneItems:
+    @pytest.fixture
+    def populated(self, conn):
+        milestones.create_milestone(
+            conn, id="release/x", kind="release", description="x")
+        _add_finding(conn, fid="CB-701", description="live bug")
+        _add_finding(conn, fid="CB-702", description="resolved-at-source bug")
+        _add_finding(conn, fid="CB-703", description="done-item bug")
+        # CB-26 state: source goes terminal FIRST, then the attach writes a
+        # stored-open row regardless (the documented bypass).
+        findings.update_finding(conn, "CB-702", status="fixed")
+        milestones.add_milestone_item(
+            conn, milestone_id="release/x", item_kind="bug",
+            item_ref="CB-701", priority=10)
+        milestones.add_milestone_item(
+            conn, milestone_id="release/x", item_kind="bug",
+            item_ref="CB-702", priority=5)
+        milestones.add_milestone_item(
+            conn, milestone_id="release/x", item_kind="bug",
+            item_ref="CB-703", priority=20)
+        # set_item_status resolves by item_ref (latest attachment = release/x row)
+        milestones.set_item_status(conn, item_ref="CB-703", status="done")
+        return conn
+
+    def test_returns_converted_rows_ordered_open_first_priority_asc(self, populated):
+        items = milestones.list_milestone_items(populated, milestone_id="release/x")
+        assert [i["item_ref"] for i in items] == ["CB-702", "CB-701", "CB-703"]
+        assert isinstance(items[0]["meta"], dict)          # converted, not meta_json
+        assert isinstance(items[0]["branch_only"], bool)
+
+    def test_statuses_filter(self, populated):
+        items = milestones.list_milestone_items(
+            populated, milestone_id="release/x", statuses=("done",))
+        assert [i["item_ref"] for i in items] == ["CB-703"]
+
+    def test_live_only_applies_terminal_source_filter(self, populated):
+        live = milestones.list_milestone_items(
+            populated, milestone_id="release/x",
+            statuses=("open", "in_progress"), live_only=True)
+        assert [i["item_ref"] for i in live] == ["CB-701"]   # CB-702 filtered (CB-26)
+
+    def test_limit_applied_after_live_filter(self, populated):
+        live = milestones.list_milestone_items(
+            populated, milestone_id="release/x",
+            statuses=("open", "in_progress"), live_only=True, limit=1)
+        assert [i["item_ref"] for i in live] == ["CB-701"]   # never a silently short page
+
+    def test_invalid_status_raises(self, populated):
+        with pytest.raises(ValueError):
+            milestones.list_milestone_items(
+                populated, milestone_id="release/x", statuses=("bogus",))
+
+    def test_unknown_milestone_raises(self, conn):
+        with pytest.raises(KeyError):
+            milestones.list_milestone_items(conn, milestone_id="release/none")
