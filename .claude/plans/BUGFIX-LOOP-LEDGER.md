@@ -912,3 +912,63 @@ one to note: `medium`, CLI-reachable, and a *plain data file* triggers it — a 
 kills `bench-import` with a raw `IntegrityError` traceback after rows have already been inserted on
 a caller-owned connection. That is the same user-facing shape as CB-71 and strictly more likely to
 be hit than CB-75 was.
+
+## 2026-08-17 — CB-81 (the card's own headline was false, and review measured it)
+
+**Focus:** `codebugs`, operator-restricted to pure bugfixes, simple first, batch if possible.
+**Disposition:** fixed. **Merge:** `db92cdd`. **Follow-up:** CB-87.
+
+**Batching was rejected, and the first reason I gave for it was invented.** Revision 1 of the plan
+cited `BATCH-codebugs-dryrun-2026-08-17.md` as having run the clustering exercise "over this exact
+backlog". Both attackers checked: the file was **untracked** (so not in the worktree and not
+travelling with the merge), it covers 24 rows and not 35, and it mentions neither CB-77 nor CB-81.
+Its conclusion was right and its authority was fabricated. The rejection now stands on the hostage
+test applied to the two cards directly — CB-77 needs a decision (one outer transaction vs explicit
+partial-success reporting) and a finished CB-81 would have sat waiting on it.
+
+**The load-bearing correction: CB-81's TITLE is false, and my plan built its root cause on it.**
+"IT HAPPENS AFTER ROWS HAVE ALREADY BEEN INSERTED" — measured, it does not. `db.connect()` returns
+`isolation_level=''`, the CLI handler ends in `finally: conn.close()` and the MCP wrapper uses
+`with conn_factory() as conn`, so both discard the implicit transaction: a failed `bench-import`
+leaves `runs=0 results=0`. The card's *body* was careful ("partial **uncommitted** state"); the
+title escalated it, my in-memory reproducer never closed its connection and so reproduced the
+escalation, and I reported that escalation to the user before review caught it. **A harness that
+does not close the connection cannot make a claim about what the user sees.**
+
+**Second fabrication, mine: `--run-id` is not a `bench-import` flag.** Revision 1 called an explicit
+run-id collision "a fifth user-visible door" and quoted a CLI invocation that exits 2 at argparse.
+The guard stayed, rescoped honestly to library callers — and it earned its place anyway, because
+Codex found that a *generated* id can collide through `CAST` saturation.
+
+**Both attackers were necessary and they found disjoint things.** Opus ran the actual CLI and found
+the two FATALs; Codex reasoned from source and found the saturation collision plus the test-vacuity
+problems (my verification table demanded `runs=0 results=0` for a case that legitimately requires a
+first successful import). One Codex finding was **rejected by measurement**: `UnicodeEncodeError` is
+a `ValueError` subclass, so a lone-surrogate label was never the traceback it claimed.
+
+**The card's letter was not followed, deliberately.** It said to refuse duplicate headers and
+duplicate row labels. Both would reject payloads that import cleanly today (measured: a repeated
+label with disjoint cells stores 2 values; a duplicate header with blank cells stores 0). The check
+is on `(row_label, metric)` pairs — the UNIQUE constraint evaluated earlier — which narrows nothing
+and still catches both of the card's cases. Intent over letter.
+
+**Process failure worth recording: a `git add -A && git commit` ran in MAIN, not the worktree.** A
+previous command had `cd`'d into the scratchpad, the harness reset cwd to the session root, and the
+next relative-path git command therefore targeted main — committing three stray plan notes under a
+message describing worktree work. The content is what main permits and the commit was unpushed, so
+the message was amended (`b7459ee`). **This is the exact trap CLAUDE.md warns about at the end of
+`worktree-finish.sh`, arriving through a different door: not "the worktree was removed", but "a
+scratchpad `cd` reset the cwd".** Use `git -C <path>` for every git command during an iteration,
+not just after the finish.
+
+**Sibling sweep, by shape:** "a database constraint is the only payload check on a CLI-reachable
+write" — `bench-import` was the **only** instance. `sweep-create` pre-checks by name, `sweep-add`
+deduplicates, `findings.add` pre-checks its partial unique index, `reqs-add` takes no caller-supplied
+id. That is a real result, not an empty one. The one genuine sibling came from the review, not the
+sweep: CB-87.
+
+**Net change: 1 closed (CB-81), 1 filed (CB-87). Open went 35 → 35.** CB-87 is the interesting one:
+it records that CB-36 — the card written to teach *"a rule expressed as an enumeration gets fixed at
+the sites someone enumerated"* — is closed with a tally that missed `import_csv`, because its
+read-modify-write is a run-id sequence rather than a meta merge and did not look like what the
+sweeper was reading for. The lesson landed on its own card.
