@@ -850,3 +850,33 @@ class TestCliContract:
 
         after = self._run(tmp_project, "claims", "--holder", "br-a", "--format", "ids")
         assert after.stdout.strip() == ""
+
+    def test_31_format_table_renders_live_claims(self, tmp_project, conn):
+        """CB-64: the DEFAULT format. claims.py passed (columns, rows) swapped into
+        fmt.format_table(rows, columns) and built list rows, so any live claim
+        crashed the table path with AttributeError ('str' has no .get).
+
+        Assert headers AND representative values, not just the exit code —
+        format_table fills misspelled keys silently via dict.get, so a test that
+        only checks rc would pass on blank columns."""
+        cb = _finding(conn)["id"]
+        conn.close()
+        ok = self._run(tmp_project, "claim", cb, "--holder", "br-tbl", "--holder-kind", "branch")
+        assert ok.returncode == 0, ok.stderr
+
+        out = self._run(tmp_project, "claims")  # no --format: table is the default
+        assert out.returncode == 0, out.stdout + out.stderr
+        for header in ("ENTITY", "HOLDER", "KIND", "REPO", "IDLE_S"):
+            assert header in out.stdout, out.stdout
+        assert cb in out.stdout, out.stdout
+        assert "br-tbl" in out.stdout, out.stdout
+        assert "branch" in out.stdout, out.stdout
+
+    def test_32_format_table_empty_says_no_results(self, tmp_project):
+        """CB-64's other half: with zero claims the swapped call printed blank
+        lines (the header list is non-empty, so the '(no results)' early-return
+        never fired). The formatter's contract for an empty row set is the
+        literal '(no results)'."""
+        out = self._run(tmp_project, "claims")
+        assert out.returncode == 0, out.stdout + out.stderr
+        assert out.stdout.strip() == "(no results)", repr(out.stdout)
