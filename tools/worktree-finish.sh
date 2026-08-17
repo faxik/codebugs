@@ -114,7 +114,7 @@ if [[ -n "${STATUS}" ]]; then
         echo "  Example: $0 ${SLUG} 'fix: what changed'"
         exit 1
     fi
-    _guard_untracked_py_at_root "${STATUS}" || exit $?
+    _guard_untracked_scratch_at_root "${STATUS}" || exit $?
     echo "  Committing: ${COMMIT_MSG}"
     git -C "${WORKTREE_PATH}" add -A
     _guard_leaked_repr "${WORKTREE_PATH}" || exit $?
