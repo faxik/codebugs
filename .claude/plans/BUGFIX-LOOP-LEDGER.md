@@ -5,6 +5,7 @@ net change. Tracker: this repo's own `.codebugs/findings.db`, served by `mcp__co
 
 | Date | Focus | Cards | Disposition | Merge | Follow-ups |
 |---|---|---|---|---|---|
+| 2026-08-17 | `codebugs` (pure/simple/confident, "batch related") | CB-72 + CB-74 | **both fixed, one mechanism** — `import_json` checked that its argument was a non-empty list and nothing else, so two inputs walked past the module contract and out as stdlib exceptions: a payload outside `str\|bytes\|bytearray\|list` as `TypeError` (CB-72, in-process only), and an array whose *elements* are not objects as `AttributeError` from `data[0].keys()` (CB-74, **MCP-reachable** — wire type is `str \| list \| None`, and the SDK also pre-parses a wire string `"[1,2]"` into a list). CB-74 was filed by me during the sibling sweep and is the more serious half. Guard is a **positive shape check before `data[0]`, never an exception rewrap** — a blanket rewrap would also convert a post-commit failure inside `import_csv` into `ValueError`, which the CLI arm reports as bad input for a write that landed (CB-15/CB-16). **Every** element checked: `[{a,b}, 5]` never reached `data[0]` at all, it died later in `csv.DictWriter`. `bytes`/`bytearray` deliberately kept working (annotation widened) — refusing what imports today would be a behaviour change wearing a bugfix costume | `6bfde7a` (`bae08df`, `43f4d4b`) | filed CB-75 (`import_csv`'s `TypeError` twin — different accepted-type condition in a different function, so its own tree). **CB-71 returned to `open`** with full evidence: both reviewers ruled the 3-card cluster illegitimate. Next candidate is CB-71, and its card now carries the design work |
 | 2026-08-17 | `codebugs` (pure/simple/confident) | CB-70 | **fixed** — the MCP wire-schema gate could not pass on 3.11/3.12, which `requires-python` promises: the golden was built on 3.13, which dedents docstrings at compile time, so 64 of 68 tools read as "drifted" and the message told the reader to regenerate — which would have broken it the other way. Replicated 3.13's own dedent instead of `inspect.cleandoc` (measured: cleandoc rewrites 61/68 entries and permanently blinds the gate to boundary whitespace), so **the golden was not modified at all**. Also collapsed the duplicated dump logic into one shared collector and pinned the golden as a fixed point | `59885ea` (`6d4ccc9`) | filed CB-73 (a 3.11/3.12-hosted server sends indented descriptions, which CommonMark renders as a code block for ~61 tools) — filed low, then **corrected to medium** when review showed my "cosmetic" framing was wrong. Both reviewers rejected revision 1 and converged on the same fix from different methods |
 | 2026-08-17 | `codebugs` (pure/simple/confident) | CB-67 | **fixed** — bench's "exactly one of two" contract lived only in the MCP wrappers, so both CLI handlers picked a winner where it says refuse (`bench-import a.csv --json-file b.json` imported b.json and discarded a.csv at exit 0; `bench-delete --run-id R --benchmark B` deleted R and ignored B), and `codebench_import` validated with `is not None` while dispatching with `if csv_data:`, leaking `TypeError` on `csv_data=""`. One structural helper, four call sites, each keeping its own notion of "supplied" | `1778db2` (`d4df261`) | filed CB-71 (uncaught `OSError` on an unreadable import path) and CB-72 (`import_json` `TypeError` leak) — both pre-existing neighbours, verified by running them, split off per the clustering rules. **Codex FAILED revision 1**: unifying "supplied" as `is not None` everywhere would have made five undeclared behavior changes and turned `bench-import ""` into a traceback — the redesign unifies the XOR *structure* only |
 | 2026-08-17 | `codebugs` (pure/simple/confident) | CB-64 | **fixed** — `claims --format table` (the default) crashed on any live claim: `claims.py:781` passed `(columns, rows)` swapped into `format_table(rows, columns)` with list rows; empty path printed blank lines instead of `(no results)`. Both symptoms reproduced, TDD tests proven failing first; sibling sweep over all `format_table` sites: only instance. Batching refused (no clustering predicate holds among CB-64/67/68; dry-run report concurs) | `3317c6f` (`ebc886b`) | none filed. Codex re-ranked the tail: CB-67 (bench falsey-dispatch + CLI cross-arg, pure bugfix) next, then CB-68 (convention, arguably not a pure bug). A general `test_cli.py` for the untested CLI-handler layer stays on CB-64's structural note / CB-55 |
@@ -32,6 +33,53 @@ net change. Tracker: this repo's own `.codebugs/findings.db`, served by `mcp__co
 | 2026-08-14 | `codebugs` | CB-36 batch 2 of N | **partial, card stays `in_progress`** — `blockers.resolve_blocker`, `sweep.add_items`, `sweep.archive_items`; 6 of 13 sites done | `77de4b2` | none filed; batch 3 = the four clean `milestones/` sites |
 | 2026-08-14 | `codebugs` | CB-36 batch 1 of N | **partial, card stays `in_progress`** — `merge.py` session lifecycle (`start_session`, `finish`, `add_claim`); 3 of 13 sites done | `80e8ccf` (`6dc89d1`, `626fa2b`, `b88a646`) | filed CB-40 (both raw `BEGIN IMMEDIATE` sites commit an ambient caller transaction); two test gaps handed forward on the card with recipes |
 | 2026-08-14 | `codebugs` | CB-27 + CB-30 (both re-scoped) | **fixed** — CB-24 conformance for the two live unwrapped read-modify-write sites; the sweep found the defect is package-wide (19 instances, 13 still open) | `ae77cba` (`89ae282`, `8a870bf`, `12af24f`, `0a2b3e5`, `4530006`) | filed CB-36 (`high`, the 13 remaining sites), CB-37 (enforcement, carried from CB-27), CB-38 (capacity policy, carried from CB-30, reframed), CB-39 (`pull_next`, same window) |
+
+## 2026-08-17 — CB-72 + CB-74 (the guard that reintroduced the bug it was fixing)
+
+**The batch the user asked for was refused, by both reviewers, on my own admission.** The tree
+started as CB-71 + CB-72 + CB-74 and the plan openly conceded that no clustering predicate covered
+CB-71 — it was kept on "the ceilings are clear". `bug-clustering.md:8` says one tree *iff* a
+predicate passes **and** the ceilings pass; ceilings are necessary, not sufficient. An Opus adversary
+and Codex reached that independently and phrased it the same way. **Writing down that I was
+stretching a rule did not make the stretch legitimate; it just made it reviewable — which is the
+point, but only because I then took the answer.**
+
+The split turned out to be load-bearing rather than procedural. Review found CB-71's fix leaves the
+card's own symptom half-open: wrapping the file read does nothing about the `BrokenPipeError` on the
+**success** `print()`, so `bench-import good.csv -b P | true` still emits a traceback. That is an
+unresolved design question, and the hostage test exists exactly so two finished guards do not wait
+on one.
+
+**The guard reintroduced CB-74 inside its own fix, and the whole test class was green.** The first
+implementation *iterated* to validate and the code after it *indexed* (`data[0]`) and iterated again.
+A `list` subclass whose `__iter__` disagrees with `__getitem__` therefore showed mappings to the
+check and a non-mapping to the consumer — CB-74's exact `AttributeError`. Found by a Codex **diff**
+review, not by either plan review, and not by 1275 passing tests. New spelling of an old lesson:
+**validating one view while consuming another is not a guard**, the sibling of "sharing an
+implementation does not share a decision if the callers supply different inputs".
+
+**Three test lessons, two of them mine.**
+- A **regression test can assert the wrong outcome for the right defect.** My first `SplitList` test
+  demanded a `ValueError`; with the snapshot in place that payload is coherent and imports the row
+  it validated, so the test failed on the *fixed* tree and looked like a broken fix. The
+  discriminator was "no `AttributeError`" all along. Caught by running it.
+- I shipped a **cannot-fail test and labelled it a premise pin**: `not issubclass(TypeError,
+  ValueError)` is a property of Python, not of this code. Codex called it a tautology; it was
+  deleted. The real non-vacuity evidence is the recorded run against main, which belongs in the
+  docstring.
+- **Fragment regexes certify wrong messages.** `"element 0 .*not int"` also matches a refusal that
+  names the accepted type set incorrectly. Anchored whole with `re.escape`.
+
+**A self-inflicted process error worth the line:** after committing the fix I made further
+uncommitted edits and then ran `git checkout <sha> -- src/...` to mutate for a non-vacuity check —
+destroying the uncommitted work. The skill warns about this in exactly these words. `git stash
+push/pop` for the second attempt.
+
+**Net change: 2 closed (CB-72, CB-74), 2 filed (CB-74 — filed and closed in this iteration — and
+CB-75).** Open went 31 → 32, and the +1 is **not** mine: CB-59 returned `in_progress → open` when
+another session landed its CI-loop fix, since branch protection is repo configuration that cannot be
+enabled from inside the repo. My own contribution to the open count is zero. The queue is filling
+with verified neighbours found by sweeps, not noise.
 
 ## 2026-08-16 — CB-45 (the similarity layer, and the seam built with its first consumer)
 
