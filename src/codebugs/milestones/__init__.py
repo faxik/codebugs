@@ -41,6 +41,7 @@ from codebugs.milestones.foundation import (  # noqa: F401
     add_milestone_item,
     create_milestone,
     get_milestone_status,
+    list_milestone_items,
     list_milestones,
     move_milestone_item,
     query_audit,
