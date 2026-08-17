@@ -95,6 +95,73 @@ def _next_run_id(conn: sqlite3.Connection) -> str:
     return f"BE-{n}"
 
 
+def _require_text(name: str, value: Any, *, optional: bool) -> str | None:
+    """Accept a non-empty string; on a write path `None` is the ONLY "not supplied".
+
+    That is deliberately different from the query side, where
+    `types.is_vocabulary_filter_active` treats `None` AND `""` as "no filter"
+    (CB-25). A filter that is absent means *match everything*; a stored value
+    that is absent means *invent one*, and inventing a date because the caller
+    passed something falsey is how a row acquires a timestamp nobody chose
+    (CB-82).
+
+    `issubclass(type(...), str)` rather than `isinstance`, per CB-75: CPython
+    honours a `__class__` property, so `isinstance` is spoofable and the guard
+    must accept exactly what the consumer accepts.
+    """
+    if optional and value is None:
+        return None
+    if not issubclass(type(value), str):
+        raise ValueError(f"{name} must be a string, not {type(value).__name__}")
+    if not value:
+        suffix = " (omit it to use the default)" if optional else ""
+        raise ValueError(f"{name} must not be empty{suffix}")
+    return value
+
+
+def _require_json_text(name: str, value: Any, kind: type, default: Any) -> str:
+    """Validate `None` (→ default) or a container, and return the SERIALIZED text.
+
+    It returns the string rather than the container, and the caller binds
+    exactly that, because **validating one view while consuming another is not
+    a guard** — CB-74's lesson. Serializing twice (once to check, once at the
+    INSERT) leaves a window in which a mutable or behaviour-overriding subclass
+    can present different data to each call, so the checked bytes must BE the
+    stored bytes.
+
+    NaN/Infinity policy is deliberately UNCHANGED (`json.dumps` defaults, which
+    emit them). Refusing them would be a narrowing this card did not ask for and
+    that nothing here has measured a need for; `json.loads` accepts them back,
+    so the round trip is intact today. That they are not portable JSON is a real
+    but separate concern.
+
+    Member types ARE checked, because `json.dumps` does not complain about them:
+    it happily writes `[1, 2]` for tags and silently COERCES a non-string dict
+    key to a string, so either would round-trip as something the caller never
+    stored. Non-string tags also crash `bench-list`, which does `",".join(tags)`.
+    """
+    if value is None:
+        return json.dumps(default)
+    if not issubclass(type(value), kind):
+        raise ValueError(f"{name} must be a {kind.__name__}, not {type(value).__name__}")
+    if kind is list:
+        for i, item in enumerate(value):
+            if not issubclass(type(item), str):
+                raise ValueError(
+                    f"{name}[{i}] must be a string, not {type(item).__name__}"
+                )
+    else:
+        for key in value:
+            if not issubclass(type(key), str):
+                raise ValueError(
+                    f"{name} keys must be strings, not {type(key).__name__}"
+                )
+    try:
+        return json.dumps(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"{name} must be JSON-serializable: {e}") from e
+
+
 def import_csv(
     conn: sqlite3.Connection,
     *,
@@ -163,6 +230,20 @@ def import_csv(
             f"csv_data must be CSV text as str, not {type(csv_data).__name__}"
         )
 
+    # CB-82: the non-payload arguments were unvalidated, and the FALSEY ones
+    # failed silently rather than loudly — `date or utc_now()[:10]` and
+    # `run_id or _next_run_id(conn)` used truthiness, so `date=[]`, `date={}`
+    # and `date=""` were all indistinguishable from "not supplied" and the row
+    # landed under a date and id the caller never asked for. Validated up front,
+    # before anything is parsed or written, so a refusal costs no partial work.
+    # `import_json` forwards all four of these here, so this is the single
+    # chokepoint for both entry points.
+    benchmark = _require_text("benchmark", benchmark, optional=False)
+    date = _require_text("date", date, optional=True)
+    run_id = _require_text("run_id", run_id, optional=True)
+    tags_json = _require_json_text("tags", tags, list, [])
+    meta_json = _require_json_text("meta", meta, dict, {})
+
     reader = csv.DictReader(io.StringIO(csv_data))
     if not reader.fieldnames or len(reader.fieldnames) < 2:
         raise ValueError("CSV must have at least 2 columns (row_label + one metric)")
@@ -174,14 +255,17 @@ def import_csv(
     if not rows:
         raise ValueError("CSV contains no data rows")
 
-    rid = run_id or _next_run_id(conn)
-    run_date = date or utc_now()[:10]
+    # `is None`, not truthiness — the guard above has already refused every
+    # falsey wrong type, and re-testing truthiness here would let a future edit
+    # reintroduce the defect at the one line that decides the stored value.
+    rid = _next_run_id(conn) if run_id is None else run_id
+    run_date = utc_now()[:10] if date is None else date
     now = utc_now()
 
     conn.execute(
         "INSERT INTO codebench_runs (run_id, benchmark, date, tags, meta, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        (rid, benchmark, run_date, json.dumps(tags or []), json.dumps(meta or {}), now),
+        (rid, benchmark, run_date, tags_json, meta_json, now),
     )
 
     result_count = 0
