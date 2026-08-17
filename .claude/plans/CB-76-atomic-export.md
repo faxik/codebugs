@@ -100,17 +100,29 @@ Sequence:
 1. `resolved = os.path.realpath(path)` — **first**, so `os.path.dirname` can never be `""` for the
    bare default `codebugs_export.csv` (`findings.py:1933`). The ordering is load-bearing; it is
    commented as such.
-2. `st = os.lstat`/`os.stat(resolved)` if it exists. Dispatch on **what the destination is**, decided
-   up front, never on a failure errno:
+2. `os.stat(resolved)`, treating **only `FileNotFoundError`** as "missing" — round 2 caught that a
+   blanket `except OSError` classifies a symlink cycle's `ELOOP` as absent and then *replaces the
+   very link it failed to resolve*. Dispatch on **what the destination is**, decided up front, never
+   on a failure errno:
    - **missing, or a regular file** → the atomic path (3-7).
-   - **not a regular file** (FIFO, char/block device, socket) → **write in place**, because there is
-     no previous content to protect and `os.replace` would destroy the node. This is what makes
-     `codebugs export-csv /dev/stdout` keep working; revision 1 would have swapped the redirect
-     target's inode out from under the shell (measured by the Opus adversary).
-   - **a directory** → raise the `IsADirectoryError` immediately with the *typed* path, before any
-     temp is written.
-3. If the destination exists, require `os.access(resolved, os.W_OK)` and raise `PermissionError`
-   otherwise. **This is not belt-and-braces — it is a regression fix Codex found:** `open(w)` needs
+   - **FIFO or character device** → **write in place**: writing *through* the node is the point,
+     there is no previous content to protect, and `os.replace` would delete the node.
+   - **a regular file whose inode this process already holds open** → **write in place**. This is
+     the `/dev/stdout` case and it is the one revision 2 got wrong: I measured
+     `os.path.realpath("/dev/stdout")` and it resolves to the **redirect target, an ordinary regular
+     file**, so a node-kind check never fires. `export-csv /dev/stdout > out.csv` would have swapped
+     `out.csv`'s inode out from under the shell's still-open descriptor, sending every later write
+     to an unlinked file. `_held_open_inodes()` reads `/proc/self/fd` (falling back to descriptors
+     0/1/2), which also catches `export-csv out.csv > out.csv`. **A positive check — "never replace
+     an inode we already hold open" — rather than a `/proc` path pattern.**
+   - **a directory** → raise `IsADirectoryError` immediately with the *typed* path, before any temp
+     is written. **Block device or socket** → refused (a partial direct write to a block device
+     corrupts persistent bytes; `open(sock,"w")` already fails today).
+3. If the destination exists, require `os.access(resolved, os.W_OK, effective_ids=True)` where the
+   platform supports it — round 2's other catch: `os.access` defaults to **real** uid/gid while
+   `open()` authorizes with **effective** ones, so the default would falsely refuse a write the old
+   code accepted under setuid/capabilities. **This is not belt-and-braces — it is a regression fix
+   Codex found:** `open(w)` needs
    write permission on the *file*, `os.replace` needs it on the *directory*, so without this check a
    read-only destination inside a writable directory would be overwritten by a command that refuses
    today. The rule is now symmetric and statable: *the atomic path requires everything the old code
@@ -151,7 +163,9 @@ narrowed to `EACCES`/`EPERM`, and warn; Codex: no fallback, it cannot safely be 
 errno). I take Codex's side, because a helper named `atomic_write` that is sometimes not atomic is
 a false contract at its own boundary, and because the user's standing rule is to **fail closed on
 the unknown**. The case needs a directory with `r-x` holding a `rw` file; no such invocation exists
-in this repo or its tests.
+in this repo or its tests. **The user was asked and chose to ship the full atomic design**, which
+authorizes this change and the block-device/socket refusal alongside it — round 2 was explicit that
+a compatibility change of this kind is not an author's call.
 
 ### 2. `findings.py::_cmd_export_csv` and `reqs.py::_cmd_reqs_export`
 
@@ -192,25 +206,40 @@ of them pass today** — the vacuous-test pattern this repo's ledger tracks. Gro
 it pins behaviour the change deliberately preserves, and each says so in its docstring so a reader
 cannot mistake it for a defect proof.
 
-**Group A — defect proofs. Each MUST fail against `cd7d68a` and I will run it there to show it.**
+Shipped as `tests/test_fsio.py` (22 tests), in **three** classes rather than two — because round 2
+was right that A4/A6 below could never fail at `cd7d68a`, the code path not existing there, and
+filing them under "must fail at baseline" would have been the same false claim in a smaller font.
 
-| # | Check | Discriminator |
-|---|---|---|
-| A1 | `export-csv` / `reqs-export` to an unwritable path | **`"Traceback" not in stderr`** — and *only* that. `returncode == 1` does not discriminate: an uncaught traceback also exits 1. Both CB-71 sibling classes say exactly this in their docstrings (`tests/test_findings.py:1616-1619`) and revision 1 dropped the discipline three days later. |
-| A2 | A body-write failure leaves the previous export **byte-identical** | Injected **above both seams** at `csv.writer` / the markdown payload, so it fires on the unfixed tree (`open`) and the fixed tree (`os.fdopen`) alike — `CLAUDE.md`'s "to probe a commit seam, hook BOTH seams". Revision 1 named no injection point, and the obvious one (`builtins.open`) never fires on the fixed path, producing a *false failure against correct code*. |
-| A3 | A **close/flush**-time failure leaves the previous export byte-identical | ENOSPC usually surfaces here, not at `writerow` (Codex). Distinct from A2. |
-| A4 | An `os.replace` failure after a good write leaves the previous export intact, reports the **typed** path, and emits no success line | Revision 1's contract did not cover a failure outside the body at all. |
-| A5 | No `.codebugs-export-*` temp survives any of A2-A4 | Asserted **only alongside** proof that a temp existed during the failure — otherwise it is green on a tree where the helper was never wired. |
-| A6 | A read-only destination inside a writable directory is still refused | The permission-bypass regression. Fails against a naive `os.replace` implementation, not against `cd7d68a` — so it is a *fix-guard*, labelled as such. |
+**`TestBaselineDefect` — MUST fail at `cd7d68a`.** Unwritable path is a clean error, not a
+traceback, for *both* commands; a **body-write** failure leaves the previous export byte-identical;
+a **close/flush** failure does the same (ENOSPC usually surfaces there, not at `writerow` — Codex);
+and no temp survives. Two discriminator rules earned in review: `"Traceback" not in stderr` is the
+assertion that discriminates — `returncode == 1` does not, since an uncaught traceback also exits 1
+(the CB-71 sibling classes say this in their own docstrings at `tests/test_findings.py:1616-1619`,
+and revision 1 dropped the discipline three days later); and the failure is injected into **both
+seams**, `builtins.open` *and* `os.fdopen`, because a hook on either alone gives a vacuous pass on
+one tree and a **false failure against correct code** on the other. The "no temp survives" check
+asserts alongside a spy proving a temp *existed* during the failure — standalone it is green on a
+tree where the helper was never wired, the classic cannot-fail shape both reviewers named.
 
-**Group B — compatibility pins. These pass on both sides, by design.** New-destination mode is
+**`TestFixGuards` — cannot fail at `cd7d68a`; they kill a wrong fix.** Each names the mutation it
+catches: the read-only-destination refusal (drop the `os.access` gate), the replace-failure
+cleanup (unlink only on body exceptions), the symlink cycle (`except OSError: st = None`), the
+held-open inode (classify by node kind alone), and the directory destination.
+
+**`TestCompatibility` — passes on BOTH sides, by design and said so.** New-destination mode is
 umask-derived not `0600`; an existing destination keeps its mode; a symlink destination stays a
-symlink and its target receives the content; a FIFO/device destination is written in place, not
-replaced; a directory destination errors with the typed path; `reqs-export` with no path still
-writes to stdout **and a `BrokenPipeError` there still propagates rather than becoming
-`SystemExit(1)`** (Codex: the naive version of this check passes whether or not the branch was
-wrongly wrapped); exported bytes are identical to those the old handle produced, for both
-`newline=""` and `newline=None`.
+symlink and its target receives the content; a FIFO is written through, not replaced; `reqs-export`
+with no path still writes to stdout **and a `BrokenPipeError` there still propagates rather than
+becoming `SystemExit(1)`** (Codex: the naive "stdout still works" version passes whether or not the
+branch was wrongly wrapped); exported bytes are byte-identical to those a plain `open` produced.
+
+**Measured, not asserted.** 7/7 mutations killed, each verified to have *landed* before the run (an
+unmatched replacement yields a vacuous "didn't fail" row, which this repo's ledger records as a real
+past failure). `tests/manual/repro_cb76_truncation.py` is committed and takes `$CB76_SRC`, so the
+baseline claim is re-runnable: against `/home/faxik/w/codebugs/src` it reports `previous export
+LOST : True` with the traceback escaping; against this tree, `False` and a clean one-line error. I
+confirmed *which* source loaded before believing that run.
 
 **Premise pin.** `TestExportPayloadIsInHandBeforeTheOpen` — the guard's safety rests on the payload
 being complete and the connection closed before the write begins; that is prose today, and this
@@ -259,3 +288,26 @@ not `--file` — revision 1 was factually wrong about the CLI it was fixing.
 **Where they disagreed:** the fallback. Opus would keep it narrowed to `EACCES`/`EPERM` with a
 stderr warning; Codex would remove it. Removed — reasoning in the "stated behaviour change" note
 above.
+
+### Round 2 (revision 2 → 3): FAIL_REVISE again, and the third new regression in three rounds
+
+Revision 2 closed the fallback, the placement, the cleanup, the typed paths and the close-ordering.
+It still shipped **three live holes**, and the pattern — *every round finds a new one inside my own
+fix* — is what sent the scope question to the user rather than being absorbed silently:
+
+1. **`/dev/stdout` was still broken.** Revision 2 dispatched on `S_ISREG`, and I measured that
+   `os.path.realpath("/dev/stdout")` returns the **redirect target — a regular file**, so the guard
+   never fires. Fixed by the positive rule *never replace an inode this process already holds open*,
+   which also catches `export-csv out.csv > out.csv` and needs no `/proc` pattern matching.
+2. **`os.access` used real rather than effective credentials**, a false refusal under setuid.
+3. **A symlink cycle's `ELOOP` was classified as "missing"** and would have replaced the link;
+   only `FileNotFoundError` may mean missing.
+
+Round 2 also ruled the writable-file-in-unwritable-directory refusal *"a product decision that
+should be escalated rather than selected inside a bugfix plan"*. It was escalated; the user chose to
+ship the full atomic design, which is what authorizes revision 3.
+
+**The honest summary of this card:** the defect is simple and the correct fix is not. Three
+adversarial rounds each found a fresh regression in the replacement semantics, which is the real
+reason `open(w)` → `os.replace` deserves a helper with one contract rather than two hand-written
+call sites.

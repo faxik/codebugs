@@ -7,6 +7,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **An export that fails no longer destroys the export it was replacing**
+  (CB-76). `codebugs export-csv` and `codebugs reqs-export` wrote through a bare
+  `open(path, "w")` with no error arm, so an unwritable path printed a raw
+  traceback — and, the half that matters, `open(w)` truncates the destination
+  *before* the first byte, so any write failure left the previous good export at
+  zero bytes. Measured with a simulated `ENOSPC`: 34 bytes → 0.
+
+  The obvious guard is a trap: `except OSError` alone converts that traceback
+  into one tidy line **over a file that is now empty**, and `import_markdown`
+  silently skips unmatched lines, so a truncated export round-trips as a
+  successful, empty import. The new `codebugs.fsio.atomic_write` writes a temp
+  beside the destination and `os.replace`s it only after the handle **closed**
+  successfully — quota and `ENOSPC` failures usually surface at flush/close, so
+  replacing earlier would install a bad file while reporting failure.
+
+  Four differences from `open(w)` are handled rather than left to be discovered:
+  a read-only destination inside a writable directory is still refused (`open`
+  authorizes on the file, `os.replace` on the directory); FIFOs, character
+  devices and any inode this process already holds open are written **in place**,
+  which is what keeps `export-csv /dev/stdout > out.csv` working, since
+  `realpath("/dev/stdout")` resolves to an ordinary *regular* file; only
+  `FileNotFoundError` counts as "missing", so a symlink cycle's `ELOOP` refuses
+  instead of replacing the link; and errors report the path you typed rather
+  than a temp name.
+
+  **Two behaviour changes**, both deliberate: a writable file inside a
+  **non-writable directory** used to export and now fails cleanly, because
+  atomic replacement is impossible there and an errno-keyed fallback cannot tell
+  that case from `ENOSPC`/`EDQUOT`; and block devices and sockets are refused.
+  Replacement cannot carry ownership, ACLs, xattrs or hard-link aliases, and
+  does not `fsync` — stated in the module docstring.
+
 - **`import_csv` refuses a non-text payload instead of leaking a `TypeError`**
   (CB-75). `csv_data` went straight to `io.StringIO`, so `csv_data=5` raised
   `TypeError: initial_value must be str or None, not int` rather than the
