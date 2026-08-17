@@ -22,22 +22,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   successfully — quota and `ENOSPC` failures usually surface at flush/close, so
   replacing earlier would install a bad file while reporting failure.
 
-  Four differences from `open(w)` are handled rather than left to be discovered:
-  a read-only destination inside a writable directory is still refused (`open`
+  Differences from `open(w)` are handled rather than left to be discovered: a
+  read-only destination inside a writable directory is still refused (`open`
   authorizes on the file, `os.replace` on the directory); FIFOs, character
-  devices and any inode this process already holds open are written **in place**,
-  which is what keeps `export-csv /dev/stdout > out.csv` working, since
-  `realpath("/dev/stdout")` resolves to an ordinary *regular* file; only
-  `FileNotFoundError` counts as "missing", so a symlink cycle's `ELOOP` refuses
-  instead of replacing the link; and errors report the path you typed rather
-  than a temp name.
+  devices, file-descriptor aliases and any inode this process already holds open
+  are written **in place**, which is what keeps both `export-csv /dev/stdout >
+  out.csv` **and** `export-csv /dev/stdout | cat` working — those two resolve
+  differently (a regular file vs. a non-existent `/proc/<pid>/fd/pipe:[N]`), so
+  the check has two halves; only `FileNotFoundError` counts as "missing", so a
+  symlink cycle's `ELOOP` refuses instead of replacing the link; and errors
+  report the path you typed rather than a temp name.
 
-  **Two behaviour changes**, both deliberate: a writable file inside a
+  **Three behaviour changes**, all deliberate. A writable file inside a
   **non-writable directory** used to export and now fails cleanly, because
   atomic replacement is impossible there and an errno-keyed fallback cannot tell
-  that case from `ENOSPC`/`EDQUOT`; and block devices and sockets are refused.
-  Replacement cannot carry ownership, ACLs, xattrs or hard-link aliases, and
-  does not `fsync` — stated in the module docstring.
+  that case from `ENOSPC`/`EDQUOT`. **Block devices** are refused, since a
+  partial direct write corrupts persistent bytes. A **socket** destination
+  changes only its error code — `open(sock, "w")` already failed with `ENXIO`.
+
+  **What an atomic replace cannot carry**, so you should know before pointing an
+  export at a file that matters: the new file is a new inode, so ownership,
+  ACLs, xattrs and hard-link aliases of the previous file are **not** preserved,
+  and any other hard link keeps pointing at the old content. Nothing is
+  `fsync`ed, so a power cut may leave either version — but never a truncated one.
 
 - **`import_csv` refuses a non-text payload instead of leaking a `TypeError`**
   (CB-75). `csv_data` went straight to `io.StringIO`, so `csv_data=5` raised
