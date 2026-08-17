@@ -791,9 +791,9 @@ def register_cli(sub, commands) -> None:
             is_json = json_flag_given or path.endswith(".json")
             # The read is guarded on its own, NOT by a handler-wide `except
             # OSError` (CB-71). It is the only OSError source that runs BEFORE
-            # import_csv/import_json commit, and a wider arm would
-            # also catch a failure raised AFTER that commit — reporting a landed
-            # import as bad input, the CB-15/CB-16 success-shaped lie.
+            # import_csv/import_json commit, and a wider arm would also catch a
+            # failure raised AFTER that commit — reporting a landed import as bad
+            # input, the CB-15/CB-16 success-shaped lie.
             try:
                 with open(path) as f:
                     data = f.read()
