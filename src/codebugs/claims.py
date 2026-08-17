@@ -769,16 +769,16 @@ def _cmd_claims_list(args):
         from codebugs import fmt
 
         rows = [
-            [
-                c["entity_id"],
-                c["holder"],
-                c["holder_kind"],
-                c["holder_repo"] or "",
-                str(c["idle_seconds"]),
-            ]
+            {
+                "ENTITY": c["entity_id"],
+                "HOLDER": c["holder"],
+                "KIND": c["holder_kind"],
+                "REPO": c["holder_repo"] or "",
+                "IDLE_S": str(c["idle_seconds"]),
+            }
             for c in result["claims"]
         ]
-        print(fmt.format_table(["ENTITY", "HOLDER", "KIND", "REPO", "IDLE_S"], rows))
+        print(fmt.format_table(rows, ["ENTITY", "HOLDER", "KIND", "REPO", "IDLE_S"]))
     sys.exit(0)
 
 
