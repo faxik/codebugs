@@ -7,6 +7,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`import_csv` refuses a non-text payload instead of leaking a `TypeError`**
+  (CB-75). `csv_data` went straight to `io.StringIO`, so `csv_data=5` raised
+  `TypeError: initial_value must be str or None, not int` rather than the
+  `ValueError` the module contract promises. The CSV twin of CB-72, and the last
+  door in that family reachable through a payload argument.
+
+  Two deliberate asymmetries with `import_json`, both stated because they look
+  like inconsistencies otherwise. **Bytes are refused, not decoded**:
+  `import_json` widened its annotation to accept them because `json.loads`
+  already did, but `io.StringIO` never accepted bytes, so nothing can be
+  importing that way today and decoding them would be a new feature rather than
+  a fix. **No snapshot is taken**: `import_json` must materialize its list
+  because `__iter__` and `__getitem__` can disagree (CB-74), whereas a `str`
+  cannot present two views, so there is nothing for a subclass to
+  desynchronize — and `isinstance` keeps `str` subclasses working.
+
+  `None` was already raising a `ValueError`, but the wrong one — `io.StringIO(None)`
+  yields an empty stream, so the failure surfaced as "CSV must have at least 2
+  columns", which describes a malformed header rather than a missing payload. An
+  empty string still reaches the parser and raises that message, because an empty
+  data payload is supplied content (CB-67).
 - **A CLI command that reads a file now reports an unreadable path as one line,
   not a traceback** (CB-71). `bench-import`, `reqs-import` and `import-csv` all
   performed a file read that no exception arm covered, so `codebugs bench-import

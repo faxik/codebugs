@@ -106,6 +106,90 @@ class TestImportCsv:
         assert result["results_stored"] == 1  # MRR skipped
 
 
+class TestImportCsvTypeGuard:
+    """CB-75. `import_csv` fed csv_data straight to `io.StringIO`, so a non-str
+    leaked "TypeError: initial_value must be str or None, not int" instead of the
+    ValueError the module contract promises ("Domain functions raise ValueError
+    for invalid input"). The CSV twin of CB-72, and the last door in that family
+    reachable through a payload argument.
+
+    NON-VACUITY, measured rather than asserted: every refusal case below was run
+    against main's bench.py on 2026-08-17 (commit 41058c5) and raised the stdlib
+    TypeError named in its row, never a ValueError.
+
+    `match=` is anchored whole with re.escape for the same reason as the
+    import_json class: a loose fragment would also accept a message that named
+    the accepted type wrongly, and a blanket
+    `except TypeError: raise ValueError(...)` around the body would satisfy a
+    fragment test while also converting a post-commit failure into bad input.
+
+    Reachability is IN-PROCESS ONLY — the MCP wire type is `csv_data: str | None`
+    (a pydantic refusal precedes the wrapper body), which is why this is `low`.
+    """
+
+    _MSG = "csv_data must be CSV text as str, not "
+
+    @pytest.mark.parametrize(
+        ("payload", "type_name"),
+        [
+            pytest.param(5, "int", id="int"),
+            pytest.param([], "list", id="empty list"),
+            pytest.param(["a,b", "1,2"], "list", id="list of lines"),
+            pytest.param(b"x,y\n1,2\n", "bytes", id="bytes"),
+            pytest.param(bytearray(b"x,y\n1,2\n"), "bytearray", id="bytearray"),
+            pytest.param(None, "NoneType", id="None"),
+            pytest.param({"a": 1}, "dict", id="dict"),
+        ],
+    )
+    def test_non_str_payload_raises_value_error_naming_the_type(
+        self, conn, payload, type_name
+    ):
+        with pytest.raises(ValueError, match=re.escape(self._MSG + type_name)):
+            bench.import_csv(conn, benchmark="a", csv_data=payload)
+
+    def test_bytes_are_refused_rather_than_decoded(self, conn):
+        """Deliberate divergence from import_json, which WIDENED its annotation to
+        accept bytes because json.loads already took them. io.StringIO never
+        accepted bytes, so no caller can be importing that way today — refusing
+        them is a contract fix, whereas decoding them would be a new feature
+        wearing a bugfix costume. Pinned so a future "consistency" change has to
+        argue with this test.
+        """
+        with pytest.raises(ValueError, match=re.escape(self._MSG + "bytes")):
+            bench.import_csv(conn, benchmark="a", csv_data=b"method,score\nbm25,0.7\n")
+
+    def test_none_is_refused_instead_of_reporting_the_wrong_fault(self, conn):
+        """`None` did NOT leak a TypeError — io.StringIO(None) is legal and yields
+        an empty stream, so this already raised ValueError, just the wrong one:
+        "CSV must have at least 2 columns" describes a malformed header, not a
+        missing payload. So this test passes on both trees by exception TYPE and
+        discriminates only on the MESSAGE. Said plainly because a reader cannot
+        otherwise tell it from a broken test.
+        """
+        with pytest.raises(ValueError, match=re.escape(self._MSG + "NoneType")):
+            bench.import_csv(conn, benchmark="a", csv_data=None)
+
+    def test_a_str_subclass_still_imports(self, conn):
+        """isinstance, not `type(...) is str`: a str subclass is CSV text and must
+        keep working. There is no split-view hazard to guard against here — the
+        reason import_json needs `list(json_data)` and this does not (CB-74).
+        """
+        class Csv(str):
+            pass
+
+        result = bench.import_csv(conn, benchmark="a", csv_data=Csv(SCALAR_CSV))
+        assert result["rows"] == 1
+
+    def test_empty_string_still_reaches_the_parser(self, conn):
+        """CB-67's ratified rule: an empty DATA PAYLOAD is supplied content, so it
+        must reach the parser and raise ITS ValueError. A truthiness guard
+        (`if not csv_data`) would refuse it with the type message instead, which
+        is why the check tests the type and nothing else.
+        """
+        with pytest.raises(ValueError, match="at least 2 columns"):
+            bench.import_csv(conn, benchmark="a", csv_data="")
+
+
 class TestImportJson:
     def test_basic_import(self, conn):
         result = bench.import_json(conn, benchmark="search-perf", json_data=SAMPLE_JSON)

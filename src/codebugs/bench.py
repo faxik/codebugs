@@ -112,12 +112,41 @@ def import_csv(
 
     Args:
         benchmark: Benchmark name (e.g. "search-perf")
-        csv_data: CSV content as string (header + data rows)
+        csv_data: CSV content as string (header + data rows). Text only —
+            unlike ``import_json``, bytes are refused rather than decoded,
+            because ``io.StringIO`` never accepted them, so nothing can be
+            importing that way today (CB-75).
         date: Run date (default: now, ISO format)
         tags: Optional tags
         meta: Optional metadata (git_sha, ci_url, etc.)
         run_id: Optional explicit run ID (default: auto-generated)
+
+    Raises:
+        ValueError: csv_data is not a str (CB-75), or the CSV has fewer than
+            two columns, no data rows, an empty row label, or a non-numeric
+            metric. The type is checked POSITIVELY and up-front rather than by
+            rewrapping ``TypeError`` from the parser below — a blanket rewrap
+            would also convert a POST-COMMIT failure into a ValueError, which
+            the CLI arm then reports as bad input for a write that landed
+            (the CB-15/CB-16 lie, and the same reasoning as import_json's).
     """
+    # An empty string is SUPPLIED CONTENT and must reach the parser to raise its
+    # own "at least 2 columns" — that is CB-67's ratified distinction, so this
+    # tests the TYPE and never the truthiness. `None` is refused here too: it is
+    # not a str, and io.StringIO(None) silently yields an EMPTY stream, which
+    # surfaced as "CSV must have at least 2 columns" — a message describing the
+    # wrong fault.
+    #
+    # No snapshot is taken, deliberately, and the asymmetry with import_json is
+    # the point: that guard must materialize its list because __iter__ and
+    # __getitem__ can disagree (CB-74). A str cannot present two views — its
+    # content is fixed at construction and StringIO reads that content — so
+    # there is nothing here for a subclass to desynchronize.
+    if not isinstance(csv_data, str):
+        raise ValueError(
+            f"csv_data must be CSV text as str, not {type(csv_data).__name__}"
+        )
+
     reader = csv.DictReader(io.StringIO(csv_data))
     if not reader.fieldnames or len(reader.fieldnames) < 2:
         raise ValueError("CSV must have at least 2 columns (row_label + one metric)")
