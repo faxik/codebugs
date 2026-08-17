@@ -209,10 +209,19 @@ def import_json(
             then reports as bad input for a write that already landed.
     """
     if isinstance(json_data, list):
-        if not json_data:
+        # MATERIALIZE ONCE, then validate and consume only this snapshot. The
+        # check below iterates while the code after it INDEXES (data[0]) and
+        # iterates again (writerows), and a list subclass whose __iter__
+        # disagrees with __getitem__ presents mappings to the check and a
+        # non-mapping to data[0] — reproducing the exact AttributeError this
+        # guard exists to replace. Validating one view while consuming another
+        # is not a guard.
+        data = list(json_data)
+        if not data:
             raise ValueError("JSON must be a non-empty array of objects")
-        data = json_data
     elif isinstance(json_data, (str, bytes, bytearray)):
+        # No snapshot needed: json.loads always returns a builtin list, whose
+        # __iter__ and __getitem__ cannot disagree.
         data = json.loads(json_data)
         if not isinstance(data, list) or not data:
             raise ValueError("JSON must be a non-empty array of objects")
@@ -225,8 +234,13 @@ def import_json(
     # EVERY element, not just data[0]: an object at index 0 followed by a
     # non-object clears a first-element check and then dies in writerows()
     # below with the same AttributeError this refusal exists to replace.
-    # Mapping rather than dict, so a mapping that works today (MappingProxyType,
-    # OrderedDict) is not newly refused — csv.DictWriter needs only .keys()/.get().
+    #
+    # Mapping rather than dict, so mappings that work today (MappingProxyType,
+    # OrderedDict) are not newly refused. This IS a narrowing, stated rather
+    # than glossed: an object that merely duck-types .keys()/.get() without
+    # registering as a Mapping imports on the old code and is refused here.
+    # That is deliberate — "an array of objects" is the documented contract,
+    # the refusal is loud and at the boundary, and no caller sends such a row.
     for index, element in enumerate(data):
         if not isinstance(element, Mapping):
             raise ValueError(

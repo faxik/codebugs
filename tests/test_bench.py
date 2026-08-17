@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import subprocess
 import sys
@@ -135,56 +136,94 @@ class TestImportJsonShapeGuard:
     """CB-72 + CB-74. import_json accepted its argument without checking its
     shape, so two inputs walked past the module's own contract ("domain
     functions raise ValueError for invalid input") and out as stdlib
-    exceptions: a non-str/non-list payload as TypeError from json.loads
-    (CB-72, in-process only), and an array of non-objects as AttributeError
-    from `data[0].keys()` (CB-74, reachable from an MCP client because the
-    wire type is `str | list | None`).
+    exceptions: a payload outside `str | bytes | bytearray | list` as
+    TypeError from json.loads (CB-72, in-process only), and an array whose
+    ELEMENTS are not objects as AttributeError from `data[0].keys()` (CB-74,
+    reachable from an MCP client because the wire type is `str | list | None`).
 
-    Every case below carries the exception the UNFIXED tree raises, measured
-    2026-08-17 against 3cd23d0 — none of them is a ValueError, so no row here
-    can pass on both trees.
+    NON-VACUITY, measured rather than asserted: every refusal case below was
+    run against main's bench.py on 2026-08-17 (commit 3cd23d0) and raised the
+    stdlib exception named in its row — never a ValueError. The `object then
+    int` row is the one that matters most: unfixed it does not die at
+    data[0].keys() at all, but later inside csv.DictWriter, which is exactly
+    the door a data[0]-only guard would leave open.
 
-    `match=` is load-bearing, not decoration. Without it, the whole class
-    passes against a blanket `except (TypeError, AttributeError): raise
-    ValueError(...)` around the function body — a shape that would ALSO
-    convert a post-commit failure inside import_csv into a ValueError, which
-    _cmd_bench_import's arm then reports as bad input for a write that already
-    landed (the CB-15/CB-16 lie). The index in the element cases is what
-    proves the check is per-element rather than data[0]-only.
+    `match=` is load-bearing, not decoration, and it anchors the WHOLE message
+    via re.escape. Without it the class passes against a blanket
+    `except (TypeError, AttributeError): raise ValueError(...)` around the
+    function body — a shape that would ALSO convert a post-commit failure
+    inside import_csv into a ValueError, which _cmd_bench_import's arm then
+    reports as bad input for a write that already landed (the CB-15/CB-16
+    lie). A loose fragment regex is nearly as bad: "element 0 .*not int" also
+    matches a message that got the accepted set wrong.
     """
 
-    # (case id, payload, unfixed exception, regex the refusal must match)
+    _TYPES = "json_data must be a JSON array as str/bytes/bytearray, or a list of objects, not "
+
+    # (case id, payload, exception raised by the UNFIXED tree, exact refusal message)
     REFUSED = [
-        ("dict", {}, TypeError, "str/bytes/bytearray.*not dict"),
-        ("int", 5, TypeError, "str/bytes/bytearray.*not int"),
-        ("list of ints", [1, 2], AttributeError, "element 0 .*not int"),
-        ("string of ints", "[1, 2]", AttributeError, "element 0 .*not int"),
-        ("string of null", "[null]", AttributeError, "element 0 .*not NoneType"),
-        # The object-then-non-object case never reaches data[0].keys() at all —
-        # unfixed, it dies later inside writer.writerows(). A data[0]-only guard
-        # would leave exactly this door open.
-        ("object then int", [{"a": 1, "b": 2}, 5], AttributeError, "element 1 .*not int"),
+        ("dict", {}, TypeError, _TYPES + "dict"),
+        ("int", 5, TypeError, _TYPES + "int"),
+        ("list of ints", [1, 2], AttributeError, "JSON array element 0 must be an object, not int"),
+        ("string of ints", "[1, 2]", AttributeError,
+         "JSON array element 0 must be an object, not int"),
+        ("string of null", "[null]", AttributeError,
+         "JSON array element 0 must be an object, not NoneType"),
+        ("object then int", [{"a": 1, "b": 2}, 5], AttributeError,
+         "JSON array element 1 must be an object, not int"),
     ]
 
     @pytest.mark.parametrize(
-        ("payload", "pattern"),
-        [pytest.param(p, r, id=i) for i, p, _, r in REFUSED],
+        ("payload", "message"),
+        [pytest.param(p, m, id=i) for i, p, _, m in REFUSED],
     )
-    def test_bad_shape_raises_value_error_naming_what_was_wrong(self, conn, payload, pattern):
-        with pytest.raises(ValueError, match=pattern):
+    def test_bad_shape_raises_value_error_naming_what_was_wrong(self, conn, payload, message):
+        with pytest.raises(ValueError, match=re.escape(message)):
             bench.import_json(conn, benchmark="a", json_data=payload)
 
-    @pytest.mark.parametrize(
-        ("payload", "unfixed"),
-        [pytest.param(p, u, id=i) for i, p, u, _ in REFUSED],
-    )
-    def test_the_unfixed_exception_is_not_a_value_error(self, payload, unfixed):
-        """Pins the premise the class rests on: each payload's OLD failure was
-        outside ValueError, so `pytest.raises(ValueError)` above discriminates.
-        If a future refactor makes one of these a ValueError for an unrelated
-        reason, this row goes red rather than the suite going quietly vacuous.
+    def test_a_list_subclass_cannot_show_the_guard_one_view_and_the_consumer_another(self, conn):
+        """The guard iterates; the code after it INDEXES (data[0]) and iterates
+        again (writerows). A list subclass whose __iter__ disagrees with
+        __getitem__ therefore passed a check on mappings and then handed a
+        non-mapping to data[0] — CB-74's exact AttributeError, surviving inside
+        its own fix. Found by Codex diff review against the FIRST
+        implementation of this guard, not against main.
+
+        The discriminator is "no AttributeError", NOT a refusal. Once the list
+        is materialized once, the two views cannot diverge — the single
+        snapshot is both validated and consumed — so this imports the iterated
+        row instead of raising anything. Asserting a ValueError here was the
+        first draft of this test and was simply wrong: it demanded the guard
+        reject a payload the fix makes coherent.
         """
-        assert not issubclass(unfixed, ValueError)
+
+        class SplitList(list):
+            def __iter__(self):
+                return iter([{"method": "bm25", "score": 0.5}])
+
+        result = bench.import_json(conn, benchmark="a", json_data=SplitList([1]))
+        assert result["rows"] == 1
+        assert result["results_stored"] == 1
+
+    def test_a_duck_typed_row_is_refused_and_that_is_a_deliberate_narrowing(self, conn):
+        """Guarding on Mapping refuses an object that merely implements
+        .keys()/.get() without registering as one — and such an object DOES
+        import on main. Pinned because it is a real behaviour change, not
+        because it is desirable: "an array of objects" is the documented
+        contract, the refusal is loud and at the boundary, and no caller sends
+        such a row. If someone ever does, this test is where the decision is
+        recorded and can be revisited.
+        """
+
+        class DuckRow:
+            def keys(self):
+                return ["method", "score"]
+
+            def get(self, key, default=None):
+                return {"method": "bm25", "score": 0.5}.get(key, default)
+
+        with pytest.raises(ValueError, match=re.escape("element 0 must be an object, not DuckRow")):
+            bench.import_json(conn, benchmark="a", json_data=[DuckRow()])
 
     # --- accepted shapes: these worked before the guard and must still work ---
 

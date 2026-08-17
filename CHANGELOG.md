@@ -11,9 +11,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   exception** (CB-72, CB-74). The function checked that its argument was a
   non-empty list, and nothing else, so two inputs walked past the module's
   contract — *domain functions raise `ValueError` for invalid input* — and out
-  to the caller unchanged: a non-`str`/non-`list` payload as `TypeError` from
-  `json.loads`, and an array whose **elements** are not objects as
-  `AttributeError` from `data[0].keys()`.
+  to the caller unchanged: a payload outside `str | bytes | bytearray | list`
+  as `TypeError` from `json.loads`, and an array whose **elements** are not
+  objects as `AttributeError` from `data[0].keys()`.
 
   The second is the one that mattered: the MCP wire type is `str | list | None`,
   so `codebench_import(benchmark="b", json_data=[1,2])` reached it from a
@@ -30,12 +30,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a first-element check and dies later inside `csv.DictWriter` with the same
   `AttributeError`.
 
+  A supplied list is also **materialized once** and only that snapshot is
+  validated and consumed. The check iterates while the code after it *indexes*
+  (`data[0]`) and iterates again, so a `list` subclass whose `__iter__`
+  disagrees with `__getitem__` could show mappings to the guard and a
+  non-mapping to `data[0]` — CB-74's exact `AttributeError`, surviving inside
+  its own fix. Validating one view while consuming another is not a guard.
+
   Two things deliberately still work, each with a test pinning it: `bytes` and
   `bytearray` payloads (accepted by `json.loads`, importing successfully today —
   refusing them would be a behaviour change wearing a bugfix costume, so the
   annotation widened to `str | bytes | bytearray | list` instead), and mappings
   that are not `dict` (`MappingProxyType`, `OrderedDict`), since the guard tests
-  `collections.abc.Mapping` and `csv.DictWriter` needs only `.keys()`/`.get()`.
+  `collections.abc.Mapping`.
+
+  One **deliberate narrowing**, stated rather than glossed: a row object that
+  merely duck-types `.keys()`/`.get()` without registering as a `Mapping` does
+  import on the old code and is refused now. *"An array of objects"* is the
+  documented contract, the refusal is loud and at the boundary, and a test
+  records the decision so it can be revisited if a real caller appears.
 - **`status="deferred"` now honours every other filter instead of discarding it**
   (CB-28). The MCP `query` / `reqs_query` deferred branch forwarded only `limit`
   and `offset`, so `query(status="deferred", severity="critical")` returned **every**
