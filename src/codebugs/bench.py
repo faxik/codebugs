@@ -59,6 +59,28 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _require_exactly_one(first: tuple[str, bool], second: tuple[str, bool]) -> None:
+    """Refuse unless exactly one of two mutually exclusive arguments was supplied.
+
+    Import and delete each take one of two alternatives on BOTH surfaces, and the
+    "not both" half of that contract used to exist only inside the MCP wrappers —
+    so the CLI picked a winner (`args.json_file or args.file`) where the contract
+    says refuse, silently discarding the other argument (CB-67).
+
+    This owns the XOR structure and nothing else. Each caller passes its own
+    already-correct notion of "supplied" as a boolean, because that legitimately
+    differs by argument kind: an empty data payload is supplied content the domain
+    layer must judge, while an empty file path or entity id is not a value at all.
+    Nothing is returned, so no caller can dispatch on display text — each dispatches
+    on the same local predicate it passed in.
+    """
+    given = [label for label, supplied in (first, second) if supplied]
+    if not given:
+        raise ValueError(f"Provide {first[0]} or {second[0]}")
+    if len(given) == 2:
+        raise ValueError(f"Provide {first[0]} or {second[0]}, not both")
+
+
 def _next_run_id(conn: sqlite3.Connection) -> str:
     row = conn.execute(
         "SELECT run_id FROM codebench_runs WHERE run_id LIKE 'BE-%' "
@@ -547,12 +569,14 @@ def register_tools(mcp, conn_factory) -> None:
             tags: Optional tags (e.g. ["nightly", "v2.1"])
             meta: Optional metadata (e.g. {"git_sha": "abc123", "ci_url": "..."})
         """
-        if csv_data is None and json_data is None:
-            raise ValueError("Provide either csv_data or json_data")
-        if csv_data is not None and json_data is not None:
-            raise ValueError("Provide csv_data or json_data, not both")
+        # A payload is "supplied" when it is not None: csv_data="" is an empty
+        # document for import_csv to reject, never an absent argument. Dispatch
+        # below MUST use this same predicate — validating with one and dispatching
+        # with `if csv_data:` is what sent an empty CSV into the JSON branch.
+        csv_given = csv_data is not None
+        _require_exactly_one(("csv_data", csv_given), ("json_data", json_data is not None))
         with conn_factory() as conn:
-            if csv_data:
+            if csv_given:
                 return import_csv(
                     conn, benchmark=benchmark, csv_data=csv_data,
                     date=date, tags=tags, meta=meta,
@@ -631,10 +655,9 @@ def register_tools(mcp, conn_factory) -> None:
             run_id: Delete a specific run (e.g. "BE-1")
             benchmark: Delete all runs for a benchmark name
         """
-        if not run_id and not benchmark:
-            raise ValueError("Provide run_id or benchmark")
-        if run_id and benchmark:
-            raise ValueError("Provide run_id or benchmark, not both")
+        # An entity id is "supplied" when it is non-empty — an empty string names
+        # nothing — and the dispatch below must use that same predicate.
+        _require_exactly_one(("run_id", bool(run_id)), ("benchmark", bool(benchmark)))
         with conn_factory() as conn:
             if run_id:
                 return delete_run(conn, run_id)
@@ -656,9 +679,12 @@ def register_cli(sub, commands) -> None:
     def _cmd_bench_import(args: argparse.Namespace) -> None:
         conn = db.connect()
         try:
-            if not args.file and not args.json_file:
-                print("Provide either a file path or --json-file", file=sys.stderr)
-                sys.exit(1)
+            # A path is "supplied" when it is non-empty, and the selection below
+            # must use that same predicate.
+            json_flag_given = bool(args.json_file)
+            _require_exactly_one(
+                ("a file path", bool(args.file)), ("--json-file", json_flag_given)
+            )
 
             kwargs: dict[str, Any] = {
                 "benchmark": args.benchmark,
@@ -669,8 +695,10 @@ def register_cli(sub, commands) -> None:
             if args.meta:
                 kwargs["meta"] = json.loads(args.meta)
 
-            path = args.json_file or args.file
-            is_json = bool(args.json_file) or path.endswith(".json")
+            path = args.json_file if json_flag_given else args.file
+            # The flag forces JSON; a bare positional still infers it from the
+            # extension, which is independent of WHICH argument was supplied.
+            is_json = json_flag_given or path.endswith(".json")
             with open(path) as f:
                 data = f.read()
             if is_json:
@@ -761,16 +789,19 @@ def register_cli(sub, commands) -> None:
     def _cmd_bench_delete(args: argparse.Namespace) -> None:
         conn = db.connect()
         try:
+            _require_exactly_one(
+                ("--run-id", bool(args.run_id)), ("--benchmark", bool(args.benchmark))
+            )
             if args.run_id:
                 result = delete_run(conn, args.run_id)
                 print(f"Deleted run {result['deleted']} ({result['results_removed']} results)")
-            elif args.benchmark:
+            else:
                 result = delete_benchmark(conn, args.benchmark)
                 print(f"Deleted benchmark {result['deleted_benchmark']} ({result['runs_removed']} runs, {result['results_removed']} results)")
-            else:
-                print("Provide --run-id or --benchmark", file=sys.stderr)
-                sys.exit(1)
-        except KeyError as e:
+        # ValueError is the refusal above. No JSONDecodeError-first arm is needed
+        # here — neither delete function parses stored JSON, so no failure can
+        # follow the write and be misreported as bad input.
+        except (KeyError, ValueError) as e:
             print(str(e), file=sys.stderr)
             sys.exit(1)
         finally:

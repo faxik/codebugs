@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
+import sys
 
 import pytest
 
-from codebugs import bench
+from codebugs import bench, db
 
 
 @pytest.fixture
@@ -259,3 +261,181 @@ class TestDelete:
     def test_delete_nonexistent_benchmark(self, conn):
         with pytest.raises(KeyError, match="not found"):
             bench.delete_benchmark(conn, "nonexistent")
+
+
+class TestExclusiveArguments:
+    """CB-67. bench-import and bench-delete each take exactly one of two mutually
+    exclusive arguments. That contract was written down only inside the MCP
+    wrappers, so both CLI handlers PICKED A WINNER where the contract says refuse
+    — and codebench_import validated with one predicate (`is not None`) while
+    dispatching with another (`if csv_data:`), so an empty payload passed
+    validation as supplied and then failed dispatch as absent.
+
+    Each test below fails against the unfixed tree. The vacuity trap that would
+    have made it pass on BOTH trees is named in its docstring, because all three
+    naive forms were vacuous.
+    """
+
+    CSV = "method,score\nbm25,0.72\n"
+    JSON = '[{"method": "dense", "score": 0.99}]'
+
+    @staticmethod
+    def _tools(conn):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def factory():
+            yield conn
+
+        class FakeMCP:
+            def __init__(self):
+                self.tools = {}
+
+            def tool(self, *a, **k):
+                def deco(fn):
+                    self.tools[fn.__name__] = fn
+                    return fn
+
+                return deco
+
+        m = FakeMCP()
+        bench.register_tools(m, factory)
+        return m.tools
+
+    @staticmethod
+    def _cli(project, *args):
+        return subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", *args],
+            cwd=project,
+            capture_output=True,
+            text=True,
+        )
+
+    # --- D3: validation and dispatch disagreed inside one function -----------
+
+    def test_mcp_import_empty_csv_reaches_the_csv_parser(self, conn):
+        """An empty csv_data is SUPPLIED CONTENT, so it must reach import_csv and
+        raise that parser's contracted ValueError.
+
+        Vacuity trap: `pytest.raises(Exception)` or `raises((ValueError, TypeError))`
+        passes on both trees, because the unfixed tree raises TypeError from
+        json.loads(None). Only matching the CSV parser's own message discriminates.
+        A second trap: calling the DOMAIN import_csv("") proves nothing — it already
+        raises correctly on both trees — so this must go through the MCP closure.
+        """
+        with pytest.raises(ValueError, match="at least 2 columns"):
+            self._tools(conn)["codebench_import"](benchmark="b", csv_data="")
+
+    # --- the MCP contract these CLI handlers were missing --------------------
+
+    def test_mcp_refuses_both_payloads(self, conn):
+        with pytest.raises(ValueError, match="not both"):
+            self._tools(conn)["codebench_import"](
+                benchmark="b", csv_data=self.CSV, json_data=self.JSON
+            )
+
+    def test_mcp_refuses_both_delete_targets(self, conn):
+        with pytest.raises(ValueError, match="not both"):
+            self._tools(conn)["codebench_delete"](run_id="BE-1", benchmark="a")
+
+    # --- D1: the CLI import picked a winner ----------------------------------
+
+    def test_cli_import_refuses_two_sources_instead_of_discarding_one(self, tmp_path):
+        """Unfixed: `bench-import data.csv --json-file other.json` reports success
+        and imports the JSON, silently discarding the CSV.
+
+        Vacuity trap: asserting "one run was imported" passes on both trees — both
+        import exactly one run, only the CONTENT differs. So the fixtures carry
+        disjoint row labels and the assertion is that NOTHING landed.
+        The positional fixture must not be named *.json, or the extension sniff
+        confounds the result.
+        """
+        db.init_project(str(tmp_path))
+        (tmp_path / "data.csv").write_text(self.CSV)
+        (tmp_path / "other.json").write_text(self.JSON)
+
+        out = self._cli(tmp_path, "bench-import", "data.csv", "--json-file", "other.json", "-b", "X")
+        assert out.returncode == 1, out.stdout + out.stderr
+        assert "not both" in (out.stdout + out.stderr), out.stdout + out.stderr
+
+        c = db.connect(str(tmp_path))
+        try:
+            assert bench.list_runs(c, benchmark="X")["runs"] == []
+        finally:
+            c.close()
+
+    def test_cli_import_still_infers_json_from_a_bare_positional(self, tmp_path):
+        """The refusal must not cost the extension sniff: `bench-import foo.json`
+        with no flag has always imported as JSON, and still must. Without this,
+        a label-driven fix routes positional JSON into the CSV parser."""
+        db.init_project(str(tmp_path))
+        (tmp_path / "results.json").write_text(self.JSON)
+
+        out = self._cli(tmp_path, "bench-import", "results.json", "-b", "X")
+        assert out.returncode == 0, out.stdout + out.stderr
+
+        c = db.connect(str(tmp_path))
+        try:
+            runs = bench.list_runs(c, benchmark="X")["runs"]
+            assert len(runs) == 1, runs
+        finally:
+            c.close()
+
+    # --- D2: the CLI delete picked a winner ----------------------------------
+
+    def test_cli_delete_refuses_two_targets_instead_of_ignoring_one(self, tmp_path):
+        """Unfixed: `bench-delete --run-id BE-1 --benchmark X` deletes BE-1, exits 0,
+        and silently ignores --benchmark.
+
+        Vacuity trap: seeding BE-1 INTO X makes "X is gone" true on both trees, since
+        deleting the only run empties it. So BE-1 lives under A and X is a separate
+        benchmark, and all three of (refusal, BE-1 survives, X survives) are asserted.
+        Also asserts stderr is a message rather than a traceback — that is what
+        catches a handler whose except clause does not cover the new ValueError.
+        """
+        db.init_project(str(tmp_path))
+        c = db.connect(str(tmp_path))
+        try:
+            run = bench.import_csv(c, benchmark="A", csv_data=self.CSV)
+            bench.import_csv(c, benchmark="X", csv_data=self.CSV)
+        finally:
+            c.close()
+
+        out = self._cli(tmp_path, "bench-delete", "--run-id", run["run_id"], "--benchmark", "X")
+        assert out.returncode == 1, out.stdout + out.stderr
+        assert "not both" in (out.stdout + out.stderr), out.stdout + out.stderr
+        assert "Traceback" not in out.stderr, out.stderr
+
+        c = db.connect(str(tmp_path))
+        try:
+            assert [r["run_id"] for r in bench.list_runs(c, benchmark="A")["runs"]] == [
+                run["run_id"]
+            ]
+            assert bench.list_runs(c, benchmark="X")["runs"] != []
+        finally:
+            c.close()
+
+    # --- what must NOT change ------------------------------------------------
+
+    def test_supplied_means_what_each_argument_kind_says_it_means(self, conn, tmp_path):
+        """Revision 1 of this fix unified "supplied" as `is not None` everywhere and
+        would have broken all four of these. An empty DATA PAYLOAD is supplied
+        content; an empty PATH or ENTITY ID is not a value at all. Pinned so the
+        next revision cannot quietly re-unify the axis.
+        """
+        tools = self._tools(conn)
+
+        # An empty entity id still reads as "not supplied" on the delete wrapper.
+        with pytest.raises(ValueError, match="Provide run_id or benchmark"):
+            tools["codebench_delete"](benchmark="")
+
+        # An empty JSON array is supplied content and reaches the JSON parser.
+        with pytest.raises(ValueError, match="non-empty array"):
+            tools["codebench_import"](benchmark="b", json_data=[])
+
+        # An empty path still reads as "not supplied" on the CLI.
+        db.init_project(str(tmp_path))
+        out = self._cli(tmp_path, "bench-import", "", "-b", "Z")
+        assert out.returncode == 1
+        assert "Provide" in (out.stdout + out.stderr), out.stdout + out.stderr
+        assert "Traceback" not in out.stderr, out.stderr
