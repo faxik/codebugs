@@ -7,6 +7,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **A benchmark import no longer invents a date or run id from a falsey wrong
+  type** (CB-82). `import_csv` resolved two of its arguments with truthiness —
+  `date or utc_now()[:10]` and `run_id or _next_run_id(conn)` — so `date=[]`,
+  `date={}` and `date=""` were all indistinguishable from *not supplied*, and
+  the row landed under a date and id the caller never chose. Measured: `date=[]`
+  stored today's date and reported success.
+
+  All five non-payload arguments are now validated before anything is parsed or
+  written, so a refusal costs no partial work, and every failure is the
+  `ValueError` the module contract promises instead of a raw
+  `sqlite3.ProgrammingError` or `TypeError` from `json.dumps`.
+  **On a write path `None` is the only "not supplied" signal** — deliberately
+  unlike a query filter, where `""` legitimately means "no filter": an absent
+  filter matches everything, while an absent stored value has to be invented.
+  `import_json` forwards these arguments here, so both entry points are covered.
+
+  `tags`/`meta` are serialized **once** and that exact string is stored, so a
+  container cannot present one view to the check and another to the write.
+  Non-string tag members and non-string `meta` keys are refused, because
+  `json.dumps` does not complain about either — it writes `[1, 2]` and silently
+  coerces a non-string key — and a non-string tag later crashes `bench-list`,
+  which does `",".join(tags)`. The NaN/Infinity policy is **unchanged**.
+
+  Behaviour change: `date=""` and `run_id=""` are now refused where they used to
+  default silently. Nothing in the repo passes them.
 - **`OSError` no longer escapes from sources that are not file opens** (CB-79).
   Two verified holes. `codebugs reqs-verify` printed a raw `FileNotFoundError`
   traceback when run from a directory that had been deleted — not hypothetical,
