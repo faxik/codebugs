@@ -31,7 +31,7 @@ Prose cannot enforce prose. That is CB-50, and the harness below is its fix.
 | This clone is actually armed | `_guard_enforcement_armed` | exit 12 |
 | Main has main checked out, and is clean | `_guard_workspace_on_main`, `_guard_main_clean` | exit 8, 11 |
 | The branch actually carries a change | `_guard_nonempty_diff` | exit 9 |
-| No conflict markers, no scratch `.py`, no stale base | `_guard_conflict_markers`, `_guard_untracked_py_at_root`, `_guard_stale_base` | exit 5, 4, 6 |
+| No conflict markers, no scratch or temp file at root, no stale base | `_guard_conflict_markers`, `_guard_untracked_scratch_at_root`, `_guard_stale_base` | exit 5, 4, 6 |
 
 **`.github/workflows/main-invariants.yml` is deliberately NOT in that table**, and the reason is the
 table's own title. It asserts that main's first-parent line carries nothing but merges and plan notes

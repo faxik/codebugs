@@ -227,16 +227,28 @@ _guard_leaked_repr() {
 # they are scratch, build wrappers, or debug leftovers.
 #
 # Input is `git status --short` output, so .gitignore has already filtered it.
-_guard_untracked_py_at_root() {
+# Renamed from _guard_untracked_py_at_root (CB-83). The old name described one
+# spelling of the failure and the guard only matched that spelling, so a
+# zero-byte `tmpy_efkp4t` — the tempfile.mkstemp DEFAULT prefix — was swept up
+# by a `git add -A`, committed, and rode a merge onto main. A name that
+# undersells what a guard must catch is how the enumeration stays narrow.
+#
+# NOT widened to "any extensionless file at root": main legitimately tracks
+# LICENSE, and Makefile/Dockerfile are ordinary additions. Refusing those would
+# be the false refusal this repo repeatedly records as the worse failure. Only
+# the two temp-file signatures are added, both of which are machine-generated
+# and never authored by hand.
+_guard_untracked_scratch_at_root() {
     local status_output="$1"
     local bad
-    bad=$(echo "${status_output}" | grep -E '^\?\? [^/]+\.py$' || true)
+    bad=$(echo "${status_output}" | grep -E '^\?\? ([^/]+\.py|tmp[A-Za-z0-9_]{6,}|\.codebugs-export-[A-Za-z0-9_]+)$' || true)
     [[ -z "${bad}" ]] && return 0
-    echo "ERROR: refusing to auto-stage untracked top-level .py file(s):" >&2
+    echo "ERROR: refusing to auto-stage untracked top-level scratch file(s):" >&2
     echo "${bad}" | sed 's/^/  /' >&2
     echo "" >&2
-    echo "  If intentional, add to .gitignore or commit it by hand inside the" >&2
-    echo "  worktree first, then re-run." >&2
+    echo "  A stray temp file reached main this way once (CB-83). If intentional," >&2
+    echo "  add to .gitignore or commit it by hand inside the worktree first," >&2
+    echo "  then re-run." >&2
     return 4
 }
 

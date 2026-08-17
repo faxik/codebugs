@@ -1064,12 +1064,12 @@ class TestKnownLimits:
         )
 
 
-class TestUntrackedPyAtRoot:
+class TestUntrackedScratchAtRoot:
     def test_clean_status_passes(self) -> None:
-        assert run_guard("_guard_untracked_py_at_root", " M src/codebugs/db.py").returncode == 0
+        assert run_guard("_guard_untracked_scratch_at_root", " M src/codebugs/db.py").returncode == 0
 
     def test_untracked_root_py_refused(self) -> None:
-        assert run_guard("_guard_untracked_py_at_root", "?? scratch.py").returncode == 4
+        assert run_guard("_guard_untracked_scratch_at_root", "?? scratch.py").returncode == 4
 
     def test_untracked_py_in_subdir_passes(self) -> None:
         """Only TOP-LEVEL untracked .py files are suspect.
@@ -1077,8 +1077,37 @@ class TestUntrackedPyAtRoot:
         A new module under src/ or a new test is the normal way this repo
         grows; refusing those would fire on nearly every feature branch.
         """
-        assert run_guard("_guard_untracked_py_at_root", "?? src/codebugs/new.py").returncode == 0
-        assert run_guard("_guard_untracked_py_at_root", "?? tests/test_new.py").returncode == 0
+        assert run_guard("_guard_untracked_scratch_at_root", "?? src/codebugs/new.py").returncode == 0
+        assert run_guard("_guard_untracked_scratch_at_root", "?? tests/test_new.py").returncode == 0
+
+    def test_the_tempfile_signature_that_actually_reached_main_is_refused(self) -> None:
+        """CB-83, from the incident and not from imagination.
+
+        A zero-byte `tmpy_efkp4t` (tempfile.mkstemp's DEFAULT prefix, `tmp` +
+        random) was swept up by `git add -A`, committed, and merged onto main.
+        The guard existed, was named for this exact failure class, and matched
+        only `*.py`.
+        """
+        assert run_guard("_guard_untracked_scratch_at_root", "?? tmpy_efkp4t").returncode == 4
+        assert run_guard(
+            "_guard_untracked_scratch_at_root", "?? .codebugs-export-ab12cd34"
+        ).returncode == 4
+
+    def test_ordinary_extensionless_root_files_are_NOT_refused(self) -> None:
+        """The false-refusal boundary, and the reason this was not widened to
+        "any extensionless file at root".
+
+        main already tracks LICENSE; Makefile and Dockerfile are ordinary
+        additions. Refusing those would be the false refusal this repo keeps
+        recording as the worse failure — so the widening matches only the two
+        machine-generated temp signatures, never authored names.
+        """
+        for name in ("LICENSE", "Makefile", "Dockerfile", "README", "tmpfile"):
+            assert run_guard("_guard_untracked_scratch_at_root", f"?? {name}").returncode == 0, name
+
+    def test_a_temp_named_file_in_a_subdirectory_passes(self) -> None:
+        """Same scoping rule as the .py half: only TOP-LEVEL is suspect."""
+        assert run_guard("_guard_untracked_scratch_at_root", "?? tests/tmpy_efkp4t").returncode == 0
 
 
 class TestLeakedRepr:
@@ -1512,7 +1541,7 @@ class TestGuardsAreActuallyInvoked:
         [
             "_guard_finishable_branch",
             "_guard_branch_type",
-            "_guard_untracked_py_at_root",
+            "_guard_untracked_scratch_at_root",
             "_guard_leaked_repr",
             "_guard_nonempty_diff",
             "_guard_conflict_markers",

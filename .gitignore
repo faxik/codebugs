@@ -11,3 +11,12 @@ build/
 # `.claude/worktrees/` is the legacy location and still resolves.
 .worktrees/
 .claude/worktrees/
+
+# Scratch temp files at the repo root (CB-83). This is the PREVENTION half:
+# `git add -A` cannot pick up an ignored path, and that is the door a stray
+# `tmpy_efkp4t` actually came through — it was committed by hand long before
+# worktree-finish.sh's guard would have looked at it. The guard is the alarm
+# for the auto-stage path; fixing only the guard would have left this open.
+# `tmp*` is the tempfile.mkstemp default prefix; the other is fsio.atomic_write's.
+/tmp[A-Za-z0-9_]*
+/.codebugs-export-*
