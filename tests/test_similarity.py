@@ -437,3 +437,26 @@ class TestSurfaces:
         assert report["families"] == []  # forwarded here too
         wide = captured["similarity_report"](threshold=0.9, category="gate")
         assert wide["rows_considered"] == 1  # category forwarded
+
+
+class TestMemoEvictionRace:
+    def test_eviction_tolerates_concurrently_popped_key(self, monkeypatch):
+        """The eviction's next(iter)/pop pair is not atomic under the anyio
+        threadpool of external readers (codashboard): two threads can pick the
+        same oldest key and the loser must no-op, not KeyError. Deterministic
+        loser simulation — the iterator serves a key that is already gone, the
+        exact state the losing thread observes."""
+
+        from codebugs import similarity
+
+        class StaleIterDict(dict):
+            def __iter__(self):
+                return iter(["ghost-key-already-popped", *list(self.keys())])
+
+        memo = StaleIterDict()
+        for i in range(4):
+            memo[(f"seed {i}", "")] = ("norm", frozenset())
+        monkeypatch.setattr(similarity, "_MEMO_CAP", 4)
+        monkeypatch.setattr(similarity, "_norm_memo", memo)
+        row = {"description": "fresh row text body", "meta_json": None}
+        similarity._row_norm_tri(row)  # must not raise KeyError
