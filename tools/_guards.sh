@@ -433,16 +433,25 @@ _guard_enforcement_armed() {
         "${hook_dir}/pre-commit" "${repo_root}/tools/pre-commit-hook.sh" "pre-commit")"
     [[ -n "${_p}" ]] && problems="${problems}${_p}"$'\n'
 
-    # pre-merge-commit is checked ONLY ONCE ITS SOURCE EXISTS ON MAIN, and that
-    # conditional is the bootstrap, not laziness (CB-57, same shape as CB-50).
-    # This guard runs BEFORE the merge that first brings
-    # tools/pre-merge-commit-hook.sh onto main, so demanding the hook
-    # unconditionally would make the commit that introduces it unlandable by the
-    # very harness it extends. Once it is on main the check is unconditional,
-    # and the next finish refuses until install-hooks.sh has been re-run — which
-    # is correct: a clone armed before CB-57 is genuinely missing enforcement.
+    # pre-merge-commit needs a bootstrap, because this guard runs BEFORE the
+    # merge that first brings tools/pre-merge-commit-hook.sh onto main —
+    # demanding the hook unconditionally would make the commit introducing it
+    # unlandable by the very harness it extends (CB-57, same shape as CB-50).
+    #
+    # THE CONDITION IS MONOTONIC ON PURPOSE, and the obvious version was a real
+    # defect: gating on "does the file exist" meant a single `rm
+    # tools/pre-merge-commit-hook.sh` both dangled the installed hook (git skips
+    # a dangling hook silently) AND made this guard skip the check and return 0
+    # — a permanent, flagless disarm, reproduced end to end in adversarial
+    # review. Gating on whether the PATH HAS HISTORY on main cannot be undone by
+    # deleting the file: history only grows, so once CB-57 has landed the check
+    # is permanent, and a missing source then reports as "cannot verify the hook
+    # identity" instead of vanishing.
     local merge_hook_src="${repo_root}/tools/pre-merge-commit-hook.sh"
-    if [[ -e "${merge_hook_src}" ]]; then
+    local merge_hook_known
+    merge_hook_known=$(git -C "${repo_root}" log -1 --format=%H main \
+        -- tools/pre-merge-commit-hook.sh 2>/dev/null || true)
+    if [[ -n "${merge_hook_known}" || -e "${merge_hook_src}" ]]; then
         _p="$(_hook_problems \
             "${hook_dir}/pre-merge-commit" "${merge_hook_src}" "pre-merge-commit")"
         [[ -n "${_p}" ]] && problems="${problems}${_p}"$'\n'

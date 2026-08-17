@@ -1,0 +1,38 @@
+# Lint and tests (CB-59's other half: the repo had no CI at all, so nothing but
+# a local run ever proved the suite green).
+#
+# THIS is the job to mark as a required status check on pull requests. It runs
+# on `pull_request` with no `if:` guard, so it genuinely executes and can
+# genuinely fail there. Its sibling workflow, main-invariants.yml, deliberately
+# does NOT subscribe to `pull_request`: a job skipped by an `if:` is reported as
+# PASSING for required-check purposes, so requiring it would have produced a
+# gate that can never fail on the path where it is evaluated.
+
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Lint
+        # Pinned: CLAUDE.md records that ruff 0.16.x flags the whole repo, so an
+        # unpinned CI lint would go red on a release nobody here made.
+        # `ruff format` is deliberately NOT a gate — much of the existing tree is
+        # non-conformant to it and gating would refuse every change.
+        run: uvx ruff@0.15.7 check src/ tests/
+
+      - name: Tests
+        run: uv run --extra dev python -m pytest tests/ -q

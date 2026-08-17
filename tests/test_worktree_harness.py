@@ -459,13 +459,44 @@ class TestEnforcementArmed:
         This guard runs BEFORE the merge that first brings
         tools/pre-merge-commit-hook.sh onto main. Demanding the hook
         unconditionally would make the commit that introduces it unlandable by
-        the harness it extends — the CB-50 bootstrap repeating. So the check is
-        conditional on the source existing, and this pins that a repo without
-        the source still passes.
+        the harness it extends — the CB-50 bootstrap repeating. So a repo where
+        the path has never existed and has no history still passes.
+
+        Read this together with the test below: the condition is MONOTONIC, and
+        an earlier version of this test pinned a hole open instead.
         """
         self._arm(repo)
         assert not (repo / "tools" / "pre-merge-commit-hook.sh").exists()
         assert run_guard("_guard_enforcement_armed", str(repo)).returncode == 0
+
+    def test_deleting_the_merge_hook_source_does_not_disarm_the_check(self, repo: Path) -> None:
+        """The disarm path adversarial review reproduced end to end.
+
+        The first version gated on "does tools/pre-merge-commit-hook.sh exist".
+        A single `rm` then did two things at once: dangled
+        .git/hooks/pre-merge-commit (git skips a dangling hook silently) AND
+        made this guard skip the check and return 0. Permanent, flagless, and
+        landable on a perfectly typed branch — the exact silent-skip shape
+        _guards.sh says three times that it was hardened against.
+
+        The condition is now whether the PATH HAS HISTORY on main, which cannot
+        be undone by deleting the file. Deletion becomes a reported problem
+        ("cannot verify the hook identity"), not a vanishing check.
+        """
+        self._arm(repo)
+        self._arm_merge_hook(repo)
+        git(repo, "add", "-A")
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "--no-verify", "-m", "land the merge hook"],
+            check=True,
+            capture_output=True,
+        )
+        assert run_guard("_guard_enforcement_armed", str(repo)).returncode == 0
+
+        (repo / "tools" / "pre-merge-commit-hook.sh").unlink()
+        result = run_guard("_guard_enforcement_armed", str(repo))
+        assert result.returncode == 12, "deleting the hook source silently disarmed the check"
+        assert "pre-merge-commit" in result.stderr
 
     def test_impostor_merge_hook_refused(self, repo: Path) -> None:
         """A regular file at the path is not evidence it is THIS hook.
@@ -634,21 +665,72 @@ class TestPreMergeCommitHook:
         git(repo, "checkout", "-q", "fix/cb-57-work")
         assert self._merge(repo, "main").returncode == 0
 
-    def test_pull_shaped_merge_of_main_onto_main_allowed(self, repo: Path) -> None:
-        """`main` is an accepted name: that is a pull, not a landing.
+    @staticmethod
+    def _with_upstream(repo: Path, tmp_path: Path) -> None:
+        """Give `repo` a real origin with main ahead of it, ready to pull."""
+        bare = tmp_path / "origin.git"
+        subprocess.run(
+            ["git", "init", "-q", "--bare", "-b", "main", str(bare)], check=True
+        )
+        git(repo, "remote", "add", "origin", str(bare))
+        git(repo, "push", "-q", "-u", "origin", "main")
+        clone = tmp_path / "other"
+        subprocess.run(["git", "clone", "-q", str(bare), str(clone)], check=True)
+        git(clone, "config", "user.email", "t@t")
+        git(clone, "config", "user.name", "t")
+        (clone / "upstream.txt").write_text("upstream\n")
+        git(clone, "add", "upstream.txt")
+        git(clone, "commit", "-q", "-m", "upstream work")
+        git(clone, "push", "-q", "origin", "main")
 
-        Refusing it would break `git pull` under merge.ff=false, which turns
-        every would-be fast-forward into a merge commit.
+    def test_a_real_git_pull_is_allowed(self, repo: Path, tmp_path: Path) -> None:
+        """The FALSE REFUSAL adversarial review found, now pinned both ways.
+
+        The previous test here ran `git merge origin/main` and claimed in its
+        docstring to cover `git pull`. It does not: that sets
+        GITHEAD_<sha>=origin/main and takes an entirely different branch of the
+        hook. A real pull hands merge the raw OID from FETCH_HEAD, so
+        GITHEAD_<sha>=<sha>, `rev-parse --symbolic-full-name` resolves nothing,
+        and the first version of this hook refused every pull — while its own
+        comment and CLAUDE.md both promised pulls were allowed. Measured on git
+        2.53, not assumed.
         """
         self._install(repo)
-        git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
-        git(repo, "checkout", "-q", "-b", "fix/cb-57-upstream")
-        (repo / "work.txt").write_text("upstream\n")
-        git(repo, "add", "work.txt")
-        git(repo, "commit", "-q", "-m", "upstream work")
-        git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
-        git(repo, "checkout", "-q", "main")
+        self._with_upstream(repo, tmp_path)
+        (repo / "local.txt").write_text("local\n")
+        git(repo, "add", "local.txt")
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "--no-verify", "-q", "-m", "local"], check=True
+        )
+        result = subprocess.run(
+            ["git", "-C", str(repo), "-c", "pull.rebase=false", "pull", "--no-edit"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, f"git pull refused on main: {result.stderr}"
+
+    def test_merge_of_a_remote_tracking_main_allowed(self, repo: Path, tmp_path: Path) -> None:
+        """The named-ref twin of the pull above: refs/remotes/origin/main."""
+        self._install(repo)
+        self._with_upstream(repo, tmp_path)
+        git(repo, "fetch", "-q", "origin")
         assert self._merge(repo, "origin/main").returncode == 0
+
+    def test_unconfigured_remote_namespace_is_not_stripped_to_main(
+        self, repo: Path
+    ) -> None:
+        """`refs/remotes/junk/main` must not collapse to the accepted `main`.
+
+        A blind `${rest#*/}` strips whatever sits before the first slash, so any
+        ref anyone can write by hand launders arbitrary content onto main.
+        Reproduced in adversarial review. Only a CONFIGURED remote's name is
+        stripped now.
+        """
+        self._install(repo)
+        self._branch_with_work(repo, "worktree-untyped")
+        git(repo, "update-ref", "refs/remotes/junk/main", "worktree-untyped")
+        result = self._merge(repo, "junk/main")
+        assert result.returncode != 0, "an invented remote namespace laundered an untyped branch"
 
     def test_unattributable_head_refused(self, repo: Path) -> None:
         """FAIL CLOSED: a bare SHA merged onto main has no provenance.
@@ -662,7 +744,7 @@ class TestPreMergeCommitHook:
         git(repo, "branch", "-D", "fix/cb-57-temp")
         result = self._merge(repo, sha)
         assert result.returncode != 0
-        assert "does not resolve to a branch" in result.stderr
+        assert "resolves to no branch at all" in result.stderr
 
     def test_premise_merge_head_is_absent_on_a_clean_merge(self, repo: Path) -> None:
         """PIN THE PREMISE. CB-57's proposed mechanism does not exist.
@@ -703,6 +785,46 @@ class TestPreMergeCommitHook:
         sha = git(repo, "rev-parse", "fix/cb-57-probe")
         stderr = self._merge(repo, "fix/cb-57-probe").stderr
         assert f"GITHEAD_{sha}=fix/cb-57-probe" in stderr
+
+    def test_a_typed_alias_at_the_same_commit_cannot_launder_the_refusal(
+        self, repo: Path
+    ) -> None:
+        """The three-command bypass adversarial review reproduced.
+
+        When this hook refuses, git does NOT abort — it leaves MERGE_HEAD
+        written and says "use 'git commit' to complete the merge", which routes
+        the operator straight into pre-commit. While pre-commit accepted a head
+        if ANY ref at that SHA was typed, the whole gate came apart:
+
+            git merge untyped --no-ff     # refused here, merge left in progress
+            git branch fix/tmp untyped    # a typed ref at the same commit
+            git commit --no-edit          # -> landed, no --no-verify typed
+
+        The shared predicate now requires EVERY ref at an unnamed head to
+        qualify, so the untyped branch still disqualifies it.
+        """
+        self._install(repo)
+        hooks = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")) / "hooks"
+        shutil.copy(REPO_ROOT / "tools" / "pre-commit-hook.sh", hooks / "pre-commit")
+        (hooks / "pre-commit").chmod(0o755)
+
+        git(repo, "checkout", "-q", "-b", "worktree-untyped")
+        (repo / "work.txt").write_text("work\n")
+        git(repo, "add", "work.txt")
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "--no-verify", "-q", "-m", "work"], check=True
+        )
+        git(repo, "checkout", "-q", "main")
+
+        assert self._merge(repo, "worktree-untyped").returncode != 0
+        git(repo, "branch", "fix/tmp", "worktree-untyped")
+        result = subprocess.run(
+            ["git", "-C", str(repo), "commit", "--no-edit"], capture_output=True, text=True
+        )
+        assert result.returncode != 0, (
+            "a typed branch created at the same commit laundered an untyped merge"
+        )
+        assert git(repo, "log", "-1", "--format=%s") == "seed", "the merge landed anyway"
 
     def test_no_verify_is_the_documented_escape(self, repo: Path) -> None:
         """Same contract as pre-commit: the hook stops the accident.
@@ -823,14 +945,41 @@ class TestHarnessIntegrity:
         ):
             assert decl in (REPO_ROOT / rel).read_text(), f"{rel} drifted from the others"
 
-    def test_the_three_branch_predicates_are_character_identical(self) -> None:
+    @staticmethod
+    def _shared_gate_block(rel: str) -> str:
+        """The merge-gate predicate as it appears in one hook, verbatim."""
+        text = (REPO_ROOT / rel).read_text()
+        start = text.index("# ---8<--- SHARED MERGE-GATE PREDICATE")
+        end = text.index("# ---8<--- END SHARED MERGE-GATE PREDICATE")
+        return text[start:end]
+
+    def test_the_shared_merge_gate_block_is_byte_identical_in_both_hooks(self) -> None:
+        """The two hooks must not merely 'agree' — they must be the same text.
+
+        This replaces a weaker test that grepped each file for the substring
+        `/[A-Za-z0-9._-]+$`. Adversarial review showed that was insufficient by
+        rewriting the merge hook's check as a prefix test while leaving the
+        regex ASSIGNMENT in place: the grep still found the substring and the
+        test stayed green.
+
+        It matters because the two hooks cover disjoint halves of one rule and
+        git routes an operator from one to the other — when pre-merge-commit
+        refuses, the merge is left in progress and `git commit` goes to
+        pre-commit. Review reproduced a three-command bypass off exactly that
+        seam while the predicates differed.
+        """
+        a = self._shared_gate_block("tools/pre-merge-commit-hook.sh")
+        b = self._shared_gate_block("tools/pre-commit-hook.sh")
+        assert a == b, "the shared merge-gate predicate has drifted between the two hooks"
+        assert "_head_is_acceptable()" in a, "the block no longer defines the predicate"
+
+    def test_all_three_branch_predicates_use_the_full_shape(self) -> None:
         """Same types is NOT the same predicate, and the difference has teeth.
 
         A prefix test (`${branch} == fix/*`) accepts `fix/a/b`, which the
-        full-shape regex refuses. If the hooks and the guard disagreed on the
-        SHAPE, a session could commit for hours behind a permissive hook and be
-        turned away at the finish — or, worse now, pass the finish guard and be
-        refused by the merge hook after the tests have already run.
+        full-shape regex refuses. `_guards.sh` is not covered by the
+        byte-identical test above (it is a library, not a hook), so its shape is
+        pinned here — and behaviourally by TestBranchType.
         """
         shape = "/[A-Za-z0-9._-]+$"
         for rel in (
@@ -939,6 +1088,79 @@ class TestHarnessIntegrity:
         )
         assert result.returncode == 0, (
             f"workflow baseline {match.group(1)} is not a commit in this repo"
+        )
+
+    def test_invariants_job_is_not_subscribed_to_pull_request(self) -> None:
+        """A skipped job is reported as PASSING for required status checks.
+
+        The first draft ran this job `on: pull_request` and guarded it with
+        `if: github.event_name != 'pull_request'`. Marking it required would
+        then have produced a check that can never fail on the only path where
+        branch protection evaluates it — the exact 'gate that cannot fire'
+        failure this change exists to remove, reintroduced inside its own fix.
+        Both reviewers flagged it independently.
+
+        The repair is structural: do not subscribe to the event at all, so the
+        job cannot be chosen as a vacuous required check. The PR-time required
+        check is ci.yml's `tests` job, which has no `if:`.
+        """
+        def code(path: Path) -> str:
+            """The file with comment lines stripped.
+
+            Comments must not count: these workflows explain the defect at
+            length and name the event a dozen times, so a naive substring test
+            fails on its own documentation.
+            """
+            return "\n".join(
+                ln for ln in path.read_text().splitlines() if not ln.lstrip().startswith("#")
+            )
+
+        def triggers(path: Path) -> str:
+            return code(path).split("jobs:", 1)[0]
+
+        wf = REPO_ROOT / ".github" / "workflows" / "main-invariants.yml"
+        assert "pull_request" not in triggers(wf), (
+            "main-invariants subscribes to pull_request; a skipped job passes a required check"
+        )
+        assert "if: github.event_name" not in code(wf), (
+            "the job is guarded by an event `if:` again — that is the vacuous-check shape"
+        )
+
+        ci = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        assert ci.exists(), "the PR-time check (ci.yml) is missing"
+        assert "pull_request" in triggers(ci), (
+            "ci.yml must run on pull_request — it is the check meant to be required"
+        )
+
+    def test_ci_and_hook_both_defeat_rename_detection(self) -> None:
+        """`--name-only` prints only the DESTINATION path for a rename.
+
+        So `git mv src/keep.py .claude/plans/keep.md` presents one allowlisted
+        path, passes both the hook and the CI job, and quietly deletes source
+        from main. Reproduced in adversarial review against both readers.
+        `--no-renames` makes git report the delete and the add separately.
+        """
+        wf = (REPO_ROOT / ".github" / "workflows" / "main-invariants.yml").read_text()
+        assert "--no-renames" in wf, "CI job still collapses renames to the destination path"
+        hook = (REPO_ROOT / "tools" / "pre-commit-hook.sh").read_text()
+        assert "git diff --cached --no-renames --name-only" in hook, (
+            "pre-commit still collapses renames to the destination path"
+        )
+
+    def test_installer_sets_merge_ff_before_anything_that_can_fail(self) -> None:
+        """merge.ff=false is the one mechanism no hook can replace.
+
+        With it last, a clone missing tools/pre-merge-commit-hook.sh (an older
+        main, a `git checkout <old-commit>`, the CB-57 bootstrap window) armed
+        pre-commit, printed its tick, then exited 1 at the merge-hook step —
+        leaving merge.ff UNSET. The installer could skip the irreplaceable step.
+        Reproduced in adversarial review. A step that cannot fail goes first.
+        """
+        src = (REPO_ROOT / "tools" / "install-hooks.sh").read_text()
+        ff = src.index("config merge.ff false")
+        first_exit = src.index("exit 1")
+        assert ff < first_exit, (
+            "install-hooks.sh can exit before setting merge.ff=false"
         )
 
 
