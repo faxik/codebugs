@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import stat
 import subprocess
 import sys
 from typing import Any, NamedTuple
@@ -100,7 +101,28 @@ def file_status(
         }
 
     commit_count = len(log_output.splitlines())
-    file_exists = os.path.isfile(os.path.join(cwd, file_path))
+
+    # os.stat in a guard, NOT os.path.isfile (CB-85). isfile returns False on
+    # ANY OSError from the underlying stat — an unreadable parent directory,
+    # ELOOP, ENAMETOOLONG, a stale NFS handle — and a False here skips the
+    # `modified` branch, falls through the rename lookup, and reports a
+    # confident `deleted`: a positive claim about the file derived from a
+    # question that was never answered. Reproduced: chmod 000 on the parent
+    # directory turns `modified` into `deleted` for a file that is still there.
+    #
+    # This is the SECOND route to that same wrong answer. CB-79 closed the
+    # first one line below, where a subprocess failure was swallowed into an
+    # empty rename result. Same "guard reporting clean because it could not
+    # look" shape, different mechanism — which is why it needed its own card.
+    try:
+        file_exists = stat.S_ISREG(os.stat(os.path.join(cwd, file_path)).st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        # Genuinely absent — including a path component that is not a
+        # directory, which means the target cannot exist. Today's answer is
+        # right, so fall through to the rename/deleted branches unchanged.
+        file_exists = False
+    except OSError:
+        return {"file_status": "unknown", "reason": "stat_error"}
 
     if file_exists:
         s = "commit" if commit_count == 1 else "commits"
