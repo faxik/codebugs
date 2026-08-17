@@ -1597,3 +1597,54 @@ class TestMetaValueRequiresMetaKey:
         )
         assert findings.query_findings(conn, meta_key="k", meta_value="v")["total"] == 1
         assert findings.query_findings(conn, meta_key="k", meta_value="other")["total"] == 0
+
+
+class TestImportCsvFileIOErrorContract:
+    """CB-71 sibling sweep. `_cmd_import_csv` performed its `open()` outside any
+    arm, so an unreadable path escaped as a raw traceback.
+
+    The fix HOISTS the `open` out of its `with` statement and guards that alone.
+    That shape is mandatory, not stylistic: `with open(args.file, newline="") as
+    f:` owned the entire import loop, so the obvious `try: with open(...):
+    <loop>` would have placed both already-committed rows and the loop's own
+    three `print(..., file=sys.stderr)` calls inside an `except OSError` — which
+    would report a partially-landed import as bad input, the CB-15/CB-16 lie
+    this guard exists to avoid. A read failure MID-iteration therefore still
+    crashes, deliberately; what to report when rows are already committed is a
+    semantics decision tracked as CB-77.
+
+    Non-vacuity: the unfixed tree already exits 1 with the path inside its
+    traceback, so `"Traceback" not in stderr` is the only discriminating
+    assertion below.
+    """
+
+    def _run(self, tmp_project, *args):
+        return subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", *args],
+            capture_output=True, text=True, cwd=tmp_project,
+            env={**os.environ, "PYTHONPATH": os.path.join(os.getcwd(), "src")},
+        )
+
+    def test_missing_csv_path_is_a_clean_error_not_a_traceback(self, tmp_project):
+        r = self._run(tmp_project, "import-csv", "missing.csv")
+        assert "Traceback" not in r.stderr, r.stderr
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "missing.csv" in r.stderr, r.stderr
+
+    def test_a_directory_path_is_a_clean_error_not_a_traceback(self, tmp_project, tmp_path):
+        d = tmp_path / "adir"
+        d.mkdir()
+        r = self._run(tmp_project, "import-csv", str(d))
+        assert "Traceback" not in r.stderr, r.stderr
+        assert r.returncode == 1, r.stdout + r.stderr
+
+    def test_a_readable_csv_still_imports(self, tmp_project, tmp_path):
+        """The normal condition: hoisting the open out of the `with` must not
+        change what the loop does, and the handle must still be closed by it."""
+        csv_file = tmp_path / "in.csv"
+        csv_file.write_text(
+            "severity,category,file,description\nhigh,bug,a.py,something broke\n"
+        )
+        r = self._run(tmp_project, "import-csv", str(csv_file))
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "Imported 1" in r.stdout, r.stdout

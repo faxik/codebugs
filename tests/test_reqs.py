@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import threading
 
@@ -919,3 +922,78 @@ class TestFalseyVocabularyFiltersDoNotDisableTheFilter:
         self._two(conn)
         assert reqs.query_requirements(conn, priority=empty)["total"] == 2
         assert reqs.query_requirements(conn, status=empty)["total"] == 2
+
+
+class TestReqsImportFileIOErrorContract:
+    """CB-71 sibling sweep. `_cmd_reqs_import` had NO try/except at ALL, so an
+    unreadable path escaped as a raw traceback from `import_markdown`'s
+    `open()`, and every exception also leaked the connection (there was no
+    `finally`). CLAUDE.md states both halves of the rule this violated: "CLI
+    handlers catch domain exceptions and print to stderr with sys.exit(1)", and
+    "a handler that catches nothing violates it just as surely as one that
+    catches in the wrong order".
+
+    This is the FIRST subprocess-based CLI test in this file — before it,
+    tests/test_reqs.py exercised only in-process domain functions, which cannot
+    observe a handler's arms or its stderr at all. Non-vacuity: exit 1 and "the
+    path appears on stderr" are both already true of the unfixed tree, so
+    `"Traceback" not in stderr` is the only assertion here that discriminates.
+    """
+
+    @staticmethod
+    def _cli(project, *args):
+        return subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", *args],
+            capture_output=True, text=True, cwd=str(project),
+            env={**os.environ, "PYTHONPATH": os.path.join(os.getcwd(), "src")},
+        )
+
+    def test_missing_markdown_path_is_a_clean_error_not_a_traceback(self, tmp_path):
+        db.init_project(str(tmp_path))
+        r = self._cli(tmp_path, "reqs-import", "missing.md")
+        assert "Traceback" not in r.stderr, r.stderr
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "missing.md" in r.stderr, r.stderr
+
+    def test_a_readable_file_still_imports(self, tmp_path):
+        """The guard must not swallow the success path — Phase 7 requires the
+        normal condition as well as the failure."""
+        db.init_project(str(tmp_path))
+        (tmp_path / "REQ.md").write_text(
+            "### 1.1 Search (FR-001)\n\n"
+            "| ID | Requirement | Priority | Status |\n"
+            "|---|---|---|---|\n"
+            "| FR-001 | Search works | Must | Planned |\n"
+        )
+        r = self._cli(tmp_path, "reqs-import", "REQ.md")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "Imported 1 requirements" in r.stdout, r.stdout
+
+
+class TestImportMarkdownReadIsEagerPremise:
+    """A PREMISE PIN, not a behaviour test — said plainly so a reader cannot
+    mistake it for one.
+
+    `_cmd_reqs_import` guards the WHOLE `import_markdown(conn, args.file)` call
+    with `except OSError`, which is only safe because that function materializes
+    the file eagerly (`f.readlines()`) before it writes any row and before it
+    commits. Convert that to lazy iteration — the natural fix if REQUIREMENTS.md
+    ever grows too large to hold in memory — and an OSError raised by a late
+    read would land AFTER committed rows, where the handler's arm would report
+    it as bad input: the CB-15/CB-16 success-shaped lie, arriving silently with
+    no other test failing.
+
+    So this pins the premise instead of the consequence, in the style of
+    tests/test_worktree_harness.py's `test_premise_*` cases. If it goes red, the
+    guard in `_cmd_reqs_import` must be narrowed (read in the handler, pass the
+    materialized lines to the domain) before the lazy read lands.
+    """
+
+    def test_the_whole_file_is_read_before_any_write(self):
+        src = inspect.getsource(reqs.import_markdown)
+        assert "readlines()" in src, (
+            "import_markdown no longer reads the file eagerly — _cmd_reqs_import's "
+            "whole-call `except OSError` guard is no longer safe and must be narrowed"
+        )
+        # The read must precede the first write, not merely exist.
+        assert src.index("readlines()") < src.index("INSERT"), src

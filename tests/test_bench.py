@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -557,3 +558,102 @@ class TestExclusiveArguments:
         assert out.returncode == 1
         assert "Provide" in (out.stdout + out.stderr), out.stdout + out.stderr
         assert "Traceback" not in out.stderr, out.stderr
+
+
+class TestFileIOErrorContract:
+    """CB-71. `bench-import` had TWO defects in the same five lines.
+
+    (1) The file read sat inside a `try` whose only arm was `except (ValueError,
+    json.JSONDecodeError)`, and a read raises neither — so an unreadable path
+    escaped as a raw traceback.
+
+    (2) That same `try` also spanned the SUCCESS print, which runs after
+    import_csv/import_json commit. So a post-commit failure from that statement
+    was caught by the input-validation arm and reported as one tidy line at exit
+    1 for a run that had already landed — the CB-15/CB-16 success-shaped lie,
+    live, in the code CB-71 was filed against.
+
+    NON-VACUITY, which is the whole risk here. Exit code 1 and "the path appears
+    on stderr" are BOTH satisfied by the unfixed tree (an uncaught exception
+    already exits 1 and its traceback already contains the path), so neither
+    discriminates and both are kept only to pin the contract jointly. The real
+    discriminators are opposite in sign: `"Traceback" not in stderr` for the read
+    guard, and `"Traceback" IN stderr` for the post-commit case — the latter
+    mirroring TestRetriageCliContract's stored-corruption test in
+    tests/test_findings.py, this repo's template for "a failure raised after the
+    write must not be disguised as an input error".
+    """
+
+    @staticmethod
+    def _cli(project, *args):
+        return subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", *args],
+            capture_output=True, text=True, cwd=str(project),
+            env={**os.environ, "PYTHONPATH": os.path.join(os.getcwd(), "src")},
+        )
+
+    def test_missing_path_is_a_clean_error_not_a_traceback(self, tmp_path):
+        db.init_project(str(tmp_path))
+        r = self._cli(tmp_path, "bench-import", "missing.csv", "-b", "Q")
+        assert "Traceback" not in r.stderr, r.stderr
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "missing.csv" in r.stderr, r.stderr
+
+    def test_a_directory_path_is_a_clean_error_not_a_traceback(self, tmp_path):
+        """IsADirectoryError, covered by the same guard and otherwise unpinned."""
+        db.init_project(str(tmp_path))
+        (tmp_path / "adir").mkdir()
+        r = self._cli(tmp_path, "bench-import", "adir", "-b", "Q")
+        assert "Traceback" not in r.stderr, r.stderr
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "adir" in r.stderr, r.stderr
+
+    def test_a_post_commit_output_failure_is_not_laundered_into_an_input_error(self, tmp_path):
+        """The load-bearing half: every test above passes IDENTICALLY for the
+        localized guard this fix uses and for the handler-wide `except OSError`
+        it rejects, so none of them can fail when the rule is broken. This one
+        can.
+
+        Mechanism, measured rather than assumed: closing the `sys.stdout` OBJECT
+        makes `print` raise `ValueError: I/O operation on closed file.`, which is
+        exactly what the pre-existing arm catches. (Closing fd 1 instead raises
+        OSError, which that arm never caught, and under block buffering the
+        failure surfaces at interpreter shutdown outside every handler — that
+        wider family is CB-78.)
+
+        Against the unfixed tree this run printed the single line "I/O operation
+        on closed file." with exit 1 while the BE run was committed and visible
+        in bench-list. Verified red on bc3f67e before the fix landed.
+        """
+        db.init_project(str(tmp_path))
+        (tmp_path / "good.csv").write_text("label,metric\na,1\n")
+        script = (
+            "import sys\n"
+            "sys.argv = ['codebugs', 'bench-import', 'good.csv', '-b', 'LANDED']\n"
+            "from codebugs.cli import main\n"
+            "sys.stdout.close()\n"
+            "main()\n"
+        )
+        r = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, cwd=str(tmp_path),
+            env={**os.environ, "PYTHONPATH": os.path.join(os.getcwd(), "src")},
+        )
+
+        # The premise: the import really did commit before the output failed.
+        c = db.connect(str(tmp_path))
+        try:
+            landed = c.execute(
+                "SELECT COUNT(*) AS n FROM codebench_runs WHERE benchmark = 'LANDED'"
+            ).fetchone()["n"]
+        finally:
+            c.close()
+        assert landed == 1, "premise broken: nothing committed, so there is no lie to detect"
+
+        # The discriminator: a committed write whose output failed must CRASH,
+        # not come back as a tidy input error.
+        assert "Traceback" in r.stderr, (
+            "a post-commit output failure must not be disguised as an input error; "
+            f"stderr was {r.stderr!r}"
+        )
+        assert r.stderr.strip() != "I/O operation on closed file.", r.stderr

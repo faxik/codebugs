@@ -1019,8 +1019,23 @@ def register_cli(sub, commands) -> None:
 
     def _cmd_reqs_import(args: argparse.Namespace) -> None:
         conn = db.connect()
-        result = import_markdown(conn, args.file)
-        conn.close()
+        try:
+            # An unreadable path escaped as a raw traceback here, and this handler
+            # had no arm at all (CB-71). Guarding the whole call is safe ONLY
+            # because import_markdown materializes the file eagerly —
+            # `f.readlines()` at reqs.py:537 — before it writes a single row or
+            # commits (reqs.py:606), so no OSError can arise after the write and
+            # be laundered into an input error. That premise is pinned by
+            # TestImportMarkdownReadIsEagerPremise; convert the read to lazy
+            # iteration and the suite goes red instead of this becoming the
+            # CB-15/CB-16 lie silently.
+            result = import_markdown(conn, args.file)
+        except OSError as e:
+            print(f"codebugs: {e}", file=sys.stderr)
+            sys.exit(1)
+        finally:
+            # Was absent: any exception leaked the connection.
+            conn.close()
         print(f"Imported {result['imported']} requirements, skipped {result['skipped']}.")
 
     def _cmd_reqs_export(args: argparse.Namespace) -> None:
