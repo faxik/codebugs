@@ -5,6 +5,7 @@ net change. Tracker: this repo's own `.codebugs/findings.db`, served by `mcp__co
 
 | Date | Focus | Cards | Disposition | Merge | Follow-ups |
 |---|---|---|---|---|---|
+| 2026-08-17 | `codebugs` (pure/simple/confident, "batch related") | CB-71 | **fixed, and the card's own prescribed fix was rejected by measurement** — three CLI handlers performed a file read that no arm covered, so `bench-import missing.csv -b Q` printed a raw traceback. `_cmd_bench_import` *had* a `try` whose only arm was `(ValueError, JSONDecodeError)`; `_cmd_reqs_import` had **no arm at all** and leaked its connection. The card asked for a handler-wide `except OSError`; that would have reported a **landed** import as bad input, because the success `print` runs after the commit and raises `BrokenPipeError` (an `OSError`) on a closed pipe — reproduced with the run visible in `bench-list` afterwards. Guard covers **exactly the read**; `_cmd_import_csv`'s `open` is hoisted out of its `with`, which owned the whole import loop. **The tree also fixed a LIVE instance of the hazard the card only theorised about**: the pre-existing arm spanned the success print, so a post-commit `ValueError` from a closed stdout came back as the single line `I/O operation on closed file.` at exit 1 with the run committed. The card had listed hoisting that print as a *considered-and-rejected alternative*; it is the fix | `82ef895` (`f86c286`, `19d5e95`) | filed CB-76 (exports + truncation), CB-77 (mid-loop read semantics), CB-78 (post-success output failure, POSIX decision at `cli.main`), CB-79 (non-file `OSError` sources); evidence appended to CB-55. **Scope cut from 5 handler edits to 3 by review** — the two export handlers went to CB-76 |
 | 2026-08-17 | `codebugs` (pure/simple/confident, "batch related") | CB-72 + CB-74 | **both fixed, one mechanism** — `import_json` checked that its argument was a non-empty list and nothing else, so two inputs walked past the module contract and out as stdlib exceptions: a payload outside `str\|bytes\|bytearray\|list` as `TypeError` (CB-72, in-process only), and an array whose *elements* are not objects as `AttributeError` from `data[0].keys()` (CB-74, **MCP-reachable** — wire type is `str \| list \| None`, and the SDK also pre-parses a wire string `"[1,2]"` into a list). CB-74 was filed by me during the sibling sweep and is the more serious half. Guard is a **positive shape check before `data[0]`, never an exception rewrap** — a blanket rewrap would also convert a post-commit failure inside `import_csv` into `ValueError`, which the CLI arm reports as bad input for a write that landed (CB-15/CB-16). **Every** element checked: `[{a,b}, 5]` never reached `data[0]` at all, it died later in `csv.DictWriter`. `bytes`/`bytearray` deliberately kept working (annotation widened) — refusing what imports today would be a behaviour change wearing a bugfix costume | `6bfde7a` (`bae08df`, `43f4d4b`) | filed CB-75 (`import_csv`'s `TypeError` twin — different accepted-type condition in a different function, so its own tree). **CB-71 returned to `open`** with full evidence: both reviewers ruled the 3-card cluster illegitimate. Next candidate is CB-71, and its card now carries the design work |
 | 2026-08-17 | `codebugs` (pure/simple/confident) | CB-70 | **fixed** — the MCP wire-schema gate could not pass on 3.11/3.12, which `requires-python` promises: the golden was built on 3.13, which dedents docstrings at compile time, so 64 of 68 tools read as "drifted" and the message told the reader to regenerate — which would have broken it the other way. Replicated 3.13's own dedent instead of `inspect.cleandoc` (measured: cleandoc rewrites 61/68 entries and permanently blinds the gate to boundary whitespace), so **the golden was not modified at all**. Also collapsed the duplicated dump logic into one shared collector and pinned the golden as a fixed point | `59885ea` (`6d4ccc9`) | filed CB-73 (a 3.11/3.12-hosted server sends indented descriptions, which CommonMark renders as a code block for ~61 tools) — filed low, then **corrected to medium** when review showed my "cosmetic" framing was wrong. Both reviewers rejected revision 1 and converged on the same fix from different methods |
 | 2026-08-17 | `codebugs` (pure/simple/confident) | CB-67 | **fixed** — bench's "exactly one of two" contract lived only in the MCP wrappers, so both CLI handlers picked a winner where it says refuse (`bench-import a.csv --json-file b.json` imported b.json and discarded a.csv at exit 0; `bench-delete --run-id R --benchmark B` deleted R and ignored B), and `codebench_import` validated with `is not None` while dispatching with `if csv_data:`, leaking `TypeError` on `csv_data=""`. One structural helper, four call sites, each keeping its own notion of "supplied" | `1778db2` (`d4df261`) | filed CB-71 (uncaught `OSError` on an unreadable import path) and CB-72 (`import_json` `TypeError` leak) — both pre-existing neighbours, verified by running them, split off per the clustering rules. **Codex FAILED revision 1**: unifying "supplied" as `is not None` everywhere would have made five undeclared behavior changes and turned `bench-import ""` into a traceback — the redesign unifies the XOR *structure* only |
@@ -788,3 +789,65 @@ and it grew for the right reason: every new card is either a verified defect pop
 enumeration had missed, or a decision that was buried inside a card claiming to be a bug. That is
 the review machinery working, not noise. CB-36 (`high`) is the strongest next candidate and needs no
 decision.
+
+## 2026-08-17 — CB-71 (the card's own prescription was the bug, and my test plan could not see it)
+
+**Two reviewers, ten FATALs between them, and revision 1 did not survive.** An Opus adversary
+(5 FATAL / 5 SERIOUS / 4 WEAKNESS) and Codex/Sol (4 FATAL-equivalents) ran in parallel against the
+plan. Five findings were corroborated across both models, which is the number worth keeping: the
+4-edit ceiling breach, the findings connection leak, `tests/test_reqs.py` having no CLI harness at
+all, my sweep-completeness claim being false, and the `import_markdown` whole-call guard being safe
+only by accident. Corroborated across two model families is a different confidence class from one
+reviewer's opinion, and all five were conceded.
+
+**The finding that changed the design, and only one model found it.** The Opus adversary noticed that
+the pre-existing `except (ValueError, json.JSONDecodeError)` **spans the success `print`**, which runs
+after `import_csv` commits. So a post-commit `ValueError` from that statement was already being
+laundered into an input error — one tidy line, exit 1, write landed. My plan had spent twenty lines
+reasoning about exactly that failure mode *for `OSError`* and never noticed `ValueError` reaches the
+same statement through the same `try`. Worse, it explicitly **rejected** hoisting the print, which is
+the fix. Codex missed this entirely; it is the whole argument for cross-model review.
+
+**But the adversary's reproduction was wrong, and checking rather than accepting it mattered.** It
+claimed closing fd 1 gives `ValueError: I/O operation on closed file` through the arm. Measured: fd 1
+closed gives `OSError [Errno 9]` (a traceback — not laundered) or exit 120 at interpreter shutdown
+outside every handler. Only closing the `sys.stdout` **object** produces the `ValueError` the arm
+catches. So the defect is real and the reachability is narrower than reported — and establishing the
+exact mechanism is what gave the test a runnable reproducer. **Verify the finding, not just the
+verdict.**
+
+**The vacuity failure was structural, not a missing case.** `"Traceback" not in stderr` passes
+*identically* for the localized guard the plan mandates and for the handler-wide guard it calls a
+CB-15 lie. Every test I proposed was satisfied by the design I was rejecting — so nothing could fail
+when the load-bearing half broke. The repo already owned the template
+(`TestRetriageCliContract` asserts `"Traceback" **in** stderr` so stored corruption is not disguised
+as input error) and I had not looked for it. New spelling of a rule this repo keeps relearning:
+**a check that validates elements cannot validate their composition** — here, a set of tests that all
+agree with both designs cannot decide between them.
+
+**Four cards filed because the plan asserted bookkeeping that did not exist.** Revision 1 said the
+pipe defect was "**Filed as its own card**" and evidence was "appended to CB-55 instead". Neither was
+true — the adversary checked the tracker and found no CB-76 and CB-55 untouched with
+`updated_at == created_at`. That is the CB-48 shape (a document asserting the opposite of what is on
+disk) inside a plan whose subject is success-shaped lies. Now real: CB-76, CB-77, CB-78, CB-79, and a
+CB-55 append. **A deferral that is not written down is a dropped defect wearing a scope decision's
+hat.**
+
+**The ceiling is what governs a sibling sweep, not the predicate.** Both reviewers said five edits
+breach `bug-clustering.md`'s hard stop of 4. The adversary also confirmed the part I had right:
+unfiled sibling sites need no clustering predicate (`bugfix-loop` exempts sweep hits from the card
+count, and predicate 3 must not be invented here), so the *count* was the only live objection.
+Grouping the five "by file" into three rows was a regrouping, not a count — the plan's own next
+sentence ("each row lands and verifies alone") proved it. Split to the input side; exports to CB-76.
+
+**Found by the end-to-end diff read, missed by both reviewers and by 1280 tests:** the comment I
+added to `findings.py` cited the loop's stderr prints at `:1866/:1877/:1886`, and my own 14-line
+insertion had shifted them. A stale citation created by the very commit that added it. Fixed in
+`19d5e95`. The one-artifact read is worth its cost.
+
+**Net change: 1 closed (CB-71), 4 filed (CB-76, CB-77, CB-78, CB-79). Open went 32 → 35.** The queue
+grew, and the interpretation is the same as previous iterations: every new card is a *reproduced*
+defect that the previous enumeration could not see — two because the sweep's regex was the wrong
+shape, one because a deferral had never been written down, one because a semantics decision was
+hiding inside a card about identity. That is the review machinery working. It is not noise, and it is
+not padding: CB-78 is `medium` and names a real product decision.
