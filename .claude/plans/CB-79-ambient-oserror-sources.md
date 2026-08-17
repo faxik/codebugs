@@ -109,3 +109,53 @@ Scaled **down** from `adversarial-review-x2` to a single bounded Codex pass, del
 a strict superset with no decision in it, and the only judgement is Edit B's degrade-vs-raise split,
 which is one question. The standing rule's full two-attacker round is for a design surface; this
 adds none. Saying so because "I skipped review" must be a visible choice, not a silent one.
+
+---
+
+## Codex review (bounded pass) — FAIL_REVISE, three real findings, all taken
+
+1. **`provenance.py:88` was unsafe as widened.** An `OSError` during rename detection became
+   `rename_output = ""` and the fall-through then reported a confident **`deleted`**. Confirmed by
+   reading. Widening made it reachable through `PermissionError` and a deleted cwd, so the swallow
+   had to go — it returns `unknown/git_error` now. **A widening can expose a latent wrong answer;
+   that is not a reason to skip the widening, it is a reason to look below it.**
+2. **Resolve the requirements root LAZILY.** `root` is consumed only by the `tests` check
+   (`reqs.py:477`), so an eager `os.getcwd()` refused `checks=["ids"]` for a check that never needs
+   a directory. Verified by reading every use.
+3. **`_cmd_reqs_verify` needs the `JSONDecodeError`-before-`ValueError` ordering**, because
+   `verify_requirements` calls `db.row_to_dict` (confirmed: `reqs.py:446`), which raises it on a row
+   with malformed stored `tags`/`meta`. Without the ordering, a corrupt-data fault would be reported
+   as bad input — CB-15/CB-16.
+
+Codex also confirmed the five-tuple population is complete for shape A, and assessed the remaining
+`os.getcwd()` sites as already covered: `db.py:885` is guarded, `db.py:978` is caught by `cli.py:36`
+with no MCP route, and production callers supply `start` at `db.py:692`. Examined and left, not
+silently ignored.
+
+## Outcome
+
+6/6 mutations killed, each verified to have **landed** first — M1 initially matched twice (four
+byte-identical tuples in one file) and did not land, which is exactly the vacuous row that check
+exists to catch. 1337 tests, ruff clean.
+
+Both halves discriminate across trees: `reqs-verify` from a deleted cwd gives a traceback on main
+and one clean line here; a non-executable git raises `PermissionError` on main and returns
+`unknown` here.
+
+## Process note, recorded because it nearly cost real work
+
+Several relative-path shell commands ran against **main** rather than the worktree after the shell
+cwd reset — the trap `CLAUDE.md` documents at the finish step, hit here at the *editing* step. The
+appended test block landed in main's `tests/test_provenance.py`. Caught by reading `git status` in
+both trees, extracted, main restored, block re-appended in the worktree. Nothing was lost, and the
+three source edits had gone to the right tree because they used absolute paths through the `Edit`
+tool. **Use absolute paths for every file-touching shell command in a worktree session.**
+
+## Follow-ups filed rather than absorbed
+
+- `provenance.py`'s `os.path.isfile` converts stat/permission errors to `False`, which can still
+  route a readable-but-unstattable file to `deleted`. Adjacent to this card's shape, different
+  mechanism (Codex).
+- `db.py:1086`/`:1089`: create-mode `sqlite3.connect` and WAL init can raise a non-contention
+  `sqlite3.OperationalError` that the CLI re-raises as a traceback. Not an `OSError`, so outside
+  this card's sweep, but the same ambient-I/O family (Codex).

@@ -7,6 +7,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`OSError` no longer escapes from sources that are not file opens** (CB-79).
+  Two verified holes. `codebugs reqs-verify` printed a raw `FileNotFoundError`
+  traceback when run from a directory that had been deleted — not hypothetical,
+  since a long-lived MCP server outlives the git worktree it started in. And a
+  git binary that exists but is **not executable** raised `PermissionError`
+  straight out of `provenance.file_status`, because its guard caught only
+  `FileNotFoundError` — which covers *git is missing* and nothing else.
+
+  All five `subprocess` guards (four in `provenance.py`, one in
+  `db.git_rev_parse`) now catch `OSError`. That is a strict widening —
+  `FileNotFoundError` is an `OSError`, so nothing that was handled stops being
+  handled — and `subprocess.SubprocessError` stays in each tuple because it is
+  *not* an `OSError` subclass, so dropping it would let `CalledProcessError` and
+  `TimeoutExpired` escape.
+
+  **A latent wrong answer fell out of doing this and was fixed too:** the rename
+  lookup in `file_status` used to swallow its own failure into an empty result,
+  and the code below then reported the file as **`deleted`** — stating as fact
+  something it had failed to check. It now reports `unknown`.
+
+  Behaviour to know about: `verify_requirements` resolves the working directory
+  **lazily**, only for the `tests` check that actually uses it, so `checks=["ids"]`
+  and `checks=["status"]` work from a deleted cwd; the `tests` check raises a
+  clear error instead. `provenance` degrades to its existing `unknown` vocabulary
+  rather than raising, because that is already what it does when git cannot be
+  consulted.
 - **An export that fails no longer destroys the export it was replacing**
   (CB-76). `codebugs export-csv` and `codebugs reqs-export` wrote through a bare
   `open(path, "w")` with no error arm, so an unwritable path printed a raw
