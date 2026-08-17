@@ -1,0 +1,140 @@
+# Server-side audit of main's history (CB-59).
+#
+# The worktree harness in tools/ is CLIENT-SIDE and PER-CLONE: hooks and
+# `merge.ff` cannot be committed, so a fresh clone has zero enforcement until
+# someone runs tools/install-hooks.sh, and `git push`, `git rebase`,
+# `git cherry-pick`, `git revert`, `git am`, `git reset --hard` and
+# `core.hooksPath` all move or publish main without passing any of it.
+#
+# WHAT THIS CATCHES: a commit on main's FIRST-PARENT line that is NOT a merge
+# and touches anything outside `.claude/plans/*.md` — i.e. authored directly on
+# main, or flattened onto it by rebase / cherry-pick / revert / am / a plain
+# `git commit --amend`. None of those runs a hook on the resulting main.
+#
+# ---------------------------------------------------------------------------
+# WHAT IT DOES NOT CATCH. Stated at length because an earlier draft of this file
+# and of CLAUDE.md claimed it caught "every bypass the local harness cannot
+# see", and adversarial review refuted that in three ways:
+#
+#   1. ANYTHING MERGE-SHAPED. `--no-merges` excludes merge commits by
+#      construction, so `git commit --amend` ON A MERGE COMMIT, `git rebase
+#      --rebase-merges`, and a force-push to a fabricated merge-only history all
+#      pass. DAG inspection cannot prove HOW a merge commit reached the ref;
+#      only a protected ref can. Reading the merged branch out of the merge
+#      MESSAGE would be the name-matching heuristic CB-57 refused, and it is the
+#      local pre-merge-commit hook that reads the real ref instead.
+#   2. AN EVIL MERGE. A merge commit may carry content in neither parent, and
+#      `git show --name-only` on a merge prints nothing. Invisible here.
+#   3. ANY OF IT, UNTIL origin/main IS PROTECTED. A workflow cannot refuse a
+#      push; it reports afterwards. This job is an ALARM. The GATE is branch
+#      protection: require pull requests, forbid direct and force pushes, and
+#      disable squash- and rebase-merging so only merge commits can land.
+#      That is repository configuration, not committed state, and CB-59 is not
+#      closed until it is switched on.
+#
+# WHY THIS JOB DOES NOT RUN ON pull_request. It used to, guarded by
+# `if: github.event_name != 'pull_request'`, and that was a real defect of
+# exactly the kind this change exists to remove: GitHub reports a SKIPPED job as
+# passing for required-status-check purposes, so marking it required would have
+# produced a check that can never fail on the one path where it is evaluated —
+# strictly worse than no check. It is not subscribed to `pull_request` at all
+# now, so it cannot be selected as a vacuous required check. The PR-time
+# required check is the `tests` job in ci.yml.
+#
+# WHY A PINNED BASELINE. main's history predates the rule (the rule landed
+# 2026-08-16, the repo did not): measured, 110 of the 132 first-parent non-merge
+# commits before that point would fail this assertion, and nobody is going to
+# rewrite them. The baseline is where enforcement begins. Moving it forward is
+# how a violation would be laundered, so it is a deliberate, reviewable edit.
+
+name: main invariants
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  first-parent-is-merges-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # fetch-depth: 0 is REQUIRED, not an optimisation. With the default
+          # shallow checkout the baseline commit is absent (the `git cat-file`
+          # preflight below then fails loudly, as intended) and `origin/main`
+          # may not exist, which would silently drop the audit back to HEAD.
+          fetch-depth: 0
+
+      - name: Assert nothing but plan notes was committed directly to main
+        env:
+          # main as of 2026-08-17, the merge that landed CB-50's harness docs.
+          BASELINE: a1fb5ab20373814c133beb1977b84a444ae1f2f7
+        run: |
+          set -euo pipefail
+
+          # Judge MAIN, never HEAD. On a push to main they are the same, but a
+          # workflow_dispatch can be launched from any ref, and on a branch the
+          # branch's own commits ARE its first-parent line — so a HEAD-relative
+          # assertion fails on every branch it is manually run against, for the
+          # entirely wrong reason.
+          if git rev-parse --verify -q origin/main >/dev/null; then
+            TARGET=origin/main
+          else
+            TARGET=HEAD
+          fi
+          echo "auditing ${TARGET}"
+
+          if ! git cat-file -e "${BASELINE}^{commit}" 2>/dev/null; then
+            echo "::error::baseline ${BASELINE} is not in this repository."
+            echo "History was rewritten, or the baseline is wrong. Refusing to"
+            echo "report main clean without a reference point to measure from."
+            exit 1
+          fi
+
+          # Capture the log rather than piping it into `while`: with process
+          # substitution a FAILING `git log` is not caught by `set -o pipefail`,
+          # the loop body simply runs zero times, and the script goes on to
+          # print "main is clean" — the guard failing OPEN because it could not
+          # look. Found in adversarial review.
+          if ! commits=$(git log --first-parent --no-merges --format=%H \
+                "${BASELINE}..${TARGET}"); then
+            echo "::error::git log failed; refusing to report main clean."
+            exit 1
+          fi
+
+          violations=0
+          for sha in ${commits}; do
+            # --no-renames IS LOAD-BEARING. With rename detection on (the
+            # default) `--name-only` prints ONLY the destination path, so
+            # `git mv src/keep.py .claude/plans/keep.md` shows one allowlisted
+            # path and the source file silently leaves main. Reproduced in
+            # adversarial review against this job and the pre-commit hook alike.
+            # core.quotePath=false for the same reason as the pre-commit hook:
+            # the default C-quotes a non-ASCII path, the allowlist regex misses
+            # it, and a legitimate plan note would be reported as a violation.
+            files=$(git -c core.quotePath=false show --pretty=format: --no-renames \
+              --name-only "${sha}" | sed '/^$/d')
+            # An empty commit touches nothing and cannot violate the rule.
+            [ -z "${files}" ] && continue
+            offending=$(printf '%s\n' "${files}" \
+              | grep -vE '^\.claude/plans/[^/]+\.md$' || true)
+            if [ -n "${offending}" ]; then
+              violations=$((violations + 1))
+              echo "::error::direct commit on main: ${sha} $(git log -1 --format=%s "${sha}")"
+              printf '%s\n' "${offending}" | sed 's/^/    /'
+            fi
+          done
+
+          if [ "${violations}" -ne 0 ]; then
+            echo ""
+            echo "${violations} commit(s) reached main without going through a merge."
+            echo "CLAUDE.md: every code edit happens on a short-lived branch, in a"
+            echo "worktree. The only thing that may land on main directly is a"
+            echo ".claude/plans/*.md note."
+            exit 1
+          fi
+          echo "clean: every change since ${BASELINE:0:12} arrived by merge."
