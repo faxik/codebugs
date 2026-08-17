@@ -1790,11 +1790,12 @@ def register_cli(sub, commands) -> None:
         # The open is HOISTED out of the `with` so the guard covers it alone
         # (CB-71). `with open(...) as f:` owned the entire import loop, so the
         # obvious `try: with open(...): <loop>` would have put both the
-        # already-committed rows and the loop's own stderr prints (:1866, :1877,
-        # :1886) inside an OSError arm — reporting a partially-landed import as
-        # bad input, the CB-15/CB-16 lie this guard exists to avoid. A read
-        # failure mid-iteration therefore still crashes, deliberately: what to
-        # report when rows are already committed is a semantics decision, CB-77.
+        # already-committed rows and the loop's own three `print(...,
+        # file=sys.stderr)` diagnostics inside an OSError arm — reporting a
+        # partially-landed import as bad input, the CB-15/CB-16 lie this guard
+        # exists to avoid. A read failure mid-iteration therefore still crashes,
+        # deliberately: what to report when rows are already committed is a
+        # semantics decision, CB-77.
         try:
             handle = open(args.file, newline="")
         except OSError as e:
