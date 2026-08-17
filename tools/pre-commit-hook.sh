@@ -167,7 +167,15 @@ git_dir=$(git rev-parse --git-dir)
 # EXCEPT the one that had a conflict — enforcement that lapses precisely when
 # the operator is already distracted. Here MERGE_HEAD genuinely does exist (git
 # writes it when it stops), so the ref is resolvable, unlike in the clean case.
-if [[ "${branch}" == "main" && -e "${git_dir}/MERGE_HEAD" ]]; then
+# NOTE THE CONDITION IS NOT SCOPED TO MAIN, and that was a defect when it was.
+# The exemption below fires on ANY branch, so while this validation was
+# main-only, `: > .git/MERGE_HEAD` on an untyped branch still skipped the
+# branch-type check and let a source commit through — the same "one empty file
+# turns off a rule" shape as the cherry-pick markers, on the other side of the
+# condition, reachable by an interrupted merge on a hand-made branch. Review
+# reproduced it. So the merge STATE is validated everywhere; only the
+# head-ACCEPTABILITY rules (typed branch / upstream main) are about main.
+if [[ -e "${git_dir}/MERGE_HEAD" ]]; then
     _refused=0
     _seen=0
     # `|| [[ -n "${_sha}" ]]` — `read` returns non-zero on an UNTERMINATED last
@@ -190,6 +198,9 @@ if [[ "${branch}" == "main" && -e "${git_dir}/MERGE_HEAD" ]]; then
         # the operator typed is long gone, so the predicate judges EVERY ref at
         # the head. That strictness is the point — see the bypass recorded in
         # the shared block's comment.
+        # The head rules are about MAIN. On a branch, completing a merge is not
+        # authoring, and which branch was merged in is that branch's business.
+        [[ "${branch}" == "main" ]] || continue
         _head_is_acceptable "${_sha}" || _refused=1
     done < "${git_dir}/MERGE_HEAD"
 

@@ -24,7 +24,7 @@ Prose cannot enforce prose. That is CB-50, and the harness below is its fix.
 | Branch carries `fix/`\|`feature/`\|`refactor/`\|`docs/` | `_guard_branch_type` (7) + pre-commit hook (1) | exit 7 / 1 |
 | Nothing but `.claude/plans/*.md` is committed on main | pre-commit hook | exit 1 |
 | A merge onto main comes from a typed local branch, or from main's own upstream `main` | pre-merge-commit hook (clean merge) + pre-commit hook (conflicted merge) | exit 1 |
-| Cherry-pick / revert get **no** exemption on main | pre-commit hook | exit 1 |
+| An in-progress cherry-pick/revert marker no longer exempts a commit | pre-commit hook | exit 1 |
 | Integration never fast-forwards | `--no-ff` + `git config merge.ff false` | — |
 | One integration at a time | `flock` on `.worktrees/.integrate.lock` | exit 1 |
 | The tested state is the landed state | in-lock SHA re-check | exit 13 |
@@ -67,28 +67,40 @@ the worse failure.** Measured on git 2.53 against a real remote: `git merge orig
 first draft therefore refused every pull, while its own comment and this section both promised pulls
 were fine. (One cross-model reviewer asserted `GITHEAD_` carries a `branch 'main' of <url>`
 description in that case; it does not, on this version — the other reviewer reproduced the OID, and
-so did I. Measured, not argued.) So the predicate falls back to the refs that point **at** the head
-when the caller's name is not a ref, and one shared function decides both cases:
+so did I. Measured, not argued.) So `GITHEAD_` is used only to LEARN WHICH COMMITS are being merged;
+the decision is made from the refs that point at each of them.
 
-**The rule that survived two review rounds: the sanctioned-type rule governs LOCAL branches.**
-Remote-tracking refs are *upstream's* namespace, which this repo does not name, so they are consulted
-only to recognise a pull. Concretely:
+**The rule that survived three review rounds: the sanctioned-type rule governs LOCAL branches.**
+Remote-tracking refs are *upstream's* namespace, which this repo does not name, so exactly one of them
+is consulted — main's own upstream — and only to recognise a pull. Concretely, given a merge head:
 
-- A **named** ref that resolves is judged directly — it is the caller's stated provenance.
-- Otherwise every ref at the head is collected. **Every local branch must qualify**, because with
-  "any qualifies" review reproduced a **three-command bypass**: `git merge untyped` (refused),
-  `git branch fix/tmp untyped`, `git commit`. Git does not abort after a refusal; it leaves the merge
-  in progress and says "use `git commit` to complete the merge", routing the operator into
-  `pre-commit`, where one typed alias at the same commit laundered the whole thing.
-- A **non-`main` remote ref neither qualifies nor disqualifies.** Requiring *all* refs to qualify
-  refused a real `git pull` whenever upstream happened to have another branch cut at that commit
-  (`origin/release-1.0`), and `refs/remotes/<r>/HEAD` — the default-branch alias — disqualified the
-  very pull the fallback existed for. Both reproduced; the second was caught by this repo's own test
-  minutes after the first fix, two bugs in the same three lines.
-- A remote **`main` wins** over a non-qualifying local branch, so a stray local bookmark left at the
+- Candidates are **every ref pointing at that head**, always. There is no "judge the named ref
+  instead" branch any more; see the byte-identity note below for why that had to go.
+- **Every local branch must qualify**, because with "any qualifies" review reproduced a
+  **three-command bypass**: `git merge untyped` (refused), `git branch fix/tmp untyped`, `git commit`.
+  Git does not abort after a refusal; it leaves the merge in progress and says "use `git commit` to
+  complete the merge", routing the operator into `pre-commit`, where one typed alias at the same
+  commit laundered the whole thing.
+- A **remote ref other than main's upstream `main` neither qualifies nor disqualifies.** Requiring
+  *all* refs to qualify refused a real `git pull` whenever upstream happened to have another branch cut
+  at that commit (`origin/release-1.0`), and `refs/remotes/<r>/HEAD` — the default-branch alias —
+  disqualified the very pull the fallback existed for. Both reproduced; the second was caught by this
+  repo's own test minutes after the first fix, two bugs in the same three lines.
+- Upstream **`main` wins** over a non-qualifying local branch, so a stray local bookmark left at the
   commit being pulled cannot refuse the pull.
-- Only a **configured** remote's name is stripped. A blind `${rest#*/}` collapsed
-  `refs/remotes/junk/main` to the accepted literal `main`.
+- The trusted ref is matched **exactly** (`refs/remotes/<branch.main.remote|origin>/main`). Nothing is
+  "stripped": a blind `${rest#*/}` once collapsed `refs/remotes/junk/main` to the accepted literal
+  `main`, and the intermediate fix — trusting any *configured* remote's `main` — still left
+  `git remote add junk <anything>` plus a fetch as a two-command bypass.
+
+**A merge head with NO ref at all is refused, and that is a real cost, not a free win.** It is what
+catches a bare SHA or a tag, but it also refuses four legitimate-if-rare flows, verified: a one-shot
+`git pull --no-rebase <URL> main`, `git merge FETCH_HEAD` with no tracking ref, a `branch.main.remote`
+set to a URL rather than a remote name, and `git merge <tag>` where no branch points at the tagged
+commit. Ordinary `git pull` against a configured remote is unaffected, which is why this is documented
+rather than fixed: closing it means trusting `.git/FETCH_HEAD`'s description text, and adding a new
+trust path with no review round left to attack it is a worse trade than a rare `--no-verify`. **Use
+`git merge --no-verify` for a one-shot pull from a URL.**
 
 **And one limit that cannot be closed here, stated rather than papered over.** *Main's own upstream*
 `main` is **trusted** — `branch.main.remote`, defaulting to `origin` — and nothing local can prove
@@ -126,14 +138,22 @@ outright**, because git resolves one against the top of *each* working tree, so
 `core.hooksPath=.githooks` names a different directory in the primary checkout and in every linked
 worktree. Round 3 reproduced that too: armed in the primary, main checked out in a linked worktree
 with no `.githooks` there, guard `0`, source commit onto main `0`. "This clone is armed" is not a
-statement the guard can make about a per-worktree path, so it declines to make it.
+statement the guard can make about a per-worktree path, so it declines to make it. The value is read
+with **`--type=path`**, so git does its own `~` expansion first: reading it raw classed `~/hooks` as
+relative and refused a genuinely armed clone, while the same function was resolving the same setting
+through `--git-path` two lines earlier — one setting, two answers. Known residual: with
+`extensions.worktreeConfig` and an *absolute* per-worktree value the asymmetry returns, bounded because
+the integration merge runs in the primary where the gate does fire.
 
-**The bootstrap gate's "monotonic" condition lost to an ordinary clone, twice-fixed.** It read the
-literal ref `main`, so in any clone with no *local* main — `git clone --single-branch --branch fix/…`
-is enough, and `origin/main` being present does not help — `git log -1 main -- <path>` fatals, the
-value empties, and the condition collapses back to the file-existence test that round 2 had killed.
-Round 3 reproduced the full disarm again through that door. It reads `--all` now, so no checkout shape
-can hide the history.
+**The bootstrap gate's "monotonic" condition took three attempts.** It first gated on the file
+existing, so one `rm` was a permanent silent disarm (round 2). It then read the literal ref `main`, so
+any clone with no *local* main — `git clone --single-branch --branch fix/…` is enough, and
+`origin/main` being present does not help — collapsed it straight back (round 3). It now reads
+`--all`, **and distinguishes an ERROR from an empty result**, because `2>/dev/null || true` made those
+identical: round 4 reproduced the full disarm once more through a `--filter=tree:0` clone whose
+promisor remote had gone away, where `git log --all -- <path>` exits 128. The claim "no checkout shape
+can hide the history" was true and still insufficient — the hole had moved from a checkout shape to an
+error path. It now fails closed on the error, which is the third distinct door onto the same defect.
 
 **A non-ASCII plan note could not land on main** — a false refusal, and the mirror image of a bug
 this repo already had. `git diff --cached --name-only` C-quotes such a path by default, the allowlist
@@ -153,12 +173,16 @@ own merge: leaving it would have made the harness the single caller exempt from 
 CLIENT-SIDE and PER-CLONE: hooks and git config cannot be committed. A fresh clone has none of it
 until `tools/install-hooks.sh` is run — which is why `_guard_enforcement_armed` refuses to integrate
 from an unarmed clone, the one moment being unarmed can cost anything. **It now checks both hooks**,
-and a clone armed before CB-57 will be refused until `install-hooks.sh` is re-run. Even armed,
-`git rebase`, `git cherry-pick`, `git revert`, `git am`, `git reset --hard`, `git push` and
-`core.hooksPath` all move or publish `main` without passing any hook, and a typed branch committed
-in the *primary* checkout satisfies `pre-commit` while ignoring the worktree rule entirely. **Most of
-those are what the CI job is for** — they flatten a non-merge commit onto main's first-parent line,
-which is exactly what `.github/workflows/main-invariants.yml` asserts against.
+and a clone armed before CB-57 will be refused until `install-hooks.sh` is re-run. Even armed, all of
+these move or publish `main` without passing any hook: `git rebase`, `git am`, `git reset --hard`,
+`git push`, `core.hooksPath`, **`git subtree add`** (which commits via `commit-tree` plumbing — added
+to this list because round-4 review landed content on main with it and the list did not mention it),
+and **a CLEAN `git cherry-pick` or `git revert`**, where git's sequencer commits directly. Note the
+case split on those last two, because an earlier version of this list was half-wrong: *clean* skips
+the hook entirely, while the *conflicted* form is finished with `git commit` and **is** gated. A typed
+branch committed in the *primary* checkout also satisfies `pre-commit` while ignoring the worktree rule
+entirely. **Most of these are what the CI job is for** — they flatten a non-merge commit onto main's
+first-parent line, which is what `.github/workflows/main-invariants.yml` asserts against.
 
 **`install-hooks.sh` sets `merge.ff=false` before anything arming-related can abort.** With it last, a
 clone missing `tools/pre-merge-commit-hook.sh` — an older main, a `git checkout <old-commit>`, the
@@ -302,15 +326,25 @@ predicate now takes only the merge head, so both callers pass identical informat
 form, which this repo keeps relearning: sharing an implementation does not share a decision if the
 callers supply different inputs.**
 
-**Cherry-pick and revert lost their exemption on main.** The merge-in-progress exemption used to fire
-on mere existence of `MERGE_HEAD`, `CHERRY_PICK_HEAD` *or* `REVERT_HEAD`. Only the first was hardened,
-and review reproduced the rest: `: > .git/CHERRY_PICK_HEAD` then `git commit` landed arbitrary staged
-content on main **and** skipped the branch-type check, so one empty file turned off both of this
-hook's rules — reachable the same way empty `MERGE_HEAD` was, since a conflicted cherry-pick leaves
-the file until `--continue`/`--abort`. The fix was not to harden them but to stop exempting them:
-completing a *merge* onto main is the sanctioned landing path, while cherry-picking or reverting
-directly onto main is the thing the hook exists to refuse. `--no-verify` remains the way to state that
-intent deliberately.
+**Cherry-pick and revert lost their exemption — and the honest scope is narrower than "they are now
+refused".** The merge-in-progress exemption used to fire on mere existence of `MERGE_HEAD`,
+`CHERRY_PICK_HEAD` *or* `REVERT_HEAD`. Only the first was hardened, and review reproduced the rest:
+`: > .git/CHERRY_PICK_HEAD` then `git commit` landed arbitrary staged content on main **and** skipped
+the branch-type check, so one empty file turned off both of this hook's rules — reachable the same way
+empty `MERGE_HEAD` was, since a conflicted cherry-pick leaves the file until `--continue`/`--abort`.
+The fix was to stop exempting them.
+
+**But a CLEAN `git cherry-pick` or `git revert` onto main never reaches `pre-commit` at all** — git's
+sequencer commits directly — so it still lands, verified by running both. An earlier draft of the row
+above read "cherry-pick / revert get **no** exemption on main … exit 1", which described a gate that
+cannot fire: the identical category error this section corrects for `main-invariants.yml`, committed
+in the same table two rows apart. What the change actually buys is that a *marker file* no longer
+launders a commit. Clean cherry-pick and revert onto main are caught only by the CI alarm (they leave
+a single-parent commit on the first-parent line), and that is the honest statement.
+
+**The same fail-closed validation is NOT scoped to main**, because the exemption it guards is not:
+while it was, `: > .git/MERGE_HEAD` on an untyped branch still skipped the branch-type check. Only the
+head-*acceptability* rules — typed branch, or upstream `main` — are about main.
 
 **The bootstrap is a real constraint, not an oversight.** `worktree-finish.sh` cannot land the
 commit that first creates `tools/` — `_guard_enforcement_armed` refuses, because main has no

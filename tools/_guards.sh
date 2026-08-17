@@ -441,8 +441,16 @@ _guard_enforcement_armed() {
     # .githooks there, guard rc=0, and `git commit` of a source file straight onto
     # main rc=0. "This clone is armed" is not a statement this guard can make
     # about a per-worktree path, so it declines to make it.
+    #
+    # `--type=path`, so git does its own `~` expansion before the test. Reading
+    # the RAW value classed `core.hooksPath=~/hooks` as relative and refused a
+    # clone that was genuinely, uniformly armed — git expands the tilde, the hook
+    # there really does fire, and the guard was resolving the same setting two
+    # different ways in one function (`--git-path` for hook_dir, raw string here).
+    # Review caught the inconsistency. `--type=path` still refuses `./hooks`,
+    # `.githooks` and a leading-space value, which is the point.
     local _hooks_cfg
-    _hooks_cfg=$(git -C "${repo_root}" config --get core.hooksPath || true)
+    _hooks_cfg=$(git -C "${repo_root}" config --type=path --get core.hooksPath || true)
     if [[ -n "${_hooks_cfg}" && "${_hooks_cfg}" != /* ]]; then
         problems="${problems}  core.hooksPath is RELATIVE ('${_hooks_cfg}'), which resolves"$'\n'
         problems="${problems}    per working tree — arming one checkout leaves the others bare."$'\n'
@@ -482,9 +490,21 @@ _guard_enforcement_armed() {
     # install-hooks → rm the source → guard rc=0 → an untyped branch merged onto
     # main. `--all` consults every ref, so no checkout shape can make the history
     # invisible.
-    merge_hook_known=$(git -C "${repo_root}" log -1 --format=%H --all \
-        -- tools/pre-merge-commit-hook.sh 2>/dev/null || true)
-    if [[ -n "${merge_hook_known}" || -e "${merge_hook_src}" ]]; then
+    # AND the failure of that command is NOT "no history". `2>/dev/null || true`
+    # made the two indistinguishable, so any error re-opened the whole disarm:
+    # review reproduced it with a `--filter=tree:0` clone whose promisor remote
+    # had gone away, where `git log --all -- <path>` exits 128, the value empties,
+    # the condition collapses to `-e <src>`, and `rm` + a merge of the literal
+    # 2026-08-16 offender landed on main. Distinguish the two and FAIL CLOSED on
+    # an error: "cannot tell" must demand the hook, not excuse it.
+    local merge_hook_log_ok=""
+    if merge_hook_known=$(git -C "${repo_root}" log -1 --format=%H --all \
+            -- tools/pre-merge-commit-hook.sh 2>/dev/null); then
+        merge_hook_log_ok=1
+    else
+        merge_hook_known=""
+    fi
+    if [[ -z "${merge_hook_log_ok}" || -n "${merge_hook_known}" || -e "${merge_hook_src}" ]]; then
         _p="$(_hook_problems \
             "${hook_dir}/pre-merge-commit" "${merge_hook_src}" "pre-merge-commit")"
         [[ -n "${_p}" ]] && problems="${problems}${_p}"$'\n'

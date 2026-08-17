@@ -469,6 +469,21 @@ class TestEnforcementArmed:
         assert not (repo / "tools" / "pre-merge-commit-hook.sh").exists()
         assert run_guard("_guard_enforcement_armed", str(repo)).returncode == 0
 
+    def test_tilde_core_hookspath_is_not_mistaken_for_relative(self, repo: Path) -> None:
+        """A false REFUSAL: git expands `~`, so `~/hooks` is an absolute path.
+
+        Reading the raw config value classed it as relative and refused a clone
+        that was genuinely armed. The guard was resolving the same setting two
+        ways in one function — `--git-path` (which agrees with git) for the hooks
+        dir, and the raw string for this test. `--type=path` makes them agree.
+        """
+        self._arm(repo)
+        git(repo, "config", "core.hooksPath", "~/hooks")
+        result = run_guard("_guard_enforcement_armed", str(repo))
+        assert "RELATIVE" not in result.stderr, (
+            "a tilde path was classed relative; git expands it to an absolute one"
+        )
+
     def test_relative_core_hookspath_is_refused(self, repo: Path) -> None:
         """A relative core.hooksPath resolves PER WORKING TREE, so it is unverifiable.
 
@@ -1237,10 +1252,23 @@ class TestHarnessIntegrity:
         the elements-vs-composition asymmetry inside a test whose own name says
         "both". Round 3 caught it.
         """
-        wf = (REPO_ROOT / ".github" / "workflows" / "main-invariants.yml").read_text()
-        assert "core.quotePath=false" in wf, (
-            "the CI job will C-quote non-ASCII paths and misread a legitimate plan note"
-        )
+        for rel in (
+            ".github/workflows/main-invariants.yml",
+            "tools/pre-commit-hook.sh",
+        ):
+            # Comment lines excluded, or the prose that EXPLAINS the flag keeps
+            # the test green after the flag itself is deleted. Verified: removing
+            # it from the workflow's `git show` while leaving the comment left the
+            # earlier version of this test passing. Its siblings in this class
+            # already filtered comments; this one did not.
+            code = [
+                ln
+                for ln in (REPO_ROOT / rel).read_text().splitlines()
+                if not ln.lstrip().startswith("#")
+            ]
+            assert any("core.quotePath=false" in ln for ln in code), (
+                f"{rel} will C-quote non-ASCII paths and misread a legitimate plan note"
+            )
 
     def test_installer_targets_the_main_checkout_not_the_invoking_one(self) -> None:
         """The hook symlink must point at REPO_ROOT/tools, never $_SCRIPT_DIR.
@@ -1736,6 +1764,20 @@ class TestPreCommitHook:
         (repo / "backdoor.py").write_text("x = 1\n")
         result = self._commit(repo, "backdoor.py")
         assert result.returncode != 0, f"{marker} waved a source commit onto main"
+
+    def test_empty_merge_head_does_not_exempt_a_branch_either(self, repo: Path) -> None:
+        """The MERGE_HEAD twin of the test below, and it was missing.
+
+        The fail-closed validation was scoped to `branch == main` while the
+        exemption it guards fires on ANY branch, so `: > .git/MERGE_HEAD` on an
+        untyped branch still skipped the branch-type check. Reproduced in review;
+        reachable by an interrupted merge on a hand-made branch.
+        """
+        self._install(repo)
+        git(repo, "checkout", "-q", "-b", "another-untyped-thing")
+        (repo / ".git" / "MERGE_HEAD").write_text("")
+        (repo / "src2.py").write_text("x = 1\n")
+        assert self._commit(repo, "src2.py").returncode != 0
 
     def test_cherry_pick_marker_does_not_exempt_the_branch_type_rule(
         self, repo: Path
