@@ -7,6 +7,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **MCP tool descriptions no longer depend on which Python built the server**
+  (CB-73). The SDK reads `Tool.description` from `__doc__`, and CPython 3.13
+  dedents docstrings at compile time while 3.11 and 3.12 do not — so on the
+  older interpreters `requires-python` promises to support, clients received the
+  source indentation. That is not cosmetic: MCP clients render descriptions as
+  Markdown, and CommonMark treats a 4-space-indented line following a blank line
+  as an **indented code block**, so the entire prose body of most tools rendered
+  monospaced as code.
+
+  Measured across both interpreters: **64 of 68 descriptions differed** between a
+  3.12- and a 3.13-hosted server, and **61 of 68** contained the code-block
+  pattern. Both are now 0, and 3.13 output is byte-identical before and after —
+  which is why the wire golden does not move.
+
+  Normalized once at registration through the SDK's public `description=`
+  parameter. No private API, no `__doc__` mutation, and an explicit description
+  passed by a caller still wins.
+
 - **A file whose existence could not be checked is no longer reported as
   `deleted`** (CB-85). `staleness_check` used `os.path.isfile`, which returns
   `False` for *any* stat failure — an unreadable parent directory, a symlink
