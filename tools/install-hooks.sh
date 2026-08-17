@@ -14,7 +14,13 @@ REPO_ROOT="$(_guards_resolve_repo_root "${_SCRIPT_DIR}")"
 
 # Hooks live in the COMMON git dir, so one install covers main and every
 # worktree — a worktree's .git is a file pointing here.
-HOOK_DIR="$(git -C "${REPO_ROOT}" rev-parse --path-format=absolute --git-common-dir)/hooks"
+#
+# Resolved with `--git-path hooks` rather than `--git-common-dir`/hooks so that
+# it follows `core.hooksPath`. Installing into the common dir while git reads a
+# redirected directory would arm nothing while reporting success — the same
+# mismatch that made _guard_enforcement_armed lie (adversarial review). If
+# core.hooksPath is set, this installs where git will actually look.
+HOOK_DIR="$(git -C "${REPO_ROOT}" rev-parse --path-format=absolute --git-path hooks)"
 mkdir -p "${HOOK_DIR}"
 
 echo "=== codebugs: installing local enforcement ==="
@@ -39,8 +45,14 @@ echo ""
 #    `git checkout <old-commit>`, the CB-57 bootstrap window) armed the
 #    pre-commit hook, printed its ✓, then exited 1 at the merge-hook step —
 #    leaving merge.ff UNSET. The installer could skip the one thing no hook can
-#    replace. Reproduced in adversarial review. A step that cannot fail goes
-#    first.
+#    replace. Reproduced in adversarial review.
+#
+#    Precisely: this is the first step that can FAIL FOR A REASON THIS SCRIPT IS
+#    ABOUT. Four commands still precede it — sourcing _guards.sh, resolving the
+#    repo root, resolving the hooks dir, mkdir -p — and each is fatal under
+#    `set -e`. Review pointed out that "a step that cannot fail goes first" was
+#    therefore not literally true, and it is not; what matters is that nothing
+#    ARMING-RELATED can abort before merge.ff is set.
 #
 #    An explicit `git merge --ff` still works, which is the intended escape.
 echo "[1/3] merge.ff=false"
@@ -100,5 +112,5 @@ echo "=== armed ==="
 echo ""
 echo "Verify:"
 echo "  git -C ${REPO_ROOT} config --get merge.ff        # false"
-echo "  ls -l $(git -C "${REPO_ROOT}" rev-parse --git-common-dir)/hooks/pre-commit"
-echo "  ls -l $(git -C "${REPO_ROOT}" rev-parse --git-common-dir)/hooks/pre-merge-commit"
+echo "  ls -l $(git -C "${REPO_ROOT}" rev-parse --path-format=absolute --git-path hooks)/pre-commit"
+echo "  ls -l $(git -C "${REPO_ROOT}" rev-parse --path-format=absolute --git-path hooks)/pre-merge-commit"

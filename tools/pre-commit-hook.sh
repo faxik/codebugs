@@ -48,10 +48,11 @@ _IFS_SAVE="$IFS"; IFS='|'; _types="${_BRANCH_TYPES[*]}"; IFS="$_IFS_SAVE"
 # three through the same case table.
 _type_re="^(${_types})/[A-Za-z0-9._-]+$"
 
-# ---8<--- SHARED MERGE-GATE PREDICATE — byte-identical in tools/pre-commit-hook.sh
-# Do not edit one copy. tests/test_worktree_harness.py compares the two blocks
-# verbatim; they are duplicated rather than sourced because each hook runs from
-# .git/hooks and must not depend on tools/ being present in the checked-out tree.
+# ---8<--- SHARED MERGE-GATE PREDICATE — byte-identical in pre-commit-hook.sh and
+# pre-merge-commit-hook.sh. Do not edit one copy.
+# tests/test_worktree_harness.py compares the two blocks verbatim; they are
+# duplicated rather than sourced because each hook runs from .git/hooks and must
+# not depend on tools/ being present in the checked-out tree.
 #
 # Decides whether one merge head may land on main. Two inputs, because two
 # callers know different things:
@@ -60,14 +61,37 @@ _type_re="^(${_types})/[A-Za-z0-9._-]+$"
 #            (pre-merge-commit has it from GITHEAD_; pre-commit, completing a
 #            conflicted merge in a separate process, does not)
 #
-# When `named` resolves to a ref, THAT ref is judged: it is the caller's stated
-# provenance and the strongest signal available.
+# THE RULE, after two rounds of adversarial review taught it the hard way:
 #
-# When it does not — a raw OID from `git pull`, or the pre-commit path with no
-# name at all — every ref pointing at the head is collected and ALL of them must
-# qualify. "All", not "any": with "any", a single typed branch created at the
-# same commit launders an untyped merge, which review reproduced end to end.
-# Fail closed; `--no-verify` is the escape.
+#   THE SANCTIONED-TYPE RULE GOVERNS LOCAL BRANCHES. Remote-tracking refs are
+#   UPSTREAM's namespace, which this repo does not name, so they are consulted
+#   only to recognise a pull — a remote `main` at the head means upstream's main
+#   is what is being merged.
+#
+# Why it is shaped that way, case by case:
+#   * EVERY local branch at the head must qualify, not just one. With "any", a
+#     typed branch created at the same commit launders an untyped merge, which
+#     review reproduced in three commands: `git merge untyped` (refused), `git
+#     branch fix/tmp untyped`, `git commit`. Git does not abort after a refusal —
+#     it leaves the merge in progress and routes the operator into pre-commit.
+#   * A NON-main remote ref neither qualifies nor disqualifies. Requiring ALL
+#     refs to qualify refused a legitimate `git pull` whenever upstream happened
+#     to have another branch cut at that commit (`origin/release-1.0`), and
+#     `refs/remotes/<r>/HEAD` — an alias for the default branch — disqualified
+#     the very pull the fallback existed to allow. Both reproduced.
+#   * A remote `main` WINS over a non-qualifying local branch, so a local
+#     bookmark left at the commit being pulled cannot refuse the pull.
+#   * Only a CONFIGURED remote's name is stripped. A blind `${rest#*/}`
+#     collapsed refs/remotes/junk/main to the accepted literal `main`.
+#
+# KNOWN LIMIT, stated rather than papered over: a remote-tracking `main` is
+# TRUSTED, and nothing local can prove it arrived by fetch — `git update-ref
+# refs/remotes/origin/main <any-sha>` then `git merge origin/main` lands
+# anything, in two commands, with no --no-verify. There is no local
+# discriminator, and inventing one would be a deeper guess, not a fix (the same
+# reasoning as the --separate-git-dir misbinding in CLAUDE.md). The remedy is
+# CB-59's server-side protection; TestKnownLimits pins that this reproduces, so
+# the day it stops being true someone re-reads this comment.
 _head_is_acceptable() {
     local sha="$1" named="${2:-}"
     local _ifs_save _types _re
@@ -93,52 +117,39 @@ _head_is_acceptable() {
         return 1
     fi
 
-    local _ref _name _rest _r _bad="" _ok=""
+    local _ref _name _rest _r _local_ok="" _local_bad="" _upstream_main=""
     while read -r _ref; do
         [[ -z "${_ref}" ]] && continue
-        _name=""
         case "${_ref}" in
             refs/heads/*)
                 _name="${_ref#refs/heads/}"
+                if [[ "${_name}" == "main" ]] || [[ "${_name}" =~ ${_re} ]]; then
+                    _local_ok=1
+                else
+                    _local_bad="${_local_bad}    ${_ref}"$'\n'
+                fi
                 ;;
             refs/remotes/*)
-                # Strip ONLY a CONFIGURED remote's name. A blind `${rest#*/}`
-                # collapses refs/remotes/junk/main to the accepted literal
-                # `main`, so anyone who can write a ref by hand launders
-                # arbitrary content — reproduced in review.
                 _rest="${_ref#refs/remotes/}"
+                _name=""
                 while read -r _r; do
                     [[ -z "${_r}" ]] && continue
                     if [[ "${_rest}" == "${_r}/"* ]]; then _name="${_rest#"${_r}"/}"; break; fi
                 done <<< "${_remotes}"
+                [[ "${_name}" == "main" ]] && _upstream_main=1
                 ;;
         esac
-        # refs/remotes/<r>/HEAD is the remote's default-branch ALIAS, not a
-        # branch of its own. It points wherever origin/main points, so on a real
-        # `git pull` it joins the candidate set, strips to the literal "HEAD",
-        # and disqualified the entire pull. Caught by this repo's own test right
-        # after the fix for the pull refusal — the second bug in the same three
-        # lines. Skip it: the ref it aliases is in the set on its own account.
-        [[ "${_name}" == "HEAD" ]] && continue
-        # `main` itself is accepted: that is a pull, or a re-merge of main.
-        # Under merge.ff=false even a would-be fast-forward pull becomes a merge
-        # commit and lands here, so refusing it would break `git pull` outright.
-        if [[ "${_name}" == "main" ]] || { [[ -n "${_name}" ]] && [[ "${_name}" =~ ${_re} ]]; }; then
-            _ok=1
-            continue
-        fi
-        _bad="${_bad}    ${_ref}"$'\n'
     done <<< "${_candidates}"
 
-    if [[ -n "${_bad}" ]]; then
-        echo "  merge head ${sha:0:12} is named by ref(s) carrying no sanctioned type:" >&2
-        printf '%s' "${_bad}" >&2
+    [[ -n "${_upstream_main}" ]] && return 0
+
+    if [[ -n "${_local_bad}" ]]; then
+        echo "  merge head ${sha:0:12} is named by local branch(es) with no sanctioned type:" >&2
+        printf '%s' "${_local_bad}" >&2
         return 1
     fi
-    # Every candidate was skipped as an alias and none qualified on its own.
-    # Do not pass vacuously: the skip above must never become the whole answer.
-    [[ -n "${_ok}" ]] && return 0
-    echo "  ${sha:0:12} is named only by aliases, never by a branch." >&2
+    [[ -n "${_local_ok}" ]] && return 0
+    echo "  ${sha:0:12} is named by no local branch — only by upstream or alias refs." >&2
     return 1
 }
 # ---8<--- END SHARED MERGE-GATE PREDICATE
@@ -163,14 +174,41 @@ git_dir=$(git rev-parse --git-dir)
 # writes it when it stops), so the ref is resolvable, unlike in the clean case.
 if [[ "${branch}" == "main" && -e "${git_dir}/MERGE_HEAD" ]]; then
     _refused=0
-    while read -r _sha; do
+    _seen=0
+    # `|| [[ -n "${_sha}" ]]` — `read` returns non-zero on an UNTERMINATED last
+    # line, so a plain `while read` DROPS it. And `_seen` exists because the
+    # loop running zero times used to leave _refused=0, after which the
+    # merge-in-progress exemption below waved the commit straight through. Two
+    # reproduced bypasses, one reachable BY ACCIDENT:
+    #   (a) an empty MERGE_HEAD (an interrupted git can leave one) let arbitrary
+    #       staged content land on main with no merge involved at all;
+    #   (b) `printf '%s' <sha> > .git/MERGE_HEAD` — no trailing newline — landed
+    #       a real two-parent merge of an untyped branch.
+    # Neither typed --no-verify. This is the "guard reporting clean because it
+    # could not look" shape that the CI job and the pre-merge-commit hook were
+    # both already hardened against in this very change; pre-commit was the one
+    # place left failing OPEN.
+    while read -r _sha || [[ -n "${_sha}" ]]; do
         [[ -z "${_sha}" ]] && continue
+        _seen=$((_seen + 1))
         # No `named` here: this is a separate `git commit` process and the ref
-        # the operator typed is long gone, so the predicate falls back to
-        # judging EVERY ref at the head. That strictness is the point — see the
-        # bypass recorded in the shared block's comment.
+        # the operator typed is long gone, so the predicate judges EVERY ref at
+        # the head. That strictness is the point — see the bypass recorded in
+        # the shared block's comment.
         _head_is_acceptable "${_sha}" || _refused=1
     done < "${git_dir}/MERGE_HEAD"
+
+    if [[ "${_seen}" -eq 0 ]]; then
+        echo "ERROR: ${git_dir}/MERGE_HEAD exists but names no merge head." >&2
+        echo "" >&2
+        echo "  Refusing rather than assuming there is nothing to check — an" >&2
+        echo "  unreadable merge state must not read as a clean one." >&2
+        echo "" >&2
+        echo "  If a merge was interrupted, clear it:  git merge --abort" >&2
+        echo "" >&2
+        echo "  Deliberate exception: git commit --no-verify" >&2
+        exit 1
+    fi
 
     if [[ "${_refused}" -ne 0 ]]; then
         echo "" >&2
@@ -205,7 +243,13 @@ if [[ "${branch}" == "main" ]]; then
     # file silently leaves main. Reproduced in adversarial review, against both
     # this hook and the CI job. Without renames, git reports the delete and the
     # add separately and the delete is caught.
-    staged=$(git diff --cached --no-renames --name-only)
+    #
+    # core.quotePath=false, because the DEFAULT is a false REFUSAL: a plan note
+    # with non-ASCII in its name comes back C-quoted (".claude/plans/\321\202….md"),
+    # the allowlist regex misses it, and a legitimate note cannot land on main.
+    # This repo has already been bitten by C-quoting once, in
+    # _guard_conflict_markers, where it silently ACCEPTED a conflict marker.
+    staged=$(git -c core.quotePath=false diff --cached --no-renames --name-only)
     [[ -z "${staged}" ]] && exit 0
 
     offending=$(echo "${staged}" | grep -vE '^\.claude/plans/[^/]+\.md$' || true)
@@ -235,9 +279,16 @@ fi
 # rather than only at finish time, because by the time a branch has commits on
 # it, renaming means every reference to it in a plan or handoff is already stale.
 #
-# `_type_re` is built once at the top of this file and used by both checks —
-# the merge-completion gate above and this one. Two constructions of the same
-# regex in one file would be the duplicated-check hazard at its silliest.
+# `_type_re` here is the BRANCH-NAME check. The shared merge-gate block above
+# builds its own `_re` inside `_head_is_acceptable`, because that block must stay
+# byte-identical with pre-merge-commit-hook.sh and so cannot reach for a variable
+# only this file defines. So the regex genuinely is constructed twice in this
+# file, and that is a consequence of the byte-identity requirement rather than an
+# oversight — an earlier version of this comment claimed the opposite, which was
+# true before the shared block landed and false after (caught in review).
+# TestHarnessIntegrity pins that all three copies use the full shape, and
+# TestPreCommitHook::test_hook_and_guard_agree_on_nested_branch pins this one
+# behaviourally.
 [[ "${branch}" =~ ${_type_re} ]] && exit 0
 
 echo "ERROR: branch '${branch}' does not carry a sanctioned type." >&2

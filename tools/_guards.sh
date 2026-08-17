@@ -423,7 +423,15 @@ _guard_enforcement_armed() {
     [[ "${ff}" == "false" ]] || problems="${problems}  merge.ff is '${ff:-unset}', expected 'false'"$'\n'
 
     local hook_dir
-    hook_dir="$(git -C "${repo_root}" rev-parse --path-format=absolute --git-common-dir)/hooks"
+    # `--git-path hooks`, NOT `--git-common-dir`/hooks: git honours
+    # `core.hooksPath` and the common-dir form does not. So `git config
+    # core.hooksPath <empty-dir>` made this guard report ARMED (rc 0) while
+    # nothing at all was installed, and a commit of arbitrary content on main
+    # then succeeded — reproduced in adversarial review. This is the guard whose
+    # entire job is "this clone is actually armed", so a false 0 here is exactly
+    # the false-assurance class _hook_problems exists to refuse. Verified that
+    # --git-path follows the redirect and --git-common-dir does not.
+    hook_dir="$(git -C "${repo_root}" rev-parse --path-format=absolute --git-path hooks)"
 
     # Append with an EXPLICIT separator: `$( )` strips trailing newlines, so
     # concatenating two non-empty results directly would run the last line of

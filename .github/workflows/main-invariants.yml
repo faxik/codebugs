@@ -63,6 +63,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # fetch-depth: 0 is REQUIRED, not an optimisation. With the default
+          # shallow checkout the baseline commit is absent (the `git cat-file`
+          # preflight below then fails loudly, as intended) and `origin/main`
+          # may not exist, which would silently drop the audit back to HEAD.
           fetch-depth: 0
 
       - name: Assert nothing but plan notes was committed directly to main
@@ -109,7 +113,11 @@ jobs:
             # `git mv src/keep.py .claude/plans/keep.md` shows one allowlisted
             # path and the source file silently leaves main. Reproduced in
             # adversarial review against this job and the pre-commit hook alike.
-            files=$(git show --pretty=format: --no-renames --name-only "${sha}" | sed '/^$/d')
+            # core.quotePath=false for the same reason as the pre-commit hook:
+            # the default C-quotes a non-ASCII path, the allowlist regex misses
+            # it, and a legitimate plan note would be reported as a violation.
+            files=$(git -c core.quotePath=false show --pretty=format: --no-renames \
+              --name-only "${sha}" | sed '/^$/d')
             # An empty commit touches nothing and cannot violate the rule.
             [ -z "${files}" ] && continue
             offending=$(printf '%s\n' "${files}" \
