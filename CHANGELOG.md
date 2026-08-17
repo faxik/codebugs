@@ -7,6 +7,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **A CLI command that reads a file now reports an unreadable path as one line,
+  not a traceback** (CB-71). `bench-import`, `reqs-import` and `import-csv` all
+  performed a file read that no exception arm covered, so `codebugs bench-import
+  missing.csv -b Q` printed a raw `FileNotFoundError` traceback. `bench-import`
+  *had* a `try`, whose only arm was `except (ValueError, json.JSONDecodeError)`
+  — the arm existed and did not cover the failure the handler performs;
+  `_cmd_reqs_import` had no arm at all and additionally leaked its connection.
+
+  The guard covers **exactly the read**. A handler-wide `except OSError` was
+  rejected after measuring it: the success `print` runs after the import has
+  committed, and on a closed pipe it raises `BrokenPipeError` — an `OSError` —
+  so a wider arm would report a landed import as bad input, the CB-15/CB-16
+  success-shaped lie. For the same reason `_cmd_import_csv`'s `open` is hoisted
+  out of its `with` statement, since that statement owned the whole import loop
+  and a naive wrap would have enclosed both committed rows and the loop's own
+  stderr diagnostics.
+
+  While the read guard was going in, the pre-existing arm turned out to be
+  laundering a post-commit failure already: it spanned the success `print`, so a
+  `ValueError` from a closed stdout came back as one tidy line at exit 1 for a
+  run that had committed (measured; the run is visible in `bench-list`
+  afterwards). The `print` now sits outside the arm, so such a failure surfaces
+  as a crash. Making it POSIX-clean instead — SIGPIPE semantics or the
+  `dup2(devnull)` shutdown dance, applied once at the `cli.main` boundary — is a
+  product decision tracked as CB-78.
+
+  Four reproduced siblings are filed rather than folded in, because each needs a
+  different transformation: the two export handlers truncate their target before
+  failing, so the honest fix is write-to-temp-then-rename (CB-76); a read
+  failure part-way through CSV import has committed rows behind it and needs a
+  reporting contract (CB-77); and `os.getcwd()` in `reqs-verify`/`provenance`
+  raises from a deleted cwd, which the file-open sweep structurally could not
+  see (CB-79).
 - **`import_json` now refuses a malformed payload instead of leaking a stdlib
   exception** (CB-72, CB-74). The function checked that its argument was a
   non-empty list, and nothing else, so two inputs walked past the module's

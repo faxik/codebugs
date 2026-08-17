@@ -744,19 +744,35 @@ def register_cli(sub, commands) -> None:
             # The flag forces JSON; a bare positional still infers it from the
             # extension, which is independent of WHICH argument was supplied.
             is_json = json_flag_given or path.endswith(".json")
-            with open(path) as f:
-                data = f.read()
+            # The read is guarded on its own, NOT by a handler-wide `except
+            # OSError` (CB-71). It is the only OSError source that runs BEFORE
+            # import_csv/import_json commit (bench.py:164), and a wider arm would
+            # also catch a failure raised AFTER that commit — reporting a landed
+            # import as bad input, the CB-15/CB-16 success-shaped lie.
+            try:
+                with open(path) as f:
+                    data = f.read()
+            except OSError as e:
+                print(f"codebugs: {e}", file=sys.stderr)
+                sys.exit(1)
             if is_json:
                 result = import_json(conn, json_data=data, **kwargs)
             else:
                 result = import_csv(conn, csv_data=data, **kwargs)
-
-            print(f"Imported: {result['run_id']} ({result['rows']} rows, {result['results_stored']} values)")
         except (ValueError, json.JSONDecodeError) as e:
             print(str(e), file=sys.stderr)
             sys.exit(1)
         finally:
             conn.close()
+
+        # OUTSIDE the arm above, deliberately: this runs after the import has
+        # committed, so a failure here is not an input error. While it sat inside
+        # that try, a ValueError from a closed stdout ("I/O operation on closed
+        # file") was caught and reported as one tidy line at exit 1 for a run
+        # that had already landed — measured, and the same class as CB-15/CB-16.
+        # A post-commit output failure must surface as a crash; making it POSIX-
+        # clean instead is CB-78.
+        print(f"Imported: {result['run_id']} ({result['rows']} rows, {result['results_stored']} values)")
 
     def _cmd_bench_query(args: argparse.Namespace) -> None:
         conn = db.connect()

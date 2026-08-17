@@ -1787,7 +1787,22 @@ def register_cli(sub, commands) -> None:
         # Loop-invariant: resolver registration happens at module import, which
         # db.connect() above completed, so the union cannot change mid-import.
         dropped_keys = _RESERVED_META_KEYS | db.resolver_reserved_meta_keys()
-        with open(args.file, newline="") as f:
+        # The open is HOISTED out of the `with` so the guard covers it alone
+        # (CB-71). `with open(...) as f:` owned the entire import loop, so the
+        # obvious `try: with open(...): <loop>` would have put both the
+        # already-committed rows and the loop's own three `print(...,
+        # file=sys.stderr)` diagnostics inside an OSError arm — reporting a
+        # partially-landed import as bad input, the CB-15/CB-16 lie this guard
+        # exists to avoid. A read failure mid-iteration therefore still crashes,
+        # deliberately: what to report when rows are already committed is a
+        # semantics decision, CB-77.
+        try:
+            handle = open(args.file, newline="")
+        except OSError as e:
+            print(f"codebugs: {e}", file=sys.stderr)
+            conn.close()
+            sys.exit(1)
+        with handle as f:
             reader = csv.DictReader(f)
             for row in reader:
                 # No inline .strip().lower() — add_finding normalizes now (CB-19).
