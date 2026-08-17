@@ -13,35 +13,10 @@ from contextlib import contextmanager
 from typing import Any
 
 from codebugs import db
-
-
-def dedent_docstring(doc: str) -> str:
-    """Strip the common source indentation from a docstring, as CPython 3.13 does.
-
-    CPython 3.13 dedents docstrings at compile time; 3.11 and 3.12 leave the
-    source indentation in `__doc__`, and the mcp SDK passes `__doc__` through
-    untouched. `requires-python` admits all three, so without this the tool
-    descriptions — and therefore the golden — differ purely by interpreter
-    (CB-70).
-
-    This deliberately reproduces the compiler's rule and nothing more: take the
-    minimum indentation over the non-blank lines AFTER the first, remove exactly
-    that prefix from those lines, and leave the first line alone (it begins
-    immediately after the opening quotes, so it carries no indentation to strip).
-    `inspect.cleandoc` is the tempting shortcut and is wrong here: it also drops
-    boundary blank lines and expands tabs, which would both rewrite 61 of the 68
-    golden descriptions and blind the gate to whitespace changes clients can see.
-    """
-    lines = doc.split("\n")
-    indent = None
-    for line in lines[1:]:
-        stripped = line.lstrip(" \t")
-        if stripped:
-            margin = len(line) - len(stripped)
-            indent = margin if indent is None else min(indent, margin)
-    if not indent:
-        return doc
-    return "\n".join([lines[0]] + [line[indent:] for line in lines[1:]])
+# ONE definition, and it lives in src now (CB-73): the server emits normalized
+# descriptions, so a second copy here would be one drift away from the gate and
+# the server disagreeing about the thing they exist to keep in agreement.
+from codebugs.server import dedent_docstring
 
 
 @contextmanager

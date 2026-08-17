@@ -15,6 +15,86 @@ from mcp_types import INVALID_PARAMS
 from codebugs import db
 
 
+def dedent_docstring(doc: str) -> str:
+    """Strip the common source indentation from a docstring, as CPython 3.13 does.
+
+    CPython 3.13 dedents docstrings at compile time; 3.11 and 3.12 leave the
+    source indentation in `__doc__`, and the mcp SDK passes `__doc__` through
+    untouched. `requires-python` admits all three, so without this the tool
+    descriptions clients receive differ purely by interpreter (CB-70, CB-73).
+
+    This deliberately reproduces the compiler's rule and nothing more: take the
+    minimum indentation over the non-blank lines AFTER the first, remove exactly
+    that prefix from those lines, and leave the first line alone (it begins
+    immediately after the opening quotes, so it carries no indentation to strip).
+    `inspect.cleandoc` is the tempting shortcut and is wrong here: it also drops
+    boundary blank lines and expands tabs, which would both rewrite 61 of the 68
+    golden descriptions and blind the gate to whitespace changes clients can see.
+
+    THIS IS THE ONLY COPY. It lived in `tests/_mcp_schema.py` while it normalized
+    only the comparison; now that the server emits normalized text too, a second
+    definition would be one drift away from the gate and the server disagreeing
+    about the very thing they exist to keep in agreement — so the test helper
+    imports this one.
+    """
+    lines = doc.split("\n")
+    indent = None
+    for line in lines[1:]:
+        stripped = line.lstrip(" \t")
+        if stripped:
+            margin = len(line) - len(stripped)
+            indent = margin if indent is None else min(indent, margin)
+    if not indent:
+        return doc
+    return "\n".join([lines[0]] + [line[indent:] for line in lines[1:]])
+
+
+class _NormalizedDescriptions:
+    """Registration-time adapter: every tool's description is dedented ONCE.
+
+    WHY THIS EXISTS (CB-73). The SDK reads `Tool.description` from the function's
+    `__doc__`, so on a 3.11/3.12 host clients receive the source indentation.
+    MCP clients render descriptions as Markdown, and CommonMark treats a
+    4-space-indented line following a blank line as an INDENTED CODE BLOCK — so
+    the entire prose body of ~61 tools rendered monospaced as code on
+    interpreters `requires-python` promises to support. Measured on 3.12 vs 3.13.
+
+    WHY IT WRAPS RATHER THAN MUTATES. Two alternatives were rejected. Rewriting
+    `fn.__doc__` in place is a global side effect on another module's objects;
+    rewriting the registered `Tool` objects afterwards would reach into the SDK's
+    PRIVATE `_tool_manager._tools`, which is a worse coupling than the one
+    `install_strict_arguments` already documents. `description=` is a public,
+    declared parameter of `MCPServer.tool()` (verified), so passing it needs no
+    private API and no mutation.
+
+    The surface is deliberately one method: providers call `mcp.tool(...)` and
+    nothing else — 68 times, verified by sweep — so `__getattr__` exists only so
+    a future provider that reaches for something else keeps working rather than
+    failing obscurely.
+    """
+
+    def __init__(self, server: MCPServer) -> None:
+        self._server = server
+
+    def tool(self, *args: Any, **kwargs: Any) -> Any:
+        inner = self._server.tool(*args, **kwargs)
+
+        def register(fn: Any) -> Any:
+            # An explicit description always wins: a caller that passed one has
+            # already said what the client should see, and second-guessing it
+            # here would make this adapter a policy rather than a normalizer.
+            if kwargs.get("description") is None and fn.__doc__:
+                return self._server.tool(
+                    *args, **{**kwargs, "description": dedent_docstring(fn.__doc__)}
+                )(fn)
+            return inner(fn)
+
+        return register
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._server, name)
+
+
 @contextmanager
 def _conn():
     conn = db.connect()
@@ -159,8 +239,12 @@ def main():
     # json_response flag; it only ever applied to streamable-http, and we run stdio.
     server = MCPServer(SERVER_NAMES[args.mode])
 
+    # Wrapped, so what clients receive does not depend on which interpreter
+    # built the server (CB-73). The adapter is registration-time only; the real
+    # server object is what runs and what install_strict_arguments inspects.
+    registrar = _NormalizedDescriptions(server)
     for provider in db.get_tool_providers(mode=args.mode):
-        provider.register_fn(server, _conn)
+        provider.register_fn(registrar, _conn)
 
     # After registration, so the middleware sees the full tool catalogue.
     install_strict_arguments(server)

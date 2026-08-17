@@ -18,6 +18,7 @@ would be collected and never awaited — i.e. it would pass without running.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import tempfile
 import types
@@ -25,6 +26,8 @@ from contextlib import contextmanager
 
 import pytest
 from mcp.server.mcpserver import MCPServer
+
+from codebugs import server
 from mcp.shared.exceptions import MCPError
 
 from codebugs import db, findings, server
@@ -229,3 +232,90 @@ class TestPreflight:
             assert capsys.readouterr().err != ""
         finally:
             os.chdir(original)
+
+
+class TestInterpreterIndependentDescriptions:
+    """CB-73 — what a client sees must not depend on which Python built the server.
+
+    The SDK reads `Tool.description` from `__doc__`. CPython 3.13 dedents
+    docstrings at compile time; 3.11 and 3.12 do not. MCP clients render
+    descriptions as Markdown, and CommonMark treats a 4-space-indented line
+    following a blank line as an INDENTED CODE BLOCK — so on a 3.12 host the
+    whole prose body of ~61 tools rendered monospaced as code.
+
+    MEASURED end to end on both interpreters, which is what the fix actually
+    rests on: 64 of 68 descriptions differed between a 3.12- and a 3.13-hosted
+    server, and 61 of 68 contained the code-block pattern; both are 0 after the
+    fix, and 3.13 output is byte-identical before and after. That comparison
+    needs two interpreters, so it is NOT run here — reproduce with
+    `uv run --python 3.12 --extra dev` against `_NormalizedDescriptions`.
+
+    These tests are interpreter-independent instead: they feed the adapter a
+    docstring that ALREADY carries indentation — exactly what 3.12 hands the SDK
+    — so they discriminate on any host.
+    """
+
+    INDENTED = "Summary line.\n\n    Body that CommonMark would render as code.\n    "
+
+    def _register(self, target, doc, **kw):
+        def sample(a: str) -> dict:
+            return {}
+
+        sample.__doc__ = doc
+        target.tool(**kw)(sample)
+
+    def test_an_indented_docstring_is_normalized_before_the_client_sees_it(self):
+        """Fails against the unfixed tree, where the raw docstring reaches the
+        SDK untouched."""
+        raw = MCPServer("raw")
+        self._register(raw, self.INDENTED)
+        before = asyncio.run(raw.list_tools())[0].description
+
+        fixed = MCPServer("fixed")
+        self._register(server._NormalizedDescriptions(fixed), self.INDENTED)
+        after = asyncio.run(fixed.list_tools())[0].description
+
+        assert "\n    " in before, (
+            "fixture is wrong: the unwrapped server was expected to keep the indentation"
+        )
+        assert "\n    " not in after, after
+        assert after.startswith("Summary line.")
+        assert "Body that CommonMark" in after
+
+    def test_an_explicit_description_still_wins(self):
+        """The adapter normalizes; it does not decide. A caller that passed a
+        description has already said what the client should see."""
+        srv = MCPServer("explicit")
+        self._register(
+            server._NormalizedDescriptions(srv), self.INDENTED, description="chosen text"
+        )
+        assert asyncio.run(srv.list_tools())[0].description == "chosen text"
+
+    def test_a_tool_with_no_docstring_still_registers(self):
+        srv = MCPServer("nodoc")
+        self._register(server._NormalizedDescriptions(srv), None)
+        tools = asyncio.run(srv.list_tools())
+        assert len(tools) == 1
+
+    def test_normalization_is_idempotent_so_a_3_13_host_is_unaffected(self):
+        """Why the golden does not move: on 3.13 the docstring is already
+        dedented, so the adapter is a no-op there."""
+        already = "Summary line.\n\nBody.\n"
+        assert server.dedent_docstring(already) == already
+
+    def test_the_registrar_is_actually_wired_into_main(self):
+        """Structural, and this repo's own lesson for exactly this shape: a
+        helper that is unit-tested but never invoked leaves the suite green
+        while the defect ships. `main()` cannot be executed here (it parses argv
+        and calls `server.run()`), so the wiring is read."""
+        src = inspect.getsource(server.main)
+        assert "_NormalizedDescriptions(server)" in src, src
+        assert "provider.register_fn(registrar, _conn)" in src, src
+
+    def test_the_normalizer_has_exactly_one_definition(self):
+        """The gate and the server must not be able to disagree about what
+        'normalized' means. `tests/_mcp_schema` imports this one rather than
+        carrying a copy, which is how CB-70's helper started."""
+        from tests import _mcp_schema
+
+        assert _mcp_schema.dedent_docstring is server.dedent_docstring
