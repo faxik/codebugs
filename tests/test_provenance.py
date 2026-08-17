@@ -357,3 +357,131 @@ class TestFindingIdBranchHonoursItsFilters:
         project, _ = git_project
         with pytest.raises(KeyError):
             provenance.check_findings(conn, project, finding_id="CB-99999")
+
+
+class TestAmbientOSErrorSources:
+    """CB-79 — `OSError` from sources the "guard the `open()`" sweep cannot see.
+
+    Which side each test can fail on, stated because this repo ships vacuous
+    tests otherwise:
+
+      * `test_a_non_executable_git_*` and `test_a_deleted_cwd_*` MUST fail
+        against the pre-fix tree (recorded runs in their docstrings).
+      * `test_a_git_error_during_rename_detection_*` is a FIX-GUARD: pre-fix it
+        fails by raising, and against a NAIVE widening (one that keeps
+        `rename_output = ""`) it fails by reporting `deleted`. Both are wrong,
+        for different reasons.
+      * `TestNarrowTupleCompatibility` below passes on both sides by design.
+    """
+
+    def test_a_non_executable_git_degrades_instead_of_raising(self, monkeypatch, git_project):
+        """Recorded run at 4ee8c6c: `PermissionError: [Errno 13] Permission
+        denied: 'git'` escaped `file_status` entirely.
+
+        NEGATIVE RESULT worth not re-deriving: putting a `chmod 000 git`
+        EARLIER on PATH does not reproduce this. CPython's exec continues the
+        PATH search on EACCES and silently finds the real git, so the
+        non-executable one must be the ONLY git on PATH — which is what this
+        test arranges.
+        """
+        project, sha = git_project
+        bindir = os.path.join(project, "fakebin")
+        os.makedirs(bindir)
+        gitpath = os.path.join(bindir, "git")
+        with open(gitpath, "w") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(gitpath, 0o000)
+        assert os.path.exists(gitpath), "fixture did not create the fake git"
+        monkeypatch.setenv("PATH", bindir)
+
+        result = provenance.file_status(
+            file_path="src/auth.py", reported_at_commit=sha, project_dir=project
+        )
+        assert result["file_status"] == "unknown", result
+
+    def test_a_git_error_during_rename_detection_reports_unknown_not_deleted(
+        self, monkeypatch, git_project
+    ):
+        """FIX-GUARD. The rename lookup used to swallow its failure into
+        `rename_output = ""`, and the fall-through then stated `deleted` as a
+        fact about the file — "a guard reporting clean because it could not
+        look". Widening the tuple made it reachable, so the swallow had to go.
+
+        Injects at the THIRD subprocess call only: the first two must succeed,
+        or the function returns before reaching the branch under test.
+        """
+        project, sha = git_project
+        os.remove(os.path.join(project, "src", "auth.py"))
+        subprocess.run(["git", "add", "-A"], cwd=project, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "delete"], cwd=project, check=True, capture_output=True
+        )
+
+        real = subprocess.check_output
+        calls = {"n": 0}
+
+        def flaky(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 3:
+                raise PermissionError(13, "Permission denied")
+            return real(*a, **kw)
+
+        monkeypatch.setattr(subprocess, "check_output", flaky)
+        result = provenance.file_status(
+            file_path="src/auth.py", reported_at_commit=sha, project_dir=project
+        )
+        assert calls["n"] >= 3, "the injection point was never reached"
+        assert result["file_status"] == "unknown", result
+        assert result["reason"] == "git_error", result
+
+    def test_a_deleted_cwd_degrades_rather_than_raising(self, monkeypatch, git_project):
+        """`os.getcwd()` raises once the directory is deleted out from under the
+        process — a long-lived MCP server outlives the worktree it started in.
+        Pre-fix this escaped as FileNotFoundError.
+
+        `os.getcwd` is monkeypatched rather than actually deleting the cwd,
+        which would affect the whole test process.
+        """
+        _project, sha = git_project
+
+        def gone():
+            raise FileNotFoundError(2, "No such file or directory")
+
+        monkeypatch.setattr(os, "getcwd", gone)
+        result = provenance.file_status(file_path="src/auth.py", reported_at_commit=sha)
+        assert result == {"file_status": "unknown", "reason": "no_cwd"}
+
+
+class TestNarrowTupleCompatibility:
+    """Compatibility pins. These pass on BOTH sides — they exist to show the
+    widening from `FileNotFoundError` to `OSError` is a STRICT superset, not a
+    behaviour change."""
+
+    def test_a_missing_git_still_degrades_exactly_as_before(self, monkeypatch, git_project):
+        project, sha = git_project
+        monkeypatch.setenv("PATH", "/nonexistent")
+        result = provenance.file_status(
+            file_path="src/auth.py", reported_at_commit=sha, project_dir=project
+        )
+        assert result["file_status"] == "unknown"
+        assert result["reason"] == "unreachable_commit"
+
+    def test_subprocess_errors_are_still_caught(self, monkeypatch, git_project):
+        """`subprocess.SubprocessError` is NOT an OSError subclass, so it has to
+        stay in the tuple; dropping it would let CalledProcessError and
+        TimeoutExpired escape."""
+        project, sha = git_project
+        assert not issubclass(subprocess.SubprocessError, OSError)
+
+        for exc in (
+            subprocess.CalledProcessError(1, "git"),
+            subprocess.TimeoutExpired("git", 10),
+        ):
+            def boom(*a, _e=exc, **kw):
+                raise _e
+
+            monkeypatch.setattr(subprocess, "check_output", boom)
+            result = provenance.file_status(
+                file_path="src/auth.py", reported_at_commit=sha, project_dir=project
+            )
+            assert result["file_status"] == "unknown", (exc, result)

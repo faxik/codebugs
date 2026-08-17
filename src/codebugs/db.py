@@ -531,7 +531,15 @@ def git_rev_parse(ref: str, *, silent: bool = False, cwd: str | None = None) -> 
             stderr=subprocess.DEVNULL if silent else None,
             cwd=cwd,
         ).strip()
-    except (subprocess.SubprocessError, FileNotFoundError):
+    except (subprocess.SubprocessError, OSError):
+        # OSError, not FileNotFoundError (CB-79). The narrow spelling covered
+        # "git is missing" and nothing else, so a git binary that exists but is
+        # not executable raised PermissionError straight through a caller that
+        # had asked to be told "unavailable" — reproduced with a chmod-000 git
+        # as the only one on PATH. NotADirectoryError from a deleted `cwd` is
+        # the same class. `subprocess.SubprocessError` is NOT an OSError
+        # subclass, so it has to stay: dropping it loses CalledProcessError and
+        # TimeoutExpired, which is most of what this guard is for.
         if silent:
             return None
         raise

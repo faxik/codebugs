@@ -12,6 +12,28 @@ from typing import Any, NamedTuple
 from codebugs import db, findings, types
 
 
+def _ambient_cwd() -> str | None:
+    """The process cwd, or None when it no longer exists (CB-79).
+
+    `os.getcwd()` raises FileNotFoundError once the directory is deleted out
+    from under the process — not hypothetical here, since a long-lived MCP
+    server outlives the git worktree it was started in. Every caller in this
+    module degrades on None rather than raising, because that is already what
+    this module does when git cannot be consulted: `file_status` reports
+    `unknown`, `_parse_trailers` returns `[]`. `db.py:876` fixed the same shape
+    the other way, raising `DatabaseNotFoundError`, because its callers all
+    handle that — the difference is the caller's contract, not the failure.
+
+    Returning None is safe downstream: `cwd=None` is exactly what `subprocess`
+    means by "inherit", so the widened except tuples convert the resulting
+    OSError into this module's own degraded answers.
+    """
+    try:
+        return os.getcwd()
+    except OSError:
+        return None
+
+
 def head_sha(*, project_dir: str | None = None) -> str | None:
     """Current HEAD SHA for provenance auto-population. Returns None if git unavailable."""
     return db.git_rev_parse("HEAD", silent=True, cwd=project_dir)
@@ -27,10 +49,17 @@ def file_status(
 
     file_status is one of: current, modified, renamed, deleted, unknown.
     """
-    cwd = project_dir or os.getcwd()
+    cwd = project_dir or _ambient_cwd()
 
     if not reported_at_commit:
         return {"file_status": "unknown", "reason": "no_provenance"}
+
+    # This function is the one caller that cannot simply pass `cwd` through:
+    # `os.path.join(cwd, file_path)` below would raise TypeError on None. The
+    # check sits AFTER the no-provenance return so a finding with no commit
+    # still reports the more specific reason.
+    if cwd is None:
+        return {"file_status": "unknown", "reason": "no_cwd"}
 
     try:
         subprocess.check_output(
@@ -40,7 +69,17 @@ def file_status(
             timeout=10,
             stderr=subprocess.DEVNULL,
         )
-    except (subprocess.SubprocessError, FileNotFoundError):
+    except (subprocess.SubprocessError, OSError):
+        # OSError rather than FileNotFoundError, at all four sites in this module
+        # and at db.git_rev_parse (CB-79). The narrow spelling covered exactly one
+        # way for git to be unusable — absent — and let two others escape as
+        # tracebacks: a git binary that exists but is not executable
+        # (PermissionError, reproduced with a chmod-000 git as the only one on
+        # PATH), and a `cwd` that has been deleted (NotADirectoryError /
+        # FileNotFoundError from the exec itself). Strict widening:
+        # FileNotFoundError is an OSError, so nothing that was caught stops being
+        # caught. `subprocess.SubprocessError` is not an OSError subclass and has
+        # to stay, or CalledProcessError and TimeoutExpired escape.
         return {"file_status": "unknown", "reason": "unreachable_commit"}
 
     try:
@@ -51,7 +90,7 @@ def file_status(
             timeout=10,
             stderr=subprocess.DEVNULL,
         ).strip()
-    except (subprocess.SubprocessError, FileNotFoundError):
+    except (subprocess.SubprocessError, OSError):
         return {"file_status": "unknown", "reason": "git_error"}
 
     if not log_output:
@@ -85,8 +124,14 @@ def file_status(
             timeout=10,
             stderr=subprocess.DEVNULL,
         ).strip()
-    except (subprocess.SubprocessError, FileNotFoundError):
-        rename_output = ""
+    except (subprocess.SubprocessError, OSError):
+        # NOT `rename_output = ""` (CB-79). That conflated "git found no renames"
+        # with "git could not be asked", and the fall-through below then reports
+        # a confident `deleted` — the repo's own "a guard reporting clean because
+        # it could not look" failure, stated as a fact about the file. Widening
+        # the tuple above made it reachable through PermissionError and a deleted
+        # cwd, so the honest answer has to replace the silent one.
+        return {"file_status": "unknown", "reason": "git_error"}
 
     if rename_output:
         for line in rename_output.splitlines():
@@ -117,7 +162,7 @@ def check_findings(
 
     Filters forward to findings.query_findings; default status is 'open'.
     """
-    cwd = project_dir or os.getcwd()
+    cwd = project_dir or _ambient_cwd()
 
     if finding_id:
         # The docstring below has always promised "Filters forward to
@@ -212,7 +257,7 @@ def _parse_trailers(rev_range: str, *, project_dir: str | None = None) -> list[_
     unavailable or the range is empty. Field-separated with control chars so
     subjects/bodies with newlines parse unambiguously.
     """
-    cwd = project_dir or os.getcwd()
+    cwd = project_dir or _ambient_cwd()
     fmt = "%x1e%H%x1f%s%x1f%B"
     try:
         out = subprocess.check_output(
@@ -222,7 +267,7 @@ def _parse_trailers(rev_range: str, *, project_dir: str | None = None) -> list[_
             timeout=10,
             stderr=subprocess.DEVNULL,
         )
-    except (subprocess.SubprocessError, FileNotFoundError):
+    except (subprocess.SubprocessError, OSError):
         return []
     trailers: list[_Trailer] = []
     for record in out.split("\x1e"):

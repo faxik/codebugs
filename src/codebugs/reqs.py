@@ -439,7 +439,6 @@ def verify_requirements(
       - status: contradictions (description vs status)
     """
     all_checks = checks or ["tests", "ids", "status"]
-    root = project_dir or os.getcwd()
     issues: list[dict[str, str]] = []
 
     rows = conn.execute("SELECT * FROM requirements ORDER BY id").fetchall()
@@ -474,7 +473,26 @@ def verify_requirements(
                                "message": f"Numbering gaps (5+): {', '.join(gaps)}"})
 
     if "tests" in all_checks:
-        tests_dir = os.path.join(root, "tests")
+        # Resolved HERE, not at the top of the function (CB-79). `root` is used
+        # by this check and no other, so an eager `os.getcwd()` made
+        # `verify_requirements(checks=["ids"])` fail from a deleted cwd for a
+        # check that never needed a directory. A deleted cwd is not
+        # hypothetical: a long-lived MCP server outlives the worktree it was
+        # started in.
+        #
+        # This one RAISES where provenance degrades, and the difference is the
+        # contract, not the failure: this function has no "unknown" vocabulary,
+        # so reporting no issues because we could not look for the tests would
+        # be exactly the false-clean answer the repo keeps recording.
+        if project_dir is None:
+            try:
+                project_dir = os.getcwd()
+            except OSError as e:
+                raise ValueError(
+                    f"cannot determine the current directory ({e}) — it may have been "
+                    f"deleted; cd somewhere that exists, or pass project_dir / --repo"
+                ) from e
+        tests_dir = os.path.join(project_dir, "tests")
         for r in reqs:
             tc = r["test_coverage"].strip()
             if not tc or tc == "--":
@@ -1003,8 +1021,23 @@ def register_cli(sub, commands) -> None:
     def _cmd_reqs_verify(args: argparse.Namespace) -> None:
         conn = db.connect()
         checks = args.checks.split(",") if args.checks else None
-        result = verify_requirements(conn, project_dir=args.project_dir, checks=checks)
-        conn.close()
+        try:
+            result = verify_requirements(conn, project_dir=args.project_dir, checks=checks)
+        except json.JSONDecodeError:
+            # BEFORE the ValueError arm, and the ordering is load-bearing
+            # (CB-15/CB-16): JSONDecodeError SUBCLASSES ValueError, and this one
+            # comes from `db.row_to_dict` on a row with malformed stored
+            # tags/meta — a corrupt-data fault, not bad input. Reporting it as
+            # bad input would print a tidy line for a genuine data problem.
+            raise
+        except ValueError as e:
+            # The deleted-cwd refusal from the "tests" check (CB-79).
+            print(f"codebugs: {e}", file=sys.stderr)
+            sys.exit(1)
+        finally:
+            # Was absent entirely: any exception leaked the connection, exactly
+            # as _cmd_reqs_import did before CB-71.
+            conn.close()
 
         print(f"Verified {result['total_requirements']} requirements.")
         if not result["issues"]:
