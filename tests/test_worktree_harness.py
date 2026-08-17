@@ -1420,6 +1420,32 @@ class TestHarnessIntegrity:
             "ci.yml must run on pull_request — it is the check meant to be required"
         )
 
+    def test_ci_job_proves_it_examined_every_commit(self) -> None:
+        """A scan that examines nothing must not report clean.
+
+        The loop used to be `for sha in ${commits}`, which depends on IFS
+        word-splitting: bash splits, zsh does not. Running this very assertion by
+        hand under zsh made the body execute ONCE with every SHA concatenated,
+        `git show` fail, and the script print "clean" having examined nothing.
+        Actions runs bash so the job was correct in situ — but a gate whose
+        correctness depends on which shell invokes it is one `shell:` key away
+        from vacuous, which is the defect class this change exists to remove.
+
+        Two properties are pinned: the loop no longer relies on word-splitting,
+        and the job compares what it examined against what it should have.
+        """
+        wf = (REPO_ROOT / ".github" / "workflows" / "main-invariants.yml").read_text()
+        code = "\n".join(
+            ln for ln in wf.splitlines() if not ln.lstrip().startswith("#")
+        )
+        assert "for sha in ${commits}" not in code, (
+            "the scan loop depends on IFS word-splitting again"
+        )
+        assert 'examined=$((examined + 1))' in code, "the job does not count what it examined"
+        assert '"${examined}" -ne "${expected}"' in code, (
+            "the job does not compare examined against expected — a partial scan reports clean"
+        )
+
     def test_ci_and_hook_both_defeat_rename_detection(self) -> None:
         """`--name-only` prints only the DESTINATION path for a rename.
 
