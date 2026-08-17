@@ -791,3 +791,126 @@ class TestFileIOErrorContract:
             f"stderr was {r.stderr!r}"
         )
         assert r.stderr.strip() != "I/O operation on closed file.", r.stderr
+
+
+class TestImportArgumentValidation:
+    """CB-82 — a write path must not invent a value from a falsey wrong type.
+
+    `TestImportArgumentValidation` MUST fail against 2cb5dc2; the pre-fix
+    behaviour for the falsey cases is a SUCCESSFUL call that stores a default,
+    so `pytest.raises` is itself the discriminator. `TestImportArgumentCompat`
+    below passes on both sides by design.
+    """
+
+    CSV = "metric,value\nrow-a,1\n"
+
+    def _import(self, conn, **kw):
+        args = {"benchmark": "b", "csv_data": self.CSV}
+        args.update(kw)
+        return bench.import_csv(conn, **args)
+
+    @pytest.mark.parametrize("falsey", [[], {}, "", 0, set()])
+    @pytest.mark.parametrize("arg", ["date", "run_id"])
+    def test_a_falsey_wrong_type_is_refused_not_silently_defaulted(self, conn, arg, falsey):
+        """Recorded at 2cb5dc2: `date=[]` STORED '2026-08-17' and `run_id=[]`
+        stored 'BE-1' — `x or default` cannot tell a falsey wrong type from
+        "not supplied".
+
+        NOTE the card itself was wrong here: it claimed `date={}` / `run_id={}`
+        "reach the INSERT and raise". They do not — `{}` is falsey, so they took
+        the same silent-default path. Measured.
+        """
+        with pytest.raises(ValueError):
+            self._import(conn, **{arg: falsey})
+
+    def test_nothing_is_written_when_an_argument_is_refused(self, conn):
+        """The guard runs BEFORE any parse or INSERT, so a refusal costs no
+        partial work. Uses an otherwise-valid payload, so the only reason for an
+        empty table is the refusal itself."""
+        with pytest.raises(ValueError):
+            self._import(conn, date=[])
+        assert conn.execute("SELECT COUNT(*) c FROM codebench_runs").fetchone()["c"] == 0
+        assert conn.execute("SELECT COUNT(*) c FROM codebench_results").fetchone()["c"] == 0
+
+    @pytest.mark.parametrize(
+        ("kw", "match"),
+        [
+            ({"benchmark": []}, "benchmark must be a string"),
+            ({"benchmark": ""}, "benchmark must not be empty"),
+            ({"date": ["x"]}, "date must be a string"),
+            ({"tags": {1, 2}}, "tags must be a list"),
+            ({"tags": [1]}, r"tags\[0\] must be a string"),
+            ({"meta": []}, "meta must be a dict"),
+            ({"meta": {1: "x"}}, "meta keys must be strings"),
+            ({"meta": {"a": object()}}, "meta must be JSON-serializable"),
+        ],
+    )
+    def test_each_argument_reports_which_one_and_why(self, conn, kw, match):
+        """Pre-fix these raised ProgrammingError / InterfaceError / TypeError from
+        sqlite3 or json — violating "domain functions raise ValueError for invalid
+        input" — or, for the truthy-wrong-type cases, stored garbage."""
+        with pytest.raises(ValueError, match=match):
+            self._import(conn, **kw)
+
+    def test_import_json_inherits_the_guard(self, conn):
+        """Codex's correction to my first draft: an EMPTY/malformed json_data
+        already raises on the pre-fix tree, so such a test cannot discriminate.
+        This passes VALID json_data and an invalid SHARED argument, so the only
+        thing under test is whether the delegation carries the guard."""
+        with pytest.raises(ValueError, match="date must be a string"):
+            bench.import_json(
+                conn,
+                benchmark="b",
+                json_data='[{"metric": "row-a", "value": 1}]',
+                date=[],
+            )
+
+    def test_the_checked_bytes_are_the_stored_bytes(self, conn):
+        """CB-74's lesson applied here: the guard serializes ONCE and the INSERT
+        binds that exact string, so a container that mutates between a check and
+        a consume cannot store something the guard never saw.
+
+        A list whose contents change on each iteration would, with two separate
+        `json.dumps` calls, be validated in one state and stored in another.
+        """
+
+        class Shifting(list):
+            def __init__(self):
+                super().__init__(["first"])
+                self._n = 0
+
+            def __iter__(self):
+                self._n += 1
+                return iter(["first"] if self._n <= 2 else ["MUTATED"])
+
+        self._import(conn, tags=Shifting())
+        stored = conn.execute("SELECT tags FROM codebench_runs").fetchone()["tags"]
+        assert "MUTATED" not in stored, f"stored a view the guard never validated: {stored}"
+
+
+class TestImportArgumentCompat:
+    """Passes on BOTH sides — pins behaviour the change preserves."""
+
+    CSV = "metric,value\nrow-a,1\n"
+
+    def test_omitting_date_and_run_id_still_defaults(self, conn):
+        r = bench.import_csv(conn, benchmark="b", csv_data=self.CSV)
+        assert r["run_id"] == "BE-1"
+        assert len(r["date"]) == 10
+
+    def test_empty_tags_and_meta_are_valid_supplied_values(self, conn):
+        r = bench.import_csv(conn, benchmark="b", csv_data=self.CSV, tags=[], meta={})
+        row = conn.execute("SELECT tags, meta FROM codebench_runs").fetchone()
+        assert (row["tags"], row["meta"]) == ("[]", "{}")
+        assert r["run_id"]
+
+    def test_nan_in_meta_is_still_accepted(self, conn):
+        """The NaN policy is deliberately UNCHANGED. Refusing it would be a
+        narrowing this card did not ask for; `json.loads` accepts it back, so
+        the round trip is intact."""
+        bench.import_csv(
+            conn, benchmark="b", csv_data=self.CSV, meta={"x": float("nan")}
+        )
+        stored = conn.execute("SELECT meta FROM codebench_runs").fetchone()["meta"]
+        assert "NaN" in stored
+        assert json.loads(stored)["x"] != json.loads(stored)["x"]  # NaN != NaN
