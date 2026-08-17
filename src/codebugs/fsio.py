@@ -22,12 +22,20 @@ from __future__ import annotations
 import contextlib
 import errno
 import os
+import re
 import stat
 import tempfile
 from collections.abc import Iterator
 from typing import IO
 
 __all__ = ["atomic_write"]
+
+# A path that resolves INTO a descriptor directory is an fd alias, not a file.
+# `realpath("/dev/stdout")` returns the redirect target when stdout is a FILE,
+# but `/proc/<pid>/fd/pipe:[N]` when it is a PIPE — a name that does not exist,
+# so `os.stat` raises FileNotFoundError and a stat-based classifier reads it as
+# "a new file to create" and then tries to mkstemp inside /proc. Measured.
+_FD_DIR = re.compile(r"\A(/proc/(?:self|thread-self|\d+)(?:/task/\d+)?/fd|/dev/fd)\Z")
 
 # Attributable and hidden, so a temp leaked by an uncatchable signal (SIGKILL)
 # can be recognised and swept. Nothing here can clean that case up; see below.
@@ -121,27 +129,54 @@ def atomic_write(path: str, *, newline: str | None = None) -> Iterator[IO[str]]:
     accepted or set: `open()` and `os.fdopen()` both take the locale default,
     and pinning one here would silently desynchronise export from import on a
     non-UTF-8 host.
-    """
-    # FIRST, so `os.path.dirname` is never "" for a bare filename like the
-    # default `codebugs_export.csv`; mkstemp(dir="") fails. Ordering is
-    # load-bearing.
-    resolved = os.path.realpath(path)
 
-    try:
-        st: os.stat_result | None = os.stat(resolved)
-    except FileNotFoundError:
-        st = None  # a genuinely absent destination: we create it
-    except OSError as exc:
-        # ELOOP from a symlink cycle, EACCES on a path component, ENOTDIR...
-        # Only FileNotFoundError means "missing"; classifying these as missing
-        # would replace the very symlink we failed to resolve.
-        raise _typed(exc, path) from exc
+    TWO LIMITS ON THE NAME, stated here because the caller cannot see them:
+
+    * **Not always atomic.** A destination that is a FIFO, a character device,
+      a file-descriptor alias, or a regular file whose inode this process
+      already holds open is written IN PLACE — replacement would destroy a live
+      node or orphan an open descriptor, so writing through it is the only
+      correct behaviour, and it carries `open(w)`'s truncation window. There is
+      nothing to protect in the first three cases; the fourth is a deliberate
+      trade of atomicity for not breaking `export-csv out.csv > out.csv`.
+    * **Single-threaded callers only.** Creating a NEW file reads the umask,
+      which requires setting it, and that is process-global for two syscalls.
+      Both callers today are CLI handlers. A threaded caller could observe the
+      cleared umask.
+    """
+    # FIRST, and load-bearing — but NOT for the reason an earlier draft of this
+    # comment gave. `mkstemp(dir="")` does not fail; it creates in the cwd
+    # (measured), which for a bare filename is the right directory anyway. The
+    # real reason is the SYMLINK case: the temp must sit beside the *resolved*
+    # target so the replace is same-filesystem (no EXDEV) and lands in the
+    # directory that actually holds the file.
+    resolved = os.path.realpath(path)
 
     in_place = False
     keep_mode: int | None = None
 
-    if st is None:
-        pass  # create
+    # Checked BEFORE the stat, because for a pipe the alias resolves to a name
+    # that does not exist: `/proc/<pid>/fd/pipe:[N]`. A stat-based classifier
+    # reads that as "a new file to create" and then tries to mkstemp inside
+    # /proc — so `codebugs export-csv /dev/stdout | cat`, which streams CSV on
+    # main, came back as `[Errno 2] ... '/dev/stdout'`. Reproduced against both
+    # trees; an fd alias is a live descriptor, never a destination to replace.
+    if _FD_DIR.match(os.path.dirname(resolved)):
+        st: os.stat_result | None = None
+        in_place = True
+    else:
+        try:
+            st = os.stat(resolved)
+        except FileNotFoundError:
+            st = None  # a genuinely absent destination: we create it
+        except OSError as exc:
+            # ELOOP from a symlink cycle, EACCES on a path component, ENOTDIR...
+            # Only FileNotFoundError means "missing"; classifying these as
+            # missing would replace the very symlink we failed to resolve.
+            raise _typed(exc, path) from exc
+
+    if in_place or st is None:
+        pass  # write through the alias, or create a new file
     elif stat.S_ISDIR(st.st_mode):
         raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), path)
     elif stat.S_ISFIFO(st.st_mode) or stat.S_ISCHR(st.st_mode):
@@ -195,18 +230,24 @@ def atomic_write(path: str, *, newline: str | None = None) -> Iterator[IO[str]]:
         _discard(tmp)
         raise
 
+    # One `finally`, not a `_discard` at each failure point: "the temp never
+    # survives" is then structural rather than a convention every future edit
+    # must re-establish — the same argument this repo applies to SQL-computed
+    # deadlines and guarded rollbacks. After a successful replace the temp is
+    # already gone and `_discard` no-ops on it.
     try:
         with handle:
             yield handle
         # Closed by the `with`, so a flush/close ENOSPC — where quota failures
         # usually surface — has already raised and we never reach the replace.
-    except BaseException:
-        _discard(tmp)
-        raise
 
-    try:
-        os.chmod(tmp, keep_mode if keep_mode is not None else _default_file_mode())
-        os.replace(tmp, resolved)
-    except OSError as exc:
+        try:
+            os.chmod(tmp, keep_mode if keep_mode is not None else _default_file_mode())
+            os.replace(tmp, resolved)
+        except OSError as exc:
+            raise _typed(exc, path) from exc
+        # The caller's own write/close errors are deliberately NOT re-typed:
+        # rebuilding them would keep only errno/strerror/filename and discard
+        # anything richer they carried (a BlockingIOError's characters_written).
+    finally:
         _discard(tmp)
-        raise _typed(exc, path) from exc

@@ -313,6 +313,32 @@ class TestFixGuards:
         )
         assert target.read_text() == "replacement"
 
+    def test_an_fd_alias_resolving_into_proc_is_written_through(self, populated):
+        """Killed by the mutation "classify from os.stat alone".
+
+        THE REGRESSION THIS BRANCH SHIPPED AND THE FOURTH REVIEW PASS CAUGHT.
+        When stdout is a PIPE, realpath('/dev/stdout') is
+        `/proc/<pid>/fd/pipe:[N]` — a name that does not exist — so os.stat
+        raises FileNotFoundError, a stat-based classifier reads "new file to
+        create", and mkstemp then tries to create inside /proc. Measured
+        against both trees: main streams the CSV, the first draft of this fix
+        returned `[Errno 2] No such file or directory: '/dev/stdout'`.
+
+        Note the sibling test above covers the redirect-to-a-FILE case, where
+        realpath yields an ordinary regular file instead. Two different
+        resolutions of the same `/dev/stdout`, and neither check catches both.
+        """
+        r = subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", "--tracker-root", populated,
+             "export-csv", "/dev/stdout"],
+            capture_output=True,  # a pipe, which is the whole point
+            text=True,
+            env={**os.environ, "PYTHONPATH": os.path.join(os.getcwd(), "src")},
+        )
+        assert r.returncode == 0, r.stderr
+        assert "id,severity,category" in r.stdout, r.stdout[:200]
+        assert "No such file" not in r.stderr, r.stderr
+
     def test_a_directory_destination_reports_the_typed_path(self, tmp_path):
         d = tmp_path / "adir"
         d.mkdir()
@@ -443,6 +469,58 @@ class TestCompatibility:
                 ])
 
         assert via_helper.read_bytes() == via_plain.read_bytes()
+
+
+class TestWriteCallSitesRatchet:
+    """Prose cannot enforce prose — this repo's own first principle.
+
+    CLAUDE.md now says a CLI handler writes files through `fsio.atomic_write`,
+    never a bare `open(path, "w")`. That rule holds today, so this ratchet is
+    green on landing and costs ~10 lines; without it the rule is one PR from a
+    silent violation. Same shape as `TestOpenCallSitesRatchet` in
+    test_db_infra.py and the BEGIN IMMEDIATE occurrence count in test_claims.py.
+
+    `fsio.py` itself is the one sanctioned site: its in-place branch must call
+    `open` directly, which is exactly what the rule routes everyone else away
+    from.
+    """
+
+    def test_fsio_is_the_only_module_that_opens_a_file_for_writing(self):
+        """Read by AST, not by regex.
+
+        The first draft of this test grepped the source text and matched the
+        phrase `open(path, "w")` inside three DOCSTRINGS of the very module it
+        was policing — a ratchet that fails on prose is a ratchet nobody keeps.
+        The AST sees calls, so comments and docstrings are invisible to it, and
+        no line number is hardcoded.
+        """
+        import ast
+        import pathlib
+
+        src = pathlib.Path(__file__).resolve().parent.parent / "src" / "codebugs"
+        offenders = []
+        for py in sorted(src.rglob("*.py")):
+            tree = ast.parse(py.read_text(), filename=str(py))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                name = getattr(func, "id", None) or getattr(func, "attr", None)
+                if name != "open":  # os.fdopen is a different attr, correctly missed
+                    continue
+                mode = None
+                if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
+                    mode = node.args[1].value
+                for kw in node.keywords:
+                    if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
+                        mode = kw.value.value
+                if isinstance(mode, str) and set(mode) & set("wax"):
+                    offenders.append(f"{py.relative_to(src)}:{node.lineno}")
+
+        assert [o.split(":")[0] for o in offenders] == ["fsio.py"], (
+            "a write-mode open() appeared outside fsio.atomic_write — route it "
+            "through the helper (CB-76):\n" + "\n".join(offenders)
+        )
 
 
 class TestExportPayloadIsInHandBeforeTheOpen:
