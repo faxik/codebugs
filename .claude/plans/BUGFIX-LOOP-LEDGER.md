@@ -5,6 +5,7 @@ net change. Tracker: this repo's own `.codebugs/findings.db`, served by `mcp__co
 
 | Date | Focus | Cards | Disposition | Merge | Follow-ups |
 |---|---|---|---|---|---|
+| 2026-08-17 | `codebugs` (pure/simple/confident, "batch related") | CB-75 | **fixed, and the fix's own first implementation was bypassable** — `import_csv` fed `csv_data` straight to `io.StringIO`, so `csv_data=5` leaked `TypeError: initial_value must be str or None, not int` instead of the contracted `ValueError`. Guard is positive and up-front, never a rewrap (a rewrap would also convert a post-commit failure into bad input, CB-15/CB-16). **A Codex diff review then showed `isinstance(csv_data, str)` is spoofable** — CPython honours a `__class__` property, and `MagicMock(spec=str)` is such an object, so the leak survived its own fix; now `issubclass(type(...), str)`, which accepts exactly what the consumer accepts. **The general rule, CB-74's lesson in a second form: the guard's predicate must be IDENTICAL to the consumer's requirement.** Two deliberate asymmetries with `import_json`, both measured: bytes are refused rather than decoded (StringIO never took them, so nothing imports that way today), and no snapshot is taken because a `str` cannot present two views — verified with a lying `__str__` | `1e033d5` (`01abf7b`, `17b7423`, `cefde2a`) | filed CB-80 (population card: batch entry points; a str payload silently iterates CHARACTERS), CB-81 (`medium` — duplicate labels/headers/`nan` raise `IntegrityError` MID-WRITE, CLI-reachable traceback), CB-82 (the other five arguments unvalidated; falsey ones silently defaulted — CB-25's shape on a write path). **Three false claims of mine corrected**, incl. one inherited by the landed CB-72 class |
 | 2026-08-17 | `codebugs` (pure/simple/confident, "batch related") | CB-71 | **fixed, and the card's own prescribed fix was rejected by measurement** — three CLI handlers performed a file read that no arm covered, so `bench-import missing.csv -b Q` printed a raw traceback. `_cmd_bench_import` *had* a `try` whose only arm was `(ValueError, JSONDecodeError)`; `_cmd_reqs_import` had **no arm at all** and leaked its connection. The card asked for a handler-wide `except OSError`; that would have reported a **landed** import as bad input, because the success `print` runs after the commit and raises `BrokenPipeError` (an `OSError`) on a closed pipe — reproduced with the run visible in `bench-list` afterwards. Guard covers **exactly the read**; `_cmd_import_csv`'s `open` is hoisted out of its `with`, which owned the whole import loop. **The tree also fixed a LIVE instance of the hazard the card only theorised about**: the pre-existing arm spanned the success print, so a post-commit `ValueError` from a closed stdout came back as the single line `I/O operation on closed file.` at exit 1 with the run committed. The card had listed hoisting that print as a *considered-and-rejected alternative*; it is the fix | `82ef895` (`f86c286`, `19d5e95`) | filed CB-76 (exports + truncation), CB-77 (mid-loop read semantics), CB-78 (post-success output failure, POSIX decision at `cli.main`), CB-79 (non-file `OSError` sources); evidence appended to CB-55. **Scope cut from 5 handler edits to 3 by review** — the two export handlers went to CB-76 |
 | 2026-08-17 | `codebugs` (pure/simple/confident, "batch related") | CB-72 + CB-74 | **both fixed, one mechanism** — `import_json` checked that its argument was a non-empty list and nothing else, so two inputs walked past the module contract and out as stdlib exceptions: a payload outside `str\|bytes\|bytearray\|list` as `TypeError` (CB-72, in-process only), and an array whose *elements* are not objects as `AttributeError` from `data[0].keys()` (CB-74, **MCP-reachable** — wire type is `str \| list \| None`, and the SDK also pre-parses a wire string `"[1,2]"` into a list). CB-74 was filed by me during the sibling sweep and is the more serious half. Guard is a **positive shape check before `data[0]`, never an exception rewrap** — a blanket rewrap would also convert a post-commit failure inside `import_csv` into `ValueError`, which the CLI arm reports as bad input for a write that landed (CB-15/CB-16). **Every** element checked: `[{a,b}, 5]` never reached `data[0]` at all, it died later in `csv.DictWriter`. `bytes`/`bytearray` deliberately kept working (annotation widened) — refusing what imports today would be a behaviour change wearing a bugfix costume | `6bfde7a` (`bae08df`, `43f4d4b`) | filed CB-75 (`import_csv`'s `TypeError` twin — different accepted-type condition in a different function, so its own tree). **CB-71 returned to `open`** with full evidence: both reviewers ruled the 3-card cluster illegitimate. Next candidate is CB-71, and its card now carries the design work |
 | 2026-08-17 | `codebugs` (pure/simple/confident) | CB-70 | **fixed** — the MCP wire-schema gate could not pass on 3.11/3.12, which `requires-python` promises: the golden was built on 3.13, which dedents docstrings at compile time, so 64 of 68 tools read as "drifted" and the message told the reader to regenerate — which would have broken it the other way. Replicated 3.13's own dedent instead of `inspect.cleandoc` (measured: cleandoc rewrites 61/68 entries and permanently blinds the gate to boundary whitespace), so **the golden was not modified at all**. Also collapsed the duplicated dump logic into one shared collector and pinned the golden as a fixed point | `59885ea` (`6d4ccc9`) | filed CB-73 (a 3.11/3.12-hosted server sends indented descriptions, which CommonMark renders as a code block for ~61 tools) — filed low, then **corrected to medium** when review showed my "cosmetic" framing was wrong. Both reviewers rejected revision 1 and converged on the same fix from different methods |
@@ -851,3 +852,58 @@ defect that the previous enumeration could not see — two because the sweep's r
 shape, one because a deferral had never been written down, one because a semantics decision was
 hiding inside a card about identity. That is the review machinery working. It is not noise, and it is
 not padding: CB-78 is `medium` and names a real product decision.
+
+## 2026-08-17 — CB-75 (the guard was bypassable, and one cheap review found it)
+
+**A single-file, six-line guard qualified for skipping adversarial review, and reviewing it anyway
+was the right call.** `bugfix-loop` permits skipping x2 for a genuinely mechanical fix (single file,
+<30 lines, no new API, no gate) and this met every criterion. I ran one Codex-only *diff* review
+instead of the full x2 — proportionate — because `bench.py`'s guard family had already burned this
+repo twice (CB-74 was reintroduced *inside* its own fix). It returned at 0.98 and the single most
+important finding was that **my guard did not work**: `isinstance(csv_data, str)` is spoofable via a
+`__class__` property, so the `TypeError` CB-75 exists to eliminate still escaped. Third iteration in
+a row where the defect survived the first draft of its own fix.
+
+**Reachability decided the severity of that finding, and it is not a contrived threat.**
+`unittest.mock.MagicMock(spec=str)` sets `__class__` to `str`, so any test double passed to
+`import_csv` defeats an isinstance guard. This repo already pins a mock-shaped trap for the same
+reason (CB-25's `mock.ANY` case), which is the precedent that made it worth fixing rather than
+documenting.
+
+**The rule worth keeping, because it is now the second spelling of the same lesson:** *the guard's
+predicate must be identical to the consumer's requirement.* CB-74 was "validating one view while
+consuming another is not a guard" (list `__iter__` vs `__getitem__`); this is the same failure with
+a spoofable type view — `StringIO` checks the real type, so the guard must too. Stated as a rule in
+the code so the next guard does not re-derive it.
+
+**Three false claims, all mine, one inherited.** (1) The tests claimed `match=` was "anchored whole
+with re.escape". It is not: `pytest.raises(match=)` runs `re.search` and `re.escape` adds no
+anchors, so a message with junk prefixed or appended would have passed. Now exact equality on
+`str(excinfo.value)`. **The landed CB-72 class carries the identical false claim** — corrected in
+place rather than left to mislead the next reader who copies it. (2) The class docstring said every
+refusal case raised `TypeError` on main; `None` did not. (3) The CHANGELOG called this "the last
+door in that family" — falsified in the same review, and now CB-81.
+
+**Self-inflicted, and the second iteration running:** a comment citing `bench.py:164` went stale
+because this diff added 45 lines above it. Last iteration's version of this was in `findings.py`.
+Two occurrences in two days is a pattern, not bad luck — **stop putting line numbers in comments;
+describe the site.**
+
+**What the sweep did right this time.** Swept by SHAPE, not by name, which is the lesson CB-71's
+retracted sweep claim bought: `io.StringIO(|csv.DictReader(|csv.reader(|json.loads(` over the
+package, then reading every domain entry point taking a payload. That correctly **excluded** ~25
+`json.loads` sites parsing stored DB rows — rewrapping stored corruption as `ValueError` is the
+CB-15/CB-24-consequence-2 lie — and found two genuine siblings in the batch entry points, including
+the nasty one where a `str` payload is *iterable* and so silently iterates characters instead of
+failing at the loop.
+
+**One card, not three, for those siblings.** Filing door-by-door is exactly how CB-24 → CB-27 →
+CB-36 went 4 → "a fifth" → 19. CB-80 is a population card carrying the sites *and* the design
+question (share `import_json`'s landed validator vs copy it a third time), because the answer
+crosses module boundaries and is therefore not a bugfix.
+
+**Net change: 1 closed (CB-75), 3 filed (CB-80, CB-81, CB-82). Open went 35 → 37.** CB-81 is the
+one to note: `medium`, CLI-reachable, and a *plain data file* triggers it — a duplicate row label
+kills `bench-import` with a raw `IntegrityError` traceback after rows have already been inserted on
+a caller-owned connection. That is the same user-facing shape as CB-71 and strictly more likely to
+be hit than CB-75 was.
