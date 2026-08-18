@@ -2071,27 +2071,72 @@ class TestRestoreColumnsMatchTheSchema:
 
 
 class TestExportIsNotCapped:
-    """CB-97. `query_findings(limit=100000)` silently truncated a larger tracker on the one
-    path where losing rows costs most — an export is the input to a restore, so a quiet cap
-    there is a quiet backup failure."""
+    """CB-97. `export-csv` used `query_findings(limit=100000)` — a silent ceiling on the one
+    path where losing rows costs most, since an export is the input to a restore.
 
-    def test_export_pages_past_its_page_size(self, tmp_project, tmp_path, monkeypatch):
-        monkeypatch.setattr(findings, "_EXPORT_PAGE", 2)
+    Asserting "7 rows in, 7 rows out" would NOT catch a reintroduced cap of any size, so
+    this asserts the property directly: the export must ask for at least as many rows as
+    the tracker holds, and must not be paged. Paging was the first fix and review killed
+    it — `query_findings` orders by severity rank and whole-second `created_at` with no
+    unique tiebreaker, so OFFSET paging over that is not a stable partition and a tie group
+    on a page boundary can be duplicated or skipped.
+    """
+
+    def test_the_export_requests_no_fewer_rows_than_exist(self, tmp_project, tmp_path, monkeypatch):
         conn = db.connect(tmp_project)
         for i in range(7):
             findings.add_finding(conn, severity="low", category="c", file=f"f{i}.py",
                                  description=f"row number {i}")
         conn.close()
+
+        real = findings.query_findings
+        limits = []
+
+        def spy(conn_, **kw):
+            limits.append(kw.get("limit"))
+            return real(conn_, **kw)
+
+        monkeypatch.setattr(findings, "query_findings", spy)
         out = tmp_path / "all.csv"
-        # IN-PROCESS, and that is the whole point: the first draft of this test shelled
-        # out, so the monkeypatched page size never reached the exporter and the
-        # assertion passed against the default 5000 — a vacuous test of paging that
-        # exercised no paging at all.
+        # IN-PROCESS: an earlier draft shelled out, so a monkeypatch never reached the
+        # exporter and the test proved nothing about the exporter at all.
         from codebugs import cli
 
         monkeypatch.setattr(
             sys, "argv", ["codebugs", "--tracker-root", tmp_project, "export-csv", str(out)]
         )
         cli.main()
+
         with open(out, newline="") as fh:
-            assert len(list(csv.DictReader(fh))) == 7, "export truncated at a page boundary"
+            assert len(list(csv.DictReader(fh))) == 7
+        # the fetch that actually pulled the rows asked for >= the row count
+        assert max(x for x in limits if x is not None) >= 7, limits
+        # ...and there is no OFFSET walk: at most a count probe plus the real fetch
+        assert len(limits) <= 2, limits
+
+
+class TestRestoreScalesPastTheSqlVariableLimit:
+    """A backup you cannot restore is not a backup. The collision pre-check used one SQL
+    placeholder per row, and SQLite caps `SQLITE_LIMIT_VARIABLE_NUMBER` at 32766 on this
+    build (999 on older ones) — measured: 40000 placeholders raise `too many SQL
+    variables`. A tracker large enough would therefore export a file it could not read
+    back, which is this card's own defect arriving at scale."""
+
+    def test_a_restore_larger_than_the_variable_limit_succeeds(self, conn):
+        n = 40000  # comfortably past 32766
+        rows = [{"id": f"CB-{i}", "severity": "low", "category": "c", "file": "a.py",
+                 "description": f"row {i}"} for i in range(1, n + 1)]
+        report = findings.restore_findings(conn, rows)
+        assert report.restored == n, report
+        assert conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0] == n
+
+    def test_a_collision_is_still_detected_in_a_large_file(self, conn):
+        """The single-parameter `json_each` form must not lose a collision buried in a
+        large batch — the obvious way to get the no-ceiling rewrite wrong."""
+        findings.add_finding(conn, severity="low", category="c", file="a.py",
+                             description="already here", finding_id="CB-33333")
+        rows = [{"id": f"CB-{i}", "severity": "low", "category": "c", "file": "a.py",
+                 "description": f"row {i}"} for i in range(1, 40001)]
+        with pytest.raises(ValueError, match="CB-33333"):
+            findings.restore_findings(conn, rows)
+        assert conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0] == 1

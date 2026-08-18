@@ -560,4 +560,12 @@ class TestExportPayloadIsInHandBeforeTheOpen:
         command = "export-csv" if module is findings else "reqs-export"
         _call_cli(monkeypatch, populated, command, str(tmp_path / "out.txt"))
 
-        assert order[:2] == ["produce", "open"], order
+        # The property is ORDERING, not the producer's call count: every "produce" must
+        # precede the first "open". The assertion was `order[:2] == ["produce", "open"]`,
+        # which also pinned the count — and went red when `export-csv` legitimately began
+        # asking for the row total before fetching (CB-97), even though the payload was
+        # still fully in hand before any handle opened. A premise pin that fails on a
+        # change it does not care about teaches people to edit premise pins.
+        assert "produce" in order and "open" in order, order
+        assert order.index("open") > 0, order
+        assert "produce" not in order[order.index("open") :], order

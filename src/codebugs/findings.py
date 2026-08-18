@@ -12,6 +12,7 @@ from typing import Any, NamedTuple
 
 from codebugs import db, entities
 from codebugs.types import (
+    is_sql_identifier,
     ENTITY_FINDING,
     FINDING_ID_PREFIX,
     SEVERITIES,
@@ -964,29 +965,58 @@ class RestoreReport(NamedTuple):
 #: 100k-row fixture.
 _EXPORT_PAGE = 5000
 
+#: Ids per collision-check statement. SQLite's `SQLITE_LIMIT_VARIABLE_NUMBER` is 32766 on
+#: this build (999 on older ones), and one placeholder per row meant a large enough backup
+#: raised `too many SQL variables` and could not be restored at all — measured: 40000
+#: placeholders raise, 32766 do not. Chunking well under the OLD limit keeps it working on
+#: any SQLite this package might meet, and costs nothing: a 20000-row restore runs in 0.3s.
+_RESTORE_ID_CHUNK = 500
+
 _RESTORE_COLUMNS = (
     "id", "severity", "category", "file", "status", "description", "source",
     "tags", "meta", "reported_at_commit", "reported_at_ref", "created_at",
     "updated_at", "fingerprint", "occurrence_count", "last_seen_at",
 )
 
+if not all(is_sql_identifier(_c) for _c in _RESTORE_COLUMNS):  # pragma: no cover - import-time
+    raise ValueError(
+        "_RESTORE_COLUMNS carries a value that is not a safe SQL identifier: "
+        f"{[c for c in _RESTORE_COLUMNS if not is_sql_identifier(c)]}"
+    )
 
-def _restore_json(value: Any, *, field: str, label: str, default: str) -> str:
+
+def _restore_json(value: Any, *, field: str, label: str) -> str:
     """A `tags`/`meta` column for a restore: JSON text or a container, stored EXACTLY once.
 
-    Serialized once and that exact string is stored (CB-82/CB-74): validating with one
+    Serialized once and that exact string is stored (CB-74/CB-82): validating with one
     `json.dumps` and storing with a second leaves a window where a mutable or
     `__iter__`-overriding value shows different data to each.
+
+    SHAPE IS CHECKED, because `json.dumps` complains about neither shape nor member types
+    (CB-82) — it will happily write `{"a": 1}` into `tags`, which then crashes the display
+    layer's `",".join(...)` long after the restore reported success. `tags` is a list of
+    strings; `meta` is an object. Reserved meta keys are deliberately ALLOWED here: an
+    exported `recurrence_of` is the evidence a restore exists to preserve.
     """
+    default = "[]" if field == "tags" else "{}"
     if value is None or value == "":
         return default
     if isinstance(value, str):
         try:
-            json.loads(value)
+            parsed = json.loads(value)
         except json.JSONDecodeError as e:
             raise ValueError(f"{label}: {field} is not valid JSON: {e}") from e
-        return value
-    return json.dumps(value)
+        serialized = value
+    else:
+        parsed = value
+        serialized = json.dumps(value)
+
+    if field == "tags":
+        if not isinstance(parsed, list) or not all(isinstance(t, str) for t in parsed):
+            raise ValueError(f"{label}: tags must be a JSON array of strings")
+    elif not isinstance(parsed, dict) or not all(isinstance(k, str) for k in parsed):
+        raise ValueError(f"{label}: meta must be a JSON object with string keys")
+    return serialized
 
 
 def restore_findings(
@@ -1032,7 +1062,7 @@ def restore_findings(
 
         for index, row in enumerate(rows, start=1):
             row_id = (row.get("id") or "").strip()
-            label = row_id or f"row {index}"
+            label = row_id  # every path below this raise has a non-empty id
             if not row_id:
                 raise ValueError(
                     f"restore requires an id on every row; row {index} has none. "
@@ -1061,40 +1091,53 @@ def restore_findings(
 
             now = utc_now()
             created_at = (row.get("created_at") or "").strip() or now
+            # A DICT with named placeholders, not a positional tuple. The exporter had
+            # exactly this coupling — a header list and a row list, hand-aligned — and
+            # adding two columns shifted every value after `meta`, turning the exported
+            # `fingerprint` into a timestamp. Rebuilding it here would have re-created the
+            # defect one function away, and the schema ratchet is set-based so a REORDER
+            # of `_RESTORE_COLUMNS` would misalign every row while the suite stayed green.
             prepared.append(
-                (
-                    row_id,
+                {
+                    "id": row_id,
                     # Spelling is resolved, meaning is not (CB-19): a legacy spelling
                     # normalises instead of leaking an IntegrityError from the CHECK.
-                    resolve_severity(row.get("severity") or "medium"),
-                    category,
-                    file,
-                    resolve_finding_status(row.get("status") or "open"),
-                    description,
-                    (row.get("source") or "restore").strip(),
-                    _restore_json(row.get("tags"), field="tags", label=label, default="[]"),
-                    _restore_json(row.get("meta"), field="meta", label=label, default="{}"),
-                    (row.get("reported_at_commit") or "").strip() or None,
-                    (row.get("reported_at_ref") or "").strip() or None,
-                    created_at,
-                    (row.get("updated_at") or "").strip() or created_at,
+                    "severity": resolve_severity(row.get("severity") or "medium"),
+                    "category": category,
+                    "file": file,
+                    "status": resolve_finding_status(row.get("status") or "open"),
+                    "description": description,
+                    "source": (row.get("source") or "restore").strip(),
+                    "tags": _restore_json(row.get("tags"), field="tags", label=label),
+                    "meta": _restore_json(row.get("meta"), field="meta", label=label),
+                    "reported_at_commit": (row.get("reported_at_commit") or "").strip() or None,
+                    "reported_at_ref": (row.get("reported_at_ref") or "").strip() or None,
+                    "created_at": created_at,
+                    "updated_at": (row.get("updated_at") or "").strip() or created_at,
                     # NOT stripped of the `auto:` prefix — that strip is an IMPORT rule,
                     # and applying it here is what would leave the restored tracker with
                     # no identity function at all.
-                    (row.get("fingerprint") or "").strip() or None,
-                    occurrence_count,
-                    (row.get("last_seen_at") or "").strip() or None,
-                )
+                    "fingerprint": (row.get("fingerprint") or "").strip() or None,
+                    "occurrence_count": occurrence_count,
+                    "last_seen_at": (row.get("last_seen_at") or "").strip() or None,
+                }
             )
 
-        placeholders = ",".join("?" for _ in _RESTORE_COLUMNS)
         columns = ", ".join(_RESTORE_COLUMNS)
+        placeholders = ", ".join(f":{c}" for c in _RESTORE_COLUMNS)
 
+        # ONE bound parameter, so there is no row ceiling. The obvious
+        # `IN (?,?,?...)` uses a placeholder per row and SQLite caps
+        # `SQLITE_LIMIT_VARIABLE_NUMBER` at 32766 on this build (999 on older ones) —
+        # measured: 40000 placeholders raise `too many SQL variables`, so a large enough
+        # tracker could export a backup it was unable to restore. Chunking also works and
+        # was rejected: it reintroduces a magic number to get wrong. JSON1 is already a
+        # dependency (`json_extract` in `query_findings`).
         existing = {
             r["id"]
             for r in conn.execute(
-                f"SELECT id FROM findings WHERE id IN ({','.join('?' for _ in seen)})",  # noqa: S608
-                tuple(seen),
+                "SELECT id FROM findings WHERE id IN (SELECT value FROM json_each(?))",
+                (json.dumps(list(seen)),),
             )
         }
         if existing:
@@ -2363,19 +2406,24 @@ def register_cli(sub, commands) -> None:
 
     def _cmd_export_csv(args: argparse.Namespace) -> None:
         conn = db.connect()
-        # PAGED, not capped (CB-97). `limit=100000` silently truncated a larger tracker on
-        # the one path where losing rows costs the most — an export is the input to a
-        # restore, so a quiet cap there is a quiet backup failure. Looping to exhaustion
-        # removes the ceiling rather than raising it to a number that is wrong later.
-        rows: list[dict[str, Any]] = []
-        page = _EXPORT_PAGE
-        while True:
-            batch = query_findings(conn, limit=page, offset=len(rows))["findings"]
-            rows.extend(batch)
-            if len(batch) < page:
-                break
+        # ONE query, not OFFSET pagination, and not the old `limit=100000` cap.
+        #
+        # The cap silently truncated a larger tracker on the one path where losing rows
+        # costs most — an export is the input to a restore, so a quiet ceiling there is a
+        # quiet backup failure. But paging it was WORSE, and review caught that before it
+        # shipped: `query_findings` orders by `{severity rank}, created_at DESC` with no
+        # unique tiebreaker, and `created_at` is whole-second, so ties are ordinary. OFFSET
+        # paging over a non-total order is not a stable partition of the table — a tie
+        # group straddling a page boundary can be emitted twice or skipped. Duplicated or
+        # missing rows in a backup is strictly worse than a documented cap.
+        #
+        # Asking for the count first and then fetching that many keeps the single-query
+        # stability AND removes the ceiling. The window between the two reads only ever
+        # makes the second short (a concurrent delete) or drops a newer row — never
+        # corrupts one — and an export is a snapshot, not a lock.
+        total = query_findings(conn, limit=1)["total"]
+        result = query_findings(conn, limit=max(total, 1))
         conn.close()
-        result = {"findings": rows}
 
         output = args.file or "codebugs_export.csv"
         # CB-76: `open(output, "w")` truncated the destination before the first
