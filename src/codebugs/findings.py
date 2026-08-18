@@ -949,6 +949,171 @@ def import_findings(
     return ImportReport(imported, merged, skipped_present, skipped_decided, errors)
 
 
+class RestoreReport(NamedTuple):
+    """What a restore did. `restored` is rows written; there is no partial state."""
+
+    restored: int
+
+
+#: Every column a faithful restore writes. Declared once, used to build the INSERT and
+#: checked against the live schema by `TestRestoreWritesEveryColumn` — a column added to
+#: `findings` and forgotten here would be silently dropped by every future restore, which
+#: is precisely the class of quiet loss this card exists to remove.
+#: Export page size. A module constant so a test can shrink it and actually exercise the
+#: loop — with the page hardcoded, "it pages" is an unfalsifiable claim short of building a
+#: 100k-row fixture.
+_EXPORT_PAGE = 5000
+
+_RESTORE_COLUMNS = (
+    "id", "severity", "category", "file", "status", "description", "source",
+    "tags", "meta", "reported_at_commit", "reported_at_ref", "created_at",
+    "updated_at", "fingerprint", "occurrence_count", "last_seen_at",
+)
+
+
+def _restore_json(value: Any, *, field: str, label: str, default: str) -> str:
+    """A `tags`/`meta` column for a restore: JSON text or a container, stored EXACTLY once.
+
+    Serialized once and that exact string is stored (CB-82/CB-74): validating with one
+    `json.dumps` and storing with a second leaves a window where a mutable or
+    `__iter__`-overriding value shows different data to each.
+    """
+    if value is None or value == "":
+        return default
+    if isinstance(value, str):
+        try:
+            json.loads(value)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{label}: {field} is not valid JSON: {e}") from e
+        return value
+    return json.dumps(value)
+
+
+def restore_findings(
+    conn: sqlite3.Connection,
+    rows: list[dict[str, Any]],
+) -> RestoreReport:
+    """Write an export back VERBATIM — id, status, occurrence_count, timestamps and all.
+
+    This is not an import and deliberately shares no code with one. An import is an
+    observation and must go through the identity function; a restore is a statement that
+    these rows ARE the tracker, so it bypasses dedup, the pre-add resolvers and the
+    post-add hooks and writes the stored columns directly.
+
+    THE ADD PATH CANNOT DO THIS, and each refusal was measured before this was written:
+    `_validate_fingerprint` rejects the `auto:` prefix every derived fingerprint carries;
+    `_validate_meta_keys` rejects `recurrence_of` / `occurrences`, which is the evidence a
+    restore exists to preserve; and `status` / `occurrence_count` / `created_at` are not
+    insertable at all. Worse, the obvious two-step — insert as `open`, then UPDATE —
+    REFUSES A LEGITIMATE EXPORT: a `wont_fix` card and its `recurrence_of` twin share a
+    fingerprint by design, so whichever lands second collides on
+    `ux_findings_fingerprint_live`. Writing the FINAL statuses satisfies that partial index
+    by construction.
+
+    ALL-OR-NOTHING, and it REFUSES rather than merges. Every check runs inside the
+    transaction, so `BEGIN IMMEDIATE` holds the write lock and there is no check-then-act
+    window: every row must carry an id, no id may already exist locally, and no id may
+    repeat within the file. A collision raises `ValueError` naming the ids — without it a
+    duplicate leaks `sqlite3.IntegrityError`, which is outside this module's contract and
+    unclassifiable by `db.is_contention` (code 19, not 5/6).
+
+    WHAT A RESTORE CANNOT BRING BACK, stated rather than discovered: milestone items and
+    their audit rows. They are a PROJECTION built by post-add hooks, they are not exported,
+    and firing the hooks here would fabricate one triage item and two audit rows per card
+    asserting a history that never happened. A restored tracker therefore has no milestone
+    projections; the CLI says so.
+    """
+    if not rows:
+        return RestoreReport(0)
+
+    with db.txn(conn):
+        seen: dict[str, int] = {}
+        prepared: list[tuple[Any, ...]] = []
+
+        for index, row in enumerate(rows, start=1):
+            row_id = (row.get("id") or "").strip()
+            label = row_id or f"row {index}"
+            if not row_id:
+                raise ValueError(
+                    f"restore requires an id on every row; row {index} has none. "
+                    f"Use `import-csv` to fold in rows that carry no identity."
+                )
+            if row_id in seen:
+                raise ValueError(
+                    f"{row_id} appears twice in the file (rows {seen[row_id]} and {index})"
+                )
+            seen[row_id] = index
+
+            category = (row.get("category") or "").strip()
+            file = (row.get("file") or "").strip()
+            description = (row.get("description") or "").strip()
+            if not category or not file or not description:
+                raise ValueError(
+                    f"{label}: category, file and description are required for a restore"
+                )
+
+            try:
+                occurrence_count = int(row.get("occurrence_count") or 1)
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"{label}: occurrence_count is not an integer") from e
+            if occurrence_count < 1:
+                raise ValueError(f"{label}: occurrence_count must be >= 1")
+
+            now = utc_now()
+            created_at = (row.get("created_at") or "").strip() or now
+            prepared.append(
+                (
+                    row_id,
+                    # Spelling is resolved, meaning is not (CB-19): a legacy spelling
+                    # normalises instead of leaking an IntegrityError from the CHECK.
+                    resolve_severity(row.get("severity") or "medium"),
+                    category,
+                    file,
+                    resolve_finding_status(row.get("status") or "open"),
+                    description,
+                    (row.get("source") or "restore").strip(),
+                    _restore_json(row.get("tags"), field="tags", label=label, default="[]"),
+                    _restore_json(row.get("meta"), field="meta", label=label, default="{}"),
+                    (row.get("reported_at_commit") or "").strip() or None,
+                    (row.get("reported_at_ref") or "").strip() or None,
+                    created_at,
+                    (row.get("updated_at") or "").strip() or created_at,
+                    # NOT stripped of the `auto:` prefix — that strip is an IMPORT rule,
+                    # and applying it here is what would leave the restored tracker with
+                    # no identity function at all.
+                    (row.get("fingerprint") or "").strip() or None,
+                    occurrence_count,
+                    (row.get("last_seen_at") or "").strip() or None,
+                )
+            )
+
+        placeholders = ",".join("?" for _ in _RESTORE_COLUMNS)
+        columns = ", ".join(_RESTORE_COLUMNS)
+
+        existing = {
+            r["id"]
+            for r in conn.execute(
+                f"SELECT id FROM findings WHERE id IN ({','.join('?' for _ in seen)})",  # noqa: S608
+                tuple(seen),
+            )
+        }
+        if existing:
+            raise ValueError(
+                f"refusing to restore: {len(existing)} id(s) already exist here "
+                f"({', '.join(sorted(existing)[:5])}"
+                f"{', ...' if len(existing) > 5 else ''}). "
+                f"A restore writes ids verbatim, so it will not merge into a populated "
+                f"tracker; use `import-csv` to fold these rows in with fresh ids."
+            )
+
+        conn.executemany(
+            f"INSERT INTO findings ({columns}) VALUES ({placeholders})",  # noqa: S608
+            prepared,
+        )
+
+    return RestoreReport(len(prepared))
+
+
 def _same_finding_exists(
     conn: sqlite3.Connection, row_id: str, category: str, file: str, description: str
 ) -> bool:
@@ -2160,10 +2325,57 @@ def register_cli(sub, commands) -> None:
         if report.errors:
             sys.exit(1)
 
+    def _cmd_restore_csv(args: argparse.Namespace) -> None:
+        """Write an export back verbatim. Refuses rather than merges."""
+        conn = db.connect()
+        # Read before the transaction opens, same reason as import: an all-or-nothing
+        # contract is only honest if a read failure happens with nothing written.
+        try:
+            with open(args.file, newline="") as handle:
+                rows = list(csv.DictReader(handle))
+        except OSError as e:
+            print(f"codebugs: {e}", file=sys.stderr)
+            conn.close()
+            sys.exit(1)
+
+        try:
+            report = restore_findings(conn, rows)
+        except (ValueError, sqlite3.Error) as e:
+            # One arm: the restore is one transaction, so every failure means the same
+            # thing — nothing landed — and the message says so instead of printing a
+            # count over a rollback (CB-15/CB-16).
+            print(f"codebugs: restore aborted, nothing written: {e}", file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
+
+        print(f"Restored {report.restored} findings.")
+        if report.restored:
+            # Said out loud rather than left for a reader to discover: milestone items
+            # and their audit rows are a projection built by post-add hooks, they are
+            # not in the CSV, and firing those hooks would fabricate a triage history
+            # that never happened. So they are absent, not wrong.
+            print(
+                "Note: milestone items and audit history are not part of a CSV export "
+                "and were not restored.",
+                file=sys.stderr,
+            )
+
     def _cmd_export_csv(args: argparse.Namespace) -> None:
         conn = db.connect()
-        result = query_findings(conn, limit=100000)
+        # PAGED, not capped (CB-97). `limit=100000` silently truncated a larger tracker on
+        # the one path where losing rows costs the most — an export is the input to a
+        # restore, so a quiet cap there is a quiet backup failure. Looping to exhaustion
+        # removes the ceiling rather than raising it to a number that is wrong later.
+        rows: list[dict[str, Any]] = []
+        page = _EXPORT_PAGE
+        while True:
+            batch = query_findings(conn, limit=page, offset=len(rows))["findings"]
+            rows.extend(batch)
+            if len(batch) < page:
+                break
         conn.close()
+        result = {"findings": rows}
 
         output = args.file or "codebugs_export.csv"
         # CB-76: `open(output, "w")` truncated the destination before the first
@@ -2173,44 +2385,21 @@ def register_cli(sub, commands) -> None:
         # lie CB-71 measured live.
         try:
             with atomic_write(output, newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(
-                    [
-                        "id",
-                        "severity",
-                        "category",
-                        "file",
-                        "status",
-                        "description",
-                        "source",
-                        "tags",
-                        "meta",
-                        "created_at",
-                        "updated_at",
-                        "fingerprint",
-                        "occurrence_count",
-                        "last_seen_at",
-                    ]
-                )
+                # ONE declaration for the header AND the rows (CB-97). They used to be
+                # two parallel positional lists, and adding the provenance columns to the
+                # header alone shifted every value after `meta` — the exported
+                # `fingerprint` became a timestamp, and a cross-tracker round-trip test
+                # caught it. `_RESTORE_COLUMNS` is the same tuple `restore_findings`
+                # writes, which is the point: an export is the input to a restore, so the
+                # two cannot be allowed to disagree about the column set.
+                writer = csv.DictWriter(f, fieldnames=list(_RESTORE_COLUMNS))
+                writer.writeheader()
                 for finding in result["findings"]:
-                    writer.writerow(
-                        [
-                            finding["id"],
-                            finding["severity"],
-                            finding["category"],
-                            finding["file"],
-                            finding["status"],
-                            finding["description"],
-                            finding["source"],
-                            json.dumps(finding["tags"]),
-                            json.dumps(finding["meta"]),
-                            finding["created_at"],
-                            finding["updated_at"],
-                            finding["fingerprint"],
-                            finding["occurrence_count"],
-                            finding["last_seen_at"],
-                        ]
-                    )
+                    row = {c: finding.get(c) for c in _RESTORE_COLUMNS}
+                    # `row_to_dict` parses these back into containers; the file carries JSON.
+                    row["tags"] = json.dumps(finding["tags"])
+                    row["meta"] = json.dumps(finding["meta"])
+                    writer.writerow(row)
         except OSError as e:
             print(f"codebugs: {e}", file=sys.stderr)
             sys.exit(1)
@@ -2260,6 +2449,12 @@ def register_cli(sub, commands) -> None:
     p = sub.add_parser("import-csv", help="Import findings from CSV")
     p.add_argument("file", help="CSV file path")
 
+    p = sub.add_parser(
+        "restore-csv",
+        help="Restore an export VERBATIM (ids, statuses, counts) into an empty tracker",
+    )
+    p.add_argument("file", help="CSV file path")
+
     p = sub.add_parser("export-csv", help="Export findings to CSV")
     p.add_argument("file", nargs="?", help="Output file (default: codebugs_export.csv)")
 
@@ -2273,6 +2468,7 @@ def register_cli(sub, commands) -> None:
             "summary": _cmd_summary,
             "categories": _cmd_categories,
             "import-csv": _cmd_import_csv,
+            "restore-csv": _cmd_restore_csv,
             "export-csv": _cmd_export_csv,
         }
     )

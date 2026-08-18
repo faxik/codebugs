@@ -451,22 +451,21 @@ class TestCompatibility:
         via_plain = tmp_path / "plain.csv"
         import csv as _csv
 
+        # The comparison writer derives its columns from the SAME declaration the
+        # exporter uses. It used to hand-copy the list, which made it a third copy
+        # of the schema and a false failure the day a column was added (CB-97) —
+        # this test is about the file HANDLE, not the column set, and pinning the
+        # schema here was testing something it never meant to.
         with open(via_plain, "w", newline="") as f:
-            w = _csv.writer(f)
-            w.writerow([
-                "id", "severity", "category", "file", "status", "description", "source",
-                "tags", "meta", "created_at", "updated_at", "fingerprint",
-                "occurrence_count", "last_seen_at",
-            ])
             import json as _json
 
+            w = _csv.DictWriter(f, fieldnames=list(findings._RESTORE_COLUMNS))
+            w.writeheader()
             for x in rows["findings"]:
-                w.writerow([
-                    x["id"], x["severity"], x["category"], x["file"], x["status"],
-                    x["description"], x["source"], _json.dumps(x["tags"]),
-                    _json.dumps(x["meta"]), x["created_at"], x["updated_at"],
-                    x["fingerprint"], x["occurrence_count"], x["last_seen_at"],
-                ])
+                row = {c: x.get(c) for c in findings._RESTORE_COLUMNS}
+                row["tags"] = _json.dumps(x["tags"])
+                row["meta"] = _json.dumps(x["meta"])
+                w.writerow(row)
 
         assert via_helper.read_bytes() == via_plain.read_bytes()
 
