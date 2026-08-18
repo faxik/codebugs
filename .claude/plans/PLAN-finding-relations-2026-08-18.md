@@ -140,13 +140,28 @@ RFC vocabulary: `{duplicate_of, split_from, follow_up_of, found_during, distinct
 
 | relation | kind | absorbs | edges |
 |---|---|---|---:|
-| `related_to` | symmetric | `related`, `related_codebugs`, `related_cb`, `related_to`, `sibling*`, `siblings`, `closest_sibling(s)`, `cross_links`, … | ~700 |
+| `related_to` | symmetric | `related`, `related_codebugs`, `related_cb`, `related_to`, `sibling*`, `siblings`, `closest_sibling(s)`, `cross_links`, **`anchor`**, `duplicate_cluster` | ~720 |
 | `split_from` | directed, child → parent | `split_from`, `parent`, `parents`, `parent_*`, and **reversed**: `split_children`, `members`, `owns_cards`, `spawned_cards` | ~90 |
 | `found_during` | directed | `found_during`, `discovered_during`, `surfaced_by` | ~90 |
 | `distinct_from` | symmetric | `distinct_from`, `adjacent_not_duplicate`, `distinct_from_parent`, `related_distinct` | ~70 |
-| `duplicate_of` | directed, loser → survivor | `duplicate_of`, `residual_merged_into`, `anchor` | ~20 |
+| `duplicate_of` | directed, loser → survivor | `duplicate_of`, `residual_merged_into` | **2** |
 | `follow_up_of` | directed | `follow_up_of`, `follow_up_to`, `followups` (reversed) | ~9 |
 
+> **Revision-2 corrections, found by measuring the values rather than reading the key names**
+> (`~/.cache/codebugs-identity/validate_mapping.py`, run before the second review round):
+>
+> - **`anchor` is NOT `duplicate_of` — it is a cluster anchor.** 16 cards carry it; **12 point at
+>   the single card `CB-1566`**, and it forms chains (`CB-1889 → CB-1878 → CB-1566`,
+>   `CB-1906 → CB-1895 → CB-1566`). Twelve cards cannot all be duplicates of one card, and
+>   `duplicate_of` is transitive in a way a hub label is not. R2 had it as `duplicate_of`, which
+>   would have manufactured **12 false merge candidates** in the one relation that must be
+>   trustworthy. Reclassified to `related_to`. This is exactly the failure §9 predicted.
+> - **`duplicate_filed_and_retracted` is a RETRACTION marker, not an assertion.** `CB-2227` carries
+>   it with value `CB-2251`, while `CB-2251` carries `duplicate_of = CB-2227`. The pair holds a
+>   claim *and its withdrawal*. Migrating the marker as a positive edge would re-assert something a
+>   human explicitly retracted. **Excluded**; optionally imported as a pre-retracted tombstone.
+> - **Real `duplicate_of` volume is 2 edges, not ~20.** R2's figure counted `anchor`'s 16.
+>
 > **Revision-1 correction — `part_of` is DROPPED.** R1 added it for `parent*`. But
 > `grouping.py:85` already declares `LINEAGE_PARENT_KEYS = ("split_from", "parent")`, with a comment
 > stating `parent` is included *"on purpose… the same relation with 20x the rows"*, and
@@ -210,6 +225,12 @@ Extraction rules — **each exists because a real row breaks the naive version**
    `polarity:"negative"`, excluded from positive relations, and routed to human review. Fixtures:
    `CB-3115 introduced_by`, `CB-2310 related_distinct`, `CB-3085 not_introduced_by`,
    `CB-2266 do_not_absorb`, `CB-2537 duplicate_filing_gap_from_cb2596`.
+
+   **The screen runs ONLY on keys mapping to a POSITIVE relation.** Measured: it flags 40 of 585
+   edge-yielding card-key pairs, but a large share of those are legitimate `distinct_from` rows
+   whose values *properly* contain "distinct" (`CB-1615`, `CB-1629`, `CB-1857`, …). Screening a
+   negative relation for negation words routes correct suppression edges to review for nothing —
+   and under-migrating `distinct_from` is the dangerous direction (rule 2).
 5. **Direction is a REQUIRED per-key field that fails closed** — never a default with named
    exceptions. Reversed (parent names its children): `split_children`, `members`, `owns_cards`,
    `spawned_cards`, `followups`. Note `parents` is **default** direction, despite R1 listing it as
