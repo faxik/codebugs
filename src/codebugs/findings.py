@@ -753,16 +753,70 @@ class ImportRowError(NamedTuple):
 
     label: str
     message: str
-    landed: bool  # True when a write for this row DID land (see PostCommitCorruptionError)
 
 
 class ImportReport(NamedTuple):
-    """What an import did. Counts are per CSV row, not per database write."""
+    """What an import did. Counts are per CSV row, not per database write.
+
+    `skipped_present` and `skipped_decided` are separate because they are
+    different facts and the operator reads them: a row skipped because this
+    tracker already holds it is "already present", while a row skipped because
+    recording it would have REOPENED a decided card is not present at all.
+    Collapsing them printed the second as the first — a success-shaped mislabel
+    in the one line a human reads (CB-15/CB-16 family).
+    """
 
     imported: int
     merged: int
-    skipped: int
+    skipped_present: int
+    skipped_decided: int
     errors: list[ImportRowError]
+
+
+def _import_meta(row: dict[str, Any], dropped_keys: frozenset[str] | set[str]) -> dict[str, Any]:
+    """The meta an imported row may carry: JSON or dict in, reserved keys out.
+
+    Stripping lives HERE, not in the CLI handler, and that is the point of
+    CB-51: the four identity rules had accumulated in a presentation layer, so
+    the domain validated meta that only one caller had sanitized. The reserved
+    union is DYNAMIC (`db.resolver_reserved_meta_keys()`), so a resolver added
+    later cannot slip a key through. The machinery's OUTPUT is not its input:
+    an exported `similar_to` / `resolver_errors` / `recurrence_of` is dropped,
+    not refused, or a tracker's own export would be unimportable.
+    """
+    raw = row.get("meta")
+    if isinstance(raw, str):
+        raw = raw.strip()
+        try:
+            raw = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            raw = {}
+    meta = {k: v for k, v in raw.items() if k not in dropped_keys} if isinstance(raw, dict) else {}
+
+    lines = (row.get("lines") or row.get("Lines") or "").strip()
+    if lines:
+        meta["lines"] = lines
+    return meta
+
+
+def _import_tags(row: dict[str, Any]) -> tuple[list[str] | None, str | None]:
+    """`(tags, error)` — a list in, a list out; JSON in, a list out.
+
+    Returns an error rather than dropping a malformed value silently: the row
+    has an error channel, and "your tags vanished" with no message is the kind
+    of quiet loss this card exists to remove.
+    """
+    raw = row.get("tags")
+    if raw is None or raw == "":
+        return None, None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return None, "tags column is not valid JSON"
+    if not isinstance(raw, list) or not all(isinstance(t, str) for t in raw):
+        return None, "tags must be a JSON array of strings"
+    return raw, None
 
 
 def import_findings(
@@ -771,20 +825,26 @@ def import_findings(
 ) -> ImportReport:
     """Fold observations from another source into this tracker, in ONE transaction.
 
+    ROW CONTRACT: each row is a mapping in the shape `export-csv` writes, i.e.
+    what `csv.DictReader` yields — every value may be a string. `meta` and `tags`
+    may arrive as JSON text OR as an already-decoded dict/list, so the CLI and a
+    library caller hand over the same thing. Only `category`, `file` and
+    `description` are required; a row missing one is not a finding and is passed
+    over silently.
+
     An import is NOT an observation of this repository (CB-45): it carries no
     provenance of its own, so `annotate=False` — the pre-add resolvers never run.
     Routing this through `batch_add_findings` was designed and REJECTED in review:
     that function has no `annotate` parameter, so every imported row would have
     run the similarity resolver (trigram work over up to 500 candidates) inside
-    the held write lock, silently.
+    the held write lock, silently; and it validates every member before opening
+    its transaction, which forbids the per-row error partitioning below.
 
     THE WHOLE LOOP IS ONE TRANSACTION (CB-77). A read failure part-way through a
     large CSV used to leave N rows committed behind it and escape as a traceback;
     the caller's decision, ratified 2026-08-18, is all-or-nothing. Consequence the
     caller must honour: on an exception NOTHING landed, so a count must not be
-    printed. `add_finding` is not used here — it opens its own `db.txn`, which is
-    reentrant and would work, but `_add_one` is the layer that lets each row's
-    error be partitioned into skippable vs fatal.
+    printed.
 
     TWO IMPORT-SPECIFIC RULES, each closing a reproduced defect:
 
@@ -813,65 +873,63 @@ def import_findings(
     skip cannot see them and they duplicate on every re-import. That population is
     every pre-CB-43 row and every explicit-id row.
     """
-    report_imported = 0
-    report_merged = 0
-    report_skipped = 0
+    imported = merged = skipped_present = skipped_decided = 0
     errors: list[ImportRowError] = []
+    dropped_keys = _RESERVED_META_KEYS | db.resolver_reserved_meta_keys()
 
     with db.txn(conn):
         for index, row in enumerate(rows, start=1):
-            label = (row.get("id") or "").strip() or f"row {index}"
+            row_id = (row.get("id") or "").strip()
+            label = row_id or f"row {index}"
 
-            category = (row.get("category") or "").strip()
-            file = (row.get("file") or "").strip()
-            description = (row.get("description") or "").strip()
+            category = (row.get("category") or row.get("Category") or "").strip()
+            file = (row.get("file") or row.get("File") or "").strip()
+            description = (row.get("description") or row.get("Description") or "").strip()
             if not category or not file or not description:
                 continue  # not an error: an incomplete row is not a finding
 
-            row_id = (row.get("id") or "").strip()
             if row_id and _same_finding_exists(conn, row_id, category, file, description):
-                report_skipped += 1
+                skipped_present += 1
                 continue
 
-            meta = dict(row.get("meta") or {})
+            meta = _import_meta(row, dropped_keys)
             if row_id:
                 # The origin survives renumbering. Without this the row lands with
                 # a local id and no record that it came from someone else's CB-N.
                 meta["imported_id"] = row_id
 
             # Empty is NOT supplied — a CSV reader yields "" for every absent
-            # column, and a caller handing us raw export rows is the normal case.
-            # The `auto:` strip lives here, not in the CLI: it is one of the four
-            # identity rules CB-51 was filed about precisely because they had
-            # accumulated in a presentation-layer handler where nothing else
-            # could reuse or test them. An exported derived fingerprint carries
-            # the reserved prefix, which callers may not supply; passing None
+            # column. The `auto:` strip is one of the four identity rules CB-51
+            # was filed about: an exported derived fingerprint carries the
+            # reserved prefix, which callers may not supply, and passing None
             # re-derives the identical value server-side.
             fingerprint = (row.get("fingerprint") or "").strip() or None
             if fingerprint and fingerprint.startswith(_AUTO_FP_PREFIX):
                 fingerprint = None
 
             try:
-                severity = resolve_severity(row.get("severity") or "medium")
+                tags, tags_error = _import_tags(row)
+                if tags_error is not None:
+                    raise ValueError(tags_error)
+                severity = resolve_severity(row.get("severity") or row.get("Severity") or "medium")
                 fingerprint = _validate_fingerprint(fingerprint)
                 _validate_meta_keys(meta)
-            except ValueError as e:
-                errors.append(ImportRowError(label, str(e), landed=False))
-                continue
 
-            if _import_would_reopen(conn, fingerprint, category, file, description, meta):
-                report_skipped += 1
-                continue
+                would_reopen, fingerprint = _import_would_reopen(
+                    conn, fingerprint, category, file, description, meta
+                )
+                if would_reopen:
+                    skipped_decided += 1
+                    continue
 
-            try:
-                inserted, matched, was_new, _action = _add_one(
+                _inserted, _matched, was_new, _action = _add_one(
                     conn,
                     severity=severity,
                     category=category,
                     file=file,
                     description=description,
-                    source=(row.get("source") or "import").strip(),
-                    tags=row.get("tags"),
+                    source=(row.get("source") or row.get("Source") or "import").strip(),
+                    tags=tags,
                     meta=meta or None,
                     finding_id=None,
                     reported_at_commit=None,
@@ -880,15 +938,15 @@ def import_findings(
                     annotate=False,
                 )
             except ValueError as e:
-                errors.append(ImportRowError(label, str(e), landed=False))
+                errors.append(ImportRowError(label, str(e)))
                 continue
 
             if was_new:
-                report_imported += 1
+                imported += 1
             else:
-                report_merged += 1
+                merged += 1
 
-    return ImportReport(report_imported, report_merged, report_skipped, errors)
+    return ImportReport(imported, merged, skipped_present, skipped_decided, errors)
 
 
 def _same_finding_exists(
@@ -916,8 +974,12 @@ def _import_would_reopen(
     file: str,
     description: str,
     meta: dict[str, Any] | None,
-) -> bool:
-    """Would recording this row REOPEN a decided card? See `import_findings` rule 1.
+) -> tuple[bool, str]:
+    """`(would_reopen, fingerprint)` — see `import_findings` rule 1.
+
+    RETURNS the resolved fingerprint so the caller can hand it to `_add_one`,
+    which would otherwise derive it and re-run both match queries for the same
+    row — four SELECTs per row instead of two, inside the held write lock.
 
     Asked here rather than by giving `_add_one` a new outcome: this module owns
     both, so the derivation cannot drift, and `_add_one`'s return shape stays the
@@ -925,7 +987,7 @@ def _import_would_reopen(
     """
     fp = fingerprint or _derive_fingerprint(category, file, description, meta)
     _live, closed = _match_fingerprint(conn, fp)
-    return closed is not None and closed["status"] in _REOPEN_STATUSES
+    return (closed is not None and closed["status"] in _REOPEN_STATUSES), fp
 
 
 def batch_add_findings(
@@ -2043,87 +2105,37 @@ def register_cli(sub, commands) -> None:
         print(format_table(data, ["category", "total", "open", "fixed"]))
 
     def _cmd_import_csv(args: argparse.Namespace) -> None:
-        """Parse CSV, hand rows to the domain, print. No import semantics here.
+        """Read the file, hand rows to the domain, print. No import semantics here.
 
-        Every rule that decides what an import MEANS moved to
-        `findings.import_findings` (CB-51). This handler had accumulated four of
-        them inline — skip existing ids, strip reserved meta, drop `auto:`
-        fingerprints, `annotate=False` — which is how a presentation layer ends
-        up owning an identity contract nothing else can reuse or test.
+        Every rule that decides what an import MEANS lives in
+        `findings.import_findings` (CB-51) — including the reserved-meta strip and
+        the `auto:` fingerprint strip, which an earlier draft of this handler kept
+        and whose docstring then claimed otherwise. The domain takes rows in the
+        shape `csv.DictReader` yields, so this function decodes nothing.
         """
         conn = db.connect()
-        dropped_keys = _RESERVED_META_KEYS | db.resolver_reserved_meta_keys()
-
-        # The open is guarded alone (CB-71). Reading the WHOLE file before the
-        # transaction opens is deliberate and is what makes CB-77's all-or-nothing
-        # contract honest: a read failure now happens with nothing written, rather
-        # than interleaved with commits. It costs memory proportional to the file,
-        # which is the accepted trade for a tracker-sized CSV.
+        # Reading the WHOLE file before the transaction opens is what makes
+        # CB-77's all-or-nothing contract honest: a read failure now happens with
+        # nothing written, rather than interleaved with per-row commits. It costs
+        # memory proportional to the file — the accepted trade for a
+        # tracker-sized CSV. The open is guarded alone (CB-71).
         try:
             with open(args.file, newline="") as handle:
-                raw_rows = list(csv.DictReader(handle))
+                rows = list(csv.DictReader(handle))
         except OSError as e:
             print(f"codebugs: {e}", file=sys.stderr)
             conn.close()
             sys.exit(1)
 
-        rows = []
-        for raw in raw_rows:
-            meta: dict[str, Any] = {}
-            meta_json = (raw.get("meta") or "").strip()
-            if meta_json:
-                try:
-                    stored = json.loads(meta_json)
-                except json.JSONDecodeError:
-                    stored = {}
-                if isinstance(stored, dict):
-                    # The machinery's OUTPUT is not its input: an exported
-                    # similar_to / resolver_errors / recurrence_of would be
-                    # refused by _validate_meta_keys. Dropped, not refused, and
-                    # the DYNAMIC union so a new resolver key cannot slip in.
-                    meta.update({k: v for k, v in stored.items() if k not in dropped_keys})
-            lines = (raw.get("lines") or raw.get("Lines") or "").strip()
-            if lines:
-                meta["lines"] = lines
-
-            # Tags round-trip: `export-csv` writes them as JSON and this handler
-            # used to drop them on the floor. Only the tags half of CB-51's
-            # defect 3 is closed here — id, status and occurrence_count need the
-            # raw-insert seam that is CB-97.
-            tags = None
-            tags_json = (raw.get("tags") or "").strip()
-            if tags_json:
-                try:
-                    parsed = json.loads(tags_json)
-                except json.JSONDecodeError:
-                    parsed = None
-                if isinstance(parsed, list) and all(isinstance(t, str) for t in parsed):
-                    tags = parsed
-
-            rows.append(
-                {
-                    "id": raw.get("id"),
-                    "severity": raw.get("severity") or raw.get("Severity") or "medium",
-                    "category": raw.get("category") or raw.get("Category") or "",
-                    "file": raw.get("file") or raw.get("File") or "",
-                    "description": raw.get("description") or raw.get("Description") or "",
-                    "source": raw.get("source") or raw.get("Source") or "import",
-                    "meta": meta,
-                    "tags": tags,
-                    "fingerprint": raw.get("fingerprint"),
-                }
-            )
-
         try:
             report = import_findings(conn, rows)
-        except json.JSONDecodeError as e:
-            # Ahead of the ValueError arm it subclasses. Nothing landed — the whole
-            # import is one transaction — and the message must say so rather than
-            # printing a count, which would be a success-shaped signal for a
-            # rollback (CB-15/CB-16 class).
-            print(f"codebugs: import aborted, no rows imported: {e}", file=sys.stderr)
-            sys.exit(1)
         except (ValueError, sqlite3.Error) as e:
+            # ONE arm, deliberately. The repo's JSONDecodeError-before-ValueError
+            # ordering (`_cmd_update`) exists because those arms BEHAVE
+            # differently — re-raise versus a tidy line. Here they do not: the
+            # import is one transaction, so every failure means nothing landed
+            # and every failure says exactly that. Printing a count on this path
+            # would be a success-shaped signal for a rollback (CB-15/CB-16).
             print(f"codebugs: import aborted, no rows imported: {e}", file=sys.stderr)
             sys.exit(1)
         finally:
@@ -2133,8 +2145,12 @@ def register_cli(sub, commands) -> None:
             print(f"Error importing {err.label}: {err.message}", file=sys.stderr)
 
         parts = []
-        if report.skipped:
-            parts.append(f"{report.skipped} already present, skipped")
+        if report.skipped_present:
+            parts.append(f"{report.skipped_present} already present, skipped")
+        if report.skipped_decided:
+            parts.append(
+                f"{report.skipped_decided} skipped, would have reopened a decided finding"
+            )
         if report.merged:
             parts.append(f"{report.merged} merged into existing findings by fingerprint")
         if report.errors:

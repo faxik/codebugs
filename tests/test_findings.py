@@ -1690,7 +1690,11 @@ class TestImportNeverReopensADecidedCard:
         with open(path, newline="") as fh:
             report = findings.import_findings(conn, list(csv.DictReader(fh)))
         assert findings.get_finding(conn, f["id"])["status"] == "fixed"
-        assert report.skipped == 1, report
+        # counted as DECIDED, not as "already present" — the local tracker does
+        # not hold this row, it holds a decision about the same defect, and the
+        # operator-facing message says so.
+        assert report.skipped_decided == 1, report
+        assert report.skipped_present == 0, report
         assert report.imported == 0, report
 
     def test_a_live_card_is_still_bumped(self, conn, tmp_path):
@@ -1735,7 +1739,7 @@ class TestAnIdIdentifiesARowOnlyWithItsContent:
         with open(path, newline="") as fh:
             report = findings.import_findings(conn, list(csv.DictReader(fh)))
         assert report.imported == 3, report
-        assert report.skipped == 0, report
+        assert report.skipped_present == 0, report
         landed = conn.execute(
             "SELECT id, json_extract(meta, '$.imported_id') FROM findings WHERE category='peerbug'"
         ).fetchall()
@@ -1753,7 +1757,7 @@ class TestAnIdIdentifiesARowOnlyWithItsContent:
         path = _write_csv(tmp_path / "own.csv", rows)
         with open(path, newline="") as fh:
             report = findings.import_findings(conn, list(csv.DictReader(fh)))
-        assert report.skipped == 2, report
+        assert report.skipped_present == 2, report
         assert report.imported == 0, report
         assert conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0] == 2
 
@@ -1772,7 +1776,7 @@ class TestAnIdIdentifiesARowOnlyWithItsContent:
         path = _write_csv(tmp_path / "null.csv", rows)
         with open(path, newline="") as fh:
             report = findings.import_findings(conn, list(csv.DictReader(fh)))
-        assert report.skipped == 1, report
+        assert report.skipped_present == 1, report
         assert conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0] == 1
 
     def test_an_id_minted_by_this_import_does_not_drop_a_later_row(self, conn, tmp_path):
@@ -1860,3 +1864,56 @@ class TestImportCarriesTags:
         tags = conn2.execute("SELECT tags FROM findings").fetchone()[0]
         conn2.close()
         assert json.loads(tags) == ["release", "ui"], tags
+
+
+class TestImportRowContract:
+    """`import_findings` takes rows in the shape `csv.DictReader` yields, so the
+    CLI and a library caller hand over the same thing.
+
+    An earlier draft accepted TWO shapes — the handler pre-decoded `meta` into a
+    dict while every test passed the raw JSON string — and `dict("...")` would
+    have raised. It only worked because the fixtures exported an empty meta
+    column, i.e. the tests could not reach the contradiction they contained.
+    Found by review of the diff, not by the suite.
+    """
+
+    def test_meta_arrives_as_json_text_and_reserved_keys_are_dropped(self, conn):
+        rows = [{
+            "id": "CB-900", "severity": "low", "category": "c", "file": "a.py",
+            "description": "meta as text", "source": "peer",
+            "meta": json.dumps({"lines": "10-20", "similar_to": [{"id": "CB-1"}],
+                                "recurrence_of": "CB-2"}),
+        }]
+        report = findings.import_findings(conn, rows)
+        assert report.imported == 1, report
+        stored = json.loads(conn.execute("SELECT meta FROM findings").fetchone()[0])
+        # the machinery's OUTPUT is not its input
+        assert "similar_to" not in stored and "recurrence_of" not in stored, stored
+        assert stored["lines"] == "10-20", stored
+        assert stored["imported_id"] == "CB-900", stored
+
+    def test_meta_already_decoded_is_also_accepted(self, conn):
+        rows = [{"id": "", "severity": "low", "category": "c", "file": "a.py",
+                 "description": "meta as dict", "meta": {"lines": "1-2"}}]
+        report = findings.import_findings(conn, rows)
+        assert report.imported == 1, report
+
+    def test_malformed_tags_are_an_ERROR_not_a_silent_drop(self, conn):
+        """A row whose tags cannot be read must say so. Dropping them quietly is
+        the same quiet loss this card exists to remove, and the row already has
+        an error channel."""
+        rows = [{"id": "", "severity": "low", "category": "c", "file": "a.py",
+                 "description": "bad tags", "tags": "not json at all"}]
+        report = findings.import_findings(conn, rows)
+        assert report.imported == 0, report
+        assert len(report.errors) == 1, report
+        assert "tags" in report.errors[0].message, report.errors
+
+    def test_a_row_missing_required_fields_is_passed_over_silently(self, conn):
+        """CONTROL — green on both sides. An incomplete row is not a finding and
+        never was an error; pinned so the new error channel does not start
+        claiming it is."""
+        rows = [{"id": "", "severity": "low", "category": "", "file": "",
+                 "description": ""}]
+        report = findings.import_findings(conn, rows)
+        assert report == findings.ImportReport(0, 0, 0, 0, []), report
