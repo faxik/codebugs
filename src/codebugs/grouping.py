@@ -226,18 +226,25 @@ def citation_report(
     mentions: list[dict[str, str]] = []
     self_refs = dangling = 0
     for row in rows:
+        # ONE unit for all three counters: the distinct (citing card, cited id)
+        # pair. The dedup has to happen BEFORE the classification, not inside
+        # the in-population arm — counting mentions per row but dangling and
+        # self-references per occurrence made the three numbers on the same
+        # header line incomparable, and inflated dangling 3x on the reference
+        # corpus (a card repeating "CB-2136" in description, notes and
+        # `related` is one relationship, not three).
         seen: set[str] = set()
         for field, text in _row_texts(row):
             for target in extract_citations(text):
+                if target in seen:
+                    continue
+                seen.add(target)
                 if target == row["id"]:
                     self_refs += 1
                     continue
                 if target not in by_id:
                     dangling += 1
                     continue
-                if target in seen:
-                    continue
-                seen.add(target)
                 mentions.append({
                     "src": row["id"], "dst": target, "field": field,
                     "context": citation_context(text, target),
