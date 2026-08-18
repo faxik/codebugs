@@ -504,14 +504,7 @@ class TestStatErrorIsNotDeleted:
     def _modified_file(self, project):
         """Give the tracked file a later commit, so file_status reaches the
         existence check instead of returning `current` first."""
-        path = os.path.join(project, "src", "auth.py")
-        with open(path, "a") as f:
-            f.write("# changed\n")
-        subprocess.run(["git", "add", "-A"], cwd=project, check=True, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", "change"], cwd=project, check=True, capture_output=True
-        )
-        return path
+        return _commit_a_change(project)
 
     @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
     def test_an_unreadable_parent_directory_reports_unknown_not_deleted(self, git_project):
@@ -711,7 +704,11 @@ class TestPathIsResolvedBeforeItIsJudged:
             reported_at_commit=sha,
             project_dir=project,
         )
-        assert result == {"file_status": "unknown", "reason": "out_of_repo"}, result
+        assert result["file_status"] == "unknown", result
+        # The reason names the worktree that made the decision — a scope
+        # boundary you cannot see is one you cannot debug (CB-11/CB-49).
+        assert result["reason"].startswith("out_of_repo"), result
+        assert os.path.realpath(project) in result["reason"], result
 
     def test_a_foreign_path_with_a_foreign_commit_is_out_of_scope(
         self, git_project, tmp_path_factory
@@ -738,7 +735,42 @@ class TestPathIsResolvedBeforeItIsJudged:
             reported_at_commit=foreign_sha,
             project_dir=project,
         )
-        assert result == {"file_status": "unknown", "reason": "out_of_repo"}, result
+        assert result["file_status"] == "unknown", result
+        assert result["reason"].startswith("out_of_repo"), result
+
+    def test_a_RELATIVE_path_into_another_repo_is_also_out_of_scope(
+        self, git_project, tmp_path_factory
+    ):
+        """main: `unreachable_commit`. The spelling must not decide the answer.
+
+        An earlier draft of this fix scoped an ABSOLUTE value before the
+        reachability check and a relative one after it, so this — the natural
+        spelling for a cross-repo card filed from a subdirectory — kept
+        reporting a provenance failure of the finding, which is precisely what
+        CB-89 was filed against. Caught by adversarial review of the fix, not by
+        the fix's own tests, because every other case used an absolute path.
+        """
+        project, _sha = git_project
+        foreign = str(tmp_path_factory.mktemp("relforeign"))
+        subprocess.run(["git", "init"], cwd=foreign, check=True, capture_output=True)
+        for k, v in (("user.email", "t@t"), ("user.name", "t")):
+            subprocess.run(["git", "config", k, v], cwd=foreign, check=True, capture_output=True)
+        with open(os.path.join(foreign, "app.py"), "w") as fh:
+            fh.write("b = 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=foreign, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "c"], cwd=foreign, check=True, capture_output=True)
+        foreign_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=foreign, text=True
+        ).strip()
+
+        relative = os.path.relpath(os.path.join(foreign, "app.py"), project)
+        assert relative.startswith(".."), relative  # the fixture must actually be relative
+
+        result = provenance.file_status(
+            file_path=relative, reported_at_commit=foreign_sha, project_dir=project
+        )
+        assert result["file_status"] == "unknown", result
+        assert result["reason"].startswith("out_of_repo"), result
 
     def test_an_in_repo_symlink_escaping_the_worktree_is_out_of_scope(self, git_project):
         """main: `current`. The path is lexically inside the repo, so a
@@ -751,7 +783,39 @@ class TestPathIsResolvedBeforeItIsJudged:
         result = provenance.file_status(
             file_path="etcout/hosts", reported_at_commit=sha, project_dir=project
         )
-        assert result == {"file_status": "unknown", "reason": "out_of_repo"}, result
+        assert result["reason"].startswith("out_of_repo"), result
+
+    def test_the_batch_resolves_the_worktree_root_once(self, monkeypatch, conn, git_project):
+        """The anti-retry property of the private `_repo_root_hint`, which was
+        otherwise asserted only in prose.
+
+        `check_findings` permits 10 000 rows and probes the root once for the
+        batch. The third state matters most when the probe FAILS: without it
+        every finding retries the same failing `rev-parse`, so the cost claim
+        inverts exactly when the machine is already unhappy.
+        """
+        project, sha = git_project
+        _commit_a_change(project)
+        for i in range(4):
+            findings.add_finding(
+                conn,
+                severity="low",
+                category="c",
+                file=f"src/f{i}.py",
+                description=f"finding {i}",
+                reported_at_commit=sha,
+            )
+
+        calls = {"n": 0}
+        real = provenance._repo_root
+
+        def counted(cwd):
+            calls["n"] += 1
+            return real(cwd)
+
+        monkeypatch.setattr(provenance, "_repo_root", counted)
+        provenance.check_findings(conn, project)
+        assert calls["n"] == 1, f"probed the worktree root {calls['n']} times for one batch"
 
     def test_a_tracked_path_replaced_by_a_fifo_is_unknown_not_deleted(self, git_project):
         """main: `deleted`. The fixture matters and the plan's first draft got it

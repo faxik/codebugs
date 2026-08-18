@@ -37,28 +37,38 @@ def _ambient_cwd() -> str | None:
 
 #: `_kind_at_commit` could not ask git. Distinct from `None` ("git answered:
 #: this path is not in that commit") because collapsing the two would let a
-#: failed question produce a confident verdict — the failure this module already
-#: carries three fix-comments about (CB-79, CB-85, CB-88).
-_GIT_UNAVAILABLE = object()
+class _GitUnavailable(Exception):
+    """A git probe could not answer.
 
-#: `check_findings` resolved the worktree root and failed. Threaded to
-#: `file_status` so a batch does not re-run the same failing probe per finding.
-ROOT_UNRESOLVED = object()
+    RAISED rather than returned, deliberately. The returned-sentinel version of
+    this was reviewed and rejected: the directory branch below reads
+    `kind != "blob"`, which classifies a sentinel as "not a blob" and answers
+    `modified` — correct only for as long as every caller remembers a two-line
+    preamble. That is exactly the shape this module has now been patched for
+    three times (CB-79, CB-85, CB-88): a question that errored producing a
+    confident verdict. An exception cannot be forgotten, only handled.
+    """
+
+
+#: `check_findings` resolved the worktree root and failed. Threaded into
+#: `file_status` so a 10 000-row batch does not re-run the same failing probe
+#: per finding.
+_ROOT_UNRESOLVED = object()
 
 
 def _repo_root(cwd: str) -> str | None:
     """The worktree root containing `cwd`, physically resolved. None if git
-    cannot say — no repo, a bare repo, or git unusable."""
-    try:
-        out = subprocess.check_output(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=cwd,
-            text=True,
-            timeout=10,
-            stderr=subprocess.DEVNULL,
-        ).strip()
-    except (subprocess.SubprocessError, OSError):
-        return None
+    cannot say — no repo, a bare repo, or git unusable.
+
+    `db.git_rev_parse` rather than a fifth hand-written `subprocess` call in
+    this module: `--show-toplevel` is an ordinary `rev-parse` argument, and that
+    helper already carries the CB-79 exception tuple and the comment explaining
+    it. CLAUDE.md fixes the CB-79 population as "provenance.py ×4, plus
+    db.git_rev_parse"; a hand-rolled copy here would make it six, in the module
+    whose own lesson is that a rule spelled as an enumeration gets fixed only at
+    the sites someone enumerated.
+    """
+    out = db.git_rev_parse("--show-toplevel", silent=True, cwd=cwd)
     return os.path.realpath(out) if out else None
 
 
@@ -79,9 +89,10 @@ def _resolve_candidate(cwd: str, file_path: str) -> str:
     return os.path.join(os.path.realpath(os.path.dirname(joined)), base)
 
 
-def _kind_at_commit(cwd: str, commit: str, rel: str) -> str | None | object:
+def _kind_at_commit(cwd: str, commit: str, rel: str) -> str | None:
     """What `rel` was in `commit`'s tree: `"blob"`, `"other"` (a tree or a
-    submodule gitlink), None (git says: not there), or `_GIT_UNAVAILABLE`.
+    submodule gitlink), or None — git answered, and it was not there.
+    Raises `_GitUnavailable` when git could not answer at all.
 
     `rel` is repo-relative and canonical because it is derived from the resolved
     candidate, never from the caller's spelling — git canonicalizes the name it
@@ -105,8 +116,8 @@ def _kind_at_commit(cwd: str, commit: str, rel: str) -> str | None | object:
             timeout=10,
             stderr=subprocess.DEVNULL,
         )
-    except (subprocess.SubprocessError, OSError):
-        return _GIT_UNAVAILABLE
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise _GitUnavailable(str(exc)) from exc
 
     records = [r for r in out.split("\0") if r]
     if not records:
@@ -144,7 +155,7 @@ def file_status(
     borrowing a confident verdict from a question that was never asked.
 
     `_repo_root_hint` is private: `check_findings` resolves the worktree root
-    once per batch and passes it (or `ROOT_UNRESOLVED` when its own probe
+    once per batch and passes it (or `_ROOT_UNRESOLVED` when its own probe
     failed, so 10 000 findings do not each retry it). It is not a public knob —
     a caller supplying a wrong root would disable the only resolution of the
     scope boundary while the function kept reporting confident verdicts.
@@ -173,41 +184,34 @@ def file_status(
     if "\0" in file_path:
         return {"file_status": "unknown", "reason": "invalid_path"}
 
-    def _scope() -> tuple[str, str] | dict[str, Any]:
-        """(root, rel) for an in-scope path, or the refusal to return."""
-        root = _repo_root_hint
-        if root is None:
-            root = _repo_root(cwd)
-        elif root is ROOT_UNRESOLVED:
-            root = None
-        if not isinstance(root, str):
-            # No worktree root means scope cannot be decided at all — a bare
-            # repo, or git unusable. Refusing is the honest answer; inventing
-            # one is how a guard reports clean because it could not look.
-            return {"file_status": "unknown", "reason": "git_error"}
+    # SCOPE FIRST, and the ordering here is precedence between REASONS, not a
+    # rule about which spelling the caller used. An earlier draft ran this
+    # before `cat-file` for an absolute value and after it for a relative one,
+    # to preserve the pinned "git missing -> unreachable_commit" contract. That
+    # made argument spelling decide the answer: `../sibling/src/x.py` — the
+    # natural spelling for a cross-repo card filed from a subdirectory — still
+    # reported `unreachable_commit`, which is the very confident-wrong-channel
+    # answer CB-89 was filed against. The contract is preserved instead by what
+    # happens when the root CANNOT be resolved: git is then unusable for this
+    # probe too, so scope simply declines to decide and the reachability check
+    # below reports what it always did.
+    root = _repo_root_hint if isinstance(_repo_root_hint, str) else None
+    if root is None and _repo_root_hint is not _ROOT_UNRESOLVED:
+        root = _repo_root(cwd)
+
+    rel: str | None = None
+    if root is not None:
         candidate = _resolve_candidate(cwd, file_path)
         try:
             inside = os.path.commonpath([root, candidate]) == root
         except ValueError:
             inside = False  # different drives, or a mix of absolute and relative
         if not inside:
-            return {"file_status": "unknown", "reason": "out_of_repo"}
-        return root, os.path.relpath(candidate, root)
-
-    # An ABSOLUTE value's scope is decidable without reference to the commit,
-    # and absolute values are the whole measured CB-89 population — including
-    # its sharpest case, a real commit in the repo that owns the file, which
-    # `cat-file` would otherwise report as `unreachable_commit`. A relative
-    # value is scoped AFTER `cat-file`, because that call is the first git call
-    # today and `TestNarrowTupleCompatibility` pins "git missing →
-    # unreachable_commit"; putting a probe in front of it rewrites that
-    # contract for every caller.
-    scoped: tuple[str, str] | None = None
-    if os.path.isabs(file_path):
-        outcome = _scope()
-        if isinstance(outcome, dict):
-            return outcome
-        scoped = outcome
+            # The root is named in the reason: a scope decision you cannot see
+            # is a scope decision you cannot debug, and this package already
+            # learned that once (CB-11/CB-49, `db.describe_root`).
+            return {"file_status": "unknown", "reason": f"out_of_repo (worktree {root})"}
+        rel = os.path.relpath(candidate, root)
 
     try:
         subprocess.check_output(
@@ -230,12 +234,12 @@ def file_status(
         # to stay, or CalledProcessError and TimeoutExpired escape.
         return {"file_status": "unknown", "reason": "unreachable_commit"}
 
-    if scoped is None:
-        outcome = _scope()
-        if isinstance(outcome, dict):
-            return outcome
-        scoped = outcome
-    _root, rel = scoped
+    if rel is None:
+        # The commit is reachable but no worktree root is — a bare repo, or a
+        # cwd that is not in a repo at all. Scope cannot be decided and neither
+        # can anything below it, so refusing is the honest answer; inventing one
+        # is how a guard reports clean because it could not look.
+        return {"file_status": "unknown", "reason": "git_error"}
 
     try:
         log_output = subprocess.check_output(
@@ -261,8 +265,9 @@ def file_status(
         # including prose, a glob, and a regular file that simply was not in
         # that commit. Disk existence is not historical identity, so the claim
         # now requires git to confirm the path was there.
-        kind = _kind_at_commit(cwd, reported_at_commit, rel)
-        if kind is _GIT_UNAVAILABLE:
+        try:
+            kind = _kind_at_commit(cwd, reported_at_commit, rel)
+        except _GitUnavailable:
             return {"file_status": "unknown", "reason": "git_error"}
         if kind is None:
             return {"file_status": "unknown", "reason": "not_in_commit"}
@@ -318,8 +323,9 @@ def file_status(
             # The one case that must NOT become `modified` is a path that was a
             # BLOB and is now a directory: its blob really is gone, so it keeps
             # falling through to rename/deleted.
-            kind = _kind_at_commit(cwd, reported_at_commit, rel)
-            if kind is _GIT_UNAVAILABLE:
+            try:
+                kind = _kind_at_commit(cwd, reported_at_commit, rel)
+            except _GitUnavailable:
                 return {"file_status": "unknown", "reason": "git_error"}
             if kind != "blob":
                 return _modified()
@@ -422,9 +428,9 @@ def check_findings(
     # would add a subprocess to every one of them. A failed probe is passed on
     # as ROOT_UNRESOLVED rather than None, or each finding would retry the same
     # failure — the cost claim inverting exactly when the machine is unhappy.
-    batch_root: str | None | object = ROOT_UNRESOLVED
+    batch_root: str | object = _ROOT_UNRESOLVED
     if cwd is not None:
-        batch_root = _repo_root(cwd) or ROOT_UNRESOLVED
+        batch_root = _repo_root(cwd) or _ROOT_UNRESOLVED
 
     staleness_by_key: dict[tuple[str, str | None], dict[str, Any]] = {}
     results = []
