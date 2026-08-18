@@ -1019,3 +1019,77 @@ upheld, and nine independently landable edits blow the batching ceiling of four.
 **Net change: 0 closed, 0 filed. Open stayed at 35** (CB-81 closed and CB-87 filed in the previous
 iteration). Two cards carry materially better evidence than they did, and both hand-backs name a
 decision precisely enough to answer in one line.
+
+## 2026-08-18 — iteration 3: CB-88 + CB-89 fixed in one tree, merge 6dba444
+
+**Focus:** `codebugs`, "stabilization batch related, in one batch". No `stabilization` tag, label or
+plan exists anywhere in the repo or tracker, so it was read as *the defect-shaped robustness cards,
+excluding the RFC and needs-decision ones* — mapping stated before ranking, per the skill.
+**Disposition:** both cards fixed and landed. **Merge:** `6dba444`.
+
+**Picked CB-88 (high) + CB-89 (medium); excluded CB-51 (the other high)** because "CSV import needs
+a domain-level restore path" is a capability rewrite with an open one-transaction question — the
+"needs a product decision" predicate, named rather than silently skipped.
+
+**The clustering predicate did NOT hold, and the plan says so.** `bug-clustering.md` predicate 2
+requires one transformation; these are two, in the same prologue of one function. Predicates 1 and 4
+fail too. They shared a tree by **explicit user instruction** ("in one batch"), which outranks skill
+policy — recorded as a scheduling decision, not a predicate that was talked into passing.
+
+**One question asked, and it was the right one to ask.** CB-89's own suggested direction — resolve
+the repo that owns the file and answer there — is a capability, not a bugfix: it makes the tracker
+shell into a directory named by card data and redefines `reported_at_commit` per card. Presented
+with both costs; the user ratified **honest scoping only**. The capability is CB-91.
+
+**THREE DRAFTS. Adversarial review x2 returned FAIL twice, and the second FAIL was found by both
+models independently.** Round 1: four reproduced FATALs. Round 2 killed the replacement design the
+same way — **git canonicalizes the name it prints** (`./a/b`, `a//b` and an absolute path all come
+back as `a/b`), so matching git's output against the caller's spelling regressed valid `current`
+files to `unknown`. The fix that survived is to stop comparing spellings: **derive git's spelling
+from the physical candidate path — the same one `os.stat` already resolves** — so the coordinate
+systems agree by construction rather than by coincidence.
+
+**The most valuable single finding was a population count.** CB-88's own census said 47
+directory-valued cards. Measured on the motivating tracker: **155 findings across 51 distinct paths
+(71 live) spell the directory with a TRAILING SLASH** — `dashboard-ui/` (48), `src/autosorter/` (13).
+`git ls-tree -- 'pkg/'` returns the directory's *children* and no tree record at all, so drafts 1
+and 2 would have repaired `src` and left `src/` reporting `deleted`: a fix for the minority of its
+own population, shipped as a fix for the defect. **A card's census is evidence, not a boundary.**
+
+**Two defects were fixed that were on neither card**, both found by running the code rather than
+reading it: a free-text `file` returned **`current`** (a confident "unchanged since" about a path
+that does not exist), and `file = ":"` made `git log` match the **whole history**, because the raw
+value was passed as a pathspec.
+
+**`/simplify`'s altitude pass caught the fix reproducing its own card's bug.** The scope check ran
+before `cat-file` for an absolute value and after it for a relative one — so `../sibling/src/x.py`,
+the natural spelling for a cross-repo card filed from a subdirectory, still reported
+`unreachable_commit`. CB-89's exact defect, surviving inside CB-89's fix, because every test used an
+absolute path. Scope is now decided first for every spelling and the pinned "git missing →
+unreachable_commit" contract *falls out* instead of being special-cased. **A fix keyed on argument
+spelling is an enumeration wearing a control-flow hat.**
+
+**A test that would have gone vacuous was caught before it did.** `tests/test_provenance.py:402`
+injects a failure at the *third* `subprocess.check_output` to pin CB-79's rename guard. The new
+`ls-tree` probe moves which call is third — same assertion, same reason string, different branch.
+Re-keyed on argv. Found by the Opus adversary, not by the suite.
+
+**Measured outcome (autosorter tracker, 1215 live findings, 1063 distinct pairs):**
+`deleted` **51 → 0** — every one of the 51 verified present on disk, so the bucket documented as
+"the strongest deterministic dismissal signal available" was 100% false positive;
+`current` 300 → 234 (66 were false freshness claims); `modified` 696 → 746;
+`git_error`+`unreachable_commit` 7 → 0, now `out_of_repo` — exactly CB-89's population.
+**27.1s → 14.0s**: the review predicted a 35% subprocess *increase* from call counting, and timing
+it showed the opposite, because the false-`deleted` paths had been paying for a whole-repo rename
+detection. **A cost claim derived from counting is a prediction until something is timed.**
+
+**Net change: 2 closed, 3 filed by this iteration (CB-91 ratified deferral, CB-92 and CB-93 both
+cross-model corroborated), 2 filed by a parallel session (CB-90, CB-94). Open 37 → 40.** The queue
+grew, and it is the review machinery working: CB-92 and CB-93 are defects that were *found by
+attacking this fix*, and CB-91 is a scope decision recorded rather than silently taken.
+
+**Harness note:** `/fewer-permission-prompts` wrote `.claude/settings.json`, which is untracked on a
+main that refuses every non-plan commit — it would have blocked *every* future `worktree-finish`.
+Folded into the gitignored `.claude/settings.local.json` (89 unique entries) instead. The skill's
+letter says project settings; its intent is fewer prompts, and only one of those survives contact
+with this repo's pre-commit hook.
