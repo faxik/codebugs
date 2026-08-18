@@ -35,6 +35,102 @@ def _ambient_cwd() -> str | None:
         return None
 
 
+#: `_kind_at_commit` could not ask git. Distinct from `None` ("git answered:
+#: this path is not in that commit") because collapsing the two would let a
+class _GitUnavailable(Exception):
+    """A git probe could not answer.
+
+    RAISED rather than returned, deliberately. The returned-sentinel version of
+    this was reviewed and rejected: the directory branch below reads
+    `kind != "blob"`, which classifies a sentinel as "not a blob" and answers
+    `modified` — correct only for as long as every caller remembers a two-line
+    preamble. That is exactly the shape this module has now been patched for
+    three times (CB-79, CB-85, CB-88): a question that errored producing a
+    confident verdict. An exception cannot be forgotten, only handled.
+    """
+
+
+#: `check_findings` resolved the worktree root and failed. Threaded into
+#: `file_status` so a 10 000-row batch does not re-run the same failing probe
+#: per finding.
+_ROOT_UNRESOLVED = object()
+
+
+def _repo_root(cwd: str) -> str | None:
+    """The worktree root containing `cwd`, physically resolved. None if git
+    cannot say — no repo, a bare repo, or git unusable.
+
+    `db.git_rev_parse` rather than a fifth hand-written `subprocess` call in
+    this module: `--show-toplevel` is an ordinary `rev-parse` argument, and that
+    helper already carries the CB-79 exception tuple and the comment explaining
+    it. CLAUDE.md fixes the CB-79 population as "provenance.py ×4, plus
+    db.git_rev_parse"; a hand-rolled copy here would make it six, in the module
+    whose own lesson is that a rule spelled as an enumeration gets fixed only at
+    the sites someone enumerated.
+    """
+    out = db.git_rev_parse("--show-toplevel", silent=True, cwd=cwd)
+    return os.path.realpath(out) if out else None
+
+
+def _resolve_candidate(cwd: str, file_path: str) -> str:
+    """The filesystem path a `file` value denotes — the same one `os.stat` gets.
+
+    Only the PARENT is resolved physically. That keeps a tracked symlink in
+    scope (git can answer about its own blob) while refusing an in-repo
+    symlinked *directory* that escapes the worktree: `<repo>/etcout/hosts`
+    where `etcout -> /etc` is lexically inside and physically is not.
+    A final `.`/`..`/`` names a directory, so there is no symlink to preserve
+    and the whole path is resolved.
+    """
+    joined = os.path.join(cwd, file_path)
+    base = os.path.basename(joined)
+    if base in ("", ".", ".."):
+        return os.path.realpath(joined)
+    return os.path.join(os.path.realpath(os.path.dirname(joined)), base)
+
+
+def _kind_at_commit(cwd: str, commit: str, rel: str) -> str | None:
+    """What `rel` was in `commit`'s tree: `"blob"`, `"other"` (a tree or a
+    submodule gitlink), or None — git answered, and it was not there.
+    Raises `_GitUnavailable` when git could not answer at all.
+
+    `rel` is repo-relative and canonical because it is derived from the resolved
+    candidate, never from the caller's spelling — git canonicalizes the name it
+    prints (`./a/b`, `a//b` and an absolute path all come back as `a/b`), so
+    comparing its output to the input is what turned valid `current` files into
+    `unknown` in two earlier drafts of this fix.
+
+    `--literal-pathspecs` because `:` and `:(exclude)…` are pathspec MAGIC, not
+    paths; `--full-tree` because `rel` is root-relative, and pairing it with a
+    cwd-relative spelling asks about a different file entirely; `-z` because it
+    also suppresses `core.quotePath` C-quoting (the hazard CB-92 records for the
+    rename reader below, which still lacks it).
+    """
+    if rel == ".":
+        return "other"  # the worktree root: always a tree, and git has no record named "."
+    try:
+        out = subprocess.check_output(
+            ["git", "--literal-pathspecs", "ls-tree", "-z", "--full-tree", commit, "--", rel],
+            cwd=cwd,
+            text=True,
+            timeout=10,
+            stderr=subprocess.DEVNULL,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise _GitUnavailable(str(exc)) from exc
+
+    records = [r for r in out.split("\0") if r]
+    if not records:
+        return None
+    if len(records) == 1:
+        fields = records[0].partition("\t")[0].split()
+        if len(fields) >= 2 and fields[1] == "blob":
+            return "blob"
+    # Known to the commit, and not a single blob. Reported as "other" rather
+    # than guessing a kind: only "is it a blob" changes any verdict below.
+    return "other"
+
+
 def head_sha(*, project_dir: str | None = None) -> str | None:
     """Current HEAD SHA for provenance auto-population. Returns None if git unavailable."""
     return db.git_rev_parse("HEAD", silent=True, cwd=project_dir)
@@ -45,10 +141,24 @@ def file_status(
     file_path: str,
     reported_at_commit: str | None,
     project_dir: str | None = None,
+    _repo_root_hint: str | None | object = None,
 ) -> dict[str, Any]:
     """Check staleness of a single file against a commit. Returns file_status dict.
 
     file_status is one of: current, modified, renamed, deleted, unknown.
+
+    CB-88 / CB-89: the `file` field is free text and the tracker never promised
+    it names a blob in this repository — directory-valued, trailing-slash,
+    glob-valued, absolute-cross-repo and prose values are all in deliberate use.
+    So the value is RESOLVED before it is judged, and anything this repo cannot
+    answer for degrades to `unknown` with a specific reason rather than
+    borrowing a confident verdict from a question that was never asked.
+
+    `_repo_root_hint` is private: `check_findings` resolves the worktree root
+    once per batch and passes it (or `_ROOT_UNRESOLVED` when its own probe
+    failed, so 10 000 findings do not each retry it). It is not a public knob —
+    a caller supplying a wrong root would disable the only resolution of the
+    scope boundary while the function kept reporting confident verdicts.
     """
     cwd = project_dir or _ambient_cwd()
 
@@ -61,6 +171,47 @@ def file_status(
     # still reports the more specific reason.
     if cwd is None:
         return {"file_status": "unknown", "reason": "no_cwd"}
+
+    # Refuse only what is INHERENTLY unanswerable, and refuse it before any
+    # syscall. An empty pathspec makes git exit 128, and a NUL makes `os.stat`
+    # and `subprocess` raise ValueError — which is outside the
+    # (SubprocessError, OSError) contract every caller of this module is
+    # written against, so it escaped as a traceback. Whitespace is PRESERVED:
+    # `git log -- ' '` exits 0 and a whitespace-only filename is a legal path,
+    # so stripping would refuse valid input (measured; an earlier draft did).
+    if file_path == "":
+        return {"file_status": "unknown", "reason": "empty_path"}
+    if "\0" in file_path:
+        return {"file_status": "unknown", "reason": "invalid_path"}
+
+    # SCOPE FIRST, and the ordering here is precedence between REASONS, not a
+    # rule about which spelling the caller used. An earlier draft ran this
+    # before `cat-file` for an absolute value and after it for a relative one,
+    # to preserve the pinned "git missing -> unreachable_commit" contract. That
+    # made argument spelling decide the answer: `../sibling/src/x.py` — the
+    # natural spelling for a cross-repo card filed from a subdirectory — still
+    # reported `unreachable_commit`, which is the very confident-wrong-channel
+    # answer CB-89 was filed against. The contract is preserved instead by what
+    # happens when the root CANNOT be resolved: git is then unusable for this
+    # probe too, so scope simply declines to decide and the reachability check
+    # below reports what it always did.
+    root = _repo_root_hint if isinstance(_repo_root_hint, str) else None
+    if root is None and _repo_root_hint is not _ROOT_UNRESOLVED:
+        root = _repo_root(cwd)
+
+    rel: str | None = None
+    if root is not None:
+        candidate = _resolve_candidate(cwd, file_path)
+        try:
+            inside = os.path.commonpath([root, candidate]) == root
+        except ValueError:
+            inside = False  # different drives, or a mix of absolute and relative
+        if not inside:
+            # The root is named in the reason: a scope decision you cannot see
+            # is a scope decision you cannot debug, and this package already
+            # learned that once (CB-11/CB-49, `db.describe_root`).
+            return {"file_status": "unknown", "reason": f"out_of_repo (worktree {root})"}
+        rel = os.path.relpath(candidate, root)
 
     try:
         subprocess.check_output(
@@ -83,9 +234,23 @@ def file_status(
         # to stay, or CalledProcessError and TimeoutExpired escape.
         return {"file_status": "unknown", "reason": "unreachable_commit"}
 
+    if rel is None:
+        # The commit is reachable but no worktree root is — a bare repo, or a
+        # cwd that is not in a repo at all. Scope cannot be decided and neither
+        # can anything below it, so refusing is the honest answer; inventing one
+        # is how a guard reports clean because it could not look.
+        return {"file_status": "unknown", "reason": "git_error"}
+
     try:
         log_output = subprocess.check_output(
-            ["git", "log", "--oneline", f"{reported_at_commit}..HEAD", "--", file_path],
+            # `--literal-pathspecs`: without it `:` is git's NULL pathspec and
+            # this call matches the WHOLE history, so a `file` value that is not
+            # a path at all produced a non-empty range and the verdict was then
+            # decided by every other file in the repo. The pathspec stays the
+            # RAW input, cwd-relative, exactly as before — reinterpreting it
+            # against the project root is CB-93, deliberately not this change.
+            ["git", "--literal-pathspecs", "log", "--oneline"]
+            + [f"{reported_at_commit}..HEAD", "--", file_path],
             cwd=cwd,
             text=True,
             timeout=10,
@@ -95,6 +260,17 @@ def file_status(
         return {"file_status": "unknown", "reason": "git_error"}
 
     if not log_output:
+        # An empty range used to mean `current` outright — a confident
+        # "unchanged since <sha>" for any value git had never heard of,
+        # including prose, a glob, and a regular file that simply was not in
+        # that commit. Disk existence is not historical identity, so the claim
+        # now requires git to confirm the path was there.
+        try:
+            kind = _kind_at_commit(cwd, reported_at_commit, rel)
+        except _GitUnavailable:
+            return {"file_status": "unknown", "reason": "git_error"}
+        if kind is None:
+            return {"file_status": "unknown", "reason": "not_in_commit"}
         return {
             "file_status": "current",
             "reason": f"{file_path} unchanged since {reported_at_commit[:12]}",
@@ -115,21 +291,48 @@ def file_status(
     # empty rename result. Same "guard reporting clean because it could not
     # look" shape, different mechanism — which is why it needed its own card.
     try:
-        file_exists = stat.S_ISREG(os.stat(os.path.join(cwd, file_path)).st_mode)
+        st_mode = os.stat(os.path.join(cwd, file_path)).st_mode
     except (FileNotFoundError, NotADirectoryError):
         # Genuinely absent — including a path component that is not a
         # directory, which means the target cannot exist. Today's answer is
         # right, so fall through to the rename/deleted branches unchanged.
-        file_exists = False
+        st_mode = None
     except OSError:
         return {"file_status": "unknown", "reason": "stat_error"}
 
-    if file_exists:
+    def _modified() -> dict[str, Any]:
         s = "commit" if commit_count == 1 else "commits"
         return {
             "file_status": "modified",
             "reason": f"{file_path} modified in {commit_count} {s} since {reported_at_commit[:12]}",
         }
+
+    if st_mode is not None:
+        if stat.S_ISREG(st_mode):
+            return _modified()
+
+        if stat.S_ISDIR(st_mode):
+            # CB-88, the headline. `S_ISREG` is False for a directory that is
+            # right there, so the existence branch was skipped, the rename
+            # lookup found nothing (a directory is not a renamed blob) and
+            # control fell into the unconditional `deleted` below — a positive
+            # claim that the path is gone, about a path that is present.
+            # Measured on the autosorter tracker: 48 of 48 `deleted` cards were
+            # false, 47 of them directories.
+            #
+            # The one case that must NOT become `modified` is a path that was a
+            # BLOB and is now a directory: its blob really is gone, so it keeps
+            # falling through to rename/deleted.
+            try:
+                kind = _kind_at_commit(cwd, reported_at_commit, rel)
+            except _GitUnavailable:
+                return {"file_status": "unknown", "reason": "git_error"}
+            if kind != "blob":
+                return _modified()
+        else:
+            # A fifo, socket or device that exists. `git log` says something
+            # under this path changed, but no blob/deleted answer describes it.
+            return {"file_status": "unknown", "reason": "unsupported_path_kind"}
 
     try:
         rename_output = subprocess.check_output(
@@ -220,6 +423,15 @@ def check_findings(
 
     current_head = db.git_rev_parse("HEAD", silent=True, cwd=cwd)
 
+    # Resolve the worktree root ONCE for the batch. `file_status` needs it to
+    # decide scope, and this query permits 10 000 rows: probing per finding
+    # would add a subprocess to every one of them. A failed probe is passed on
+    # as ROOT_UNRESOLVED rather than None, or each finding would retry the same
+    # failure — the cost claim inverting exactly when the machine is unhappy.
+    batch_root: str | object = _ROOT_UNRESOLVED
+    if cwd is not None:
+        batch_root = _repo_root(cwd) or _ROOT_UNRESOLVED
+
     staleness_by_key: dict[tuple[str, str | None], dict[str, Any]] = {}
     results = []
 
@@ -230,6 +442,7 @@ def check_findings(
                 file_path=f["file"],
                 reported_at_commit=f.get("reported_at_commit"),
                 project_dir=cwd,
+                _repo_root_hint=batch_root,
             )
         staleness = staleness_by_key[cache_key]
         results.append(
@@ -376,7 +589,12 @@ def register_tools(mcp, conn_factory) -> None:
         - modified: file changed but still exists
         - renamed: file was renamed/moved
         - deleted: file no longer exists
-        - unknown: can't determine (no provenance data, unreachable commit)
+        - unknown: can't determine, with a `reason` naming which question could
+          not be answered — no provenance data, an unreachable commit, a path
+          outside this repository's worktree, a path the reported commit never
+          contained (a glob, free text, or a file added later), an empty or
+          malformed value, a path that is neither a file nor a directory, or a
+          git/stat call that failed
 
         Args:
             finding_id: Check a single finding (e.g. CB-1)

@@ -407,8 +407,13 @@ class TestAmbientOSErrorSources:
         fact about the file — "a guard reporting clean because it could not
         look". Widening the tuple made it reachable, so the swallow had to go.
 
-        Injects at the THIRD subprocess call only: the first two must succeed,
-        or the function returns before reaching the branch under test.
+        Injects on the rename command's ARGV, not on a call index. It used to
+        fire on the third `check_output`, which was the rename lookup at the
+        time — and CB-88 then added a `ls-tree` probe on some paths, which would
+        have silently moved the third call to a different branch. The assertion
+        and the reason string are identical for the `git log` branch, so the
+        test would have stayed green while pinning something else entirely:
+        vacuous, the `TestKnownLimits` failure this repo already recorded once.
         """
         project, sha = git_project
         os.remove(os.path.join(project, "src", "auth.py"))
@@ -420,17 +425,17 @@ class TestAmbientOSErrorSources:
         real = subprocess.check_output
         calls = {"n": 0}
 
-        def flaky(*a, **kw):
-            calls["n"] += 1
-            if calls["n"] == 3:
+        def flaky(cmd, *a, **kw):
+            if "--diff-filter=R" in cmd:
+                calls["n"] += 1
                 raise PermissionError(13, "Permission denied")
-            return real(*a, **kw)
+            return real(cmd, *a, **kw)
 
         monkeypatch.setattr(subprocess, "check_output", flaky)
         result = provenance.file_status(
             file_path="src/auth.py", reported_at_commit=sha, project_dir=project
         )
-        assert calls["n"] >= 3, "the injection point was never reached"
+        assert calls["n"] >= 1, "the rename lookup was never reached"
         assert result["file_status"] == "unknown", result
         assert result["reason"] == "git_error", result
 
@@ -499,14 +504,7 @@ class TestStatErrorIsNotDeleted:
     def _modified_file(self, project):
         """Give the tracked file a later commit, so file_status reaches the
         existence check instead of returning `current` first."""
-        path = os.path.join(project, "src", "auth.py")
-        with open(path, "a") as f:
-            f.write("# changed\n")
-        subprocess.run(["git", "add", "-A"], cwd=project, check=True, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", "change"], cwd=project, check=True, capture_output=True
-        )
-        return path
+        return _commit_a_change(project)
 
     @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
     def test_an_unreadable_parent_directory_reports_unknown_not_deleted(self, git_project):
@@ -553,12 +551,424 @@ class TestStatErrorIsNotDeleted:
         )
         assert result["file_status"] == "modified", result
 
-    def test_a_directory_where_a_file_is_expected_is_not_regular(self, git_project):
-        """`isfile` is False for a directory and `S_ISREG` must match that, or
-        the swap would change an unrelated case."""
+    def test_a_directory_that_still_exists_reports_modified(self, git_project):
+        """INVERTED BY CB-88, deliberately. This test used to assert that a
+        directory does NOT report `modified` — it was written for CB-85, where
+        the point was that `S_ISREG` must agree with `isfile` on every case, and
+        a directory was treated as an incidental "unrelated case".
+
+        CB-88 is the card saying that belief is wrong for this field: a `file`
+        value naming a directory is deliberate, widespread usage ("this finding
+        is about this subsystem"), and the old assertion was satisfied by the
+        very `deleted` false positive CB-88 was filed for.
+
+        CB-85's actual concern is untouched and still pinned by
+        `test_an_unreadable_parent_directory_reports_unknown_not_deleted`: an
+        `OSError` must never become a verdict.
+        """
         project, sha = git_project
         self._modified_file(project)
         result = provenance.file_status(
             file_path="src", reported_at_commit=sha, project_dir=project
         )
-        assert result["file_status"] != "modified", result
+        assert result["file_status"] == "modified", result
+
+
+def _commit_a_change(project, rel="src/auth.py", text="# changed\n"):
+    """Give `rel` a commit after the fixture's base sha, so `git log` is
+    non-empty and `file_status` reaches the existence branches."""
+    path = os.path.join(project, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as fh:
+        fh.write(text)
+    subprocess.run(["git", "add", "-A"], cwd=project, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "change"], cwd=project, check=True, capture_output=True)
+    return path
+
+
+class TestPathIsResolvedBeforeItIsJudged:
+    """CB-88 + CB-89 — the function may not answer for a path it never resolved.
+
+    Every test here MUST fail against main (2774e16): the recorded "main today"
+    value is in each docstring, measured, not predicted. Two of them were
+    predicted wrong in the plan's first drafts and corrected by measurement,
+    which is why the values are written down.
+    """
+
+    def test_a_directory_that_exists_is_not_deleted(self, git_project):
+        """main: `deleted` — the CB-88 headline. `os.stat` succeeds on a
+        directory and `S_ISREG` is False, so the existence branch is skipped and
+        control falls into the unconditional `deleted`."""
+        project, sha = git_project
+        _commit_a_change(project)
+        result = provenance.file_status(
+            file_path="src", reported_at_commit=sha, project_dir=project
+        )
+        assert result["file_status"] == "modified", result
+
+    def test_a_directory_with_a_trailing_slash_is_not_deleted(self, git_project):
+        """main: `deleted`. THE MAJORITY CASE — measured on the real autosorter
+        tracker, 155 findings across 51 distinct paths (71 live) spell a
+        directory with a trailing slash, versus 47 without one. A discriminator
+        calibrated on `src` alone repairs the minority and leaves this."""
+        project, sha = git_project
+        _commit_a_change(project)
+        result = provenance.file_status(
+            file_path="src/", reported_at_commit=sha, project_dir=project
+        )
+        assert result["file_status"] == "modified", result
+
+    def test_a_glob_valued_file_is_unknown_not_deleted(self, git_project):
+        """main: `deleted`. A glob cannot be answered by `stat` at all, so the
+        old code borrowed the answer of a path that was never examined."""
+        project, sha = git_project
+        _commit_a_change(project)
+        result = provenance.file_status(
+            file_path="src/*.py", reported_at_commit=sha, project_dir=project
+        )
+        assert result == {"file_status": "unknown", "reason": "not_in_commit"}, result
+
+    def test_free_text_in_the_file_field_is_unknown_not_current(self, git_project):
+        """main: `current` — "unchanged since <sha>" about a path that does not
+        exist. On neither CB-88 nor CB-89; CB-89 assumed this landed in
+        `unknown`. The empty-log early return asserts freshness for anything git
+        has never heard of."""
+        project, sha = git_project
+        _commit_a_change(project)
+        result = provenance.file_status(
+            file_path="context-mode plugin PreToolUse hook (subagent routing)",
+            reported_at_commit=sha,
+            project_dir=project,
+        )
+        assert result == {"file_status": "unknown", "reason": "not_in_commit"}, result
+
+    def test_an_untracked_regular_file_is_unknown_not_current(self, git_project):
+        """main: `current`. Disk existence is not historical identity — the file
+        was never in the reported commit, so "unchanged since" is a claim about
+        a state that never existed. Found by the Codex/Sol review."""
+        project, sha = git_project
+        _commit_a_change(project)
+        with open(os.path.join(project, "scratch_untracked.py"), "w") as fh:
+            fh.write("x = 1\n")
+        result = provenance.file_status(
+            file_path="scratch_untracked.py", reported_at_commit=sha, project_dir=project
+        )
+        assert result == {"file_status": "unknown", "reason": "not_in_commit"}, result
+
+    def test_pathspec_magic_is_not_interpreted(self, git_project):
+        """main: `deleted`. `:` is git's null pathspec: without
+        `--literal-pathspecs`, `git log -- ':'` matches the WHOLE tree, so the
+        range is non-empty for a path that does not exist. The verdict is then
+        decided by a question about every other file in the repo."""
+        project, sha = git_project
+        _commit_a_change(project)
+        result = provenance.file_status(
+            file_path=":", reported_at_commit=sha, project_dir=project
+        )
+        assert result == {"file_status": "unknown", "reason": "not_in_commit"}, result
+
+    def test_an_empty_file_value_is_refused_before_git(self, git_project):
+        """main: `git_error` — git exits 128 on an empty pathspec, and the
+        failure is reported as if git had been asked a real question."""
+        project, sha = git_project
+        _commit_a_change(project)
+        result = provenance.file_status(
+            file_path="", reported_at_commit=sha, project_dir=project
+        )
+        assert result == {"file_status": "unknown", "reason": "empty_path"}, result
+
+    def test_a_nul_byte_does_not_escape_as_valueerror(self, git_project):
+        """main: raises `ValueError: embedded null byte` straight out of the
+        domain function — outside the `(SubprocessError, OSError)` contract
+        every caller here is written against. Found by the Codex/Sol review."""
+        project, sha = git_project
+        _commit_a_change(project)
+        result = provenance.file_status(
+            file_path="src/auth\0.py", reported_at_commit=sha, project_dir=project
+        )
+        assert result == {"file_status": "unknown", "reason": "invalid_path"}, result
+
+    def test_an_absolute_path_outside_the_repo_is_out_of_scope(
+        self, git_project, tmp_path_factory
+    ):
+        """main: `git_error` — a fabricated provenance failure of the FINDING
+        for a file that exists and is version-controlled elsewhere. CB-89's
+        measured population: 7 open cards on the autosorter tracker."""
+        project, sha = git_project
+        _commit_a_change(project)
+        foreign = str(tmp_path_factory.mktemp("foreign"))
+        with open(os.path.join(foreign, "app.py"), "w") as fh:
+            fh.write("b = 1\n")
+        result = provenance.file_status(
+            file_path=os.path.join(foreign, "app.py"),
+            reported_at_commit=sha,
+            project_dir=project,
+        )
+        assert result["file_status"] == "unknown", result
+        # The reason names the worktree that made the decision — a scope
+        # boundary you cannot see is one you cannot debug (CB-11/CB-49).
+        assert result["reason"].startswith("out_of_repo"), result
+        assert os.path.realpath(project) in result["reason"], result
+
+    def test_a_foreign_path_with_a_foreign_commit_is_out_of_scope(
+        self, git_project, tmp_path_factory
+    ):
+        """main: `unreachable_commit` — the CB-2831 shape, and the sharpest one:
+        the commit is REAL, in the repo that owns the file. It is "unreachable"
+        only because reachability was tested against the wrong repository. This
+        is why the scope check runs before `cat-file` for an absolute value."""
+        project, _sha = git_project
+        foreign = str(tmp_path_factory.mktemp("foreignrepo"))
+        subprocess.run(["git", "init"], cwd=foreign, check=True, capture_output=True)
+        for k, v in (("user.email", "t@t"), ("user.name", "t")):
+            subprocess.run(["git", "config", k, v], cwd=foreign, check=True, capture_output=True)
+        with open(os.path.join(foreign, "app.py"), "w") as fh:
+            fh.write("b = 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=foreign, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "c"], cwd=foreign, check=True, capture_output=True)
+        foreign_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=foreign, text=True
+        ).strip()
+
+        result = provenance.file_status(
+            file_path=os.path.join(foreign, "app.py"),
+            reported_at_commit=foreign_sha,
+            project_dir=project,
+        )
+        assert result["file_status"] == "unknown", result
+        assert result["reason"].startswith("out_of_repo"), result
+
+    def test_a_RELATIVE_path_into_another_repo_is_also_out_of_scope(
+        self, git_project, tmp_path_factory
+    ):
+        """main: `unreachable_commit`. The spelling must not decide the answer.
+
+        An earlier draft of this fix scoped an ABSOLUTE value before the
+        reachability check and a relative one after it, so this — the natural
+        spelling for a cross-repo card filed from a subdirectory — kept
+        reporting a provenance failure of the finding, which is precisely what
+        CB-89 was filed against. Caught by adversarial review of the fix, not by
+        the fix's own tests, because every other case used an absolute path.
+        """
+        project, _sha = git_project
+        foreign = str(tmp_path_factory.mktemp("relforeign"))
+        subprocess.run(["git", "init"], cwd=foreign, check=True, capture_output=True)
+        for k, v in (("user.email", "t@t"), ("user.name", "t")):
+            subprocess.run(["git", "config", k, v], cwd=foreign, check=True, capture_output=True)
+        with open(os.path.join(foreign, "app.py"), "w") as fh:
+            fh.write("b = 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=foreign, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "c"], cwd=foreign, check=True, capture_output=True)
+        foreign_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=foreign, text=True
+        ).strip()
+
+        relative = os.path.relpath(os.path.join(foreign, "app.py"), project)
+        assert relative.startswith(".."), relative  # the fixture must actually be relative
+
+        result = provenance.file_status(
+            file_path=relative, reported_at_commit=foreign_sha, project_dir=project
+        )
+        assert result["file_status"] == "unknown", result
+        assert result["reason"].startswith("out_of_repo"), result
+
+    def test_an_in_repo_symlink_escaping_the_worktree_is_out_of_scope(self, git_project):
+        """main: `current`. The path is lexically inside the repo, so a
+        containment check that trusts the spelling admits it and `os.stat` then
+        reads a file git has no idea about. Resolving the PARENT physically is
+        what refuses this while keeping a tracked symlink itself in scope."""
+        project, sha = git_project
+        _commit_a_change(project)
+        os.symlink("/etc", os.path.join(project, "etcout"))
+        result = provenance.file_status(
+            file_path="etcout/hosts", reported_at_commit=sha, project_dir=project
+        )
+        assert result["reason"].startswith("out_of_repo"), result
+
+    def test_the_batch_resolves_the_worktree_root_once(self, monkeypatch, conn, git_project):
+        """The anti-retry property of the private `_repo_root_hint`, which was
+        otherwise asserted only in prose.
+
+        `check_findings` permits 10 000 rows and probes the root once for the
+        batch. The third state matters most when the probe FAILS: without it
+        every finding retries the same failing `rev-parse`, so the cost claim
+        inverts exactly when the machine is already unhappy.
+        """
+        project, sha = git_project
+        _commit_a_change(project)
+        for i in range(4):
+            findings.add_finding(
+                conn,
+                severity="low",
+                category="c",
+                file=f"src/f{i}.py",
+                description=f"finding {i}",
+                reported_at_commit=sha,
+            )
+
+        calls = {"n": 0}
+        real = provenance._repo_root
+
+        def counted(cwd):
+            calls["n"] += 1
+            return real(cwd)
+
+        monkeypatch.setattr(provenance, "_repo_root", counted)
+        provenance.check_findings(conn, project)
+        assert calls["n"] == 1, f"probed the worktree root {calls['n']} times for one batch"
+
+    def test_a_tracked_path_replaced_by_a_fifo_is_unknown_not_deleted(self, git_project):
+        """main: `deleted`. The fixture matters and the plan's first draft got it
+        wrong: a PLAIN fifo is untracked, so its log is empty and main answers
+        `current`. Only a path that was tracked and is now a fifo reaches the
+        branch under test."""
+        project, sha = git_project
+        target = os.path.join(project, "src", "sock.py")
+        with open(target, "w") as fh:
+            fh.write("s = 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=project, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add"], cwd=project, check=True, capture_output=True)
+        os.remove(target)
+        os.mkfifo(target)
+
+        result = provenance.file_status(
+            file_path="src/sock.py", reported_at_commit=sha, project_dir=project
+        )
+        assert result == {"file_status": "unknown", "reason": "unsupported_path_kind"}, result
+
+    def test_a_parent_traversal_landing_on_the_worktree_root_is_not_deleted(self, git_project):
+        """main: `deleted` — for a path that IS the repository. The worktree root
+        is inside the worktree; `rel == "."` needs no git call to know it is a
+        tree."""
+        project, sha = git_project
+        _commit_a_change(project)
+        result = provenance.file_status(
+            file_path="src/..", reported_at_commit=sha, project_dir=project
+        )
+        assert result["file_status"] == "modified", result
+
+
+class TestResolutionPinsThatMustNotRegress:
+    """Green on BOTH sides, deliberately. Four of these pin exactly what an
+    earlier draft of the CB-88 fix would have broken — each was reproduced
+    during adversarial review — and two are contract pins that discriminate
+    against no design considered. The distinction is stated per test, because a
+    test that passes first try is otherwise indistinguishable from a broken one.
+    """
+
+    def test_an_absolute_path_inside_the_repo_still_answers(self, git_project):
+        """REGRESSION PIN. Draft 1 refused every absolute path as `out_of_repo`;
+        draft 2 then matched git's emitted name against the caller's spelling,
+        and git prints `src/auth.py` for an absolute pathspec, so the same
+        verdict was lost a second way. Absoluteness is not the criterion —
+        containment is."""
+        project, sha = git_project
+        _commit_a_change(project)
+        result = provenance.file_status(
+            file_path=os.path.join(project, "src", "auth.py"),
+            reported_at_commit=sha,
+            project_dir=project,
+        )
+        assert result["file_status"] == "modified", result
+
+    def test_a_dot_prefixed_spelling_still_answers(self, git_project):
+        """REGRESSION PIN, same mechanism: git canonicalizes `./src/auth.py` to
+        `src/auth.py` on output. Deriving the git spelling from the resolved
+        path rather than from the input is what makes every spelling agree."""
+        project, sha = git_project
+        _commit_a_change(project)
+        result = provenance.file_status(
+            file_path="./src/auth.py", reported_at_commit=sha, project_dir=project
+        )
+        assert result["file_status"] == "modified", result
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
+    def test_an_unchanged_file_under_an_unreadable_parent_is_still_current(self, git_project):
+        """REGRESSION PIN. Draft 1 moved the `stat` above the `git log`, which
+        turned this correct `current` into `unknown`/`stat_error`: the stat is
+        not needed to answer an empty range, so it must not run first."""
+        project, sha = git_project
+        parent = os.path.join(project, "src")
+        os.chmod(parent, 0o000)
+        try:
+            result = provenance.file_status(
+                file_path="src/auth.py", reported_at_commit=sha, project_dir=project
+            )
+        finally:
+            os.chmod(parent, 0o755)
+        assert result["file_status"] == "current", result
+
+    def test_a_deleted_file_is_still_deleted_from_a_subdirectory_cwd(self, git_project):
+        """REGRESSION PIN. Draft 1 asked `ls-tree --full-tree` with a
+        cwd-relative pathspec, so from a subdirectory it looked for the path at
+        the repo ROOT, found nothing, and converted this CORRECT `deleted` into
+        `unknown`. Reachable in production: `staleness_check` passes
+        `project_dir=None` and the walk-up permits any subdirectory."""
+        project, sha = git_project
+        path = _commit_a_change(project)
+        os.remove(path)
+        subprocess.run(["git", "add", "-A"], cwd=project, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "delete"], cwd=project, check=True, capture_output=True
+        )
+        result = provenance.file_status(
+            file_path="auth.py",
+            reported_at_commit=sha,
+            project_dir=os.path.join(project, "src"),
+        )
+        assert result["file_status"] == "deleted", result
+
+    def test_a_blob_that_became_a_directory_never_reports_modified(self, git_project):
+        """CONTRACT PIN — green against every design considered, and named as
+        such. A path that was a blob and is now a directory has genuinely lost
+        its blob. The plan's first draft claimed it "stays `deleted`"; measured,
+        git reports `R100` when the content survives the move and the answer is
+        `renamed`, which is strictly better information. What must never happen
+        is `modified` or `current`."""
+        project, sha = git_project
+        target = os.path.join(project, "src", "swap.py")
+        with open(target, "w") as fh:
+            fh.write("aaaa\nbbbb\ncccc\ndddd\n")
+        subprocess.run(["git", "add", "-A"], cwd=project, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add"], cwd=project, check=True, capture_output=True)
+        base = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=project, text=True
+        ).strip()
+        os.remove(target)
+        os.makedirs(target)
+        with open(os.path.join(target, "inner.py"), "w") as fh:
+            fh.write("aaaa\nbbbb\ncccc\ndddd\n")
+        subprocess.run(["git", "add", "-A"], cwd=project, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "swap"], cwd=project, check=True, capture_output=True)
+
+        result = provenance.file_status(
+            file_path="src/swap.py", reported_at_commit=base, project_dir=project
+        )
+        assert result["file_status"] in {"renamed", "deleted"}, result
+
+    def test_a_path_alive_only_on_an_unmerged_branch_is_never_deleted(self, git_project):
+        """CONTRACT PIN — green against every design considered. CB-89's
+        observation 2: the obvious way to fix CB-88 badly is to start reporting
+        these as `deleted`. The blob is known at the reported commit, so an
+        empty range answers `current` and the deleted branch is unreachable."""
+        project, _sha = git_project
+        subprocess.run(
+            ["git", "checkout", "-q", "-b", "feature"], cwd=project, check=True, capture_output=True
+        )
+        branch_file = os.path.join(project, "src", "only_on_branch.py")
+        with open(branch_file, "w") as fh:
+            fh.write("z = 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=project, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "branch work"], cwd=project, check=True, capture_output=True
+        )
+        branch_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=project, text=True
+        ).strip()
+
+        result = provenance.file_status(
+            file_path="src/only_on_branch.py",
+            reported_at_commit=branch_sha,
+            project_dir=project,
+        )
+        assert result["file_status"] != "deleted", result
