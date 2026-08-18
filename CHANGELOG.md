@@ -6,6 +6,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`grouping.py` — the three grouping axes the tracker stored but could not
+  query.** Similarity is the axis codebugs already had, and on the 3206-row
+  reference corpus it is the weakest: exactly one similarity family (two cards)
+  exists across 1093 open cards, measured three times. The axes that actually
+  carve that backlog into work units had no read surface at all, so callers
+  either did without or reimplemented tracker semantics themselves.
+
+  - `citation_report` — connected components of the hand-written CB-id
+    reference graph, over the description and every string in `meta` (which is
+    where the notes history lives). Every edge carries the field it came from
+    and the quoted window around its first mention: an edge nobody can read is
+    not evidence. Raw components do **not** decompose a real corpus — the
+    largest holds 327 of 524 linked open cards, because a few much-cited
+    landmark cards glue every neighbourhood together — so a node whose degree
+    exceeds `hub_degree` (default 4, the measured elbow) stops transmitting
+    connectivity and is reported as a terminal ANCHOR with its citers instead.
+    That turns the one hairball into 102 components, largest 55. References out
+    of the population are counted as dangling, never dropped.
+  - `tag_report` — tag counts, co-occurrence with Jaccard beside the raw count,
+    and near-duplicate taxonomy strings folded across tags AND categories in one
+    namespace (`process_improvement` and `process-improvement` are two live
+    categories in the same tracker, and every count over either is wrong by the
+    size of the other).
+  - `filing_report` — split lineage TRAVERSED, not grouped: `A → B → C` is one
+    lineage with depths, links resolve against every card in the tracker so a
+    `fixed` middle card does not sever the chain, meta cycles terminate and are
+    flagged, and a lineage value that names no card (`"autosorter prod bug
+    d7ec2391"` is real) is reported unresolved rather than silently dropped.
+    Plus `sprint` / `plan` filing-event groups. `parent` joins the documented
+    `split_from` / `split_children` keys — it is the same relation with 20x the
+    rows on the reference corpus.
+
+  Same contract as `similarity.py`: zero SQL in the module, read-only, and no
+  link inferred that a human did not write. Rows arrive through the new
+  `findings.grouping_candidates` accessor — a sibling of `similarity_candidates`
+  rather than a widening of it, since it carries `tags_json` and the two feed
+  different algorithms.
+- **`findings.parse_meta` / `findings.parse_tags`** — the tolerant parses for the
+  two JSON columns findings owns, public so every reader of a raw blob degrades
+  the same way. `parse_meta` was `similarity._parse_meta`, already documented as
+  "the ONE place"; it now actually is one.
+
+### Changed
+- **Union-find has one copy.** `similarity._DSU` moved to `grouping.DSU`, the
+  module whose subject is components over an edge set; families are that same
+  primitive over score edges. Two copies were one edit away from the two
+  surfaces disagreeing about what a component is.
+
 ### Fixed
 - **A benchmark CSV no longer kills `bench-import` with a raw
   `sqlite3.IntegrityError` traceback** (CB-81). Validation used to be

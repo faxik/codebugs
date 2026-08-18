@@ -967,6 +967,38 @@ def update_finding(
     return db.row_to_dict(final_row)
 
 
+def parse_meta(meta_json: str | None) -> dict[str, Any]:
+    """Tolerant parse over a raw stored meta blob — the ONE place.
+
+    Lives here because findings owns the `meta` column. Invalid JSON and
+    valid-but-non-dict JSON ("[1,2]", "3") both degrade to {}: legacy rows must
+    degrade the CONSUMER's answer, never fail the caller (CB-24 consequence 4).
+    The accessors below hand out `meta_json` as the stored STRING precisely so
+    that this decision belongs to the reader, not to the SELECT.
+    """
+    try:
+        meta = json.loads(meta_json) if meta_json else {}
+    except (TypeError, ValueError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def parse_tags(tags_json: str | None) -> list[str]:
+    """Tolerant parse over a raw stored tags blob; non-list / non-str degrade away.
+
+    Same contract as parse_meta: the tags column is `NOT NULL DEFAULT '[]'` on
+    the write path, but a foreign or hand-edited row is not bound by that, and a
+    grouping pass over 3000 cards must not die on one of them.
+    """
+    try:
+        tags = json.loads(tags_json) if tags_json else []
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(tags, list):
+        return []
+    return [t for t in tags if isinstance(t, str)]
+
+
 def similarity_candidates(
     conn: sqlite3.Connection,
     *,
@@ -1017,6 +1049,58 @@ def similarity_candidates(
         f"SELECT id, category, file, status, severity, occurrence_count, created_at, "
         f"description, meta AS meta_json FROM findings {where} "
         f"ORDER BY created_at {direction}, id {direction} {limit_sql}",  # noqa: S608
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def grouping_candidates(
+    conn: sqlite3.Connection,
+    *,
+    category: str | None = None,
+    categories: tuple[str, ...] | None = None,
+    status: str | None = None,
+    statuses: tuple[str, ...] | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Candidate records for a non-similarity grouping pass (grouping.py).
+
+    The sanctioned read surface for grouping.py, and a sibling of
+    similarity_candidates rather than a widening of it: the two feed different
+    algorithms and must be free to drift. This one carries the two columns the
+    similarity pass has no use for and the citation/tag/lineage passes cannot
+    work without — ``tags_json`` and, like its sibling, ``meta_json`` as the
+    STORED STRING (see parse_meta / parse_tags for why parsing is the reader's
+    job). Ordering is ``created_at, id`` for the same reason: whole-second
+    timestamps make any grouping over the result non-deterministic otherwise.
+
+    Filter conventions are its sibling's exactly — ``category``/``status`` are
+    FILTERS (blank means "no filter"), ``categories``/``statuses`` are explicit
+    tuples for callers that know their population.
+    """
+    conditions: list[str] = []
+    params: list[Any] = []
+    if is_text_filter_active(category):
+        conditions.append("category = ?")
+        params.append(category)
+    if categories:
+        conditions.append(f"category IN ({','.join('?' for _ in categories)})")
+        params.extend(categories)
+    if is_vocabulary_filter_active(status):
+        conditions.append("status = ?")
+        params.append(resolve_finding_status(status))
+    if statuses:
+        conditions.append(f"status IN ({','.join('?' for _ in statuses)})")
+        params.extend(statuses)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    limit_sql = ""
+    if limit is not None:
+        limit_sql = "LIMIT ?"
+        params.append(limit)
+    rows = conn.execute(
+        f"SELECT id, category, file, status, severity, occurrence_count, created_at, "
+        f"description, tags AS tags_json, meta AS meta_json FROM findings {where} "
+        f"ORDER BY created_at ASC, id ASC {limit_sql}",  # noqa: S608
         params,
     ).fetchall()
     return [dict(r) for r in rows]

@@ -31,8 +31,15 @@ from codebugs.findings import (
     LIVE_STATUSES,
     RECURRENCE_STATUSES,
     normalized_identity_text,
+    parse_meta,
     similarity_candidates,
 )
+
+# Union-find lives in grouping.py, the module whose whole subject is components
+# over an edge set; families are that primitive over score edges. One copy, or
+# the two surfaces are one edit away from disagreeing about what a component is.
+# The dependency runs one way — grouping never scores anything.
+from codebugs.grouping import DSU
 from codebugs.types import (
     is_text_filter_active,
     is_vocabulary_filter_active,
@@ -107,19 +114,6 @@ def _validate_score_params(threshold: float, *limits: int | None) -> None:
             raise ValueError(f"limit must be >= 0, got {limit}")
 
 
-def _parse_meta(meta_json: str | None) -> dict[str, Any]:
-    """Tolerant parse over the accessor's raw meta_json — the ONE place.
-
-    Invalid JSON and valid-but-non-dict JSON ("[1,2]", "3") both degrade to {}:
-    legacy data must degrade the SCORE, never fail the caller.
-    """
-    try:
-        meta = json.loads(meta_json) if meta_json else {}
-    except (TypeError, ValueError):
-        return {}
-    return meta if isinstance(meta, dict) else {}
-
-
 # Memo keyed on CONTENT (description, meta_json), never on (id, created_at):
 # ids recur across databases and created_at is whole-second, so an identity
 # key silently serves one row's trigrams for another's text (caught by the
@@ -140,7 +134,7 @@ def _row_norm_tri(row: dict[str, Any]) -> tuple[str, frozenset[str]]:
     hit = _norm_memo.get(key)
     if hit is not None:
         return hit
-    norm = normalize_text(row["description"], _parse_meta(row["meta_json"]))
+    norm = normalize_text(row["description"], parse_meta(row["meta_json"]))
     value = (norm, trigram_set(norm))
     if len(_norm_memo) >= _MEMO_CAP:
         # Tolerant pop: next(iter)/pop is not atomic, and external read-only
@@ -204,22 +198,6 @@ def _pair_score(a: dict[str, Any], b: dict[str, Any]) -> float:
     return jaccard(a["tri"], b["tri"])
 
 
-class _DSU:
-    def __init__(self, ids: list[str]):
-        self._parent = {i: i for i in ids}
-
-    def find(self, x: str) -> str:
-        while self._parent[x] != x:
-            self._parent[x] = self._parent[self._parent[x]]
-            x = self._parent[x]
-        return x
-
-    def union(self, a: str, b: str) -> None:
-        ra, rb = self.find(a), self.find(b)
-        if ra != rb:
-            self._parent[ra] = rb
-
-
 def group_report(
     conn: sqlite3.Connection,
     *,
@@ -270,7 +248,7 @@ def group_report(
             continue
         recs.append({"row": row, "tri": tri, "vec": (vectors or {}).get(row["id"])})
 
-    dsu = _DSU([r["row"]["id"] for r in recs])
+    dsu = DSU([r["row"]["id"] for r in recs])
     edges_by_root: dict[str, list[dict[str, Any]]] = defaultdict(list)
     blocks: dict[str, list[dict]] = defaultdict(list)
     for rec in recs:
@@ -530,7 +508,7 @@ def register_cli(sub, commands) -> None:
         conn = db.connect()
         # No JSONDecodeError-first arm here (the _cmd_update pattern): these
         # read-only commands parse stored meta through the deliberately
-        # tolerant _parse_meta, so a stored-data JSONDecodeError cannot reach
+        # tolerant parse_meta, so a stored-data JSONDecodeError cannot reach
         # this frame and the arm would assert a hazard that does not exist.
         try:
             matches = find_similar(
@@ -566,7 +544,7 @@ def register_cli(sub, commands) -> None:
             )
         except (KeyError, ValueError) as e:
             # Same as similarity-check: no stored-data JSONDecodeError can
-            # surface here (_parse_meta is tolerant), so no re-raise arm.
+            # surface here (parse_meta is tolerant), so no re-raise arm.
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
         finally:
