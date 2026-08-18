@@ -209,6 +209,7 @@ SERVER_NAMES = {
     "milestones": "codemilestones",
     "claims": "codeclaims",
     "similarity": "codesimilarity",
+    "relations": "coderelations",
     "all": "codebugs",
 }
 

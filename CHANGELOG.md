@@ -7,6 +7,56 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`relations.py` — typed, retractable relations between findings.** Callers
+  had been recording relations in ad-hoc JSON `meta` keys for months: measured
+  over the 3,176-row reference corpus, **164 distinct key names for roughly five
+  concepts** (five spellings of "related", four of "sibling", three of
+  "parent"), carrying 837 edges across 76 yielding keys — and the share of new
+  cards minting such a key went from 0.2% in March to ~25% and holding. That
+  substrate answers no question and forgets nothing: `meta` writes are
+  merge-only, so a key can be overwritten but never removed.
+
+  `finding_relations` stores one edge per row over a six-term vocabulary
+  (`duplicate_of`, `split_from`, `follow_up_of`, `found_during`,
+  `distinct_from`, `related_to`), enforced by a DB-level `CHECK` rather than in
+  application code. Three tools and three CLI verbs: `relations_relate`,
+  `relations_unrelate`, `relations_query` (which, filtered to `distinct_from`,
+  is the active-suppressions review).
+
+  - **Orientation is data, not noise.** `distinct_from` and `related_to` are
+    symmetric and stored canonically, so one edge exists per pair and no reader
+    searches both directions. The rest are directed, and **`duplicate_of` names
+    loser → survivor** — canonicalising it lexicographically would swap which
+    card survives, which it does in *all three* real `duplicate_of` facts on the
+    reference corpus (`CB-878→CB-877`, `CB-2946→CB-2935`, `CB-2251→CB-2227`).
+  - **Endpoints are validated for EXISTENCE, not liveness**, in the application
+    layer — `db._open` never enables `PRAGMA foreign_keys` and `findings.py`'s
+    legacy status migration toggles it OFF/ON, so a declared FK would be
+    decorative. Liveness would have been worse than useless: 62.8% of the
+    corpus's edges point at closed cards, and a live card citing a closed one is
+    precisely the case prose cannot resolve.
+  - **Retraction is a tombstone, never a DELETE**, and the partial unique index
+    (`WHERE retracted_at IS NULL`) then permits the pair again. A paired
+    nullability `CHECK` makes a tombstone without an actor unrepresentable. The
+    dangerous write here is a wrong `distinct_from`: it suppresses a pair from
+    every future discovery path, and a suppression that should not exist is
+    invisible by construction.
+  - **Contradiction guards** refuse a `duplicate_of` against a live
+    `distinct_from` on the same pair (and the reverse), and refuse a reciprocal
+    `duplicate_of` — both cards cannot be the loser. A retracted edge asserts
+    nothing and therefore vetoes nothing.
+  - Three terms are refused with a pointer rather than accepted:
+    `recurrence_of` (core-owned, guarded by `_RESERVED_META_KEYS` against the
+    spoofing attack its comment names), `blocked_by` (the blockers module owns
+    finding→finding blocking, with lifecycle semantics this table lacks), and
+    `similar_to` (annotator-owned, an advisory snapshot rather than a fact).
+
+  Note `distinct_from` is **inert** until a consumer reads it: `similarity.py`
+  groups via DSU over category blocks and does not consult this table. Stated
+  rather than implied. Migration of the legacy `meta` keys is deliberately not
+  included — it is a separate, not-yet-implementable piece of work whose open
+  defects are recorded in `.claude/plans/PLAN-relations-migration-2026-08-18.md`.
+
 - **`grouping.py` — the three grouping axes the tracker stored but could not
   query.** Similarity is the axis codebugs already had, and on the 3206-row
   reference corpus it is the weakest: exactly one similarity family (two cards)

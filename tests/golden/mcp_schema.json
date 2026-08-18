@@ -1937,6 +1937,133 @@
     "name": "query"
   },
   {
+    "description": "List relations touching a finding, in both directions.\n\nArgs:\n    entity_id: Finding to look up (e.g. \"CB-5\"). Omit to list all.\n    rel: Filter by relation. `rel=\"distinct_from\"` alone lists every\n         live suppression, which is worth reviewing periodically.\n    include_retracted: Include tombstoned edges (default: false)\n",
+    "inputSchema": {
+      "properties": {
+        "entity_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Entity Id"
+        },
+        "include_retracted": {
+          "default": false,
+          "title": "Include Retracted",
+          "type": "boolean"
+        },
+        "rel": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rel"
+        }
+      },
+      "title": "relations_queryArguments",
+      "type": "object"
+    },
+    "name": "relations_query"
+  },
+  {
+    "description": "Assert a typed relation between two findings.\n\nArgs:\n    src_id: Source finding (e.g. \"CB-5\"). For duplicate_of this is the\n            LOSER \u2014 the card that dies.\n    rel: duplicate_of, split_from, follow_up_of, found_during,\n         distinct_from, or related_to.\n    dst_id: Target finding. For duplicate_of this is the SURVIVOR.\n    source: Who is asserting this (e.g. \"owner\", \"goldset-2026-08-17\").\n    note: Optional reasoning.\n",
+    "inputSchema": {
+      "properties": {
+        "dst_id": {
+          "title": "Dst Id",
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "rel": {
+          "title": "Rel",
+          "type": "string"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "src_id": {
+          "title": "Src Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "src_id",
+        "rel",
+        "dst_id",
+        "source"
+      ],
+      "title": "relations_relateArguments",
+      "type": "object"
+    },
+    "name": "relations_relate"
+  },
+  {
+    "description": "Retract a relation. Tombstones it \u2014 the row and its history remain.\n\nArgs:\n    src_id: Source finding\n    rel: The relation to retract\n    dst_id: Target finding\n    retracted_by: Who is retracting it\n    reason: Why\n",
+    "inputSchema": {
+      "properties": {
+        "dst_id": {
+          "title": "Dst Id",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "rel": {
+          "title": "Rel",
+          "type": "string"
+        },
+        "retracted_by": {
+          "title": "Retracted By",
+          "type": "string"
+        },
+        "src_id": {
+          "title": "Src Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "src_id",
+        "rel",
+        "dst_id",
+        "retracted_by"
+      ],
+      "title": "relations_unrelateArguments",
+      "type": "object"
+    },
+    "name": "relations_unrelate"
+  },
+  {
     "description": "Free agent capacity for an item.\n\nArgs:\n    item_ref: The item id (e.g. CB-5).\n    status: 'done' (terminal) or 'abandoned' (returns item to 'open').\n    commit: SHA where the work landed (recorded if status='done').\n",
     "inputSchema": {
       "properties": {
