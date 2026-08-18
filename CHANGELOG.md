@@ -6,7 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`codebugs restore-csv <file>` — put a backup back exactly as it was (CB-97).**
+  `import-csv` folds someone else's findings into yours and gives them fresh ids;
+  `restore-csv` states that these rows *are* the tracker, writing ids, statuses,
+  occurrence counts, tags, fingerprints and timestamps verbatim. Until now
+  exporting and re-importing renumbered every card and reset every status to
+  `open`, so a CSV export was a report rather than a backup.
+
+  It **refuses rather than merges**: every row needs an id, no id may already
+  exist locally, and no id may repeat in the file. A refusal names the offending
+  ids and writes nothing — the whole restore is one transaction.
+
+  **What a restore cannot bring back, said plainly:** milestone items and their
+  audit history. They are a projection, they are not in the CSV, and inventing
+  them would fabricate a triage history that never happened. The command prints
+  this on stderr rather than leaving you to notice.
+
 ### Changed
+- **`export-csv` now carries `reported_at_commit` and `reported_at_ref`, and no
+  longer stops at 100 000 rows.** Without the provenance columns a restored
+  tracker could not answer `staleness_check` for any card; the row cap silently
+  truncated larger trackers on the one path where losing rows costs most. Both
+  are additive — older CSVs still import.
 - **CSV import no longer drops another tracker's findings, and no longer resurrects
   your own decided ones (CB-51).** Every import rule had accumulated inline in the
   CLI handler, which called `add_finding` once per row. Four defects fell out of
