@@ -19,12 +19,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     where the notes history lives). Every edge carries the field it came from
     and the quoted window around its first mention: an edge nobody can read is
     not evidence. Raw components do **not** decompose a real corpus — the
-    largest holds 327 of 524 linked open cards, because a few much-cited
+    largest holds 345 of 546 linked open cards, because a few much-cited
     landmark cards glue every neighbourhood together — so a node whose degree
-    exceeds `hub_degree` (default 4, the measured elbow) stops transmitting
-    connectivity and is reported as a terminal ANCHOR with its citers instead.
-    That turns the one hairball into 102 components, largest 55. References out
-    of the population are counted as dangling, never dropped.
+    exceeds `hub_degree` (default 3) stops transmitting connectivity and is
+    reported as a terminal ANCHOR with its citers instead. That turns the one
+    hairball into 117 components whose largest is 11 cards. The default is
+    chosen on the outcome and not on the degree histogram, whose elbow is at 4
+    and yields a 55-card largest component — see the sweep table at
+    `DEFAULT_HUB_DEGREE`. References out of the population are counted as
+    dangling, never dropped.
   - `tag_report` — tag counts, co-occurrence with Jaccard beside the raw count,
     and near-duplicate taxonomy strings folded across tags AND categories in one
     namespace (`process_improvement` and `process-improvement` are two live
