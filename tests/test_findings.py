@@ -1,5 +1,6 @@
 """Tests for the findings domain — CRUD, query, stats, migrations."""
 
+import csv
 import json
 import os
 import sqlite3
@@ -1603,15 +1604,15 @@ class TestImportCsvFileIOErrorContract:
     """CB-71 sibling sweep. `_cmd_import_csv` performed its `open()` outside any
     arm, so an unreadable path escaped as a raw traceback.
 
-    The fix HOISTS the `open` out of its `with` statement and guards that alone.
-    That shape is mandatory, not stylistic: `with open(args.file, newline="") as
-    f:` owned the entire import loop, so the obvious `try: with open(...):
-    <loop>` would have placed both already-committed rows and the loop's own
-    three `print(..., file=sys.stderr)` calls inside an `except OSError` — which
-    would report a partially-landed import as bad input, the CB-15/CB-16 lie
-    this guard exists to avoid. A read failure MID-iteration therefore still
-    crashes, deliberately; what to report when rows are already committed is a
-    semantics decision tracked as CB-77.
+    UPDATED BY CB-77. The original fix hoisted the `open` out of its `with` and
+    guarded that alone, leaving a mid-iteration read failure to crash on purpose,
+    because what to report with rows already committed was an undecided
+    semantics question. That question was ratified 2026-08-18 as ALL-OR-NOTHING,
+    so the handler now reads the WHOLE file before the transaction opens and the
+    import runs inside one `db.txn`. A read failure therefore happens with
+    nothing written at all, and the interleaving this docstring used to describe
+    no longer exists. The CB-15/CB-16 rule it was protecting is unchanged and is
+    now pinned by `TestImportIsAllOrNothing`: a failure must not print a count.
 
     Non-vacuity: the unfixed tree already exits 1 with the path inside its
     traceback, so `"Traceback" not in stderr` is the only discriminating
@@ -1648,3 +1649,271 @@ class TestImportCsvFileIOErrorContract:
         r = self._run(tmp_project, "import-csv", str(csv_file))
         assert r.returncode == 0, r.stdout + r.stderr
         assert "Imported 1" in r.stdout, r.stdout
+
+
+def _write_csv(path, rows, header=None):
+    """Write an import CSV. Header defaults to the export's own column set."""
+    header = header or [
+        "id", "severity", "category", "file", "status", "description",
+        "source", "tags", "meta", "created_at", "updated_at",
+        "fingerprint", "occurrence_count", "last_seen_at",
+    ]
+    with open(path, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=header, extrasaction="ignore")
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+    return str(path)
+
+
+class TestImportNeverReopensADecidedCard:
+    """CB-51 defect 1. An import is a statement about someone ELSE's tracker, so
+    it must not resurrect a card this tracker has decided. Reproduced before the
+    fix: a foreign row whose id did not even exist locally (`CB-9001`) matched a
+    local `fixed` card by fingerprint and flipped it to `open`.
+
+    The change is deliberately narrow — only the REOPEN branch. A live hit still
+    bumps and a `wont_fix` hit still files a recurrence, both pinned below as
+    green-on-both-sides controls, because neither is a filed defect and changing
+    them would be an unrequested behaviour change riding along.
+    """
+
+    def _foreign_row(self, description, row_id="CB-9001"):
+        return {"id": row_id, "severity": "high", "category": "bug",
+                "file": "src/a.py", "description": description, "source": "peer"}
+
+    def test_a_fixed_card_is_not_reopened(self, conn, tmp_path):
+        f = findings.add_finding(conn, severity="high", category="bug", file="src/a.py",
+                        description="the widget explodes on load")
+        findings.update_finding(conn, f["id"], status="fixed")
+        path = _write_csv(tmp_path / "x.csv", [self._foreign_row("the widget explodes on load")])
+        with open(path, newline="") as fh:
+            report = findings.import_findings(conn, list(csv.DictReader(fh)))
+        assert findings.get_finding(conn, f["id"])["status"] == "fixed"
+        # counted as DECIDED, not as "already present" — the local tracker does
+        # not hold this row, it holds a decision about the same defect, and the
+        # operator-facing message says so.
+        assert report.skipped_decided == 1, report
+        assert report.skipped_present == 0, report
+        assert report.imported == 0, report
+
+    def test_a_live_card_is_still_bumped(self, conn, tmp_path):
+        """CONTROL — green on both sides. Another sighting of a card you already
+        have IS an occurrence; the fix must not turn that into a skip."""
+        f = findings.add_finding(conn, severity="high", category="bug", file="src/a.py",
+                        description="the widget explodes on load")
+        path = _write_csv(tmp_path / "x.csv", [self._foreign_row("the widget explodes on load")])
+        with open(path, newline="") as fh:
+            report = findings.import_findings(conn, list(csv.DictReader(fh)))
+        assert report.merged == 1, report
+        assert findings.get_finding(conn, f["id"])["occurrence_count"] == 2
+
+    def test_a_wont_fix_card_still_files_a_recurrence(self, conn, tmp_path):
+        """CONTROL — green on both sides. `wont_fix` is a decision that stays
+        decided, and CB-43's answer is a NEW linked row, not a reopen."""
+        f = findings.add_finding(conn, severity="high", category="bug", file="src/a.py",
+                        description="the widget explodes on load")
+        findings.update_finding(conn, f["id"], status="wont_fix")
+        path = _write_csv(tmp_path / "x.csv", [self._foreign_row("the widget explodes on load")])
+        with open(path, newline="") as fh:
+            report = findings.import_findings(conn, list(csv.DictReader(fh)))
+        assert report.imported == 1, report
+        assert findings.get_finding(conn, f["id"])["status"] == "wont_fix"
+
+
+class TestAnIdIdentifiesARowOnlyWithItsContent:
+    """CB-51 defect 2 and the unfiled defect 4. The old guard asked
+    `SELECT 1 FROM findings WHERE id = ?` — bare-id existence, not identity."""
+
+    def test_a_foreign_export_with_colliding_ids_lands(self, conn, tmp_path):
+        """Every tracker numbers CB-1, CB-2, ... Reproduced before the fix: all
+        three peer rows were dropped into a 3-row tracker and reported as
+        '3 already present, skipped'."""
+        for i in range(3):
+            findings.add_finding(conn, severity="low", category="local", file=f"src/l{i}.py",
+                        description=f"local finding number {i}")
+        rows = [{"id": f"CB-{i}", "severity": "high", "category": "peerbug",
+                 "file": f"src/p{i}.py", "description": f"unrelated peer finding {i}",
+                 "source": "peer"} for i in (1, 2, 3)]
+        path = _write_csv(tmp_path / "peer.csv", rows)
+        with open(path, newline="") as fh:
+            report = findings.import_findings(conn, list(csv.DictReader(fh)))
+        assert report.imported == 3, report
+        assert report.skipped_present == 0, report
+        landed = conn.execute(
+            "SELECT id, json_extract(meta, '$.imported_id') FROM findings WHERE category='peerbug'"
+        ).fetchall()
+        assert len(landed) == 3
+        # the origin survives renumbering
+        assert sorted(x[1] for x in landed) == ["CB-1", "CB-2", "CB-3"]
+
+    def test_reimporting_your_own_export_is_still_a_no_op(self, conn, tmp_path):
+        """CONTROL for the guard's real purpose. Deleting the id check entirely
+        would break this, which is why it was narrowed rather than removed."""
+        findings.add_finding(conn, severity="low", category="c", file="a.py", description="mine one")
+        findings.add_finding(conn, severity="low", category="c", file="b.py", description="mine two")
+        rows = [dict(r) for r in conn.execute(
+            "SELECT id, severity, category, file, description, source FROM findings")]
+        path = _write_csv(tmp_path / "own.csv", rows)
+        with open(path, newline="") as fh:
+            report = findings.import_findings(conn, list(csv.DictReader(fh)))
+        assert report.skipped_present == 2, report
+        assert report.imported == 0, report
+        assert conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0] == 2
+
+    def test_a_null_fingerprint_row_does_not_duplicate(self, conn, tmp_path):
+        """The population a fingerprint-only skip CANNOT see. A row written with
+        an explicit id stores `fingerprint = NULL`, and NULL matches nothing — so
+        without the id half of the guard, every pre-CB-43 row and every
+        explicit-id row would duplicate on each re-import. Found by adversarial
+        review of the plan that proposed deleting the id check."""
+        findings.add_finding(conn, severity="low", category="c", file="a.py",
+                    description="explicit id row", finding_id="CB-500")
+        assert conn.execute(
+            "SELECT fingerprint FROM findings WHERE id='CB-500'").fetchone()[0] is None
+        rows = [{"id": "CB-500", "severity": "low", "category": "c",
+                 "file": "a.py", "description": "explicit id row", "source": "import"}]
+        path = _write_csv(tmp_path / "null.csv", rows)
+        with open(path, newline="") as fh:
+            report = findings.import_findings(conn, list(csv.DictReader(fh)))
+        assert report.skipped_present == 1, report
+        assert conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0] == 1
+
+    def test_an_id_minted_by_this_import_does_not_drop_a_later_row(self, conn, tmp_path):
+        """DEFECT 4, which was on no card. `export-csv` orders by SEVERITY, so a
+        normal export is not in ascending id order; the allocator then mints ids
+        that later rows of the same file still name. Measured before the fix:
+        3 rows exported, 2 restored, exit 0, one row silently lost."""
+        rows = [
+            {"id": "CB-1", "severity": "high", "category": "b", "file": "x.py",
+             "description": "alpha defect", "source": "s"},
+            {"id": "CB-3", "severity": "medium", "category": "b", "file": "z.py",
+             "description": "gamma defect", "source": "s"},
+            {"id": "CB-2", "severity": "low", "category": "b", "file": "y.py",
+             "description": "beta defect", "source": "s"},
+        ]
+        path = _write_csv(tmp_path / "sev.csv", rows)
+        with open(path, newline="") as fh:
+            report = findings.import_findings(conn, list(csv.DictReader(fh)))
+        assert report.imported == 3, report
+        descriptions = {r[0] for r in conn.execute("SELECT description FROM findings")}
+        assert descriptions == {"alpha defect", "beta defect", "gamma defect"}
+
+
+class TestImportIsAllOrNothing:
+    """CB-77, ratified 2026-08-18. The loop used to call `add_finding` per row,
+    each committing, so a failure part-way left N rows behind it."""
+
+    def test_a_failure_mid_import_lands_nothing(self, conn, tmp_path, monkeypatch):
+        findings.add_finding(conn, severity="low", category="pre", file="p.py", description="pre-existing")
+        rows = [{"id": "", "severity": "low", "category": "c", "file": f"f{i}.py",
+                 "description": f"row {i}", "source": "s"} for i in range(5)]
+        path = _write_csv(tmp_path / "boom.csv", rows)
+
+        real = findings._add_one
+        calls = {"n": 0}
+
+        def exploding(*a, **k):
+            calls["n"] += 1
+            if calls["n"] == 3:
+                raise sqlite3.OperationalError("simulated failure mid-import")
+            return real(*a, **k)
+
+        monkeypatch.setattr(findings, "_add_one", exploding)
+        with open(path, newline="") as fh:
+            with pytest.raises(sqlite3.OperationalError):
+                findings.import_findings(conn, list(csv.DictReader(fh)))
+        # the two rows that had already been written must be gone
+        assert conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0] == 1
+
+    def test_the_cli_prints_no_count_when_nothing_landed(self, tmp_project, tmp_path):
+        """The CB-15/CB-16 rule: a rollback must not be reported with a success
+        count. Driven through the real CLI because that is where the lie would
+        be printed."""
+        csv_file = tmp_path / "bad.csv"
+        csv_file.write_text("id,severity,category,file,description\n")
+        r = subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", "import-csv", str(csv_file)],
+            capture_output=True, text=True, cwd=tmp_project,
+            env={**os.environ, "PYTHONPATH": os.path.join(os.getcwd(), "src")},
+        )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "Imported 0 findings." in r.stdout, r.stdout
+
+
+class TestImportCarriesTags:
+    """Half of CB-51 defect 3 that the import path can close on its own. The
+    exported `tags` column was parsed by nobody. Id, status and occurrence_count
+    need the raw-insert seam and are CB-97."""
+
+    def test_tags_round_trip_through_import(self, tmp_project, tmp_path):
+        conn = db.connect(tmp_project)
+        findings.add_finding(conn, severity="low", category="c", file="a.py",
+                    description="tagged row", tags=["release", "ui"])
+        conn.close()
+        out = tmp_path / "e.csv"
+        env = {**os.environ, "PYTHONPATH": os.path.join(os.getcwd(), "src")}
+        subprocess.run([sys.executable, "-m", "codebugs.cli", "export-csv", str(out)],
+                       cwd=tmp_project, capture_output=True, text=True, env=env, check=True)
+        other = tmp_path.parent / (tmp_path.name + "-dst")
+        other.mkdir()
+        db.init_project(str(other))
+        subprocess.run([sys.executable, "-m", "codebugs.cli", "import-csv", str(out)],
+                       cwd=str(other), capture_output=True, text=True, env=env, check=True)
+        conn2 = db.connect(str(other))
+        tags = conn2.execute("SELECT tags FROM findings").fetchone()[0]
+        conn2.close()
+        assert json.loads(tags) == ["release", "ui"], tags
+
+
+class TestImportRowContract:
+    """`import_findings` takes rows in the shape `csv.DictReader` yields, so the
+    CLI and a library caller hand over the same thing.
+
+    An earlier draft accepted TWO shapes — the handler pre-decoded `meta` into a
+    dict while every test passed the raw JSON string — and `dict("...")` would
+    have raised. It only worked because the fixtures exported an empty meta
+    column, i.e. the tests could not reach the contradiction they contained.
+    Found by review of the diff, not by the suite.
+    """
+
+    def test_meta_arrives_as_json_text_and_reserved_keys_are_dropped(self, conn):
+        rows = [{
+            "id": "CB-900", "severity": "low", "category": "c", "file": "a.py",
+            "description": "meta as text", "source": "peer",
+            "meta": json.dumps({"lines": "10-20", "similar_to": [{"id": "CB-1"}],
+                                "recurrence_of": "CB-2"}),
+        }]
+        report = findings.import_findings(conn, rows)
+        assert report.imported == 1, report
+        stored = json.loads(conn.execute("SELECT meta FROM findings").fetchone()[0])
+        # the machinery's OUTPUT is not its input
+        assert "similar_to" not in stored and "recurrence_of" not in stored, stored
+        assert stored["lines"] == "10-20", stored
+        assert stored["imported_id"] == "CB-900", stored
+
+    def test_meta_already_decoded_is_also_accepted(self, conn):
+        rows = [{"id": "", "severity": "low", "category": "c", "file": "a.py",
+                 "description": "meta as dict", "meta": {"lines": "1-2"}}]
+        report = findings.import_findings(conn, rows)
+        assert report.imported == 1, report
+
+    def test_malformed_tags_are_an_ERROR_not_a_silent_drop(self, conn):
+        """A row whose tags cannot be read must say so. Dropping them quietly is
+        the same quiet loss this card exists to remove, and the row already has
+        an error channel."""
+        rows = [{"id": "", "severity": "low", "category": "c", "file": "a.py",
+                 "description": "bad tags", "tags": "not json at all"}]
+        report = findings.import_findings(conn, rows)
+        assert report.imported == 0, report
+        assert len(report.errors) == 1, report
+        assert "tags" in report.errors[0].message, report.errors
+
+    def test_a_row_missing_required_fields_is_passed_over_silently(self, conn):
+        """CONTROL — green on both sides. An incomplete row is not a finding and
+        never was an error; pinned so the new error channel does not start
+        claiming it is."""
+        rows = [{"id": "", "severity": "low", "category": "", "file": "",
+                 "description": ""}]
+        report = findings.import_findings(conn, rows)
+        assert report == findings.ImportReport(0, 0, 0, 0, []), report

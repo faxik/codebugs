@@ -7,6 +7,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **CSV import no longer drops another tracker's findings, and no longer resurrects
+  your own decided ones (CB-51).** Every import rule had accumulated inline in the
+  CLI handler, which called `add_finding` once per row. Four defects fell out of
+  that, all measured before the fix:
+  - a foreign row whose text matched a local **`fixed`** card **reopened** it —
+    an import is a statement about someone else's tracker and must not resurrect
+    a decision here;
+  - the "already present" guard compared **bare ids**, and every tracker numbers
+    `CB-1, CB-2, …`, so importing a peer's export dropped every row whose number
+    happened to be taken locally — silently, counted as "already present";
+  - the exported `tags` column was parsed by nobody;
+  - and because `export-csv` orders by **severity** rather than id, restoring a
+    backup into an **empty** tracker lost rows: the id allocator handed out ids
+    that later rows of the same file still named. Three rows out, two back,
+    exit 0.
+
+  Imports now compare content as well as id, so a colliding foreign row lands with
+  a fresh local id and records its origin in `meta.imported_id`; a re-import of
+  your own export is still a no-op.
+
+  **Not yet covered:** a faithful *restore* — preserving id, status and occurrence
+  counts — needs a different mechanism and is tracked separately. Exporting and
+  re-importing still renumbers cards and resets their status to `open`.
+- **A failed import now leaves nothing behind (CB-77).** The whole import runs in
+  one transaction and the file is read before it opens, so a read failure part-way
+  through no longer leaves earlier rows committed. A failed import reports that
+  nothing landed rather than printing a count.
+
 - **`staleness_check` now resolves a finding's `file` against the repository
   root, as `findings.py` has always documented it (CB-93).** Every staleness
   operation previously resolved it against the *process* cwd, so the documented
