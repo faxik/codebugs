@@ -1043,6 +1043,7 @@ def _ensure_modules_loaded() -> None:
             merge,
             milestones,
             provenance,
+            relations,
             reqs,
             similarity,
             sweep,
