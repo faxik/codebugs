@@ -1226,3 +1226,69 @@ replaced it is a medium with a fully specified design.
 
 **Next:** CB-97 (`restore`) is ready to implement — its constraints are recorded, and it needs no
 new user decision. Otherwise the queue is 21 medium / 18 low.
+
+---
+
+## Iteration 6 — 2026-08-18 · focus `codebugs` · **CB-97, the `restore` half of CB-51**
+
+**Cards:** CB-97 → **fixed**. Merge `c8b739f` (branch `feature/cb-97-restore-verb`, commits
+`ddc30f1`, `47af284`, `191596d`). Nothing filed. Open 39 → 38.
+
+**Picked because iteration 5 left it implementation-ready** — the design constraints were all
+established and reproduced during the review that split it out, so this iteration opened with
+code rather than another design round. That is the payoff of splitting instead of pushing
+through: the hard thinking had already been done and written down on the card.
+
+**`restore-csv` writes an export back verbatim** — a raw multi-row INSERT in one `db.txn`
+across all sixteen stored columns, bypassing the identity function, the pre-add resolvers and
+the post-add hooks, refusing rather than merging. Verified on main: export → restore is
+byte-verbatim, **including the `wont_fix` + `recurrence_of` pair that shares a fingerprint** —
+the input that killed the previous design. Forcing statuses to `open` makes that test fail with
+`IntegrityError` on `ux_findings_fingerprint_live`, so the test **reproduces the reviewer's
+FATAL** rather than asserting around it.
+
+**THREE DEFECTS I INTRODUCED IN THIS ITERATION, all caught before landing.** Recording them
+because each is a shape this repo keeps meeting, and because two were found by the process
+rather than by me:
+
+1. **Adding two columns to the export HEADER while the positional row writer kept the old
+   order** shifted every value after `meta` — the exported `fingerprint` became a timestamp.
+   Caught by an existing cross-tracker round-trip test. Header and rows now derive from one
+   `_RESTORE_COLUMNS` declaration; `tests/test_fsio.py` held a **third** copy of that list.
+2. **My first de-capping fix used OFFSET paging**, and review showed that is unstable here:
+   `query_findings` orders by severity rank and whole-second `created_at` with no unique
+   tiebreaker, so a tie group straddling a page boundary can be emitted twice or skipped.
+   **Duplicated or missing rows in a backup is strictly worse than the cap I was removing.**
+3. That rewrite **deleted `conn.close()`**, leaking the connection and breaking the exact
+   premise `TestExportPayloadIsInHandBeforeTheOpen` documents.
+
+**A scale ceiling that would have made large backups unrestorable.** The collision pre-check
+used one SQL placeholder per row, and `SQLITE_LIMIT_VARIABLE_NUMBER` is 32766 here (999 on
+pre-3.32 builds) — measured, 40000 placeholders raise `too many SQL variables`. A tracker
+could export a file it was unable to read back: this card's own defect, at scale. One bound
+parameter via `json_each` now; chunking worked and was rejected as a magic number to get wrong.
+
+**TWO TESTS WERE THEMSELVES WRONG AND WERE FIXED, NOT DELETED.** The export test shelled out
+while monkeypatching an in-process constant, so it proved nothing — it now runs in-process and
+pins the PROPERTY (the fetch asks for at least the row count; no OFFSET walk) rather than a row
+count any cap size would satisfy. And `TestExportPayloadIsInHandBeforeTheOpen` asserted
+`order[:2] == [produce, open]`, pinning the producer's CALL COUNT alongside the ordering it
+actually cares about, so it went red on a change it has no opinion about — **a premise pin that
+fails on something it does not care about teaches people to edit premise pins.** Both
+re-verified by mutation.
+
+**A verification claim was RETRACTED mid-iteration.** One mutation check's patch silently failed
+to apply, so its "passed" result proved nothing; it was re-run correctly (and the pin did fail
+under the real mutation). Third iteration in a row where the *evidence* needed checking, not
+just the code.
+
+**Harness note:** a `pkill -f "codex exec"` was refused by the CB-2680 guard, correctly — the
+stale Codex run's PID was never captured, and pattern-killing has previously destroyed a
+parallel session's work. Left running rather than worked around.
+
+**Net: 1 closed, 0 filed. Open 39 → 38** — the first iteration this session where the queue
+actually shrank, because the design cost was paid in iteration 5.
+
+**Next:** queue is medium/low only. Candidates worth ranking: CB-92-family is closed; CB-63
+(meta-batch, needs-decision), CB-37 (what enforces the CB-24 transaction rule — the obvious AST
+predicate certifies the bug it was built to catch), CB-21 (update-surface parity test).
