@@ -972,3 +972,50 @@ it records that CB-36 — the card written to teach *"a rule expressed as an enu
 the sites someone enumerated"* — is closed with a tally that missed `import_csv`, because its
 read-modify-write is a run-id sequence rather than a meta merge and did not look like what the
 sweeper was reading for. The lesson landed on its own card.
+
+## 2026-08-18 — iteration 2: nothing shipped, two cards advanced, stop condition reached
+
+**Focus:** `codebugs`, pure bugfixes, simple first. **Disposition:** no card landed. **Stop
+condition:** every remaining candidate under this focus needs a decision or is a refactor sprint.
+
+**Blocked at Phase 0 by a live parallel session, and the right move was to do nothing.** Main had
+five files STAGED and uncommitted — including a new 617-line `src/codebugs/grouping.py` — modified
+between 22:28 and 22:35 with no branch and no worktree. Not stale dirt: another session mid-flight,
+writing into main's checkout. Nothing was touched, stashed or committed. It resolved itself ~20
+minutes later: that work landed properly as `feature/grouping-axes-read-surface` and
+`fix/citation-count-units` (main d748a03 → 557d4aa), so the staged state was a moment in its
+workflow, not a violation to clean up. **Waiting was the whole intervention.**
+
+**A probe worktree inherits the repo's tracker, and that nearly wrote to it.** Diagnosing CB-86 in a
+detached worktree under the scratchpad, `codebugs stats` returned the REAL tracker's 89 findings:
+`db.connect()` follows a worktree's `.git` FILE to the main repo and resolves to its `.codebugs`
+— documented behaviour, and exactly what makes a git worktree the wrong place for a CLI probe. An
+`add` in the same chain did not run only because the `&&` chain had already broken on a failed
+`init`. Verified no stray row landed. **Probe from a plain temp dir outside any worktree.**
+
+**CB-86 upgraded from unreproduced to CONFIRMED, then handed back.** Two shapes, both raw
+tracebacks: a read-only tracker DIRECTORY raises `sqlite3.OperationalError: attempt to write a
+readonly database` at `db.py:1096` (the WAL pragma, during connection setup — pre-write), and a
+read-only DATABASE FILE raises the same class later, from a write statement. Both escape because
+`cli.main` catches `OperationalError` and re-raises non-contention. A third case checked and found
+NOT defective: `--tracker-root <missing> init` under an unwritable parent already prints a clean
+refusal. The card's decision is untouched by the reproduction, and the reproduction adds one
+consideration to it: the two shapes raise in different phases, so a central arm classifies a
+pre-write and a mid-write failure through one path — safe for "readonly database", not obviously
+safe for a mid-transaction disk error.
+
+**CB-68's premise is wrong, and measuring it was worth more than fixing it.** The card says
+`blocker_counts_for` is a lone violation whose "sibling `deferred_id_restriction` follows the rule".
+An AST sweep of every public `conn`-first function says: 37 total, **nine** with 2+ positional args
+after `conn` (the identical defect), twelve following the de-facto `f(conn, entity_id, *, ...)`
+pattern, sixteen with one positional and no keyword-only args at all. `deferred_id_restriction` is
+in that last group — it does not follow the rule, it just has fewer arguments. **Under CLAUDE.md's
+literal rule (`def f(conn, *, name, ...)`) all 37 violate it, including the ones the codebase treats
+as exemplary.** So the card is not a three-line fix, it is the question *which rule is true* — amend
+the doc to the practiced convention, or change 37 signatures (breaking, and a refactor sprint).
+Fixing only `blocker_counts_for` was refused: it is one cell of nine, it would make the rule look
+upheld, and nine independently landable edits blow the batching ceiling of four.
+
+**Net change: 0 closed, 0 filed. Open stayed at 35** (CB-81 closed and CB-87 filed in the previous
+iteration). Two cards carry materially better evidence than they did, and both hand-backs name a
+decision precisely enough to answer in one line.
