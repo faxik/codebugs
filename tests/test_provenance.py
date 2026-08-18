@@ -1231,23 +1231,10 @@ class TestUndecodablePathsDoNotKillTheBatch:
     plain-ASCII ones — by raising out of `file_status` instead of degrading.
     """
 
+    UNDECODABLE = os.path.join("src", b"other\xff.py".decode("utf-8", "surrogateescape"))
+
     def _repo_with_an_unrelated_undecodable_rename(self, project):
-        bad = os.path.join(project, "src", b"other\xff.py".decode("utf-8", "surrogateescape"))
-        with open(bad, "w") as fh:
-            fh.write("zzzz\nyyyy\nxxxx\nwwww\n")
-        subprocess.run(["git", "add", "-A"], cwd=project, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "add"], cwd=project, check=True, capture_output=True)
-        base = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=project, text=True
-        ).strip()
-        subprocess.run(
-            ["git", "mv", bad, os.path.join(project, "src", "other_ok.py")],
-            cwd=project,
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(["git", "commit", "-m", "mv"], cwd=project, check=True, capture_output=True)
-        return base
+        return _create_and_rename(project, self.UNDECODABLE, "src/other_ok.py")
 
     def test_an_unrelated_undecodable_rename_does_not_raise(self, git_project):
         """The ASCII finding under test is genuinely deleted; the answer must be
@@ -1269,7 +1256,7 @@ class TestUndecodablePathsDoNotKillTheBatch:
         non-fatal — `surrogateescape` round-trips it on both sides of the
         comparison."""
         project, _ = git_project
-        spelling = os.path.join("src", b"other\xff.py".decode("utf-8", "surrogateescape"))
+        spelling = self.UNDECODABLE
         base = self._repo_with_an_unrelated_undecodable_rename(project)
         result = provenance.file_status(
             file_path=spelling, reported_at_commit=base, project_dir=project
@@ -1329,3 +1316,109 @@ class TestAReasonStringAlwaysSerializes:
         # ...and it can actually leave the process.
         assert not any(0xD800 <= ord(c) <= 0xDFFF for c in result["reason"]), result
         json.dumps(result, ensure_ascii=False).encode("utf-8")
+
+
+class TestRenameRecordParser:
+    """Unit tests for the pure parser. The desync branch is UNREACHABLE through
+    real git (`--diff-filter=R` with no `-C` guarantees rename triples), so it
+    could only be pinned by testing the function directly — which is why it was
+    extracted. A branch that cannot be tested is a branch nobody can trust."""
+
+    def test_a_well_formed_rename_record_parses(self):
+        out = "R100\0src/old.py\0src/new.py\0"
+        assert provenance._parse_rename_records(out) == [("src/old.py", "src/new.py")]
+
+    def test_several_records_parse(self):
+        out = "R100\0a\0b\0R087\0c\0d\0"
+        assert provenance._parse_rename_records(out) == [("a", "b"), ("c", "d")]
+
+    def test_empty_output_is_no_renames_not_a_failure(self):
+        """The ordinary case when nothing was renamed. Must be `[]`, never None
+        — None means "could not answer" and would turn every genuinely deleted
+        file into `unknown`."""
+        assert provenance._parse_rename_records("") == []
+
+    def test_a_truncated_record_is_unparseable_not_empty(self):
+        """The distinction the whole extraction exists for: `[]` would be read
+        as "not renamed" and become a confident `deleted`."""
+        assert provenance._parse_rename_records("R100\0src/old.py\0") is None
+
+    def test_a_non_rename_status_is_unparseable_not_skipped(self):
+        """A status this command cannot emit means the premise is broken, so
+        the honest answer is "no answer", not a best-effort skip."""
+        assert provenance._parse_rename_records("M\0src/a.py\0") is None
+        assert provenance._parse_rename_records("R100\0a\0b\0M\0c\0") is None
+
+    def test_paths_containing_tabs_and_newlines_survive(self):
+        """What `-z` buys over `-c core.quotePath=false`."""
+        out = "R100\0src/a\tb.py\0src/c\nd.py\0"
+        assert provenance._parse_rename_records(out) == [("src/a\tb.py", "src/c\nd.py")]
+
+
+class TestEveryVerdictSerializes:
+    """RATCHET. `TestAReasonStringAlwaysSerializes` pinned the one route where a
+    surrogate had actually been observed; this asserts the general property its
+    name claims, across every verdict route the module can produce.
+
+    It is what makes `_verdict` load-bearing rather than decorative: hardening
+    `db.git_rev_parse` made `out_of_repo (worktree {root})` the next candidate
+    bomb, and nothing but a boundary sanitizer plus this ratchet would have
+    caught the one after that.
+    """
+
+    def _assert_serializes(self, result):
+        assert not any(0xD800 <= ord(c) <= 0xDFFF for c in result["reason"]), result
+        json.dumps(result, ensure_ascii=False).encode("utf-8")
+
+    def test_every_route_out_of_file_status_serializes(self, git_project):
+        project, sha = git_project
+        undecodable = os.path.join("src", b"n\xff.py".decode("utf-8", "surrogateescape"))
+        cases = {
+            "no_provenance": dict(file_path="src/auth.py", reported_at_commit=None),
+            "empty_path": dict(file_path="", reported_at_commit=sha),
+            "invalid_path": dict(file_path="a\0b", reported_at_commit=sha),
+            "out_of_repo": dict(file_path="/etc/hosts", reported_at_commit=sha),
+            "unreachable": dict(file_path="src/auth.py", reported_at_commit="dead" * 10),
+            "current": dict(file_path="src/auth.py", reported_at_commit=sha),
+            "undecodable_input": dict(file_path=undecodable, reported_at_commit=sha),
+        }
+        for label, kwargs in cases.items():
+            result = provenance.file_status(project_dir=project, **kwargs)
+            self._assert_serializes(result)
+            assert isinstance(result["file_status"], str), (label, result)
+
+    def test_a_repo_whose_ROOT_NAME_is_undecodable_does_not_raise(self, tmp_path):
+        """The third `-z`/decoding reader, missed by this branch's own first
+        sibling sweep because the fixture used a non-UTF-8 path INSIDE the repo
+        — and `git rev-parse --show-toplevel` only ever prints the root's OWN
+        name, so that fixture structurally could not fail.
+
+        Unfixed, this escaped as `UnicodeDecodeError` out of `db.git_rev_parse`,
+        which is a `ValueError` and so outside the `(SubprocessError, OSError)`
+        contract — killing a whole `check_findings` batch as a traceback.
+        """
+        repo = os.path.join(str(tmp_path), b"proj\xff".decode("utf-8", "surrogateescape"))
+        os.makedirs(repo)
+        for argv in (
+            ["git", "init", "-q", "."],
+            ["git", "config", "user.email", "t@t"],
+            ["git", "config", "user.name", "t"],
+        ):
+            subprocess.run(argv, cwd=repo, check=True, capture_output=True)
+        with open(os.path.join(repo, "a.py"), "w") as fh:
+            fh.write("x = 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "a"], cwd=repo, check=True, capture_output=True)
+        base = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+        ).strip()
+        with open(os.path.join(repo, "a.py"), "w") as fh:
+            fh.write("x = 2\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "b"], cwd=repo, check=True, capture_output=True)
+
+        result = provenance.file_status(
+            file_path="a.py", reported_at_commit=base, project_dir=repo
+        )
+        assert result["file_status"] == "modified", result
+        self._assert_serializes(result)

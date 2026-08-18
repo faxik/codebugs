@@ -527,6 +527,20 @@ def git_rev_parse(ref: str, *, silent: bool = False, cwd: str | None = None) -> 
         return subprocess.check_output(
             ["git", "rev-parse", ref],
             text=True,
+            # Not every `rev-parse` answer is hex. `--show-toplevel` prints a
+            # PATH — `provenance._repo_root` is the caller — and a repository
+            # whose root directory name is not valid UTF-8 made strict decoding
+            # raise `UnicodeDecodeError`. That is a `ValueError`, so the tuple
+            # below does not catch it and it escaped a helper whose whole
+            # contract is "returns None if git is unavailable", taking a whole
+            # `check_findings` batch down as a traceback. Reproduced.
+            #
+            # Strict widening: a hex SHA decodes identically either way, so no
+            # existing caller changes. Callers that put the result in a
+            # user-visible string must still sanitize it — `provenance._verdict`
+            # is the worked example, because a surrogate cannot be re-encoded
+            # to UTF-8 and MCP serializes these dicts to JSON.
+            errors="surrogateescape",
             timeout=10,
             stderr=subprocess.DEVNULL if silent else None,
             cwd=cwd,
