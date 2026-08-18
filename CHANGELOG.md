@@ -39,6 +39,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   This was the fourth route into this module's most-repeated false positive,
   after CB-79, CB-85 and CB-88 — each a different unasked question ending at the
   same line.
+- **Staleness answers no longer depend on the ambient locale.** Every git reader in
+  `provenance.py` and `db.git_rev_parse` decoded with `text=True`, i.e. with
+  `locale.getpreferredencoding()`. Under `LC_CTYPE=C` that is ASCII, and two
+  things broke: `git log --oneline` raised `UnicodeDecodeError` on an ordinary
+  commit subject such as `fix café`, and the rename comparison decoded git's
+  UTF-8 path bytes into surrogates that could never match the stored path — so a
+  renamed file reported a confident `deleted` on one machine and `renamed` on
+  another. All readers now pin `encoding="utf-8"` explicitly.
+- **A relative `GIT_DIR` / `GIT_WORK_TREE` is now refused instead of answered
+  wrongly.** Git resolves those against the process cwd, and staleness probes run
+  from the worktree root, so a relative value silently named a different
+  repository — measured, a genuinely modified file reported `current`. It now
+  returns `unknown` naming the variable. Absolute values are unaffected.
 - **A non-UTF-8 filename no longer aborts a whole staleness batch.** Suppressing
   git's C-quoting means raw path bytes arrive, and strict decoding raised
   `UnicodeDecodeError` — a `ValueError`, so it escaped the module's

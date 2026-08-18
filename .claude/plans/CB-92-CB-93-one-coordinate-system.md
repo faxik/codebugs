@@ -224,6 +224,63 @@ re-run against the finished diff.
 in-repo symlink escaping), `rel == "."`, glob/prose/magic/empty/NUL values, and the
 `_repo_root_hint` / `_ROOT_UNRESOLVED` batch path.
 
+## Review — round 2 (`/simplify`, 4 angles) and round 3 (Codex, on the diff)
+
+**Codex finally reported, on the third attempt** (the first two died on process mechanics:
+a `codex exec` that hung on stdin, then a detached task the relay could not retrieve). So
+the cross-model attack this repo's rules require did happen — late, and on the finished diff
+rather than the plan. **Verdict: FAIL**, and it earned it: two live findings, both
+reproduced here before being believed, both confident-WRONG answers.
+
+**Codex findings still live at its review point, now fixed:**
+
+- **Decoding was decided by the ambient locale.** `text=True` decodes with
+  `locale.getpreferredencoding()`. Under `LC_CTYPE=C` that is ASCII, and the rename probe
+  then decoded git's UTF-8 path bytes as `src/\udcc3\udca4.py` while `rel` stayed
+  `src/ä.py` — comparison fails, confident `deleted`. **CB-92 reappearing through a locale
+  instead of through quoting.** The same locale made `git log --oneline` raise
+  `UnicodeDecodeError` on an ordinary subject like `fix café`. Six readers now pin
+  `encoding="utf-8"`, with `surrogateescape` where output is compared and `replace` where
+  it is only counted or displayed. Ratcheted by AST plus an `LC_ALL=C` child-process test.
+- **A relative `GIT_WORK_TREE` repointed every probe.** Git resolves a relative `GIT_DIR` /
+  `GIT_WORK_TREE` against the process cwd, so moving cwd to `root` names a different
+  repository: `GIT_WORK_TREE=".."` turned a correct `modified` into `current ... unchanged`.
+  Introduced by this branch, so fixed here — it refuses and names the variable rather than
+  absolutizing, since absolutizing means synthesizing an env at five sites.
+
+**Codex findings already closed before it reported** (it confirmed this itself): the
+undecodable worktree root, the parser failing open, and the unserializable source path.
+
+**Codex finding NOT fixed, recorded as a known limit:** on macOS with
+`core.precomposeUnicode=true`, SQLite can hold an NFD spelling (`é`) while git
+canonicalizes argv to NFC (`é`), so the two never compare equal and a rename reads as
+`deleted`. Not fixed because this branch cannot test macOS and a blind normalization would
+be a new guess on a platform nobody here can verify — the repo's own rule about supplying
+external evidence rather than deepening a guess. Filed as its own card.
+
+**`/simplify`, 4 angles — 3 found real work, 1 produced a negative result worth keeping:**
+
+- **Altitude (serious):** the round-1 sibling sweep missed its THIRD reader and *declared it
+  safe on a fixture that could not fail* — it varied a path inside the repo, while
+  `--show-toplevel` only ever prints the root's own name. Fixed and pinned.
+- **Altitude (moderate):** `_displayable` was applied where the bug was observed, not where
+  the obligation is. Every verdict now goes through one `_verdict()` constructor.
+- **Simplification:** the parser's status-letter dispatch was dead code, and removing it
+  exposed that both it and the naive replacement failed OPEN into a confident `deleted`.
+  Now a pure `_parse_rename_records` returning None, so the caller degrades to `unknown`.
+- **Reuse:** a test fixture re-implemented `_create_and_rename`.
+- **Efficiency: clean**, plus the measured negative now recorded in the code — scoping the
+  rename probe to `-- rel` looks like a free win and silently breaks rename pairing.
+
+**A test-quality finding worth stating on its own, because it invalidated my own evidence:**
+several CB-92 tests were **ambient-git-config dependent**. With `core.quotePath=false` in a
+developer's global config, git never C-quotes, so the non-ASCII tests pass against the
+UNFIXED code — and a local mutation check would still "prove" they discriminate. The
+`git_project` fixture now pins `core.quotePath=true` and `diff.relative=false` (both git's
+own defaults; the point is that the developer's environment stops deciding). Verified by
+running the suite against unfixed code under a hostile `HOME`, where it still discriminates,
+and against the unpinned fixture, where it did not.
+
 - **Sibling sweep (method + result).** Swept every `text=True` subprocess reader reachable
   from this module for the same decoding hazard, by running each against a repo holding a
   non-UTF-8 path and a non-UTF-8 commit subject. `git log --oneline`, `_parse_trailers`'
