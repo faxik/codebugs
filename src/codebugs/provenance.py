@@ -118,6 +118,34 @@ def _displayable(path: str) -> str:
     return path.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
 
 
+def _relative_git_env() -> str | None:
+    """The name of a git environment variable set to a RELATIVE path, if any.
+
+    Running every probe from the worktree root is what makes `rel` meaningful
+    (CB-93) — but `GIT_DIR` and `GIT_WORK_TREE` are themselves resolved against
+    the process cwd when they are relative, so moving cwd silently repoints them
+    at a different repository. Measured: with `GIT_WORK_TREE=".."` and
+    `project_dir=<repo>/src`, a genuinely modified file reported
+    `current ... unchanged` — a confident wrong answer, and the one outcome this
+    module treats as worse than no answer.
+
+    Absolutizing them was considered and rejected as too clever for a path this
+    rare: it means synthesizing an env for five call sites, which is the
+    per-site enumeration this module keeps getting caught by. Refusing is the
+    behaviour every other undecidable-scope case here already has, and it names
+    the variable so the operator can fix it in one step. An ABSOLUTE value is
+    cwd-independent and passes untouched.
+
+    Found by cross-model (Codex) review of the finished diff; reproduced here
+    before it was believed.
+    """
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+        value = os.environ.get(name)
+        if value and not os.path.isabs(value):
+            return name
+    return None
+
+
 def _verdict(status: str, reason: str) -> dict[str, Any]:
     """The ONE constructor for this module's answer, so output safety is
     structural rather than remembered per return statement.
@@ -201,7 +229,7 @@ def _kind_at_commit(cwd: str, commit: str, rel: str) -> str | None:
         out = subprocess.check_output(
             ["git", "--literal-pathspecs", "ls-tree", "-z", "--full-tree", commit, "--", rel],
             cwd=cwd,
-            text=True,
+            encoding="utf-8",
             errors="surrogateescape",
             timeout=10,
             stderr=subprocess.DEVNULL,
@@ -274,6 +302,13 @@ def file_status(
     if "\0" in file_path:
         return _verdict("unknown", "invalid_path")
 
+    # Refused BEFORE any probe, because every probe below runs from `root` and
+    # a relative git env var would mean something different there than it did
+    # to the caller. See `_relative_git_env`.
+    relative_env = _relative_git_env()
+    if relative_env is not None:
+        return _verdict("unknown", f"relative_git_env ({relative_env})")
+
     # SCOPE FIRST, and the ordering here is precedence between REASONS, not a
     # rule about which spelling the caller used. An earlier draft ran this
     # before `cat-file` for an absolute value and after it for a relative one,
@@ -312,7 +347,7 @@ def file_status(
 
     try:
         subprocess.check_output(
-            ["git", "cat-file", "-t", reported_at_commit],
+["git", "cat-file", "-t", reported_at_commit],
             # `root or cwd`, so `root` is the only working directory git is
             # ever given once it resolves. Behaviourally identical — this probe
             # takes a commit, never a path — but leaving one probe on `cwd`
@@ -321,7 +356,8 @@ def file_status(
             # only to DERIVE `root`, and the `root is None -> unreachable_commit`
             # ordering the CB-88 pins protect is unchanged.
             cwd=root or cwd,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
             stderr=subprocess.DEVNULL,
         )
@@ -362,7 +398,8 @@ def file_status(
             ["git", "--literal-pathspecs", "log", "--oneline"]
             + [f"{reported_at_commit}..HEAD", "--", rel],
             cwd=root,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
             stderr=subprocess.DEVNULL,
         ).strip()
@@ -471,7 +508,7 @@ def file_status(
                 f"{reported_at_commit}..HEAD",
             ],
             cwd=root,
-            text=True,
+            encoding="utf-8",
             # `-z` is what makes this necessary, so it lands in the same change.
             # Suppressing the C-quoting means git emits the path's RAW bytes,
             # and a non-UTF-8 filename then made `text=True` raise
@@ -639,7 +676,8 @@ def _parse_trailers(rev_range: str, *, project_dir: str | None = None) -> list[_
         out = subprocess.check_output(
             ["git", "log", "--no-merges", f"--pretty=format:{fmt}", rev_range],
             cwd=cwd,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
             stderr=subprocess.DEVNULL,
         )

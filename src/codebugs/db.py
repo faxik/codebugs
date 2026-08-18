@@ -526,7 +526,7 @@ def git_rev_parse(ref: str, *, silent: bool = False, cwd: str | None = None) -> 
     try:
         return subprocess.check_output(
             ["git", "rev-parse", ref],
-            text=True,
+            encoding="utf-8",
             # Not every `rev-parse` answer is hex. `--show-toplevel` prints a
             # PATH — `provenance._repo_root` is the caller — and a repository
             # whose root directory name is not valid UTF-8 made strict decoding

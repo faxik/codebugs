@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import sys
 
 import pytest
 
@@ -24,6 +25,25 @@ def git_project(tmp_path):
     subprocess.run(
         ["git", "config", "user.name", "Test"], cwd=project, check=True, capture_output=True
     )
+    # PIN THE AMBIENT CONFIG THIS FILE'S HAZARDS DEPEND ON. Both settings are
+    # being set to git's own DEFAULT — the point is not to change behaviour but
+    # to stop the developer's ~/.gitconfig from deciding it.
+    #
+    # Without this, several CB-92 tests are VACUOUS on some machines rather than
+    # failing: `core.quotePath=false` in a global config means git never
+    # C-quotes, so the non-ASCII rename tests pass against the UNFIXED code, and
+    # a mutation check run locally would still "prove" they discriminate.
+    # `diff.relative=true` makes `git diff` print cwd-relative paths, which
+    # falsifies the premise test's "regardless of cwd" claim outright.
+    #
+    # The FIX itself is immune to both — every probe runs with `cwd=root`, so
+    # relative-to-cwd and relative-to-root coincide, and `-z` suppresses quoting
+    # unconditionally. It is the TESTS that needed pinning. Found by cross-model
+    # review, which ran git under both settings rather than trusting one machine.
+    for key, value in (("core.quotePath", "true"), ("diff.relative", "false")):
+        subprocess.run(
+            ["git", "config", key, value], cwd=project, check=True, capture_output=True
+        )
 
     test_file = os.path.join(project, "src", "auth.py")
     os.makedirs(os.path.dirname(test_file), exist_ok=True)
@@ -1422,3 +1442,143 @@ class TestEveryVerdictSerializes:
         )
         assert result["file_status"] == "modified", result
         self._assert_serializes(result)
+
+
+class TestGitReadersPinTheirDecoding:
+    """RATCHET, in this repo's established structural-test shape
+    (`TestWriteCallSitesRatchet`, `TestOpenCallSitesRatchet`).
+
+    `text=True` decodes with the AMBIENT LOCALE. Under `LC_CTYPE=C` that is
+    ASCII, and two things break at once, both measured:
+
+    * `git log --oneline` raises `UnicodeDecodeError` on an ordinary commit
+      subject like `fix café` — a `ValueError`, outside this module's
+      `(SubprocessError, OSError)` contract, so it escapes as a traceback;
+    * the rename probe decodes git's UTF-8 path bytes as
+      `src/\\udcc3\\udca4.py` while `rel` (from SQLite) stays `src/ä.py`, so the
+      comparison fails and a renamed file reports a confident `deleted` —
+      CB-92 reappearing through a locale rather than through quoting.
+
+    The policy is per-purpose, not uniform: readers whose output is COMPARED
+    byte-for-byte use `surrogateescape` (paths must round-trip exactly), and
+    readers whose output is only counted or displayed use `replace` (never let
+    a lone surrogate reach SQLite or the JSON layer). What this test enforces is
+    the part that must never be forgotten — that the choice is made explicitly.
+
+    Found by cross-model review, which varied the locale instead of trusting one
+    machine's environment.
+    """
+
+    def _check_output_calls(self, module_path):
+        import ast
+
+        tree = ast.parse(open(module_path, encoding="utf-8").read())
+        calls = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            if isinstance(fn, ast.Attribute) and fn.attr in ("check_output", "run", "Popen"):
+                calls.append(node)
+        return calls
+
+    @pytest.mark.parametrize(
+        "module", ["src/codebugs/provenance.py", "src/codebugs/db.py"]
+    )
+    def test_every_subprocess_reader_pins_encoding_and_errors(self, module):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(root, module)
+        calls = self._check_output_calls(path)
+        assert calls, f"no subprocess calls found in {module} — did the ratchet break?"
+        for call in calls:
+            kwargs = {kw.arg for kw in call.keywords}
+            assert "text" not in kwargs, (
+                f"{module}:{call.lineno} uses text=True, which decodes with the "
+                "ambient locale; pass encoding= explicitly"
+            )
+            assert "encoding" in kwargs and "errors" in kwargs, (
+                f"{module}:{call.lineno} must pin both encoding= and errors=; "
+                f"got {sorted(kwargs)}"
+            )
+
+    def test_a_non_ascii_commit_subject_survives_an_ascii_locale(self, git_project):
+        """End-to-end, in a CHILD PROCESS so the locale change cannot leak into
+        the suite. `PYTHONCOERCECLOCALE=0` and `PYTHONUTF8=0` are required or
+        CPython's PEP 538/540 coercion silently upgrades `C` to `C.UTF-8` and
+        the hazard does not reproduce — the test would pass without testing."""
+        project, sha = git_project
+        with open(os.path.join(project, "src", "auth.py"), "a") as fh:
+            fh.write("# change\n")
+        subprocess.run(["git", "add", "-A"], cwd=project, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "fix café naïve résumé"],
+            cwd=project,
+            check=True,
+            capture_output=True,
+        )
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        script = (
+            "import sys; sys.path.insert(0, %r)\n"
+            "from codebugs import provenance\n"
+            "r = provenance.file_status(file_path='src/auth.py',"
+            " reported_at_commit=%r, project_dir=%r)\n"
+            "print(r['file_status'])\n" % (os.path.join(repo_root, "src"), sha, project)
+        )
+        env = dict(os.environ, LC_ALL="C", PYTHONCOERCECLOCALE="0", PYTHONUTF8="0")
+        proc = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, env=env
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip() == "modified", (proc.stdout, proc.stderr)
+
+
+class TestRelativeGitEnvIsRefused:
+    """Running every probe from the worktree root (CB-93) is unsafe when a git
+    environment variable is itself RELATIVE, because git resolves those against
+    the process cwd. Reproduced before it was fixed: with `GIT_WORK_TREE=".."`
+    and `project_dir=<repo>/src`, a genuinely modified file answered
+    `current ... unchanged` — a confident wrong answer, which this module treats
+    as worse than no answer.
+
+    Found by cross-model (Codex) review of the finished diff, not by the suite.
+    """
+
+    def test_a_relative_git_work_tree_is_refused_not_answered_wrongly(
+        self, git_project, monkeypatch
+    ):
+        project, sha = git_project
+        _commit_a_change(project)
+        monkeypatch.setenv("GIT_DIR", os.path.join(project, ".git"))
+        monkeypatch.setenv("GIT_WORK_TREE", "..")
+        result = provenance.file_status(
+            file_path=os.path.join(project, "src", "auth.py"),
+            reported_at_commit=sha,
+            project_dir=os.path.join(project, "src"),
+        )
+        assert result["file_status"] == "unknown", result
+        assert "relative_git_env" in result["reason"], result
+        assert "GIT_WORK_TREE" in result["reason"], result
+
+    def test_an_absolute_git_work_tree_still_answers(self, git_project, monkeypatch):
+        """The guard is about RELATIVE values only — an absolute one is
+        cwd-independent, so refusing it would be a false refusal."""
+        project, sha = git_project
+        _commit_a_change(project)
+        monkeypatch.setenv("GIT_DIR", os.path.join(project, ".git"))
+        monkeypatch.setenv("GIT_WORK_TREE", project)
+        result = provenance.file_status(
+            file_path="src/auth.py", reported_at_commit=sha, project_dir=project
+        )
+        assert result["file_status"] == "modified", result
+
+    def test_no_git_env_is_unaffected(self, git_project, monkeypatch):
+        """CONTROL — green on both sides. Pins that the guard does not fire on
+        the ordinary path, which is every real caller."""
+        project, sha = git_project
+        _commit_a_change(project)
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+            monkeypatch.delenv(name, raising=False)
+        result = provenance.file_status(
+            file_path="src/auth.py", reported_at_commit=sha, project_dir=project
+        )
+        assert result["file_status"] == "modified", result
