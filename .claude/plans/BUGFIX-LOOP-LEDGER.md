@@ -1093,3 +1093,72 @@ main that refuses every non-plan commit — it would have blocked *every* future
 Folded into the gitignored `.claude/settings.local.json` (89 unique entries) instead. The skill's
 letter says project settings; its intent is fewer prompts, and only one of those survives contact
 with this repo's pre-commit hook.
+
+---
+
+## Iteration 4 — 2026-08-18 · focus `codebugs` ("stabilization batch, one batch")
+
+**Cards:** CB-92 + CB-93 → **both fixed**. Merge `f0b4010`
+(branch `fix/cb-92-cb-93-one-coordinate-system`, commits `1a7dcb8`, `3e63cbc`, `5fb1f33`,
+`3e101f0`). Filed: CB-95, CB-96. Deferred by user decision: CB-51.
+
+**No "stabilization batch" existed in the tracker** — the focus was the user's framing, not a
+named entity, so the batch was FORMED on evidence. The cluster predicate that justified one
+tree was *same root cause*, and the measurement that sealed it: `git diff --name-status`
+prints ROOT-relative paths regardless of cwd, so CB-92's rename comparison against a raw
+cwd-relative spelling **is** CB-93's coordinate mismatch surfacing one screen down. CB-88
+(iteration 3) had introduced the canonical `rel` and used it in exactly one probe; this
+iteration finished the job.
+
+**One question asked, and it was the right one.** CB-93 was tagged `needs-decision` and
+genuinely was one: honour the documented root-relative contract, or redocument reality.
+Both costs were measured before asking — the affected caller population is **0 of 3307
+findings** across two real trackers, and the real cost is that `tests/test_provenance.py:901`
+*deliberately pins* the cwd-relative reading. The user ratified **(a)**, so that pin was
+rewritten as a declared contract change with a docstring saying so.
+
+**THE CARD UNDERSTATED ITSELF: 2 routes named, 5 closed.** Canonicalization (`./src/x.py`),
+subdirectory cwd, and **ambient locale** were all additional doors to the same confident
+false `deleted`. The locale one is the sharpest: `text=True` decodes with
+`locale.getpreferredencoding()`, so under `LC_CTYPE=C` git's UTF-8 path bytes arrive as
+`src/\udcc3\udca4.py` and never match — **CB-92 arriving through a locale instead of through
+quoting**, in a fix written for CB-92.
+
+**THREE DEFECTS WERE INTRODUCED BY THE FIX AND CAUGHT BEFORE LANDING.** (1) FATAL: `-z`
+suppresses the C-quoting that had been keeping output ASCII, so raw bytes hit `text=True`
+and raised `UnicodeDecodeError` — a `ValueError`, outside the module's
+`(SubprocessError, OSError)` contract; the probe takes no pathspec, so ONE undecodable
+rename anywhere would have killed an entire `staleness_check` batch. (2) A surrogate in
+`reason` crashed pydantic's `dump_json`, i.e. the MCP serializer — the fix answering
+correctly and dying on the way out. (3) The rename parser failed OPEN into `deleted` on a
+desynchronized record. Each is the module's signature defect reproduced inside its own fix.
+
+**THE MOST UNCOMFORTABLE FINDING WAS ABOUT MY OWN EVIDENCE.** The round-1 sibling sweep
+declared `db.git_rev_parse` safe **on a fixture that structurally could not fail** — it
+varied a path *inside* the repo, while `--show-toplevel` only ever prints the root's *own*
+name. A repo whose root directory name is non-UTF-8 crashed the whole batch. Separately,
+several CB-92 tests were **ambient-git-config dependent**: with `core.quotePath=false` in a
+developer's global config they pass against the UNFIXED code, and a local mutation check
+would still "prove" they discriminate. The fixture now pins git's defaults, verified by
+re-running against unfixed code under a hostile `HOME`. **A mutation check only proves a
+test discriminates in the environment you ran it in.**
+
+**Cross-model review: three attempts, one success, and the two failures were mechanical.**
+`codex exec` hangs on stdin without `< /dev/null`, and a backgrounded relay reports before
+Codex finishes. Rounds 1 and 2 therefore had a single-model attacker despite the standing
+rule, which was stated at the time rather than papered over. Codex's eventual review
+returned FAIL with two live findings (locale decoding, relative `GIT_WORK_TREE`), both
+reproduced here before being believed, both fixed. **Its remaining finding was deliberately
+NOT fixed** — macOS NFD/NFC normalization, which cannot be reproduced or verified on this
+platform, so it is CB-96 rather than a blind guess.
+
+**Net change: 2 closed, 2 filed by this iteration (CB-95 user request, CB-96 ratified
+deferral). Open 40 → 40.** Flat, and that is the review machinery working rather than a
+stall: CB-96 is a defect found by attacking this fix, and CB-95 is a capability the user
+asked about mid-iteration, filed instead of absorbed into a two-edit stabilization tree.
+
+**Deferred by user decision: CB-51 (the queue's only `high`).** Its correct fix is a domain
+`findings.import_findings()`, and at least two of its four defects need semantic decisions
+first — is importing an export a RESTORE (preserve id/status/occurrence_count) or an
+OBSERVATION, and what happens when a foreign tracker's CB-1..CB-N collide with local ids.
+Entangled with CB-77. **Next iteration opens with that design round, not with code.**
