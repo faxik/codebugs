@@ -74,6 +74,14 @@ SYMMETRIC: frozenset[str] = frozenset({"distinct_from", "related_to"})
 #: Terms that belong to another owner. Refused with a pointer rather than
 #: silently accepted, because each would create a second authority for a fact
 #: that already has one.
+#:
+#: This deliberately does NOT use the self-registration idiom the package uses
+#: for runtime-minted ``meta`` keys (``db.register_pre_add_resolver`` /
+#: ``db.resolver_reserved_meta_keys``). That machinery exists because any module
+#: can mint a meta key at runtime, so collisions must be detected live. This
+#: vocabulary is closed: it can only change by editing this file and its CHECK
+#: constraint together, under review. A fifth registry for three fixed strings
+#: would be indirection without a reader.
 _NOT_OURS: dict[str, str] = {
     "recurrence_of": (
         "'recurrence_of' is core-owned: it is written by the identity machinery and "
@@ -284,6 +292,7 @@ def query_relations(
     return {"count": len(rows), "relations": rows}
 
 
+import json  # noqa: E402
 from codebugs.db import (  # noqa: E402
     register_cli_provider,
     register_schema,
@@ -416,7 +425,5 @@ def _cmd_relations_query(args):
     finally:
         conn.close()
 
-
-import json  # noqa: E402
 
 register_cli_provider("relations", register_cli)
