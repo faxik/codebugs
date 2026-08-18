@@ -91,6 +91,23 @@ class TestCitationComponents:
         assert rep["edges_total"] == 0
         assert rep["orphans_total"] == 1
 
+    def test_all_three_counters_use_the_same_unit(self, conn):
+        """citations / dangling / self-references sit on one header line, so they
+        must count the same thing: one distinct (citing card, cited id) pair.
+        Counting mentions per row and the other two per occurrence inflated
+        dangling 3x on the reference corpus."""
+        a = add(conn, "the in-population card that gets cited three times over")
+        b = add(conn, f"cites {a} and the absent CB-9999, twice each: "
+                      f"{a} again and CB-9999 again")
+        findings.update_finding(conn, b, meta_update={
+            "notes": f"{a} a third time, CB-9999 a third time, and itself {b}",
+            "related": f"{a} a fourth time, CB-9999 a fourth time, {b} again",
+        })
+        rep = grouping.citation_report(conn)
+        assert rep["citations_total"] == 1
+        assert rep["dangling_total"] == 1
+        assert rep["self_references"] == 1
+
     def test_reference_outside_the_population_is_dangling_not_dropped(self, conn):
         a = add(conn, "the card that gets fixed and leaves the live population")
         b = add(conn, f"a live card that still points at {a}")
