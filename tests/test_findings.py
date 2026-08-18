@@ -1917,3 +1917,226 @@ class TestImportRowContract:
                  "description": ""}]
         report = findings.import_findings(conn, rows)
         assert report == findings.ImportReport(0, 0, 0, 0, []), report
+
+
+class TestRestoreIsVerbatim:
+    """CB-97. A restore states that these rows ARE the tracker, so it writes the stored
+    columns directly — bypassing the identity function, the pre-add resolvers and the
+    post-add hooks. Every constraint below was measured during the review that split this
+    card out of CB-51."""
+
+    def _seed(self, conn):
+        a = findings.add_finding(conn, severity="high", category="bug", file="x.py",
+                                 description="alpha", tags=["rel"])
+        b = findings.add_finding(conn, severity="low", category="bug", file="y.py",
+                                 description="beta")
+        findings.update_finding(conn, a["id"], status="fixed")
+        findings.update_finding(conn, b["id"], status="wont_fix")
+        for _ in range(4):
+            findings.add_finding(conn, severity="medium", category="bug", file="z.py",
+                                 description="gamma repeated")
+        # the recurrence twin — SAME fingerprint as the wont_fix row, and live
+        findings.add_finding(conn, severity="low", category="bug", file="y.py",
+                             description="beta")
+
+    def _snapshot(self, conn):
+        return [tuple(r) for r in conn.execute(
+            "SELECT id, severity, category, file, status, description, source, tags, meta,"
+            " reported_at_commit, reported_at_ref, created_at, updated_at, fingerprint,"
+            " occurrence_count, last_seen_at FROM findings ORDER BY id")]
+
+    def _export_rows(self, conn):
+        rows = []
+        for r in conn.execute(f"SELECT {', '.join(findings._RESTORE_COLUMNS)} FROM findings"):
+            rows.append({c: r[c] for c in findings._RESTORE_COLUMNS})
+        return rows
+
+    def test_every_column_survives_the_round_trip(self, tmp_path):
+        src_dir, dst_dir = tmp_path / "s", tmp_path / "d"
+        for d in (src_dir, dst_dir):
+            d.mkdir()
+            db.init_project(str(d))
+        src = db.connect(str(src_dir))
+        self._seed(src)
+        before = self._snapshot(src)
+        rows = self._export_rows(src)
+        src.close()
+
+        dst = db.connect(str(dst_dir))
+        report = findings.restore_findings(dst, rows)
+        after = self._snapshot(dst)
+        dst.close()
+        assert report.restored == len(before), report
+        assert after == before, "a restore must be verbatim"
+
+    def test_a_recurrence_PAIR_sharing_a_fingerprint_restores(self, tmp_path):
+        """The input that killed the previous design. A `wont_fix` card and its
+        `recurrence_of` twin share a fingerprint BY DESIGN, so inserting both as `open`
+        first collides on `ux_findings_fingerprint_live` — whichever lands second fails.
+        Writing the FINAL statuses satisfies the partial index by construction."""
+        src_dir, dst_dir = tmp_path / "s2", tmp_path / "d2"
+        for d in (src_dir, dst_dir):
+            d.mkdir()
+            db.init_project(str(d))
+        src = db.connect(str(src_dir))
+        self._seed(src)
+        fps = [r[0] for r in src.execute(
+            "SELECT fingerprint FROM findings WHERE description='beta'")]
+        rows = self._export_rows(src)
+        src.close()
+        assert len(fps) == 2 and fps[0] == fps[1], fps  # the premise this test rests on
+
+        dst = db.connect(str(dst_dir))
+        findings.restore_findings(dst, rows)
+        pair = dst.execute(
+            "SELECT status FROM findings WHERE description='beta' ORDER BY id").fetchall()
+        dst.close()
+        assert sorted(p[0] for p in pair) == ["open", "wont_fix"], pair
+
+    def test_it_refuses_a_colliding_id_and_writes_nothing(self, conn):
+        findings.add_finding(conn, severity="low", category="c", file="a.py",
+                             description="already here", finding_id="CB-1")
+        rows = [{"id": "CB-1", "severity": "low", "category": "c", "file": "b.py",
+                 "description": "incoming", "status": "open"},
+                {"id": "CB-2", "severity": "low", "category": "c", "file": "c.py",
+                 "description": "also incoming", "status": "open"}]
+        with pytest.raises(ValueError, match="already exist"):
+            findings.restore_findings(conn, rows)
+        # the non-colliding row must NOT have landed
+        assert conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0] == 1
+
+    def test_it_refuses_a_duplicate_id_within_the_file(self, conn):
+        rows = [{"id": "CB-9", "severity": "low", "category": "c", "file": "a.py",
+                 "description": "one"},
+                {"id": "CB-9", "severity": "low", "category": "c", "file": "b.py",
+                 "description": "two"}]
+        with pytest.raises(ValueError, match="appears twice"):
+            findings.restore_findings(conn, rows)
+        assert conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0] == 0
+
+    def test_it_refuses_a_row_with_no_id(self, conn):
+        rows = [{"id": "", "severity": "low", "category": "c", "file": "a.py",
+                 "description": "no identity"}]
+        with pytest.raises(ValueError, match="requires an id"):
+            findings.restore_findings(conn, rows)
+
+    def test_a_bad_row_late_in_the_file_lands_nothing(self, conn):
+        rows = [{"id": f"CB-{i}", "severity": "low", "category": "c", "file": "a.py",
+                 "description": f"row {i}"} for i in range(1, 5)]
+        rows[3]["occurrence_count"] = "not a number"
+        with pytest.raises(ValueError, match="occurrence_count"):
+            findings.restore_findings(conn, rows)
+        assert conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0] == 0
+
+    def test_no_milestone_items_are_fabricated(self, tmp_path):
+        """Post-add hooks would invent one triage item and two audit rows per restored
+        card, asserting a history that never happened. Absent is honest; fabricated is
+        not. The CLI says so out loud."""
+        d = tmp_path / "m"
+        d.mkdir()
+        db.init_project(str(d))
+        conn = db.connect(str(d))
+        rows = [{"id": "CB-1", "severity": "low", "category": "c", "file": "a.py",
+                 "description": "restored", "status": "fixed"}]
+        findings.restore_findings(conn, rows)
+        items = conn.execute("SELECT COUNT(*) FROM milestone_items").fetchone()[0]
+        audit = conn.execute("SELECT COUNT(*) FROM milestone_audit").fetchone()[0]
+        conn.close()
+        assert (items, audit) == (0, 0), (items, audit)
+
+    def test_id_allocation_continues_after_restored_ids(self, conn):
+        """A restore writes ids the allocator never minted, so the next `add` must not
+        collide with them. `_next_id` is max-numeric + 1 — read, not assumed — and this
+        pins it, because a restore depends on it silently."""
+        rows = [{"id": "CB-500", "severity": "low", "category": "c", "file": "a.py",
+                 "description": "restored high id"}]
+        findings.restore_findings(conn, rows)
+        nxt = findings.add_finding(conn, severity="low", category="c", file="b.py",
+                                   description="after restore")
+        assert nxt["id"] == "CB-501", nxt["id"]
+
+
+class TestRestoreColumnsMatchTheSchema:
+    """RATCHET. `_RESTORE_COLUMNS` is the single declaration the exporter AND the restore
+    both build from. A column added to `findings` and forgotten here would be silently
+    dropped by every future export and restore — quiet backup loss, which is the whole
+    defect class this card closes."""
+
+    def test_the_declaration_covers_every_findings_column(self, conn):
+        live = {r[1] for r in conn.execute("PRAGMA table_info(findings)")}
+        assert set(findings._RESTORE_COLUMNS) == live, (
+            f"missing from _RESTORE_COLUMNS: {sorted(live - set(findings._RESTORE_COLUMNS))}; "
+            f"stale in _RESTORE_COLUMNS: {sorted(set(findings._RESTORE_COLUMNS) - live)}"
+        )
+
+
+class TestExportIsNotCapped:
+    """CB-97. `export-csv` used `query_findings(limit=100000)` — a silent ceiling on the one
+    path where losing rows costs most, since an export is the input to a restore.
+
+    Asserting "7 rows in, 7 rows out" would NOT catch a reintroduced cap of any size, so
+    this asserts the property directly: the export must ask for at least as many rows as
+    the tracker holds, and must not be paged. Paging was the first fix and review killed
+    it — `query_findings` orders by severity rank and whole-second `created_at` with no
+    unique tiebreaker, so OFFSET paging over that is not a stable partition and a tie group
+    on a page boundary can be duplicated or skipped.
+    """
+
+    def test_the_export_requests_no_fewer_rows_than_exist(self, tmp_project, tmp_path, monkeypatch):
+        conn = db.connect(tmp_project)
+        for i in range(7):
+            findings.add_finding(conn, severity="low", category="c", file=f"f{i}.py",
+                                 description=f"row number {i}")
+        conn.close()
+
+        real = findings.query_findings
+        limits = []
+
+        def spy(conn_, **kw):
+            limits.append(kw.get("limit"))
+            return real(conn_, **kw)
+
+        monkeypatch.setattr(findings, "query_findings", spy)
+        out = tmp_path / "all.csv"
+        # IN-PROCESS: an earlier draft shelled out, so a monkeypatch never reached the
+        # exporter and the test proved nothing about the exporter at all.
+        from codebugs import cli
+
+        monkeypatch.setattr(
+            sys, "argv", ["codebugs", "--tracker-root", tmp_project, "export-csv", str(out)]
+        )
+        cli.main()
+
+        with open(out, newline="") as fh:
+            assert len(list(csv.DictReader(fh))) == 7
+        # the fetch that actually pulled the rows asked for >= the row count
+        assert max(x for x in limits if x is not None) >= 7, limits
+        # ...and there is no OFFSET walk: at most a count probe plus the real fetch
+        assert len(limits) <= 2, limits
+
+
+class TestRestoreScalesPastTheSqlVariableLimit:
+    """A backup you cannot restore is not a backup. The collision pre-check used one SQL
+    placeholder per row, and SQLite caps `SQLITE_LIMIT_VARIABLE_NUMBER` at 32766 on this
+    build (999 on older ones) — measured: 40000 placeholders raise `too many SQL
+    variables`. A tracker large enough would therefore export a file it could not read
+    back, which is this card's own defect arriving at scale."""
+
+    def test_a_restore_larger_than_the_variable_limit_succeeds(self, conn):
+        n = 40000  # comfortably past 32766
+        rows = [{"id": f"CB-{i}", "severity": "low", "category": "c", "file": "a.py",
+                 "description": f"row {i}"} for i in range(1, n + 1)]
+        report = findings.restore_findings(conn, rows)
+        assert report.restored == n, report
+        assert conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0] == n
+
+    def test_a_collision_is_still_detected_in_a_large_file(self, conn):
+        """The single-parameter `json_each` form must not lose a collision buried in a
+        large batch — the obvious way to get the no-ceiling rewrite wrong."""
+        findings.add_finding(conn, severity="low", category="c", file="a.py",
+                             description="already here", finding_id="CB-33333")
+        rows = [{"id": f"CB-{i}", "severity": "low", "category": "c", "file": "a.py",
+                 "description": f"row {i}"} for i in range(1, 40001)]
+        with pytest.raises(ValueError, match="CB-33333"):
+            findings.restore_findings(conn, rows)
+        assert conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0] == 1
