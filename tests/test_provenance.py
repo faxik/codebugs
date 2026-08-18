@@ -1,5 +1,6 @@
 """Tests for staleness detection (provenance module)."""
 
+import json
 import os
 import subprocess
 
@@ -899,11 +900,28 @@ class TestResolutionPinsThatMustNotRegress:
         assert result["file_status"] == "current", result
 
     def test_a_deleted_file_is_still_deleted_from_a_subdirectory_cwd(self, git_project):
-        """REGRESSION PIN. Draft 1 asked `ls-tree --full-tree` with a
-        cwd-relative pathspec, so from a subdirectory it looked for the path at
-        the repo ROOT, found nothing, and converted this CORRECT `deleted` into
-        `unknown`. Reachable in production: `staleness_check` passes
-        `project_dir=None` and the walk-up permits any subdirectory."""
+        """REGRESSION PIN, REWRITTEN BY CB-93 — a DECLARED contract change, not
+        a repair. Read this before "fixing" it back.
+
+        Its purpose is unchanged and still load-bearing: a subdirectory cwd must
+        not turn a correct `deleted` into `unknown`. Draft 1 of CB-88 broke
+        exactly that by asking `ls-tree --full-tree` with a cwd-relative
+        pathspec.
+
+        What changed is the SPELLING the pin uses. It asserted `file="auth.py"`
+        with cwd `<repo>/src`, i.e. a value relative to the SUBDIRECTORY — which
+        `findings.py`'s "File path relative to project root" never sanctioned,
+        and which only worked because every operation was cwd-anchored. CB-93
+        ratified option (a): the documented contract wins, so the pin now uses
+        the documented spelling and the subdirectory cwd is what it was always
+        meant to be — irrelevant to the answer.
+
+        Measured before the change: 0 of 3307 findings across the codebugs and
+        autosorter trackers used a subdirectory-relative value, so the changed
+        population is empty in practice. The old spelling's new answer is pinned
+        as honest rather than merely different by
+        `TestFileIsRootRelative::test_a_subdirectory_relative_value_is_unknown_never_confident`.
+        """
         project, sha = git_project
         path = _commit_a_change(project)
         os.remove(path)
@@ -912,7 +930,7 @@ class TestResolutionPinsThatMustNotRegress:
             ["git", "commit", "-m", "delete"], cwd=project, check=True, capture_output=True
         )
         result = provenance.file_status(
-            file_path="auth.py",
+            file_path="src/auth.py",
             reported_at_commit=sha,
             project_dir=os.path.join(project, "src"),
         )
@@ -972,3 +990,342 @@ class TestResolutionPinsThatMustNotRegress:
             project_dir=project,
         )
         assert result["file_status"] != "deleted", result
+
+
+def _create_and_rename(project, old_rel, new_rel):
+    """Create `old_rel`, commit (returning that sha), then `git mv` it to
+    `new_rel` and commit. The returned sha is a commit whose tree holds
+    `old_rel` as a blob, so `file_status` reaches the rename probe."""
+    src = os.path.join(project, old_rel)
+    os.makedirs(os.path.dirname(src), exist_ok=True)
+    with open(src, "w") as fh:
+        fh.write("alpha\nbeta\ngamma\ndelta\n")
+    subprocess.run(["git", "add", "-A"], cwd=project, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "add"], cwd=project, check=True, capture_output=True)
+    base = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=project, text=True
+    ).strip()
+    dst = os.path.join(project, new_rel)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    subprocess.run(["git", "mv", src, dst], cwd=project, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "rename"], cwd=project, check=True, capture_output=True)
+    return base
+
+
+class TestRenameProbeParsing:
+    """CB-92. Four routes into one wrong answer: the rename probe TAB-splits
+    `git diff --name-status` and compares field 1 against the caller's RAW
+    spelling, so a C-quoted path, a path holding a TAB, a non-canonical
+    spelling, and a subdirectory cwd all miss the rename branch and fall
+    through to the unconditional `deleted` return.
+
+    That return is a POSITIVE claim that the file is gone, derived from a
+    comparison that silently failed — this module's most-repeated defect
+    (CB-79, CB-85, CB-88). Every test here was verified to FAIL against
+    `git show main:src/codebugs/provenance.py`; the control was verified to
+    pass on both sides and is named as such.
+    """
+
+    def test_a_non_ascii_path_is_renamed_not_deleted(self, git_project):
+        """`core.quotePath` defaults true, so git prints `"src/\\303\\244.py"`
+        — with literal quotes and octal escapes — and the equality test against
+        the raw stored value cannot match."""
+        project, _ = git_project
+        base = _create_and_rename(project, "src/ä.py", "src/renamed.py")
+        result = provenance.file_status(
+            file_path="src/ä.py", reported_at_commit=base, project_dir=project
+        )
+        assert result["file_status"] == "renamed", result
+
+    def test_a_path_containing_a_tab_is_renamed_not_deleted(self, git_project):
+        """A TAB in the name breaks the field split outright — the parse
+        hazard `-c core.quotePath=false` would NOT have fixed, which is why
+        the fix is `-z` and not that."""
+        project, _ = git_project
+        base = _create_and_rename(project, "src/a\tb.py", "src/renamed.py")
+        result = provenance.file_status(
+            file_path="src/a\tb.py", reported_at_commit=base, project_dir=project
+        )
+        assert result["file_status"] == "renamed", result
+
+    def test_a_non_canonical_spelling_is_renamed_not_deleted(self, git_project):
+        """No quoting involved at all: git canonicalizes the name it prints, so
+        `./src/x.py` is emitted as `src/x.py`. This route is NOT on CB-92 and is
+        the evidence that CB-92 and CB-93 share one cause."""
+        project, _ = git_project
+        base = _create_and_rename(project, "src/moved.py", "src/renamed.py")
+        result = provenance.file_status(
+            file_path="./src/moved.py", reported_at_commit=base, project_dir=project
+        )
+        assert result["file_status"] == "renamed", result
+
+    def test_a_rename_is_found_from_a_subdirectory_cwd(self, git_project):
+        """`git diff --name-status` prints ROOT-relative paths regardless of
+        cwd (measured), so from a subdirectory the comparison against a
+        cwd-relative spelling can never match for a nested path."""
+        project, _ = git_project
+        base = _create_and_rename(project, "src/moved.py", "src/renamed.py")
+        result = provenance.file_status(
+            file_path="src/moved.py",
+            reported_at_commit=base,
+            project_dir=os.path.join(project, "src"),
+        )
+        assert result["file_status"] == "renamed", result
+
+    def test_a_plain_rename_is_still_found(self, git_project):
+        """CONTROL — green on BOTH sides, deliberately. It pins the behaviour
+        the change preserves; without it a parser that finds nothing at all
+        would still turn the four tests above green only by accident."""
+        project, _ = git_project
+        base = _create_and_rename(project, "src/moved.py", "src/renamed.py")
+        result = provenance.file_status(
+            file_path="src/moved.py", reported_at_commit=base, project_dir=project
+        )
+        assert result["file_status"] == "renamed", result
+        assert "src/renamed.py" in result["reason"], result
+
+
+class TestFileIsRootRelative:
+    """CB-93, option (a) — RATIFIED by the user on 2026-08-18. `findings.py`
+    documents `file` as "File path relative to project root"; every operation
+    here now honours that, so the answer no longer depends on where the process
+    happens to stand.
+
+    The behaviour change is DECLARED, not incidental: a subdirectory-relative
+    value stops resolving. Measured before ratifying — across the codebugs and
+    autosorter trackers (3307 findings) not one value is subdirectory-relative,
+    so the changed population is empty in practice.
+    """
+
+    def test_the_documented_spelling_answers_from_a_subdirectory(self, git_project):
+        """The headline. Before this change the contract-correct spelling was
+        the one that did NOT work from a subdirectory."""
+        project, sha = git_project
+        _commit_a_change(project)
+        result = provenance.file_status(
+            file_path="src/auth.py",
+            reported_at_commit=sha,
+            project_dir=os.path.join(project, "src"),
+        )
+        assert result["file_status"] == "modified", result
+
+    def test_the_ambient_path_honours_the_root(self, git_project, monkeypatch):
+        """The production route: `staleness_check` passes `project_dir=None`,
+        `check_findings` falls back to `_ambient_cwd()`, and `db.connect()`'s
+        walk-up permits the server to start in any subdirectory. So a
+        long-lived MCP server one level down misreported the whole tracker."""
+        project, sha = git_project
+        _commit_a_change(project)
+        monkeypatch.chdir(os.path.join(project, "src"))
+        result = provenance.file_status(file_path="src/auth.py", reported_at_commit=sha)
+        assert result["file_status"] == "modified", result
+
+    def test_a_subdirectory_relative_value_is_unknown_never_confident(self, git_project):
+        """The declared cost of option (a), pinned so it stays HONEST rather
+        than merely changed. `auth.py` is no longer read as `<root>/src/auth.py`
+        — but it must degrade to `unknown` with a reason, never to a confident
+        `deleted`/`current` about a path this repo has no record of."""
+        project, sha = git_project
+        _commit_a_change(project)
+        result = provenance.file_status(
+            file_path="auth.py",
+            reported_at_commit=sha,
+            project_dir=os.path.join(project, "src"),
+        )
+        assert result["file_status"] == "unknown", result
+        assert result["reason"] == "not_in_commit", result
+
+    def test_the_batch_path_honours_the_root_too(self, git_project, conn):
+        """`check_findings` resolves the worktree root once and threads it as a
+        hint; the hint must not reintroduce the cwd anchor for the batch."""
+        project, sha = git_project
+        _commit_a_change(project)
+        findings.add_finding(
+            conn,
+            severity="high",
+            category="test",
+            file="src/auth.py",
+            description="root-relative by contract",
+            reported_at_commit=sha,
+        )
+        result = provenance.check_findings(conn, os.path.join(project, "src"))
+        assert result["total"] == 1, result
+        assert result["findings"][0]["file_status"] == "modified", result
+
+
+class TestPremiseGitRecordShapes:
+    """PREMISE PINS, in this repo's established `test_premise_*` shape. The
+    parser above is built on two measured facts about git's own output. Neither
+    is documented as stable, and if either changes the parser desynchronizes and
+    silently reports NO renames — a confident `deleted` for every renamed file,
+    which is precisely the defect CB-92 fixed. A git upgrade that moves either
+    must turn this suite red rather than quietly disarm the fix.
+    """
+
+    def test_premise_name_status_is_root_relative_regardless_of_cwd(self, git_project):
+        """The rename comparison uses `rel` because of THIS. `git diff` prints
+        root-relative paths from anywhere (only `--relative` changes it), so a
+        cwd-relative spelling can never match from a subdirectory."""
+        project, _ = git_project
+        base = _create_and_rename(project, "src/moved.py", "src/renamed.py")
+        for cwd in (project, os.path.join(project, "src")):
+            out = subprocess.check_output(
+                ["git", "diff", "--diff-filter=R", "-M", "--name-status", f"{base}..HEAD"],
+                cwd=cwd,
+                text=True,
+            )
+            assert "src/moved.py\tsrc/renamed.py" in out, (cwd, out)
+
+    def test_premise_z_uses_nul_separated_triples_for_renames(self, git_project):
+        """`-z` emits `<status>\\0<old>\\0<new>\\0` — status NUL-separated from
+        the first path, not TAB-separated. The parser consumes 3 fields per
+        rename on this basis."""
+        project, _ = git_project
+        base = _create_and_rename(project, "src/moved.py", "src/renamed.py")
+        out = subprocess.check_output(
+            ["git", "diff", "--diff-filter=R", "-M", "--name-status", "-z", f"{base}..HEAD"],
+            cwd=project,
+            text=True,
+        )
+        fields = [f for f in out.split("\0") if f]
+        assert "\t" not in out, out
+        assert fields[0].startswith("R"), fields
+        assert fields[1:3] == ["src/moved.py", "src/renamed.py"], fields
+
+    def test_premise_z_emits_raw_bytes_that_break_strict_decoding(self, git_project):
+        """Why `errors="surrogateescape"` is not optional. Without `-z` git
+        C-quotes to pure ASCII; WITH it the raw bytes arrive and strict decoding
+        raises `UnicodeDecodeError` — a `ValueError`, which this module's
+        `(SubprocessError, OSError)` guards do NOT catch."""
+        project, _ = git_project
+        name = os.path.join(project, "src", b"bad\xff.py".decode("utf-8", "surrogateescape"))
+        with open(name, "w") as fh:
+            fh.write("alpha\nbeta\ngamma\ndelta\n")
+        subprocess.run(["git", "add", "-A"], cwd=project, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add"], cwd=project, check=True, capture_output=True)
+        base = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=project, text=True
+        ).strip()
+        subprocess.run(
+            ["git", "mv", name, os.path.join(project, "src", "ok.py")],
+            cwd=project,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(["git", "commit", "-m", "mv"], cwd=project, check=True, capture_output=True)
+
+        argv = ["git", "diff", "--diff-filter=R", "-M", "--name-status", "-z", f"{base}..HEAD"]
+        with pytest.raises(UnicodeDecodeError) as exc:
+            subprocess.check_output(argv, cwd=project, text=True)
+        assert not isinstance(exc.value, (subprocess.SubprocessError, OSError))
+        assert isinstance(exc.value, ValueError)
+        # ...and the parameter the fix uses does round-trip it.
+        out = subprocess.check_output(argv, cwd=project, text=True, errors="surrogateescape")
+        assert "\0" in out, out
+
+
+class TestUndecodablePathsDoNotKillTheBatch:
+    """HOSTAGE TEST for the FATAL found by adversarial review of this change.
+    The rename probe takes NO pathspec, so it reads every rename in the range.
+    One undecodable path anywhere therefore poisoned every finding — including
+    plain-ASCII ones — by raising out of `file_status` instead of degrading.
+    """
+
+    def _repo_with_an_unrelated_undecodable_rename(self, project):
+        bad = os.path.join(project, "src", b"other\xff.py".decode("utf-8", "surrogateescape"))
+        with open(bad, "w") as fh:
+            fh.write("zzzz\nyyyy\nxxxx\nwwww\n")
+        subprocess.run(["git", "add", "-A"], cwd=project, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add"], cwd=project, check=True, capture_output=True)
+        base = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=project, text=True
+        ).strip()
+        subprocess.run(
+            ["git", "mv", bad, os.path.join(project, "src", "other_ok.py")],
+            cwd=project,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(["git", "commit", "-m", "mv"], cwd=project, check=True, capture_output=True)
+        return base
+
+    def test_an_unrelated_undecodable_rename_does_not_raise(self, git_project):
+        """The ASCII finding under test is genuinely deleted; the answer must be
+        `deleted`, reached without an exception, despite the undecodable rename
+        sharing the range."""
+        project, _ = git_project
+        base = self._repo_with_an_unrelated_undecodable_rename(project)
+        os.remove(os.path.join(project, "src", "auth.py"))
+        subprocess.run(["git", "add", "-A"], cwd=project, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "rm"], cwd=project, check=True, capture_output=True)
+
+        result = provenance.file_status(
+            file_path="src/auth.py", reported_at_commit=base, project_dir=project
+        )
+        assert result["file_status"] == "deleted", result
+
+    def test_an_undecodable_path_is_itself_still_renamed(self, git_project):
+        """And the undecodable path's own answer is correct, not merely
+        non-fatal — `surrogateescape` round-trips it on both sides of the
+        comparison."""
+        project, _ = git_project
+        spelling = os.path.join("src", b"other\xff.py".decode("utf-8", "surrogateescape"))
+        base = self._repo_with_an_unrelated_undecodable_rename(project)
+        result = provenance.file_status(
+            file_path=spelling, reported_at_commit=base, project_dir=project
+        )
+        assert result["file_status"] == "renamed", result
+
+
+class TestNewlineInAPathIsParsed:
+    """CB-92's third parse hazard. `-c core.quotePath=false` would have fixed
+    the quoting and left THIS open, which is why the fix is `-z`. Named
+    separately because it is the one route where the old `.splitlines()` parser
+    and a field-count-only fix diverge."""
+
+    def test_a_path_containing_a_newline_is_renamed_not_deleted(self, git_project):
+        project, _ = git_project
+        base = _create_and_rename(project, "src/a\nb.py", "src/renamed.py")
+        result = provenance.file_status(
+            file_path="src/a\nb.py", reported_at_commit=base, project_dir=project
+        )
+        assert result["file_status"] == "renamed", result
+
+
+class TestAReasonStringAlwaysSerializes:
+    """A verdict that cannot be returned is not a verdict. `surrogateescape`
+    makes an undecodable git path COMPARABLE, but a lone surrogate cannot be
+    encoded back to UTF-8 — and `reason` is serialized to JSON by the MCP layer.
+    Measured: pydantic's `dump_json` (what the SDK uses) raises
+    `PydanticSerializationError`, `json.dumps(ensure_ascii=False)` raises
+    `UnicodeEncodeError`.
+
+    Reachable on the ordinary MCP path via the rename DESTINATION: a stored
+    `file` can never hold a surrogate (SQLite refuses it on write), but
+    `new_path` comes from git. Found by following up a cross-model review
+    question, not by the suite — the fix answered correctly and died on the way
+    out.
+    """
+
+    def test_a_rename_to_an_undecodable_name_still_serializes(self, git_project):
+        project, _ = git_project
+        src = os.path.join(project, "src", "plain.py")
+        with open(src, "w") as fh:
+            fh.write("alpha\nbeta\ngamma\ndelta\n")
+        subprocess.run(["git", "add", "-A"], cwd=project, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add"], cwd=project, check=True, capture_output=True)
+        base = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=project, text=True
+        ).strip()
+        dst = os.path.join(project, "src", b"weird\xff.py".decode("utf-8", "surrogateescape"))
+        subprocess.run(["git", "mv", src, dst], cwd=project, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "mv"], cwd=project, check=True, capture_output=True)
+
+        result = provenance.file_status(
+            file_path="src/plain.py", reported_at_commit=base, project_dir=project
+        )
+        # The verdict is still correct...
+        assert result["file_status"] == "renamed", result
+        # ...and it can actually leave the process.
+        assert not any(0xD800 <= ord(c) <= 0xDFFF for c in result["reason"]), result
+        json.dumps(result, ensure_ascii=False).encode("utf-8")

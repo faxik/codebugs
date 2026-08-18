@@ -72,8 +72,14 @@ def _repo_root(cwd: str) -> str | None:
     return os.path.realpath(out) if out else None
 
 
-def _resolve_candidate(cwd: str, file_path: str) -> str:
+def _resolve_candidate(root: str, file_path: str) -> str:
     """The filesystem path a `file` value denotes — the same one `os.stat` gets.
+
+    `root` is the WORKTREE ROOT, not the process cwd (CB-93). `findings.py`
+    documents `file` as "File path relative to project root"; anchoring here is
+    what makes that true, and it is the single place the coordinate system is
+    chosen. An absolute value still wins the join, so scope is decided by
+    containment rather than by spelling.
 
     Only the PARENT is resolved physically. That keeps a tracked symlink in
     scope (git can answer about its own blob) while refusing an in-repo
@@ -82,11 +88,34 @@ def _resolve_candidate(cwd: str, file_path: str) -> str:
     A final `.`/`..`/`` names a directory, so there is no symlink to preserve
     and the whole path is resolved.
     """
-    joined = os.path.join(cwd, file_path)
+    joined = os.path.join(root, file_path)
     base = os.path.basename(joined)
     if base in ("", ".", ".."):
         return os.path.realpath(joined)
     return os.path.join(os.path.realpath(os.path.dirname(joined)), base)
+
+
+def _displayable(path: str) -> str:
+    """Git-derived path text, made safe to return inside a `reason` string.
+
+    `errors="surrogateescape"` is what lets an undecodable path be COMPARED
+    exactly — the bytes round-trip — but a lone surrogate cannot be encoded back
+    to UTF-8, and `reason` is serialized to JSON by the MCP layer. Measured:
+    pydantic's `dump_json`, which the SDK uses, raises
+    `PydanticSerializationError`, and `json.dumps(..., ensure_ascii=False)`
+    raises `UnicodeEncodeError`. So a rename whose DESTINATION has a non-UTF-8
+    name would answer correctly and then die on the way out.
+
+    Reachable on the ordinary MCP path, unlike the mirror case: a stored `file`
+    value can never hold a surrogate (SQLite refuses it on write), so the
+    caller's own spelling is always safe to echo — but `new_path` comes from
+    git, and an ASCII file renamed to a non-UTF-8 name puts one in the reason.
+
+    The bytes stay exact where they are MATCHED and become U+FFFD only where
+    they are DISPLAYED. Found by following up a cross-model review question
+    about this fix, not by the suite.
+    """
+    return path.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
 
 
 def _kind_at_commit(cwd: str, commit: str, rel: str) -> str | None:
@@ -103,8 +132,18 @@ def _kind_at_commit(cwd: str, commit: str, rel: str) -> str | None:
     `--literal-pathspecs` because `:` and `:(exclude)…` are pathspec MAGIC, not
     paths; `--full-tree` because `rel` is root-relative, and pairing it with a
     cwd-relative spelling asks about a different file entirely; `-z` because it
-    also suppresses `core.quotePath` C-quoting (the hazard CB-92 records for the
-    rename reader below, which still lacks it).
+    also suppresses `core.quotePath` C-quoting — the hazard CB-92 records, now
+    fixed in the rename reader below too.
+
+    `errors="surrogateescape"` is the sibling-sweep half of that CB-92 fix. `-z`
+    means git emits raw path bytes, so a non-UTF-8 name makes `text=True` raise
+    `UnicodeDecodeError` — a `ValueError`, outside this module's
+    `(SubprocessError, OSError)` contract, so it escapes as a traceback rather
+    than degrading. Measured: this call DOES raise when such a path is the
+    target. It is unreachable today only because `rel` derives from a stored
+    `str`, which is safety by argument; the parameter makes it structural, and
+    leaving one of two `-z` readers unhardened is this repo's enumeration
+    failure in miniature.
     """
     if rel == ".":
         return "other"  # the worktree root: always a tree, and git has no record named "."
@@ -113,6 +152,7 @@ def _kind_at_commit(cwd: str, commit: str, rel: str) -> str | None:
             ["git", "--literal-pathspecs", "ls-tree", "-z", "--full-tree", commit, "--", rel],
             cwd=cwd,
             text=True,
+            errors="surrogateescape",
             timeout=10,
             stderr=subprocess.DEVNULL,
         )
@@ -199,9 +239,16 @@ def file_status(
     if root is None and _repo_root_hint is not _ROOT_UNRESOLVED:
         root = _repo_root(cwd)
 
+    # `candidate` is bound beside `rel` and they live or die together: every
+    # consumer below is guarded by `rel is None`, so binding `candidate` only
+    # inside the branch left a name that was correct by reachability alone and
+    # one statement reorder away from a `TypeError` out of `os.stat` — outside
+    # this module's `(SubprocessError, OSError)` contract, which is exactly the
+    # escape the NUL guard above exists to prevent (adversarial review).
     rel: str | None = None
+    candidate: str | None = None
     if root is not None:
-        candidate = _resolve_candidate(cwd, file_path)
+        candidate = _resolve_candidate(root, file_path)
         try:
             inside = os.path.commonpath([root, candidate]) == root
         except ValueError:
@@ -234,7 +281,7 @@ def file_status(
         # to stay, or CalledProcessError and TimeoutExpired escape.
         return {"file_status": "unknown", "reason": "unreachable_commit"}
 
-    if rel is None:
+    if rel is None or candidate is None:
         # The commit is reachable but no worktree root is — a bare repo, or a
         # cwd that is not in a repo at all. Scope cannot be decided and neither
         # can anything below it, so refusing is the honest answer; inventing one
@@ -246,12 +293,18 @@ def file_status(
             # `--literal-pathspecs`: without it `:` is git's NULL pathspec and
             # this call matches the WHOLE history, so a `file` value that is not
             # a path at all produced a non-empty range and the verdict was then
-            # decided by every other file in the repo. The pathspec stays the
-            # RAW input, cwd-relative, exactly as before — reinterpreting it
-            # against the project root is CB-93, deliberately not this change.
+            # decided by every other file in the repo.
+            #
+            # The pathspec is `rel` and the cwd is `root` (CB-93). It used to be
+            # the caller's raw spelling resolved against the process cwd, so the
+            # DOCUMENTED root-relative spelling was the one that failed: from a
+            # subdirectory `git log -- pkg/mod.py` matched nothing and a modified
+            # file reported clean. `rel` is canonical and root-relative by
+            # construction, so every spelling of the same file now asks git the
+            # same question.
             ["git", "--literal-pathspecs", "log", "--oneline"]
-            + [f"{reported_at_commit}..HEAD", "--", file_path],
-            cwd=cwd,
+            + [f"{reported_at_commit}..HEAD", "--", rel],
+            cwd=root,
             text=True,
             timeout=10,
             stderr=subprocess.DEVNULL,
@@ -266,7 +319,7 @@ def file_status(
         # that commit. Disk existence is not historical identity, so the claim
         # now requires git to confirm the path was there.
         try:
-            kind = _kind_at_commit(cwd, reported_at_commit, rel)
+            kind = _kind_at_commit(root, reported_at_commit, rel)
         except _GitUnavailable:
             return {"file_status": "unknown", "reason": "git_error"}
         if kind is None:
@@ -291,7 +344,7 @@ def file_status(
     # empty rename result. Same "guard reporting clean because it could not
     # look" shape, different mechanism — which is why it needed its own card.
     try:
-        st_mode = os.stat(os.path.join(cwd, file_path)).st_mode
+        st_mode = os.stat(candidate).st_mode
     except (FileNotFoundError, NotADirectoryError):
         # Genuinely absent — including a path component that is not a
         # directory, which means the target cannot exist. Today's answer is
@@ -324,7 +377,7 @@ def file_status(
             # BLOB and is now a directory: its blob really is gone, so it keeps
             # falling through to rename/deleted.
             try:
-                kind = _kind_at_commit(cwd, reported_at_commit, rel)
+                kind = _kind_at_commit(root, reported_at_commit, rel)
             except _GitUnavailable:
                 return {"file_status": "unknown", "reason": "git_error"}
             if kind != "blob":
@@ -336,19 +389,41 @@ def file_status(
 
     try:
         rename_output = subprocess.check_output(
+            # `-z` for the same reason `_kind_at_commit` carries it, and it is
+            # what CB-92 is (this reader was left out of the sweep that fixed
+            # `_guard_conflict_markers` and the pre-commit allowlist reader).
+            # Default `core.quotePath` C-quotes any non-ASCII path — git prints
+            # `"src/\303\244.py"`, quotes included — so the comparison below
+            # missed the rename and fell through to a confident `deleted`. A TAB
+            # or newline in a name broke the field/line split outright, which is
+            # why `-z` is used rather than `-c core.quotePath=false`: NUL cannot
+            # occur in a path, so the record shape is unambiguous for BOTH.
             [
                 "git",
                 "diff",
                 "--diff-filter=R",
                 "-M",
                 "--name-status",
+                "-z",
                 f"{reported_at_commit}..HEAD",
             ],
-            cwd=cwd,
+            cwd=root,
             text=True,
+            # `-z` is what makes this necessary, so it lands in the same change.
+            # Suppressing the C-quoting means git emits the path's RAW bytes,
+            # and a non-UTF-8 filename then made `text=True` raise
+            # `UnicodeDecodeError` — a `ValueError`, so it is NOT caught by the
+            # `(SubprocessError, OSError)` tuple below and escaped `file_status`
+            # entirely. This probe takes no pathspec, so ONE undecodable rename
+            # anywhere in the range killed a whole `check_findings` batch,
+            # including plain-ASCII findings. Reproduced during adversarial
+            # review of this change; the module already refuses a NUL byte for
+            # this exact reason ("outside the contract every caller is written
+            # against"). `surrogateescape` round-trips the bytes instead.
+            errors="surrogateescape",
             timeout=10,
             stderr=subprocess.DEVNULL,
-        ).strip()
+        )
     except (subprocess.SubprocessError, OSError):
         # NOT `rename_output = ""` (CB-79). That conflated "git found no renames"
         # with "git could not be asked", and the fall-through below then reports
@@ -358,15 +433,32 @@ def file_status(
         # cwd, so the honest answer has to replace the silent one.
         return {"file_status": "unknown", "reason": "git_error"}
 
-    if rename_output:
-        for line in rename_output.splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 3 and parts[1] == file_path:
-                new_path = parts[2]
-                return {
-                    "file_status": "renamed",
-                    "reason": f"{file_path} renamed to {new_path}",
-                }
+    # `-z` records: each entry is `<status>\0<path>\0`, and a rename or copy
+    # carries a SECOND path, `<status>\0<old>\0<new>\0`. Consume by status
+    # letter rather than assuming `--diff-filter=R` guarantees triples: the
+    # record shape is decided by git, not by our filter, and a parser that
+    # desynchronizes would silently find no renames — this card's own bug,
+    # reintroduced one layer down.
+    fields = [f for f in rename_output.split("\0") if f]
+    i = 0
+    while i + 1 < len(fields):
+        status = fields[i]
+        if status[:1] not in ("R", "C"):
+            i += 2
+            continue
+        if i + 2 >= len(fields):
+            break
+        old_path, new_path = fields[i + 1], fields[i + 2]
+        # Compared against `rel`, never the caller's spelling: `git diff`
+        # prints ROOT-relative paths regardless of cwd (measured), so the raw
+        # cwd-relative value could never match from a subdirectory, and git
+        # canonicalizes what it prints, so `./src/x.py` could not match either.
+        if old_path == rel:
+            return {
+                "file_status": "renamed",
+                "reason": f"{file_path} renamed to {_displayable(new_path)}",
+            }
+        i += 3
 
     return {
         "file_status": "deleted",

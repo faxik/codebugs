@@ -6,6 +6,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **`staleness_check` now resolves a finding's `file` against the repository
+  root, as `findings.py` has always documented it (CB-93).** Every staleness
+  operation previously resolved it against the *process* cwd, so the documented
+  root-relative spelling was the one that failed: from a subdirectory
+  `file_status(file="pkg/mod.py")` reported `unknown`/`not_in_commit` for a file
+  that had genuinely changed. This is reachable on the ordinary path, not just
+  from a shell — the MCP tool passes `project_dir=None` and `db.connect()`'s
+  walk-up permits the server to start anywhere at or below the root, so a
+  long-lived server launched one directory down misreported the whole tracker.
+
+  **This is a behaviour change on a documented surface, stated plainly.** A
+  `file` value written relative to a *subdirectory* used to resolve and now does
+  not; it degrades to `unknown` with a reason rather than to a confident wrong
+  verdict. The changed population was measured before the decision was taken:
+  across 3,307 findings in two real trackers, **zero** used a
+  subdirectory-relative value.
+
+### Fixed
+- **A renamed file could be reported as `deleted` — a confident claim that a
+  present file is gone (CB-92).** The rename probe split `git diff
+  --name-status` output on TAB and compared it against the caller's raw
+  spelling, which failed four ways, each ending at the same unconditional
+  `deleted`: git C-quotes non-ASCII paths by default (`"src/\303\244.py"`, with
+  the quotes); a TAB or newline in a name broke the split; git canonicalises the
+  name it prints, so `./src/x.py` never matched; and `git diff` prints
+  root-relative paths regardless of cwd, so no nested path matched from a
+  subdirectory. The probe now reads NUL-delimited records (`-z`) and compares
+  against the canonical root-relative path, which closes all four.
+
+  This was the fourth route into this module's most-repeated false positive,
+  after CB-79, CB-85 and CB-88 — each a different unasked question ending at the
+  same line.
+- **A non-UTF-8 filename no longer aborts a whole staleness batch.** Suppressing
+  git's C-quoting means raw path bytes arrive, and strict decoding raised
+  `UnicodeDecodeError` — a `ValueError`, so it escaped the module's
+  `(SubprocessError, OSError)` guards entirely. The rename probe takes no
+  pathspec, so one undecodable rename anywhere in the range would have killed
+  every finding in a `staleness_check`, including plain-ASCII ones. Both
+  NUL-reading probes now decode with `surrogateescape`. Found by adversarial
+  review of the CB-92 fix, before it shipped.
+
 ### Added
 - **`relations.py` — typed, retractable relations between findings.** Callers
   had been recording relations in ad-hoc JSON `meta` keys for months: measured
