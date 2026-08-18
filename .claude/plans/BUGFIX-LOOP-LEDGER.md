@@ -1162,3 +1162,67 @@ asked about mid-iteration, filed instead of absorbed into a two-edit stabilizati
 first — is importing an export a RESTORE (preserve id/status/occurrence_count) or an
 OBSERVATION, and what happens when a foreign tracker's CB-1..CB-N collide with local ids.
 Entangled with CB-77. **Next iteration opens with that design round, not with code.**
+
+---
+
+## Iteration 5 — 2026-08-18 · focus `codebugs` · **CB-51, the queue's only `high`**
+
+**Cards:** CB-51 + CB-77 → **both fixed** (CB-51's `restore` half split out). Merge `461d8c8`
+(branch `feature/cb-51-cb-77-import-restore-verbs`, commits `f78ec74`, `edbcb25`, `ae8d83a`).
+Filed: **CB-97**. Open 40 → 40.
+
+**The iteration opened with a DESIGN ROUND, not code** — the user's ratified sequencing from
+iteration 4. Three decisions taken: two verbs (`import` = observation, `restore` = verbatim), a
+colliding row must LAND with its origin recorded, and one transaction all-or-nothing (which also
+settled CB-77, blocked on exactly that question). Grounding the questions in BOTH sides of the
+round-trip is what made them answerable: `export-csv` writes `id, status, occurrence_count,
+created_at, tags` and `_cmd_import_csv` read **none** of them.
+
+**THE CARD UNDERSTATED ITSELF AGAIN — a fifth defect, on no card, was the most dangerous.**
+`export-csv` orders by **severity**, so a normal backup is not in ascending id order; the allocator
+then mints ids that later rows of the same file still name, and the guard rejects the CSV's real
+`CB-2` because a freshly minted `CB-2` exists. **3 rows out, 2 back, exit 0** — silent data loss on
+the disaster-recovery path, reported as success.
+
+**A near-miss on evidence, caught before it reached the plan.** The first reproducer passed
+`--file` where the parser takes a positional, so all three imports died on argparse and three
+"reproductions" were about to be recorded from commands that never ran. The reproducer now raises
+if the CLI exits on a usage error. Second iteration running in which the *evidence* was the thing
+that needed checking, not the code.
+
+**ADVERSARIAL REVIEW RETURNED FAIL AND KILLED THE DESIGN — the most valuable review yet.** Three
+FATALs, all reproduced: `restore` cannot use the add path at all (`auto:` fingerprints refused,
+reserved meta keys refused, status/occurrence_count/created_at not insertable); insert-as-`open`-
+then-UPDATE **refuses a legitimate export**, because a `wont_fix` card and its `recurrence_of` twin
+share a fingerprint by design — *my own answer to defect 3 was the input that broke my own design*;
+and post-add hooks fire on the INSERT, so an N-row restore fabricates N triage items and 2N audit
+rows asserting a history that never happened. It also killed an invention of mine that was never
+ratified — "import is idempotent" — by measuring that explicit-id rows store `fingerprint = NULL`,
+so a fingerprint-only skip cannot see them and the id guard I proposed deleting is the only thing
+covering that population.
+
+**Response was to SPLIT, not to push through.** `restore` became **CB-97** carrying every
+constraint plus three fidelity gaps review surfaced (the export omits `reported_at_commit` /
+`reported_at_ref`, is capped at `limit=100000`, and carries no milestone projections). The user's
+decision is unchanged; only its delivery is sequenced. This tree shipped the half that is correct
+today — three data-loss defects, the unfiled fourth, and CB-77.
+
+**`/simplify` then found the seam had not fully moved.** The handler's docstring claimed "no import
+semantics here" while still computing the reserved-meta strip, so the domain validated meta only
+one caller had sanitized. And the row contract was **double** — the handler pre-decoded `meta` to a
+dict while every new test passed the raw JSON string, which `dict()` cannot take; it only worked
+because the fixtures export an empty meta column, so **the tests could not reach the contradiction
+they contained**. Also: `skipped` counted two different facts and printed a reopen-skip as "already
+present", which is the CB-15/CB-16 mislabel in the one line an operator reads.
+
+**Cross-model: Codex failed a FOURTH time, and the cause is now known and recorded** — the Bash
+tool caps `timeout` at 600000 ms regardless of what is requested, so a foreground `codex exec` on a
+long review is killed at 10 minutes. Its eventual run reviews a plan this iteration has already
+superseded. Iteration 4's Codex round did land and was valuable; this one did not, and saying so
+beats implying a cross-model check happened.
+
+**Net: 2 closed, 1 filed (CB-97). Open 40 → 40, but the queue's only `high` is gone** and what
+replaced it is a medium with a fully specified design.
+
+**Next:** CB-97 (`restore`) is ready to implement — its constraints are recorded, and it needs no
+new user decision. Otherwise the queue is 21 medium / 18 low.
