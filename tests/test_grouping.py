@@ -140,6 +140,18 @@ class TestCitationComponents:
         for comp in split["components"]:
             assert comp["hub_neighbours"] == [hub]
 
+    def test_default_hub_degree_is_the_one_that_is_applied(self, conn):
+        """Pins the DEFAULT, not just the parameter. Every other hub test passes
+        hub_degree explicitly, so the shipped default was unexercised — and it is
+        the value almost every caller actually gets."""
+        hub = add(conn, "a card cited by exactly four others, one over the default")
+        for i in range(4):
+            add(conn, f"citer {i} of the four, which names {hub}")
+        assert grouping.DEFAULT_HUB_DEGREE == 3
+        assert grouping.citation_report(conn)["hubs"] == [hub]
+        # One notch looser and the same card is an ordinary member again.
+        assert grouping.citation_report(conn, hub_degree=4)["hubs"] == []
+
     def test_hub_is_reported_as_a_terminal_anchor_with_its_citers(self, conn):
         hub = add(conn, "the landmark card everyone points at")
         citers = [add(conn, f"card {i} which cites {hub} in passing") for i in range(3)]

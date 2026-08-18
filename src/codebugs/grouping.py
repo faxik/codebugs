@@ -27,7 +27,8 @@ Such a card is not a member of one work unit; it is a landmark many work units
 point AT. So a node whose degree exceeds ``hub_degree`` is not allowed to
 transmit connectivity: it is reported as an ANCHOR with its citers listed (the
 terminal-anchor shape), and the components either side of it stay separate. At
-the default the same corpus yields 102 components, largest 55.
+the default the same corpus yields 117 components, largest 11 — see the sweep
+table at DEFAULT_HUB_DEGREE for why that value and not the histogram elbow.
 """
 
 from __future__ import annotations
@@ -51,11 +52,27 @@ from codebugs.types import (
 )
 
 # Degree above which a node stops transmitting connectivity (see module
-# docstring). 4 is the elbow of the measured degree histogram on the reference
-# corpus — 47 of 519 linked open cards sit above it — and it is the value that
-# breaks the 327-card hairball into a workable 102 components. Callers override
-# it; ``None`` disables hub splitting and gives the raw components.
-DEFAULT_HUB_DEGREE = 4
+# docstring). Callers override it; ``None`` disables hub splitting and returns
+# the raw components.
+#
+# 3 is chosen on the OUTCOME, not on the shape of the degree histogram — the
+# histogram elbow is at 4, and 4 is measurably the wrong answer. Swept over the
+# 1096-card open population of the reference corpus:
+#
+#   hub_degree | hubs | components | LARGEST | cards grouped
+#   -----------+------+------------+---------+--------------
+#   none       |    0 |         64 |     345 |           546
+#   6          |   18 |         78 |     229 |           494
+#   4          |   53 |        104 |      55 |           417
+#   3          |   97 |        117 |      11 |           335
+#   2          |  179 |         87 |       5 |           204
+#
+# The point of the split is to hand someone a unit of work. A 55-card component
+# is not one, so the extra 82 cards that 4 keeps in the graph are not a gain —
+# they are the hairball surviving under a smaller name. 3 is the largest value
+# whose worst component still fits the 3-12 card band the axis was adopted for,
+# and 2 pays for its tidiness by dropping nearly half the grouped cards.
+DEFAULT_HUB_DEGREE = 3
 
 CITATION_RE = re.compile(rf"\b{re.escape(FINDING_ID_PREFIX)}(\d+)\b")
 
