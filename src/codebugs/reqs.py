@@ -618,7 +618,43 @@ def import_markdown(
                  source, test_coverage, now, now),
             )
             imported += 1
-        except sqlite3.Error:
+        except sqlite3.IntegrityError:
+            # CB-99. This used to be `except sqlite3.Error`, which is the whole
+            # sqlite exception tree — so a full disk or an I/O error arriving
+            # mid-import was counted as a malformed ROW and the import reported
+            # success. Measured against 593c924 with a simulated SQLITE_FULL:
+            # `{'imported': 0, 'skipped': 2}`, no exception, and the CLI printing
+            # "Imported 0 requirements, skipped 2." at exit 0. A success-shaped
+            # lie on a path whose entire job is to write rows, and strictly worse
+            # than the traceback CB-86 exists to remove — a traceback is loud.
+            #
+            # `IntegrityError` is exactly "this ROW is wrong": CHECK, NOT NULL,
+            # UNIQUE and FK violations, and nothing else. Measured that a CHECK
+            # violation on this table is an `IntegrityError` and not an
+            # `OperationalError`, so narrowing here preserves the affordance the
+            # arm was written for while dropping every failure that is about the
+            # statement or the environment.
+            #
+            # NO CLASSIFIER IS NEEDED, and that is better than this card's own
+            # prescription (which asked to reuse CB-86's `_is_environmental`).
+            # Reaching for it would have meant exporting a predicate that is
+            # deliberately private — the CLI boundary calling it is the design
+            # CB-86 rejected — or growing a second copy of that enumeration. The
+            # exception TREE already draws the line this needs.
+            #
+            # HONEST SCOPE: with the resolvers above normalising `status` and
+            # `priority` before the INSERT, and `INSERT OR REPLACE` foreclosing
+            # UNIQUE, no markdown row reachable through `_ROW_RE` can currently
+            # violate a constraint at all — measured, a row with a bogus priority
+            # and a bogus status imports cleanly. So this arm is a safety net for
+            # a future schema, not a live path, and `skipped` is expected to stay
+            # 0. It is kept rather than deleted because a new NOT NULL or CHECK
+            # column is exactly the change that would need it.
+            #
+            # A CONSEQUENCE WORTH NAMING: the commit is at the end of the loop, so
+            # letting the failure propagate now means a mid-import environmental
+            # failure lands NOTHING instead of a partial import reported as
+            # success. That is a real improvement, not just a louder error.
             skipped += 1
 
     conn.commit()
