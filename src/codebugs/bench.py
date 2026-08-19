@@ -1002,8 +1002,16 @@ def register_cli(sub, commands) -> None:
         # that try, a ValueError from a closed stdout ("I/O operation on closed
         # file") was caught and reported as one tidy line at exit 1 for a run
         # that had already landed — measured, and the same class as CB-15/CB-16.
-        # A post-commit output failure must surface as a crash; making it POSIX-
-        # clean instead is CB-78.
+        # A post-commit output failure must surface as a crash, and CB-78 made
+        # the closed-pipe case of that crash POSIX-clean: `cli.run` installs
+        # SIG_DFL, so a dead reader kills the process by signal (141, empty
+        # stderr) instead of the old exit 1 traceback / exit 120 "Exception
+        # ignored on flushing sys.stdout". Note what did NOT change, because it
+        # is what tests/test_bench.py:745 pins: closing the sys.stdout OBJECT
+        # raises `ValueError: I/O operation on closed file`, which is not a
+        # signal and never was — that path still crashes with a traceback, which
+        # is the ratified discriminator between a post-commit failure and an
+        # input error.
         print(f"Imported: {result['run_id']} ({result['rows']} rows, {result['results_stored']} values)")
 
     def _cmd_bench_query(args: argparse.Namespace) -> None:

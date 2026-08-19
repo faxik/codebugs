@@ -510,7 +510,14 @@ delete, so `release_reason` (`explicit` | `terminal:<status>`) is a queryable re
   rebuilt). A kind declaring it must satisfy P1-P4, documented on `EntityRef.set_status`.
 - **Exit codes are the API for shell callers**: `0` proceed, `1` error, `3` held by someone else,
   `4` already resolved, `5` contended (retry). `codebugs claims --format ids` prints bare ids and
-  exits 0 on an empty list so a shell loop needs no parsing.
+  exits 0 on an empty list so a shell loop needs no parsing. **`141` was added package-wide by
+  CB-78** and is not a claims outcome: it is `128 + SIGPIPE`, meaning *the reader of my stdout went
+  away*, and it can come back from any verb. It is deliberately distinguishable from `1` — that
+  distinction is the whole reason the alternative "silent exit 0" was rejected, since a
+  `codebugs export-csv /dev/stdout | gzip > backup.gz` whose `gzip` dies must never report success
+  over a truncated backup. A `| while read` loop that `break`s now kills the producer at 141 rather
+  than 1; both are non-zero, so no `set -e` script changes behaviour. Observable only when the
+  reader closes without draining (any size) or un-drained output exceeds the 64 KB pipe buffer.
 - **Adoption**: autosorter's `worktree-setup.sh` claims every card in the branch name (and in
   `--items`) **before** `git worktree add`, with an EXIT trap that releases them if setup aborts;
   `worktree-finish.sh` releases whatever the branch still holds. Exactly one of those calls may be

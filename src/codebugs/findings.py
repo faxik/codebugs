@@ -2431,6 +2431,19 @@ def register_cli(sub, commands) -> None:
         # caught the OSError either. The success print below stays OUTSIDE the
         # guard — a post-write failure reported as bad input is the CB-15/CB-16
         # lie CB-71 measured live.
+        #
+        # CB-78 NARROWED what this arm can still see, and the cost was accepted
+        # deliberately rather than discovered later. `export-csv /dev/stdout`
+        # writes IN PLACE (fsio.atomic_write's held-open-inode branch), so a dead
+        # reader used to raise BrokenPipeError here and produce a real diagnostic
+        # — measured, `export-csv /dev/stdout | head -1` gave exit 1 and
+        # `codebugs: [Errno 32] Broken pipe`. With SIG_DFL installed by `cli.run`
+        # the process dies at 141 with empty stderr before that exception exists.
+        # This is the ONE command where CB-78 removes a working message rather
+        # than replacing a traceback, which is why it was re-ratified knowing it.
+        # The arm still guards every non-pipe destination (a full disk, an
+        # unwritable directory, a read-only file), which is what CB-76 filed it
+        # for.
         try:
             with atomic_write(output, newline="") as f:
                 # ONE declaration for the header AND the rows (CB-97). They used to be

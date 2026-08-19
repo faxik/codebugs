@@ -25,7 +25,7 @@ dependencies = [
 ]
 
 [project.scripts]
-codebugs = "codebugs.cli:main"
+codebugs = "codebugs.cli:run"
 codebugs-mcp = "codebugs.server:main"
 
 [project.optional-dependencies]
