@@ -1607,6 +1607,7 @@ class TestStalenessReadsTheNewestObservation:
             file="src/auth.py",
             description=description,
             reported_at_commit=sha,
+            new_category=True,  # CB-60 gate: first observation in a fresh tracker mints "bug"
         )
 
     def _reobserve(self, conn, sha, description="stale-looking bug"):
