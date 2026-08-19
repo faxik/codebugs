@@ -18,12 +18,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   "this row is wrong". Anything about the statement or the environment propagates, so
   the command fails loudly instead of quietly.
 
-  **Two consequences worth knowing.** The commit happens at the end of the import, so a
+  **One consequence worth knowing.** The commit happens at the end of the import, so a
   failure part-way now leaves **nothing** written rather than a partial import reported
-  as success. And `skipped` in the output is expected to stay `0`: with priorities and
-  statuses normalised before insertion, no row this importer can parse is able to
-  violate a constraint today — the counter is a safety net for a future schema, not a
-  live path.
+  as success.
+
+  **A nonzero `skipped` is still ordinary and does not mean this fix misfired** — it
+  counts malformed table rows (a row with fewer than four columns), which is what it
+  always counted and what you should read it as.
 - **A tracker you cannot write to now says so, instead of crashing or telling you to
   run `init` (CB-86).** On a read-only mount, a tracker owned by another user, a
   directory the process cannot write, or a full disk, `codebugs` behaved in one of two

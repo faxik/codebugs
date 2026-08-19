@@ -47,12 +47,21 @@ class _FailingConnection(sqlite3.Connection):
     """
 
     to_raise: BaseException | None = None
+    #: Fire only on the Nth matching INSERT (1 = the first). Letting earlier rows
+    #: through is what makes `test_nothing_is_committed_when_it_escapes`
+    #: discriminate: firing on every row leaves nothing written no matter where
+    #: the commit sits, so `landed == 0` would be true by construction.
+    fail_on: int = 1
+    seen: int = 0
 
     def execute(self, sql, *args):  # noqa: D102 - mirrors sqlite3.Connection
-        if type(self).to_raise is not None and sql.lstrip().startswith(
+        cls = type(self)
+        if cls.to_raise is not None and sql.lstrip().startswith(
             "INSERT OR REPLACE INTO requirements"
         ):
-            raise type(self).to_raise
+            cls.seen += 1
+            if cls.seen >= cls.fail_on:
+                raise cls.to_raise
         return super().execute(sql, *args)
 
 
@@ -68,12 +77,14 @@ def _markdown(tmp_path: pathlib.Path, *rows: str) -> str:
     return str(path)
 
 
-def _connect_failing(tracker, exc) -> _FailingConnection:
+def _connect_failing(tracker, exc, *, fail_on: int = 1) -> _FailingConnection:
     conn = sqlite3.connect(
         str(tracker / db.DB_DIR / db.DB_FILE), factory=_FailingConnection
     )
     conn.row_factory = sqlite3.Row
     _FailingConnection.to_raise = exc
+    _FailingConnection.fail_on = fail_on
+    _FailingConnection.seen = 0
     return conn
 
 
@@ -81,6 +92,8 @@ def _connect_failing(tracker, exc) -> _FailingConnection:
 def _reset_injection():
     yield
     _FailingConnection.to_raise = None
+    _FailingConnection.fail_on = 1
+    _FailingConnection.seen = 0
 
 
 class TestAnEnvironmentalFailureEscapes:
@@ -105,16 +118,26 @@ class TestAnEnvironmentalFailureEscapes:
             conn.close()
 
     def test_nothing_is_committed_when_it_escapes(self, tracker, tmp_path):
-        """A consequence of propagating rather than swallowing, and worth pinning:
-        the commit is at the END of the loop, so a mid-import environmental
-        failure now lands NOTHING instead of a partial import reported as
-        success."""
+        """A consequence of propagating rather than swallowing: the commit is at
+        the END of the loop, so a mid-import environmental failure lands NOTHING
+        instead of a partial import reported as success.
+
+        THE INJECTION FIRES ON THE SECOND ROW, and that is the whole test. An
+        earlier draft failed on EVERY insert, so no row was ever written and
+        `landed == 0` was true by construction — independent of where the commit
+        sits, which is the property the docstring claims to pin. Review caught
+        it. With row 1 succeeding and row 2 failing, the assertion now
+        discriminates: add a per-row `conn.commit()` or switch to autocommit and
+        FR-200 survives, turning this red.
+        """
         md = _markdown(
             tmp_path,
             "| FR-200 | first | must | planned | s | t |\n",
             "| FR-201 | second | must | planned | s | t |\n",
         )
-        conn = _connect_failing(tracker, _env_error(13, "database or disk is full"))
+        conn = _connect_failing(
+            tracker, _env_error(13, "database or disk is full"), fail_on=2
+        )
         try:
             with pytest.raises(sqlite3.OperationalError):
                 reqs.import_markdown(conn, md)

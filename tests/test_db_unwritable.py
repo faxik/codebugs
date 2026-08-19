@@ -284,11 +284,24 @@ class TestTheClassifierStaysInsideDb:
     cannot tell a reference from a mention punishes the documentation that keeps
     the rule understood.
 
-    RESIDUAL LIMIT, stated rather than implied: this is still a NAME check, now
-    over the syntax tree. A caller could re-derive the predicate by hand or reach
-    it through `getattr`. It bounds accident, not intent — the honest claim for
-    every ratchet in this repo that keys on a name rather than on a value like a
-    file mode.
+    FOUR NODE KINDS, NOT TWO — and the two extra ones are here because the first
+    AST draft LOST coverage the text version had. Review measured both: an
+    aliased import (`from codebugs.db import _is_environmental as _env`) puts the
+    name on an `ast.alias`, and `getattr(db, "_is_environmental")` puts it on an
+    `ast.Constant`; a walk inspecting only `Name` and `Attribute` reported no
+    offenders for either, while the line-scan it replaced flagged both. An
+    aliased import is accident-shaped — someone shortening a name — so losing it
+    is a real regression, not a theoretical one. **Replacing a coarse check with a
+    precise one can narrow what it catches, and the narrowing has to be measured
+    rather than assumed.**
+
+    RESIDUAL LIMIT, stated rather than implied: this is still a NAME check. A
+    caller could re-derive the predicate by hand — copy the four codes and the
+    mask — and nothing here would see it. It bounds accident, not intent, which
+    is the honest claim for every ratchet in this repo that keys on a name rather
+    than on a value like a file mode. (An earlier docstring listed `getattr`
+    under this heading, which read as a pre-existing limit when the AST rewrite
+    had just created it. It is covered now.)
     """
 
     def test_only_db_names_the_environmental_classifier(self):
@@ -298,16 +311,20 @@ class TestTheClassifierStaysInsideDb:
             if path.name == "db.py":
                 continue
             for node in ast.walk(ast.parse(path.read_text())):
-                named = (
-                    node.attr
-                    if isinstance(node, ast.Attribute)
-                    else node.id
-                    if isinstance(node, ast.Name)
-                    else None
-                )
+                if isinstance(node, ast.Attribute):
+                    named = node.attr
+                elif isinstance(node, ast.Name):
+                    named = node.id
+                elif isinstance(node, ast.alias):
+                    named = node.name
+                elif isinstance(node, ast.Constant):
+                    named = node.value
+                else:
+                    continue
                 if named == "_is_environmental":
                     offenders.append(
-                        f"{path.relative_to(src.parent).as_posix()}:{node.lineno}"
+                        f"{path.relative_to(src.parent).as_posix()}:"
+                        f"{getattr(node, 'lineno', '?')}"
                     )
         assert offenders == [], (
             "the environmental classifier is private to db.py on purpose — a caller "
