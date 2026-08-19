@@ -7,6 +7,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **Re-reporting a known defect as more severe now raises its severity (CB-52).** Since
+  findings gained an identity function, a second report of the same defect no longer
+  creates a row — it bumps the existing one. But the bump wrote only the occurrence
+  count and timestamps, so **every other column stayed frozen at the first report**. A
+  card filed `low` and later observed as `critical` stayed `low`, and the newest
+  assessment survived only inside the `meta.occurrences` ring. The visible cost was on
+  the main read path: `query(severity="critical")` did not return it, so the card was
+  effectively invisible to anyone looking for critical work.
+
+  A bump now writes the **more severe** of (stored, observed).
+
+  **Escalation is one-way.** Re-observing a `critical` card at `low` leaves it
+  `critical` — a re-observation can raise severity, never lower it. Use `update` to
+  downgrade deliberately.
+
+  **Importing does not re-rate.** `import-csv` records the occurrence but leaves the
+  local severity alone: a peer's tracker calling their copy `critical` is their
+  assessment of their repository, not evidence about yours. This matches the existing
+  rule that an import is not an observation.
+
+  **A regression reopen escalates too** — a fixed card that comes back worse than it
+  went reopens at the new severity.
+
+  Not changed: which milestone stream a finding sits in. Routing is still decided once,
+  at filing time, and re-evaluating it on a severity change is tracked separately as
+  CB-35.
 - **`codebugs reqs-import` no longer reports success when the database gives out
   mid-import (CB-99).** The per-row insert was guarded by `except sqlite3.Error` — the
   whole SQLite exception tree — so a full disk or an I/O error part-way through was
