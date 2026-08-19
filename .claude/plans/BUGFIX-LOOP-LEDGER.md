@@ -1426,3 +1426,59 @@ folded in.
 the `cliio.py` host recommendation, and a note that CB-78 left two of its six arms unreachable for
 pipe destinations. Then CB-99 (the `reqs-import` swallow), which should reuse CB-86's classifier
 rather than growing a second copy of the same enumeration.
+
+## Iteration 9 — 2026-08-19 · focus `codebugs` · **CB-99, merge `03a12a3`**
+
+**Disposition: CB-99 fixed, and reproduced in the process — it was filed NOT REPRODUCED. Open 38 → 37.**
+
+**Candidate swapped, and the reasoning is the reusable part.** The plan after iteration 8 was CB-55.
+CB-99 was taken instead because landing CB-86 had *unblocked* it, it is `medium` against CB-55's
+`low`, it is a success-shaped lie (this repo's worst category), and it is ONE transformation plus a
+sweep against CB-55's three transformations and two open decisions. **Ranking by what a card costs to
+land, not by the order they were filed in.**
+
+**The card's own prescribed fix was improved on, not followed.** It said to reuse CB-86's classifier.
+That would have meant exporting `db._is_environmental` — private precisely so a CLI-boundary caller
+cannot exist — or growing a second copy of its enumeration. The exception TREE already draws the
+line: `IntegrityError` is the class for a row that violates the table's constraints, and every
+environmental code routes to `OperationalError`. **No classifier, no second enumeration, and CB-86's
+ratchet stays intact.**
+
+**The sweep found a population of ONE, which is worth recording precisely because it is unusual
+here.** `grep -rn "except sqlite3\." src/` gives eleven sites and exactly one is this shape; review
+additionally swept the spelling grep cannot see (`except Exception`, bare) and found eight, all
+ratified hook-swallow or cleanup shapes. This repo's standing answer is "the population is larger
+than the list" — this time it genuinely was not, and saying so is as useful as the usual finding.
+
+**THREE DEFECTS IN MY OWN WORK THIS ITERATION, and all three are the same family: a guard or a claim
+that was true for the wrong reason.**
+
+1. **A user-facing falsehood in the CHANGELOG.** I wrote that `skipped` is expected to stay 0. It has
+   a SECOND, live producer sixty lines above — the `len(cells) < 4` guard — reachable by construction
+   because `_ROW_RE` anchors only on the leading id cell. Measured: `{'imported': 1, 'skipped': 1}`.
+   An operator meeting an ordinary nonzero `skipped` would have read my own documentation as "the fix
+   regressed". Caught by the altitude reviewer, corrected in three places.
+2. **A test true by construction.** `test_nothing_is_committed_when_it_escapes` failed on EVERY
+   insert, so nothing was ever written and `landed == 0` held regardless of where the commit sat —
+   which is the property its docstring claimed to pin. Now fires on the second row, and verified red
+   when a per-row `conn.commit()` is injected.
+3. **A ratchet that lost coverage while being made "better".** Iteration 8's classifier ratchet
+   checked the NAME against source TEXT, so this card's comment explaining why it does NOT use that
+   classifier tripped it — a **false refusal that punishes the documentation keeping the rule
+   understood**, and CLAUDE.md already records that exact lesson for `TestWriteCallSitesRatchet`. I
+   rewrote it to AST — and the rewrite then silently LOST what the text version caught: an aliased
+   import and a `getattr` constant both went unseen. **Replacing a coarse check with a precise one
+   can narrow what it catches, and the narrowing has to be measured rather than assumed.** Four node
+   kinds now, verified red on the aliased import.
+
+**The pattern across iterations 7, 8 and 9 is worth naming: three iterations running, the defect
+review found was in my own guard rather than in the fix.** An evadable ratchet (alias), an exported
+predicate that reopened the door it was built to close, and now a ratchet that both false-refused and
+under-covered. The fixes themselves survived review each time.
+
+**Net: 1 closed (CB-99), 0 filed. Open 38 → 37.**
+
+**Next:** CB-55 remains, and it is genuinely the heaviest of the three original batch members —
+three independent transformations, a host decision (`cliio.py` rather than `cli.py`, so the MCP
+server does not import argparse), and a declared choice about whether the latent connection leak on
+the non-`OSError` path is preserved or fixed inside a "pure refactor".
