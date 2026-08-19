@@ -744,7 +744,7 @@
     "name": "codebench_query"
   },
   {
-    "description": "Close a session for good, releasing its file claims and the merge lock.\n\nThis is the way OUT of a session that will not be merged under its own\nlock \u2014 including the case an agent hits routinely: the branch was\nintegrated by some other route (a merge harness holding its own lock), so\ncodemerge_merge refuses with reason='main_moved' and the session is\nstranded in 'active', which codemerge_finish will not accept. Until it is\nabandoned, its claimed files are reported as conflicts to every later\nsession, with no expiry \u2014 so closing it is what keeps codemerge_check\nworth consulting.\n\nAccepts a session in any state and is idempotent, so re-issuing it after\nan unclear failure is safe.\n\nArgs:\n    session_id: The merge session ID\n",
+    "description": "Close a session for good, so its files stop blocking everyone else.\n\nThis is the way OUT of a session that will not be merged under its own\nlock \u2014 including the case an agent hits routinely: the branch was\nintegrated by some other route (a merge harness holding its own lock), so\ncodemerge_merge refuses with reason='main_moved' and the session is\nstranded in 'active', which codemerge_finish will not accept. Until it is\nabandoned, its claimed files are reported as conflicts to every later\nsession, with no expiry \u2014 so closing it is what keeps codemerge_check\nworth consulting.\n\nWhat it does, stated exactly: the session's claim rows are NOT deleted,\nthey stop being reported, because the conflict query selects on session\nstatus. The merge lock is released only if this session holds it.\n\nRe-issuing it is safe: a second call on an already-abandoned session\nchanges nothing but the timestamps. A 'done' session is REFUSED \u2014 that\nwould erase the record of a merge that succeeded \u2014 and an unknown\nsession_id is an error.\n\nArgs:\n    session_id: The merge session ID. Whatever session is NAMED is the\n        one closed; nothing ties it to the caller, so passing a stale or\n        mistyped id closes someone else's work.\n",
     "inputSchema": {
       "properties": {
         "session_id": {
@@ -859,7 +859,7 @@
     "name": "codemerge_merge"
   },
   {
-    "description": "Start a new merge session for a branch.\n\nArgs:\n    session_id: Unique identifier for this merge session\n    branch: Git branch name being merged\n    description: Human-readable description of the work\n    base_commit: Git commit SHA this branch diverged from\n    repo_root: Repo root path (default: cwd)\n    allow_restart: If True, restart an existing active session\n",
+    "description": "Start a new merge session for a branch.\n\nArgs:\n    session_id: Unique identifier for this merge session\n    branch: Git branch name being merged\n    description: Human-readable description of the work\n    base_commit: Git commit SHA this branch diverged from\n    repo_root: Repo root path (default: cwd)\n    allow_restart: If True, reuse this session_id when its previous\n        session is finished \u2014 'abandoned' or 'done'. It does NOT\n        restart a live one: starting over an 'active' or 'merging'\n        session is an error whether or not this is set.\n",
     "inputSchema": {
       "properties": {
         "allow_restart": {

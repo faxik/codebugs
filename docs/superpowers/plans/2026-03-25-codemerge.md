@@ -19,8 +19,11 @@
 > tool and its line 493 counted abandon among the tools; this plan is where it was dropped.
 >
 > What was deliberately NOT changed, against CB-106's own suggestion: `finish(success=False)`
-> still reverts to `active`. The docstring at line 1275 below is the ratified semantics and
-> the code follows it; what had drifted was the docstring in `merge.py`, which promised
+> still reverts to `active`. `codemerge_finish`'s docstring below — "success: True = merged
+> successfully (done), False = failed (revert to active)" — is the ratified semantics and
+> the code follows it. It is cited by its text rather than by a line number because this
+> very amendment shifts the lines beneath it. What had drifted was the docstring in
+> `merge.py`, which promised
 > `status→abandoned` and now matches. "Release the lock, I will retry" and "this session is
 > over" are different intents, and keeping them different is what makes `codemerge_abandon`
 > the answer instead of overloading `success`.

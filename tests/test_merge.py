@@ -987,10 +987,13 @@ class TestTheMcpSurfaceCanCloseASession:
     reachable until it is declared at the surface.
 
     What was deliberately NOT changed: `finish(success=False)` still reverts to
-    'active'. The ratified design says so verbatim
-    (`docs/superpowers/plans/2026-03-25-codemerge.md:1263-1275`), and the two
-    intents are distinct — "my merge attempt failed, release the lock, let me
-    retry" is not "this session is over".
+    'active'. The ratified design says so verbatim, in `codemerge_finish`'s
+    docstring inside `docs/superpowers/plans/2026-03-25-codemerge.md`:
+    "success: True = merged successfully (done), False = failed (revert to
+    active)". Cited by its text, not by a line number, because the same commit
+    edits that file and a line citation would be stale on arrival — as the first
+    draft of this docstring in fact was. The two intents are distinct: "my merge
+    attempt failed, release the lock, let me retry" is not "this session is over".
     """
 
     @pytest.fixture
@@ -1101,6 +1104,41 @@ class TestTheMcpSurfaceCanCloseASession:
         )
         assert after["conflicts"] == []
 
+    def test_abandoning_a_done_session_is_refused(self, conn):
+        """Exposure has to be safe, and this is the destructive half of it.
+
+        `abandon_session` had no status gate at all, so the newly reachable tool
+        could turn a successfully merged session into an abandoned one —
+        destroying the only record that the merge happened, which `merge_stats`
+        then tallies as abandoned work. That is CB-106's own third consequence,
+        arriving through CB-106's own fix.
+
+        The lock-revocation half is NOT gated here, deliberately: nothing in this
+        module binds a session to its caller, and `codemerge_finish` — an MCP tool
+        since before this change — already lets any caller release another
+        session's lock (verified by running it). A gate on this one tool would buy
+        false assurance, so the missing actor binding is filed as its own card and
+        named in the tool description instead.
+        """
+        mcp = self._tools(conn)
+        merge.start_session(conn, session_id="D", branch="fix/d")
+        merge.merge(conn, "D", expected_main_head="H0", current_main_head_fn=lambda: "H0")
+        merge.finish(conn, "D", success=True)
+
+        # The SDK wraps a tool body's exception in ToolError, which is the
+        # documented contract ("MCP tools let exceptions propagate to the MCP
+        # server's built-in error handling"). What matters is that the REASON
+        # survives the wrapping and reaches the client.
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        with pytest.raises(ToolError, match="cannot be abandoned"):
+            self._call(mcp, "codemerge_abandon", session_id="D")
+        with pytest.raises(ValueError, match="cannot be abandoned"):
+            merge.abandon_session(conn, "D")
+        assert [s["session_id"] for s in merge.get_sessions(conn, status="done")] == ["D"], (
+            "the record of a successful merge must survive an abandon attempt"
+        )
+
     def test_the_finish_description_names_only_statuses_finish_can_write(self, conn):
         """The docstring lied, and the lie was on the wire (`golden/mcp_schema.json`).
 
@@ -1137,7 +1175,12 @@ class TestTheMcpSurfaceCanCloseASession:
                 r"status\s*(?:→|->)\s*(\w+)", self._descriptions(mcp)["codemerge_finish"]
             )
         )
-        assert described, "the description must still say what statuses finish writes"
-        assert described <= reachable, (
-            f"the tool description promises statuses finish cannot write: {described - reachable}"
+        assert described == reachable, (
+            "the description must name every status finish writes and no other. "
+            f"promised-but-unreachable={described - reachable}, "
+            f"written-but-undescribed={reachable - described}. "
+            "A subset assertion alone was shown insufficient in review: a description "
+            "saying only '(status→done)' and then asserting in PROSE that False closes "
+            "the session for good passed it, i.e. the opposite lie survived the guard "
+            "on half of this change."
         )
