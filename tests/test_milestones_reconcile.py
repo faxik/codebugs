@@ -501,7 +501,8 @@ class TestLiveSourceClauseAlias:
     def test_correlated_columns_are_qualified(self, conn):
         from codebugs.milestones import reconcile
         clause, _ = reconcile.live_source_clause(conn, alias="mi")
-        assert "mi.item_kind = ?" in clause
+        # `IS`, not `=` — see test_a_null_item_kind_stays_live.
+        assert "mi.item_kind IS ?" in clause
         assert "_src.id = mi.item_ref" in clause
 
     def test_a_shadowing_source_column_cannot_disable_the_filter(self, tmp_path):
@@ -528,13 +529,33 @@ class TestLiveSourceClauseAlias:
         c.execute("INSERT INTO milestone_items VALUES (2, 'external', 'CB-1')")
         c.commit()
         clause, params = reconcile.live_source_clause(c, alias="mi")
-        live = {
-            r[0] for r in c.execute(
-                f"SELECT mi.id FROM milestone_items mi WHERE ({clause})", params  # noqa: S608
-            ).fetchall()
-        }
-        assert live == {2}, "the external row must stay live despite the shadow column"
+        assert _sql_live_ids(c, clause, params) == {2}, (
+            "the external row must stay live despite the shadow column"
+        )
         c.close()
+
+
+class TestTerminalExistsSqlGuards:
+    """`EntityKind.terminal_exists_sql` validates what it interpolates, at the
+    place those things are DECLARED (CB-22, CB-31)."""
+
+    def test_ref_expr_must_be_a_qualified_pair_of_identifiers(self):
+        kind = entities.ENTITY_KINDS[0]
+        for bad in ("mi.item_ref; DROP TABLE findings", "item_ref", "a.b.c", "mi.", ""):
+            with pytest.raises(ValueError, match="ref_expr"):
+                kind.terminal_exists_sql(ref_expr=bad)
+
+    def test_a_kind_that_cannot_read_status_is_refused(self):
+        """The `readable_cols` allowlist is the discriminator, and without this it
+        is unfalsifiable: both real kinds declare `id` and `status`, so deleting
+        the check changes nothing observable. `dataclasses.replace` is how this
+        repo's other EntityKind guards are exercised."""
+        import dataclasses
+        kind = dataclasses.replace(
+            entities.ENTITY_KINDS[0], readable_cols=frozenset({"id", "description"})
+        )
+        with pytest.raises(ValueError, match="not readable"):
+            kind.terminal_exists_sql(ref_expr="mi.item_ref")
 
 
 class TestLiveSourceClauseTableAvailability:
@@ -567,18 +588,32 @@ class TestLiveSourceClauseTableAvailability:
         from codebugs.milestones import reconcile
         c = self._bare(tmp_path, f"m{len(tables)}{fragments}.db", tables)
         clause, params = reconcile.live_source_clause(c, alias="mi")
-        assert clause.count("NOT EXISTS") == fragments
+        assert clause.count("EXISTS (SELECT 1 FROM") == fragments
         assert len(params) == nparams
         assert clause.count("?") == nparams
         if fragments == 0:
             assert clause == "1"
         # Fail-open in every shape: with no findings row present nothing is hidden.
-        live = {
-            r[0] for r in c.execute(
-                f"SELECT mi.id FROM milestone_items mi WHERE ({clause})", params  # noqa: S608
-            ).fetchall()
-        }
-        assert live == {1}
+        assert _sql_live_ids(c, clause, params) == {1}
+        c.close()
+
+    def test_a_null_item_kind_stays_live(self, tmp_path):
+        """Fail-open on the discriminator itself.
+
+        The clause ANDs `item_kind IS ?` with an EXISTS. With `=` instead of `IS`,
+        a NULL item_kind makes the conjunction NULL, `NOT NULL` is NULL, and WHERE
+        NULL EXCLUDES the row — hiding live work on the quietest possible input.
+        `item_kind` is NOT NULL in this repo's schema but nullable on the bare
+        schemas raw callers build, which is exactly where a queue read would meet
+        one.
+        """
+        from codebugs.milestones import reconcile
+        c = self._bare(tmp_path, "nullkind.db", ("findings", "requirements"))
+        c.execute("INSERT INTO findings VALUES ('CB-1', 'fixed')")
+        c.execute("INSERT INTO milestone_items VALUES (2, NULL, 'CB-1')")
+        c.commit()
+        clause, params = reconcile.live_source_clause(c, alias="mi")
+        assert _sql_live_ids(c, clause, params) == {2}
         c.close()
 
     def test_a_terminal_source_is_hidden_only_on_affirmative_proof(self, tmp_path):

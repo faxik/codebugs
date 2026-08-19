@@ -15,25 +15,23 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 SRC = ROOT / "src" / "codebugs" / "milestones"
+ENTITIES = ROOT / "src" / "codebugs" / "entities.py"
 
 MUTATIONS = [
     (
-        "M1 unqualify the correlated columns",
+        "M1 unqualify the correlated ref column",
         SRC / "reconcile.py",
-        'f"WHERE {alias}.item_kind = ? AND _src.id = {alias}.item_ref "',
-        'f"WHERE item_kind = ? AND _src.id = item_ref "',
-        "TestLiveSourceClauseAlias",
+        'ref_expr=f"{alias}.item_ref"',
+        'ref_expr="item_ref"',
+        "TestLiveSourceClauseDifferential",
     ),
     (
-        "M2 NOT EXISTS -> NULL-unsafe scalar subquery",
-        SRC / "reconcile.py",
-        'f"NOT EXISTS (SELECT 1 FROM {kind.table} _src "\n'
-        '            f"WHERE {alias}.item_kind = ? AND _src.id = {alias}.item_ref "\n'
-        '            f"AND _src.status IN ({placeholders}))"',
-        'f"(CASE WHEN {alias}.item_kind = ? THEN "\n'
-        '            f"(SELECT _src.status FROM {kind.table} _src '
-        'WHERE _src.id = {alias}.item_ref) "\n'
-        '            f"NOT IN ({placeholders}) ELSE 1 END)"',
+        "M2 EXISTS -> NULL-unsafe scalar subquery (entities)",
+        ENTITIES,
+        'f"EXISTS (SELECT 1 FROM {self.table} _src "  # noqa: S608\n'
+        '            f"WHERE _src.id = {ref_expr} AND _src.status IN ({placeholders}))"',
+        'f"(SELECT _src.status FROM {self.table} _src "  # noqa: S608\n'
+        '            f"WHERE _src.id = {ref_expr}) IN ({placeholders})"',
         "TestLiveSourceClauseDifferential",
     ),
     (
@@ -49,10 +47,10 @@ MUTATIONS = [
     (
         "M4 rebuild the clause per bucket (inside BEGIN IMMEDIATE)",
         SRC / "capacity.py",
-        "    for pattern, _ in buckets:\n        rows = conn.execute(",
+        "    for pattern, _ in buckets:\n        sql, params = _bucket_query(",
         '    for pattern, _ in buckets:\n'
         '        live_clause, live_params = live_source_clause(conn, alias="mi")\n'
-        "        rows = conn.execute(",
+        "        sql, params = _bucket_query(",
         "TestLiveSourceClauseCost::test_candidates_builds_the_clause_once"
         "_for_all_four_buckets",
     ),
@@ -90,10 +88,26 @@ MUTATIONS = [
     ),
     (
         "M7 unsorted terminal statuses (EXPECTED SURVIVOR)",
-        SRC / "reconcile.py",
-        "        terminal = sorted(kind.terminal)",
-        "        terminal = list(kind.terminal)",
+        ENTITIES,
+        "        terminal = sorted(self.terminal)",
+        "        terminal = list(self.terminal)",
         "TestLiveSourceClauseDifferential TestLiveSourceClauseTableAvailability",
+    ),
+    (
+        "M9 null-unsafe `=` on the item_kind discriminator",
+        SRC / "reconcile.py",
+        'fragments.append(f"NOT ({alias}.item_kind IS ? AND {exists_sql})")',
+        'fragments.append(f"NOT ({alias}.item_kind = ? AND {exists_sql})")',
+        "TestLiveSourceClauseTableAvailability::test_a_null_item_kind_stays_live",
+    ),
+    (
+        "M10 entities drops the readable_cols check",
+        ENTITIES,
+        '        for col in ("id", "status"):\n'
+        "            if col not in self.readable_cols:",
+        '        for col in ():\n'
+        "            if col not in self.readable_cols:",
+        "TestTerminalExistsSqlGuards",
     ),
     (
         "M8 splice foundation's seam params at the WRONG position",

@@ -159,18 +159,24 @@ def _eligibility_failure(
     return None
 
 
-def _bucket_query(milestone_pattern: str, live_clause: str) -> str:
-    """One bucket's SQL. ``live_clause`` comes from ``reconcile.live_source_clause``
-    and its parameters splice at the fragment's TEXTUAL position — after the WHERE
-    and before ``ORDER BY`` (CB-20: a wrong splice corrupts only the parameterised
-    cases, while unfiltered tests keep passing)."""
-    return (
+def _bucket_query(
+    milestone_pattern: str, live_clause: str, live_params: list[Any]
+) -> tuple[str, list[Any]]:
+    """One bucket's ``(sql, params)``.
+
+    It returns both halves so the function that owns the SQL text also owns its
+    parameter vector: handing back a bare string and leaving the caller to pass
+    ``live_params`` separately is how the splice silently breaks the day a bucket
+    pattern gains a parameter of its own (CB-20 — a wrong splice corrupts only the
+    parameterised cases while unfiltered tests keep passing)."""
+    sql = (
         "SELECT mi.*, m.kind AS milestone_kind, m.target_date AS milestone_target_date "
         "FROM milestone_items mi JOIN milestones m ON m.id = mi.milestone_id "
         f"WHERE mi.milestone_id {milestone_pattern} AND mi.status = 'open' "
         f"AND ({live_clause}) "
         "ORDER BY m.target_date ASC NULLS LAST, mi.priority ASC, mi.created_at ASC, mi.id ASC"
     )
+    return sql, list(live_params)
 
 
 def _candidates(conn: sqlite3.Connection):
@@ -199,9 +205,8 @@ def _candidates(conn: sqlite3.Connection):
         ("= 'stream/maintenance'", None),
     ]
     for pattern, _ in buckets:
-        rows = conn.execute(
-            _bucket_query(pattern, live_clause), live_params
-        ).fetchall()
+        sql, params = _bucket_query(pattern, live_clause, live_params)
+        rows = conn.execute(sql, params).fetchall()
         for row in rows:
             d = dict(row)
             kind = d.pop("milestone_kind")

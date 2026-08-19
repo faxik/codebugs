@@ -154,8 +154,15 @@ def live_source_clause(
     — so no call site needs an ``if fragment:`` branch. Point-of-use discipline is
     the wrong enforcement layer (CB-41), including for this seam's own adoption.
 
-    Both halves derive from ``kind.terminal``, so they cannot drift; a differential
-    test asserts they agree row for row.
+    Both halves are built by ``entities`` from the same ``EntityKind`` — the row-wise
+    one in ``EntityRef.is_resolved``, the set-wise one in
+    ``EntityKind.terminal_exists_sql``, declared a few lines apart — and a
+    differential test compares them. State the strength of that honestly: the test
+    is a SAMPLE over a fixture, not a proof, so it would not catch a change made to
+    only one of them that every fixture row happens to agree on (a status
+    normalization on the Python side is the concrete example, since every fixture
+    row stores a canonical status). Co-location is what makes them hard to drift;
+    the test is what makes a drift likely to be noticed.
 
     **Why this is ``NOT EXISTS`` and never ``status NOT IN (...)`` over a LEFT JOIN
     or a scalar subquery.** A missing source row yields NULL, ``NULL NOT IN (...)``
@@ -200,15 +207,18 @@ def live_source_clause(
         # working and is fail-open by construction.
         if not _table_exists(conn, kind.table):
             continue
-        # sorted(): frozenset iteration order is unstable, and unstable SQL text
-        # makes a template-asserting test flaky.
-        terminal = sorted(kind.terminal)
-        placeholders = ", ".join("?" * len(terminal))
-        fragments.append(  # noqa: S608 - kind.table validated in EntityKind.__post_init__
-            f"NOT EXISTS (SELECT 1 FROM {kind.table} _src "
-            f"WHERE {alias}.item_kind = ? AND _src.id = {alias}.item_ref "
-            f"AND _src.status IN ({placeholders}))"
+        # The entity half — table, status column, terminal vocabulary — is built by
+        # `entities`, which owns those tables. This module contributes only its own
+        # `milestone_items` columns.
+        exists_sql, terminal = kind.terminal_exists_sql(
+            ref_expr=f"{alias}.item_ref"
         )
+        # `IS`, not `=`, and that is load-bearing. `item_kind` is NOT NULL in this
+        # repo's schema but nullable on the bare schemas raw callers build, and
+        # `NULL = ?` yields NULL: `NOT (NULL AND EXISTS(...))` is NULL, and WHERE
+        # NULL EXCLUDES the row. `IS` is SQLite's null-safe comparison, so an
+        # unknown kind reads as "not this kind" and the row stays live.
+        fragments.append(f"NOT ({alias}.item_kind IS ? AND {exists_sql})")
         params.append(item_kind)
         params.extend(terminal)
 
