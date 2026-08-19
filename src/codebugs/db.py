@@ -493,13 +493,23 @@ def is_contention(exc: BaseException) -> bool:
     Contention is not confined to a domain module's own statements — connect()
     itself writes during schema initialization, so any command can meet it.
     """
+    return _sqlite_code_in(exc, _CONTENTION_CODES)
+
+
+def _sqlite_code_in(exc: BaseException, codes: frozenset[int]) -> bool:
+    """Shared extraction for the code classifiers: `getattr`, mask, membership.
+
+    The two classifiers are separate POLICIES on purpose (see `_is_environmental`),
+    but the mechanism is one thing, and this repo has a standing habit of growing a
+    third copy of any boilerplate it leaves duplicated twice.
+    """
     code = getattr(exc, "sqlite_errorcode", None)
     if code is None:
         return False
-    return (code & 0xFF) in _CONTENTION_CODES
+    return (code & 0xFF) in codes
 
 
-def is_environmental(exc: BaseException) -> bool:
+def _is_environmental(exc: BaseException) -> bool:
     """True for a failure about the ENVIRONMENT, not about this package (CB-86).
 
     Read-only mount, read-only file, unwritable directory, full disk, I/O error on
@@ -513,11 +523,23 @@ def is_environmental(exc: BaseException) -> bool:
     distinguishable — `claims.py`'s `undetermined` outcome tells the caller to
     re-issue the identical call. Widening it would tell a caller to retry a full
     disk forever, which is the opposite of what either layer needs.
+
+    PRIVATE, AND THAT IS THE POINT — unlike its public sibling `is_contention`,
+    which `cli.main` must call. This function exists so `_open` can raise a TYPE;
+    a caller at the CLI boundary is precisely the design that was rejected, and
+    exporting the classifier would make that rejected design a two-line patch
+    looking like an obvious tidy-up:
+
+        except sqlite3.OperationalError as e:
+            if db.is_environmental(e):      # <- this
+                print(...); sys.exit(1)
+
+    That patch silently deletes the discriminator `tests/test_bench.py:789` exists
+    to protect (a post-commit failure must keep its traceback), and prose cannot
+    refuse it. `tests/test_db_unwritable.py::TestTheClassifierStaysInsideDb` pins
+    that nothing outside this module names it.
     """
-    code = getattr(exc, "sqlite_errorcode", None)
-    if code is None:
-        return False
-    return (code & 0xFF) in _ENVIRONMENTAL_CODES
+    return _sqlite_code_in(exc, _ENVIRONMENTAL_CODES)
 
 
 @contextmanager
@@ -1131,8 +1153,33 @@ def _ensure_modules_loaded() -> None:
         _modules_loaded = True
 
 
+def _unwritable(path: str, exc: BaseException) -> TrackerUnwritableError:
+    """The ONE construction of the CB-86 refusal, for both of `_open`'s arms.
+
+    The two arms fire on DIFFERENT predicates — the `create=False` arm also
+    requires `os.path.exists`, because `SQLITE_CANTOPEN` is ambiguous there — and
+    that is exactly why the message must not be typed twice. `CLAUDE.md` records
+    the general form from CB-57: *sharing an implementation does not share a
+    decision if the callers supply different inputs*. Here the reverse is what
+    matters — two decisions may still share one sentence, and the end-to-end gate
+    on that sentence is a substring (`"for writing" in stderr`), which cannot see
+    one copy drifting.
+    """
+    return TrackerUnwritableError(
+        f"cannot open {DB_FILE} at {path} for writing ({exc}); "
+        f"check permissions on the file and its directory, and free disk space"
+    )
+
+
 def _open(path: str, *, create: bool) -> sqlite3.Connection:
     """Open a connection at an EXACT path and apply every module's schema.
+
+    Raises `DatabaseNotFoundError` when `create=False` and the database is not
+    there, and `TrackerUnwritableError` (CB-86) when it IS there and the
+    environment refuses the write — a read-only mount or file, an unwritable
+    directory, a full disk. Contention propagates as `sqlite3.OperationalError`
+    so `cli.main`'s exit-5 arm still sees it, and any other sqlite failure keeps
+    its traceback.
 
     Split out of `connect` so `init_project` can reach it without going through
     `_resolve_db`, whose job on the named and declared branches is to refuse a
@@ -1183,11 +1230,8 @@ def _open(path: str, *, create: bool) -> sqlite3.Connection:
             # False, so that case still reports "not found" for what is really a
             # permission problem. No worse than before, and narrowing it would
             # mean stat-ing every ancestor.
-            if is_environmental(e) and os.path.exists(path):
-                raise TrackerUnwritableError(
-                    f"cannot open {DB_FILE} at {path} for writing ({e}); "
-                    f"check permissions on the file and its directory, and free disk space"
-                ) from e
+            if _is_environmental(e) and os.path.exists(path):
+                raise _unwritable(path, e) from e
             raise DatabaseNotFoundError(
                 f"no readable {DB_FILE} at {path} ({e}); "
                 f"run `codebugs init` for that project, or check the path"
@@ -1219,12 +1263,22 @@ def _open(path: str, *, create: bool) -> sqlite3.Connection:
         for entry in _resolved_order():
             entry.ensure_fn(conn)
     except sqlite3.OperationalError as e:
-        if is_contention(e) or not is_environmental(e):
+        if is_contention(e) or not _is_environmental(e):
             raise
-        raise TrackerUnwritableError(
-            f"cannot open {DB_FILE} at {path} for writing ({e}); "
-            f"check permissions on the file and its directory, and free disk space"
-        ) from e
+        # NO EXISTENCE CHECK HERE, and the asymmetry with the arm above is
+        # deliberate rather than an oversight — a reader must be able to tell
+        # those apart, so it is written down. On `create=True` the file legitimately
+        # does NOT exist yet, so `os.path.exists(path)` would be False on the
+        # ordinary path and the check could not mean what it means above.
+        #
+        # KNOWN GAP, accepted: if `.codebugs/` itself vanishes between
+        # `_resolve_db` and this open — the CB-23 race window — the user is told to
+        # check permissions for a tracker that is gone. The honest discriminator
+        # would be `os.path.isdir(os.path.dirname(path))`, and it is NOT added
+        # because there is no reproducer for it: adding a third predicate to an
+        # allowlist-shaped refusal on reasoning alone is how the enumerations this
+        # repo keeps re-filing get their extra dead entries.
+        raise _unwritable(path, e) from e
 
     return conn
 
@@ -1236,6 +1290,9 @@ def connect(project_dir: str | None = None) -> sqlite3.Connection:
     directory that already exists — the deliberate asymmetry documented on
     `_resolve_db` (CB-23). A named `project_dir` or a declared root is opened
     `mode=rw` and never creates anything.
+
+    Raises `DatabaseNotFoundError`, `TrackerUnwritableError` (CB-86), or a
+    contention `sqlite3.OperationalError`; see `_open` for which is which.
     """
     path, may_create = _resolve_db(project_dir)
     return _open(path, create=may_create)

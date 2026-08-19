@@ -7,16 +7,18 @@ that is not an `OperationalError` instance could never be caught by the
 `except sqlite3.OperationalError` arm the fix adds, so a stub-based test would be
 VACUOUS with respect to that arm while looking like coverage.
 
-THE FOUR END-TO-END SHAPES TRAVERSE FOUR DIFFERENT CODE PATHS, which is why they
-are four tests and not one parametrisation over a message:
-    A  read-only DIRECTORY, walk route  -> the WAL pragma inside `_open`
-    B  read-only FILE, walk route       -> `merge.ensure_schema`, inside `_open`'s
-                                           `_resolved_order()` loop, several frames down
-    C  chmod 000, named route           -> the `mode=rw` URI branch
-    C2 chmod 000, walk route            -> `sqlite3.connect(path)`, create branch
+THE FOUR END-TO-END SHAPES RAISE FROM FOUR DIFFERENT STATEMENTS, ACROSS THE TWO
+`except` HANDLERS `_open` HAS — and it is the second number the coverage argument
+actually rests on, so both are named:
+    A  read-only DIRECTORY, walk route  -> `PRAGMA journal_mode=WAL`   | handler 2
+    B  read-only FILE, walk route       -> `entry.ensure_fn(conn)`,     | handler 2
+                                           i.e. `merge.ensure_schema`, several frames down
+    C  chmod 000, named route           -> `sqlite3.connect(uri)`       | handler 1
+    C2 chmod 000, walk route            -> `sqlite3.connect(path)`      | handler 2
 Shape B is the one that had to be verified rather than assumed: it raises from
 another module and still lands inside `_open`, which is the property the whole
-design rests on.
+design rests on. Shape C is the only one on handler 1, which is also the only
+handler that must choose between two exception types.
 
 POSIX-only: every shape is built from Unix permission bits.
 """
@@ -85,32 +87,32 @@ class TestIsEnvironmental:
         [(8, "SQLITE_READONLY"), (10, "SQLITE_IOERR"), (13, "SQLITE_FULL"), (14, "SQLITE_CANTOPEN")],
     )
     def test_environmental_codes_are_classified(self, code, name):
-        assert db.is_environmental(_op_error(code)) is True, name
+        assert db._is_environmental(_op_error(code)) is True, name
 
     def test_the_extended_readonly_directory_code_masks_down(self):
         """1544 is SQLITE_READONLY_DIRECTORY, which a read-only tracker directory
         actually raises — measured. Without the `& 0xFF` mask the most common
         shape of this whole card would be unclassified."""
         assert 1544 & 0xFF == 8
-        assert db.is_environmental(_op_error(1544)) is True
+        assert db._is_environmental(_op_error(1544)) is True
 
     def test_a_programming_error_is_refused(self):
         """SQLITE_ERROR (1) is what a bug in this package raises — `no such
         column`, `cannot start a transaction within a transaction`. Classifying it
         would launder a real defect into "check your permissions" and delete the
         traceback that finds it."""
-        assert db.is_environmental(_op_error(1, "no such column: nope")) is False
+        assert db._is_environmental(_op_error(1, "no such column: nope")) is False
 
     @pytest.mark.parametrize("code", [5, 6, 517])
     def test_contention_is_not_environmental(self, code):
         """The two sets must stay disjoint. `claims.py` tells a caller to re-issue
         an `undetermined` call; telling it to retry a full disk forever is the
         opposite of what that contract needs."""
-        assert db.is_environmental(_op_error(code)) is False
+        assert db._is_environmental(_op_error(code)) is False
         assert db.is_contention(_op_error(code)) is True
 
     def test_an_exception_with_no_code_is_refused(self):
-        assert db.is_environmental(ValueError("not a sqlite error")) is False
+        assert db._is_environmental(ValueError("not a sqlite error")) is False
 
 
 class TestCantopenIsAmbiguousAndExistenceDecides:
@@ -128,6 +130,23 @@ class TestCantopenIsAmbiguousAndExistenceDecides:
         with pytest.raises(db.TrackerUnwritableError) as excinfo:
             db._open(str(project.dbfile), create=False)
         assert "for writing" in str(excinfo.value)
+        assert "codebugs init" not in str(excinfo.value)
+
+    def test_the_second_handler_also_raises_the_TYPE(self, tmp_path, monkeypatch):
+        """Both handlers must produce `TrackerUnwritableError`, and only the direct
+        tests can assert the TYPE — the end-to-end tests see a subprocess's stderr,
+        so their gate is the substring `"for writing"`, which cannot tell the two
+        arms apart. Without this, handler 2 was pinned only by that substring.
+        """
+        boom = types.SimpleNamespace(
+            name="readonly",
+            ensure_fn=lambda conn: (_ for _ in ()).throw(
+                _op_error(1544, "attempt to write a readonly database")
+            ),
+        )
+        monkeypatch.setattr(db, "_resolved_order", lambda: [boom])
+        with pytest.raises(db.TrackerUnwritableError) as excinfo:
+            db._open(str(tmp_path / "fresh.db"), create=True)
         assert "codebugs init" not in str(excinfo.value)
 
     def test_a_missing_database_is_still_NOT_FOUND(self, tmp_path):
@@ -236,3 +255,47 @@ class TestTheHealthyPathIsUntouched:
         r = _cli(project.dir, "add", "-f", "x.py", "-c", "t", "-s", "low", "-d", "healthy")
         assert r.returncode == 0, r.stdout + r.stderr
         assert "Added:" in r.stdout, r.stdout
+
+
+class TestTheClassifierStaysInsideDb:
+    """The rejected design must stay a DELIBERATE act, not a two-line tidy-up.
+
+    CB-86's whole point is that environmental failures are classified inside
+    `_open` and raised as a TYPE — never classified at the `cli.main` boundary,
+    which structurally cannot tell a pre-write failure from a post-commit one.
+    `cli.py` already has an `except sqlite3.OperationalError` arm, so if the
+    classifier were reachable from outside `db`, re-introducing the rejected
+    design would be one `if` inside an arm that already exists, and it would look
+    like an obvious cleanup. It would silently delete the discriminator
+    `tests/test_bench.py:789` protects.
+
+    Prose cannot refuse that, which this repo has established several times over —
+    `TestOpenCallSitesRatchet`, the `BEGIN IMMEDIATE` count in `test_claims.py`,
+    and `TestWriteCallSitesRatchet`. So it is pinned here.
+
+    RESIDUAL LIMIT, stated rather than implied: this is a NAME check. A caller
+    could still re-derive the predicate by hand, or reach it through `getattr`.
+    It bounds accident, not intent — which is the honest claim for every ratchet
+    in this repo that keys on a name rather than on a value like a file mode.
+    """
+
+    def test_only_db_names_the_environmental_classifier(self):
+        src = pathlib.Path(db.__file__).parent
+        offenders = [
+            f"{path.relative_to(src.parent).as_posix()}:{i}"
+            for path in sorted(src.rglob("*.py"))
+            if path.name != "db.py"
+            for i, line in enumerate(path.read_text().splitlines(), 1)
+            if "_is_environmental" in line
+        ]
+        assert offenders == [], (
+            "the environmental classifier is private to db.py on purpose — a caller "
+            f"at the CLI boundary is the design CB-86 rejected. Found: {offenders}"
+        )
+
+    def test_the_public_surface_did_not_grow(self):
+        """`is_contention` is public because `cli.main` must call it. Its sibling
+        is not, and a rename to `is_environmental` would quietly re-open the door
+        the test above closes."""
+        assert hasattr(db, "is_contention")
+        assert not hasattr(db, "is_environmental")
