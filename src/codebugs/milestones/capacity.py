@@ -15,7 +15,7 @@ from codebugs.milestones._spine import (
     _get_item_row_by_ref,
     _row_to_item,
 )
-from codebugs.milestones.reconcile import source_is_terminal
+from codebugs.milestones.reconcile import live_source_clause
 
 
 def _held_col(size: str) -> str:
@@ -159,17 +159,39 @@ def _eligibility_failure(
     return None
 
 
-def _bucket_query(milestone_pattern: str) -> str:
+def _bucket_query(milestone_pattern: str, live_clause: str) -> str:
+    """One bucket's SQL. ``live_clause`` comes from ``reconcile.live_source_clause``
+    and its parameters splice at the fragment's TEXTUAL position — after the WHERE
+    and before ``ORDER BY`` (CB-20: a wrong splice corrupts only the parameterised
+    cases, while unfiltered tests keep passing)."""
     return (
         "SELECT mi.*, m.kind AS milestone_kind, m.target_date AS milestone_target_date "
         "FROM milestone_items mi JOIN milestones m ON m.id = mi.milestone_id "
         f"WHERE mi.milestone_id {milestone_pattern} AND mi.status = 'open' "
-        "ORDER BY m.target_date ASC NULLS LAST, mi.priority ASC, mi.created_at ASC"
+        f"AND ({live_clause}) "
+        "ORDER BY m.target_date ASC NULLS LAST, mi.priority ASC, mi.created_at ASC, mi.id ASC"
     )
 
 
 def _candidates(conn: sqlite3.Connection):
-    """Yield (item, milestone) tuples in priority order across buckets."""
+    """Yield (item, milestone) tuples in priority order across buckets.
+
+    A terminal source is never eligible, whatever the stored status says (CB-26),
+    and since CB-31 that is enforced in SQL rather than per row. This covers
+    RELEASE milestones too, which the reconciliation hook deliberately does not
+    touch, so ``pull_next`` never hands out finished work even where the stored row
+    was left behind — the case only this read-side filter can catch.
+
+    The clause is built ONCE and reused across all four buckets. It probes
+    ``sqlite_master`` per entity kind, so building it per bucket would add eight
+    reads inside ``pull_next``'s ``BEGIN IMMEDIATE`` window — making the exclusive
+    lock hold worse, which is the opposite of why CB-31 moved this into SQL.
+
+    ``mi.id ASC`` breaks ties: ``created_at`` is whole-second, and ``pull_next``
+    takes the FIRST eligible candidate, so an undefined tie order decided which
+    card an agent got.
+    """
+    live_clause, live_params = live_source_clause(conn, alias="mi")
     buckets = [
         ("= 'stream/security'", None),
         ("IN (SELECT id FROM milestones WHERE kind='release' AND state='open')", None),
@@ -177,14 +199,10 @@ def _candidates(conn: sqlite3.Connection):
         ("= 'stream/maintenance'", None),
     ]
     for pattern, _ in buckets:
-        rows = conn.execute(_bucket_query(pattern)).fetchall()
+        rows = conn.execute(
+            _bucket_query(pattern, live_clause), live_params
+        ).fetchall()
         for row in rows:
-            # A terminal source is never eligible, whatever the stored status says
-            # (CB-26). This covers RELEASE milestones too, which the reconciliation
-            # hook deliberately does not touch, so `pull_next` never hands out
-            # finished work even where the stored row was left behind.
-            if source_is_terminal(conn, row["item_kind"], row["item_ref"]):
-                continue
             d = dict(row)
             kind = d.pop("milestone_kind")
             d.pop("milestone_target_date")

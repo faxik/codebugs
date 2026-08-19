@@ -17,7 +17,7 @@ from codebugs.milestones._spine import (
     _milestone_exists,
     _row_to_item,
 )
-from codebugs.milestones.reconcile import _table_exists, source_is_terminal
+from codebugs.milestones.reconcile import _table_exists, live_source_clause
 
 
 def _auto_route_finding(conn: sqlite3.Connection, finding: dict[str, Any]) -> None:
@@ -72,16 +72,32 @@ def triage_inbox(
     write statuses with no hook at all — so the filter here is what actually makes
     "a resolved finding never appears in the inbox" true.
 
-    The LIMIT is applied AFTER filtering; pushing it into the SQL would silently
-    return fewer than ``limit`` live rows whenever stale ones sort ahead of them.
+    Since CB-31 the filter is ``reconcile.live_source_clause`` — one SQL statement
+    instead of ``1 + 2N``.
+
+    **The LIMIT stays in Python, and the original reason for that is now the wrong
+    reason.** This docstring used to say pushing it into SQL "would silently return
+    fewer than ``limit`` live rows"; with the filter in the same WHERE that is no
+    longer true, since SQL applies LIMIT after WHERE. It stays because moving it
+    would be a real behaviour change, measured twice in review: SQL ``LIMIT -1``
+    means UNLIMITED while ``live[:-1]`` drops the last row, and nothing validates
+    ``limit`` on the way in (``__init__.py`` declares ``limit: int = 50`` and the
+    CLI passes an unvalidated ``type=int``). Rejecting a negative limit is a
+    separate contract question, filed rather than smuggled in here.
+
+    ``id ASC`` breaks ties: ``created_at`` is whole-second and this tracker really
+    does have 5- and 4-way ties, so without it the WHERE change could reorder tied
+    rows and the Python slice would then return a different page.
     """
+    clause, params = live_source_clause(conn, alias="mi")
     rows = conn.execute(
-        """SELECT * FROM milestone_items
-           WHERE milestone_id = 'stream/triage' AND status = 'open'
-           ORDER BY created_at ASC""",
+        "SELECT mi.* FROM milestone_items mi "
+        "WHERE mi.milestone_id = 'stream/triage' AND mi.status = 'open' "
+        f"AND ({clause}) "
+        "ORDER BY mi.created_at ASC, mi.id ASC",
+        params,
     ).fetchall()
-    live = [r for r in rows if not source_is_terminal(conn, r["item_kind"], r["item_ref"])]
-    return [_row_to_item(r) for r in live[:limit]]
+    return [_row_to_item(r) for r in rows[:limit]]
 
 
 def triage_dismiss(
