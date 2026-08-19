@@ -80,6 +80,25 @@ MUTATIONS = [
         "                )",
         "tests/test_blockers.py::TestDeferredWrappersUseTheSinglePass",
     ),
+    (
+        "M7 delete the reqs blocker_count annotation entirely",
+        SRC / "reqs.py",
+        "            if deferred_ids is not None and not result.get(\"grouped\"):\n"
+        "                for row in result[\"requirements\"]:\n"
+        "                    row[\"blocker_count\"] = deferred_counts.get(row[\"id\"], 0)\n",
+        "",
+        "tests/test_blockers.py::TestDeferredWrappersUseTheSinglePass",
+    ),
+    (
+        "M8 get_deferred_counts stops using the shared aggregation",
+        SRC / "blockers.py",
+        "    active_counts = _active_counts(evaluated)\n"
+        "    all_items = {b[\"item_id\"] for b in evaluated}",
+        "    _hand = {b[\"item_id\"] for b in evaluated if b[\"is_active\"]}\n"
+        "    active_counts = dict.fromkeys(_hand, 1)\n"
+        "    all_items = {b[\"item_id\"] for b in evaluated}",
+        "tests/test_blockers.py::TestActiveCountsIsTheSingleDefinition",
+    ),
 ]
 
 

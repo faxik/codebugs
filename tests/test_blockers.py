@@ -952,23 +952,63 @@ class TestDeferredIdsAndCountsDifferential:
 
 
 class TestActiveCountsIsTheSingleDefinition:
-    def test_query_deferred_entities_uses_the_shared_aggregation(self, conn):
-        """`query_deferred_entities` carried its own copy of the counting loop. Two
-        definitions of one aggregation contract in one file is the drift this repo
-        keeps filing cards about, so it now derives from `_active_counts` too."""
+    """EVERY function that evaluates the blocker set must derive its per-item
+    aggregation from `_active_counts`, or be named in ``EXEMPT`` with a reason.
+
+    The first version of this test asserted ONE call site while `_active_counts`'
+    own docstring claimed "every consumer" — and the counter-example
+    (`get_deferred_counts`, re-deriving "has an active blocker" by hand) sat 170
+    lines below in the same file. That is this repo's enumeration failure in
+    miniature: a check that validates one element cannot validate the composition.
+    So the ratchet asserts the COMPLEMENT — every evaluator, minus a named
+    exemption list — in the shape of TestOpenCallSitesRatchet.
+
+    **Residual, measured rather than assumed.** This keys on the CALL, not on the
+    result being used. A function that still calls `_active_counts` while
+    hand-deriving one of its projections passes here — and ruff does not catch it
+    either when the result is used for something else (verified: the variant that
+    hand-derives `deferred_count` while `active_counts` still feeds
+    `currently_unblocked_count` is clean under `ruff check`). The realistic
+    regression — dropping the call — IS caught, and mutation M8 pins that. Stating
+    the gap because a ratchet described better than it behaves is worse than none.
+    """
+
+    # name -> why it may re-derive. Empty today, deliberately: `get_deferred_counts`
+    # was the one candidate and it turned out only `overdue_count` needs the
+    # trigger fields, so its `deferred_count` now derives from the shared map.
+    EXEMPT: dict[str, str] = {}
+
+    def test_every_evaluator_derives_from_the_shared_aggregation(self):
         import ast
         import pathlib
-        src = pathlib.Path(blockers.__file__).read_text()
-        tree = ast.parse(src)
-        fn = next(
-            n for n in ast.walk(tree)
-            if isinstance(n, ast.FunctionDef) and n.name == "query_deferred_entities"
+        tree = ast.parse(pathlib.Path(blockers.__file__).read_text())
+
+        def called_names(node):
+            return {
+                c.func.id for c in ast.walk(node)
+                if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+            }
+
+        offenders = []
+        evaluators = []
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.FunctionDef):
+                continue
+            names = called_names(fn)
+            if "_get_active_blockers_by_type" not in names:
+                continue
+            evaluators.append(fn.name)
+            if fn.name in self.EXEMPT or "_active_counts" in names:
+                continue
+            offenders.append(fn.name)
+
+        # Non-vacuity: if the evaluator set is ever empty the assertion below is
+        # free, which is exactly how a ratchet stops ratcheting.
+        assert len(evaluators) >= 4, evaluators
+        assert offenders == [], (
+            f"{offenders} evaluate the blocker set without deriving from "
+            "_active_counts; add to EXEMPT with a reason, or derive from it"
         )
-        calls = {
-            c.func.id for c in ast.walk(fn)
-            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
-        }
-        assert "_active_counts" in calls
 
 
 class TestDeferredWrappersUseTheSinglePass:
@@ -1013,44 +1053,55 @@ class TestDeferredWrappersUseTheSinglePass:
         c.row_factory = sqlite3.Row
         return c
 
+    # Both helpers put ALL `n` blockers on ONE item, so the number of rows the
+    # domain query returns is 1 at every size and only the blocker count varies.
+    # An earlier draft scaled the row count with `n` too, which would let a future
+    # per-returned-row cost in `query_findings` move the delta for a reason that
+    # has nothing to do with CB-69 — while the failure message blamed a double
+    # evaluation.
+
     def _findings_cost(self, tmp_path, n):
         c = self._counting_conn(tmp_path / f"f{n}")
-        for i in range(n * 2):
+        for i in range(n + 1):
             findings.add_finding(
                 c, finding_id=f"CB-{i + 1}", description=f"d{i}",
                 severity="low", category="bug", file="a.py",
             )
         for i in range(n):
             blockers.add_blocker(
-                c, item_id=f"CB-{i + 1}", blocked_by=f"CB-{n + i + 1}", reason="r"
+                c, item_id="CB-1", blocked_by=f"CB-{i + 2}", reason=f"r{i}"
             )
         tools = self._tools(c, findings)
         c.n = 0
         result = tools["query"](status="deferred")
-        assert result["total"] == n
-        assert all(r["blocker_count"] == 1 for r in result["findings"])
+        assert result["total"] == 1
+        assert result["findings"][0]["blocker_count"] == n
         cost = c.n
         c.close()
         return cost
 
     def _reqs_cost(self, tmp_path, n):
         c = self._counting_conn(tmp_path / f"r{n}")
+        reqs.add_requirement(
+            c, req_id="FR-1", description="r", section="core", priority="should",
+        )
         for i in range(n):
-            reqs.add_requirement(
-                c, req_id=f"FR-{i + 1}", description=f"r{i}",
-                section="core", priority="should",
-            )
             findings.add_finding(
                 c, finding_id=f"CB-{i + 1}", description=f"d{i}",
                 severity="low", category="bug", file="a.py",
             )
             blockers.add_blocker(
-                c, item_id=f"FR-{i + 1}", blocked_by=f"CB-{i + 1}", reason="r"
+                c, item_id="FR-1", blocked_by=f"CB-{i + 1}", reason=f"r{i}"
             )
         tools = self._tools(c, reqs)
         c.n = 0
         result = tools["reqs_query"](status="deferred")
-        assert result["total"] == n
+        assert result["total"] == 1
+        # The findings twin asserts this and the reqs one did not, so DELETING the
+        # whole annotation block in reqs.py left the entire suite green — verified
+        # by mutation. That hole predates CB-69; this branch rewrote the line, so
+        # it closes it.
+        assert result["requirements"][0]["blocker_count"] == n
         cost = c.n
         c.close()
         return cost

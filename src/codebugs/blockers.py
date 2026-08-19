@@ -590,8 +590,13 @@ def blocker_counts_for(
 ) -> dict[str, int]:
     """Active-blocker count per id, for annotating a forwarded deferred query.
 
-    Kept as-is for existing callers. A caller that ALSO needs the deferred id set
-    must use ``deferred_ids_and_counts`` rather than calling both — see CB-69.
+    **No production caller remains** — both wrappers moved to
+    ``deferred_ids_and_counts`` in CB-69. This and ``deferred_id_restriction`` are
+    kept because the differential tests use them as the before/after baseline that
+    pins the halving. ("They are public" is NOT a second reason — nothing consumes
+    this package as a Python library; the public surface is MCP and the CLI.) A
+    caller that needs BOTH halves must use ``deferred_ids_and_counts``; calling
+    these two together is exactly the double evaluation CB-69 was filed for.
 
     The signature keeps its positional arguments deliberately: the missing
     keyword-only ``*`` is CB-68's question over a nine-site population, and fixing
@@ -607,30 +612,32 @@ def get_deferred_counts(
 ) -> dict[str, int]:
     """Return deferred/overdue/unblocked counts for an entity type."""
     evaluated = _get_active_blockers_by_type(conn, entity_type)
-
     now = utc_now()
-    items: dict[str, list[dict[str, Any]]] = {}
-    for b in evaluated:
-        items.setdefault(b["item_id"], []).append(b)
 
-    deferred_count = 0
-    currently_unblocked_count = 0
-    overdue_items: set[str] = set()
+    # `deferred_count` IS the size of the shared aggregation — "this item has at
+    # least one active blocker" is precisely what `_active_counts` decides, so
+    # re-deriving it here would be a third definition of one contract in one file.
+    # The CB-69 plan justified leaving this function alone on the grounds that it
+    # needs `trigger_type`/`trigger_at`; that is only half true, and only of
+    # `overdue_count`.
+    active_counts = _active_counts(evaluated)
+    all_items = {b["item_id"] for b in evaluated}
 
-    for item_id, item_blockers in items.items():
-        active = [b for b in item_blockers if b["is_active"]]
-        if active:
-            deferred_count += 1
-            for b in active:
-                if b["trigger_type"] == "date" and b["trigger_at"] and b["trigger_at"] <= now:
-                    overdue_items.add(item_id)
-        else:
-            currently_unblocked_count += 1
+    # The one projection a count map cannot carry: it needs each ACTIVE blocker's
+    # trigger fields, not how many there are.
+    overdue_items = {
+        b["item_id"]
+        for b in evaluated
+        if b["is_active"]
+        and b["trigger_type"] == "date"
+        and b["trigger_at"]
+        and b["trigger_at"] <= now
+    }
 
     return {
-        "deferred_count": deferred_count,
+        "deferred_count": len(active_counts),
         "overdue_count": len(overdue_items),
-        "currently_unblocked_count": currently_unblocked_count,
+        "currently_unblocked_count": len(all_items) - len(active_counts),
     }
 
 
