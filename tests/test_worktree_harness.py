@@ -1964,6 +1964,34 @@ def code_only(src: str) -> str:
     return "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
 
 
+def invocations(src: str, command: str) -> list[str]:
+    """Logical lines where `command` is actually RUN, not merely mentioned.
+
+    Two things a naive `command in src` gets wrong, both met while writing
+    these tests:
+
+    * A mutation that disables a call by prefixing the shell no-op — `:
+      codebugs release …` — leaves the substring intact, so the assertion
+      passes over a script that does nothing. Command position is the fix.
+    * Real calls are wrapped in `if` and split across backslash continuations,
+      so the flags belong to the same LOGICAL line as the command name.
+
+    Comments are dropped first, then continuations joined, then each line is
+    stripped of the leading keywords that still leave the next word in command
+    position. Anything else — `:`, `#`, a string — is a mention.
+    """
+    joined = code_only(src).replace("\\\n", " ")
+    out = []
+    for line in joined.splitlines():
+        rest = " ".join(line.split())
+        for keyword in ("if ", "elif ", "then ", "! "):
+            while rest.startswith(keyword):
+                rest = rest[len(keyword) :]
+        if rest.startswith(command + " "):
+            out.append(rest)
+    return out
+
+
 class TestClaimsWiringStructure:
     """The scripts must reach the claims ledger, not flip a status field.
 
@@ -2037,10 +2065,29 @@ class TestClaimsWiringStructure:
         assert "exit 3" in src, "held_by_other does not refuse the setup"
 
     def test_finish_releases_what_the_branch_held(self) -> None:
-        src = code_only(self.FINISH.read_text())
-        assert "codebugs release" in src, "finish never releases the branch's claims"
-        assert '--holder "${BRANCH}"' in src, "the release does not name the branch as holder"
-        assert "--holder-kind branch" in src
+        """The call must be INVOKED, not merely present.
+
+        The first draft asserted `"codebugs release" in src` and a mutation
+        that disabled the call by prefixing it with `:` — the shell no-op —
+        left this whole class green. A command is a line that STARTS with it;
+        anything else is a mention.
+        """
+        calls = invocations(self.FINISH.read_text(), "codebugs release")
+        assert calls, "finish never INVOKES `codebugs release` (a mention is not a call)"
+        call = "\n".join(calls)
+        assert '--holder "${BRANCH}"' in call, "the release does not name the branch as holder"
+        assert "--holder-kind branch" in call
+        assert '--repo "${REPO_ROOT}"' in call
+
+    def test_setup_release_trap_actually_invokes_release(self) -> None:
+        """Same shape on the setup side, for the same reason."""
+        calls = invocations(self.SETUP.read_text(), "codebugs release")
+        assert calls, "setup's abort trap never INVOKES `codebugs release`"
+        assert any('--repo "${REPO_ROOT}"' in c for c in calls)
+
+    def test_setup_actually_invokes_claim(self) -> None:
+        calls = invocations(self.SETUP.read_text(), "codebugs claim")
+        assert calls, "setup never INVOKES `codebugs claim`"
 
     def test_finish_release_is_never_fatal(self) -> None:
         """The merge has already landed by then.
