@@ -232,16 +232,39 @@ this paragraph overclaimed.**
    step, because the coupling was previously implicit.
 
 - **Create:** `tools/worktree-setup.sh <type>/<slug> [base]`, which validates the name, refuses a
-  card already carried by another branch, creates `.worktrees/<type>-<slug>`, primes the worktree's
-  own dev environment, and flips an `open` card to `in_progress`. **That last part is a
-  best-effort status write, not a claim** — it does not go through `claims.py`, takes no holder
-  identity, has no release path, and is skipped entirely when the `codebugs` CLI is off `PATH`, so
-  an abandoned branch leaves the card `in_progress` forever. The *branch-name* collision check is
-  the half with teeth, and it is pure git. Wiring this to the claims ledger (which already provides
-  mutual exclusion via a partial unique index) is open work. One concern per branch; a
-  card-driven branch carries its id (`fix/cb-48-tracker-root-init`). Work already started on main
-  moves over with `git stash push <files>` → setup → `git stash pop` in the worktree; the stash is
-  shared across worktrees because it lives in the common git dir.
+  card already carried by another branch, **claims every card the branch names through the claims
+  ledger**, creates `.worktrees/<type>-<slug>`, and primes the worktree's own dev environment.
+  **The claim is a real claim now (CB-58), and this bullet used to say the opposite** — it read
+  "flips an `open` card to `in_progress` … a best-effort status write, not a claim", which was
+  accurate then and is the defect that was fixed. The status flip is not gone, it is *subsumed*:
+  it arrives as the claim's projection (`EntityKind.busy_status`), so the card still reads
+  `in_progress` while the branch holds it. What is new is that the write now carries a **holder
+  triple** (`--holder <branch> --holder-kind branch --repo <root>`), mutual exclusion is the
+  partial unique index rather than nobody, and there is a release path — including
+  `_auto_release_on_terminal`, so closing the card releases the claim in the same transaction.
+  **Order is load-bearing: the claim happens BEFORE `git worktree add`,** for the same reason
+  `_guard_branch_type` does — otherwise the losing side of a race owns a branch and a directory by
+  the time it is told no. **Exit codes are handled as the API they are**: `3` (held by someone
+  else) is FATAL and prints the incumbent's triple — this is the **setup gate**, the one tracker
+  call in the harness allowed to abort; `4` (already resolved) warns and proceeds, because a
+  follow-up branch on a closed card is legitimate; `5` (undetermined) is retried **once** with the
+  identical call, which converges rather than double-claiming because the primitive is an
+  idempotent upsert. An **EXIT trap** releases whatever the run took if setup aborts, armed after
+  the first successful claim and **disarmed on success** — leaving it armed would make every setup
+  that *worked* release its own claim on the way out. `CODEBUGS_SETUP_NO_CLAIM=1` still skips the
+  tracker entirely and is the documented escape hatch past a `3`; **`--allow-duplicate`
+  deliberately does not punch through it**, because it answers a different question (another
+  *branch* carries the id) and, since this repo never deletes merged branches, it is needed for
+  ordinary follow-up work — overloading it would make the claim gate routinely bypassed. The
+  *branch-name* collision check remains, and it is still the half that works with no tracker at
+  all, because it is pure git. **What this does NOT do, and the honest scope is the point: a branch
+  abandoned AFTER a successful setup still leaves a live claim.** Steal and expiry stay deferred by
+  design (Claims module, below). That is strictly better than the anonymous `in_progress` it
+  replaces — `codebugs who-holds` names the holder and repo, and any close releases it — but it is
+  not the claim disappearing. One concern per branch; a card-driven branch carries its id
+  (`fix/cb-48-tracker-root-init`). Work already started on main moves over with `git stash push
+  <files>` → setup → `git stash pop` in the worktree; the stash is shared across worktrees because
+  it lives in the common git dir.
 - **Worktrees live in `.worktrees/`,** slug = branch with `/`→`-`, matching autosorter. Both that
   directory and the legacy `.claude/worktrees/` are gitignored; the legacy path still works and
   `worktree-finish.sh` resolves either, but new worktrees go in `.worktrees/`.
@@ -533,6 +556,30 @@ delete, so `release_reason` (`explicit` | `terminal:<status>`) is a queryable re
   `worktree-finish.sh` releases whatever the branch still holds. Exactly one of those calls may be
   fatal — the setup gate. Everything else is guarded, so a missing or contended tracker can never
   abort a finish after the merge has landed.
+  **This repo's own `tools/worktree-*.sh` now follow the same shape (CB-58)** — see the Workflow
+  section for the exit-code handling and the trap. One detail worth carrying to any third adopter,
+  because it was only obvious after building it: **the fatal/guarded asymmetry is about WHEN, not
+  about importance** — setup may abort because nothing has been created yet and a refusal is free,
+  while finish runs after the merge has landed, where a false failure over tracker bookkeeping is
+  the worse outcome.
+  **Two places codebugs deliberately diverges from `FINAL-DESIGN.md` §6.2–§6.3, both because that
+  section was written for autosorter's script and one of its premises does not hold here.** Do not
+  "fix" either back without reading this.
+  1. **`--allow-duplicate` does NOT clear a `held_by_other` refusal** (design §6.2(a) has it clear
+     both `3` and `4`). That flag also clears the pure-git branch guard, and this repo never deletes
+     merged branches, so it is needed for *ordinary follow-up work* — one flag for both jobs would
+     turn the claim gate off exactly when people are doing normal work. `CODEBUGS_SETUP_NO_CLAIM=1`
+     is the typed alternative and it builds with **no** claim rather than stealing one. **Ratified
+     by the owner, 2026-08-19**, against the design doc, on this reasoning.
+  2. **Finish leaves restore ON** (design §6.3 passes `--no-restore`). The design's own text says
+     why the difference is correct: there, `[7b/9] auto-resolve-codebugs.py` has already flipped the
+     card to `fixed` from a `Fixes:` trailer, so the release is a no-op and `--no-restore` guards a
+     rare case. **This repo has no auto-resolve step** — `worktree-finish.sh` tells the operator to
+     close the card by hand — so the card is typically still `in_progress`, and `--no-restore` would
+     leave every finished branch's card `in_progress` with no holder: CB-58's own defect,
+     reintroduced by CB-58's fix. Restore is a CAS against the projected value, so it still cannot
+     resurrect a card someone already closed; the operator-closed case returns `not_claimed` at
+     exit 0 and writes nothing.
 - Deferred by design, not forgotten: `steal`, claim history queries, audit/divergence tooling,
   retention, `expected_status`/`changed`, and `pull_next` integration.
   See `docs/superpowers/plans/design-council-entity-claims/FINAL-DESIGN.md` §10.
