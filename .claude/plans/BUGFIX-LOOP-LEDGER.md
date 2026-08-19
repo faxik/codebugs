@@ -1366,3 +1366,59 @@ a typed `db.TrackerUnwritableError` raised inside `db._open`, never a central
 `sqlite3.OperationalError` arm at `cli.main` (the boundary option was refuted by this repo's own
 `tests/test_bench.py:789`, which ratifies the traceback as the post-commit discriminator). Then
 CB-55, which now carries its three-transformation breakdown and a `cliio.py` host recommendation.
+
+## Iteration 8 — 2026-08-19 · focus `codebugs` · **CB-86, merge `c05250a`**
+
+**Disposition: CB-86 fixed, FULL, with three limits named on the card. CB-100 filed. Open 37 → 37.**
+
+**The design had already been ratified in iteration 7's review, so this iteration opened with a
+reproducer instead of a design round** — the same payoff iteration 6 recorded. All four shapes were
+re-reproduced by hand before any edit, in a plain temp dir outside any worktree, and two of the
+card's own claims turned out wrong: every line number on it was stale, and there are **three** raise
+sites inside `_open`, not two. The one that mattered was shape B — a read-only database file raises
+from `merge.ensure_schema`, several frames down through `_open`'s `ensure_fn` loop — because that is
+what makes ONE classification point sufficient for all four shapes.
+
+**A design question the review had not covered, found only by implementing.** `SQLITE_CANTOPEN` (14)
+is returned for BOTH "the file is not there" and "the file is there and I may not open it", with an
+identical message — measured. So the error code alone cannot choose between "run `codebugs init`"
+and "check your permissions", and classifying 14 as environmental unconditionally would have
+regressed the main CB-23 path into telling people with a genuinely missing tracker that their
+permissions are wrong. `os.path.exists` picks the message, which is exactly what `_open`'s own
+docstring already says the resolver's `isfile` check is for.
+
+**I shipped the rejected design's own door and the altitude reviewer found it.** `is_environmental`
+was exported PUBLIC — so re-introducing the refused boundary arm became a two-line patch inside an
+`except sqlite3.OperationalError` that already exists in `cli.py`, looking like an obvious tidy-up
+while silently deleting the discriminator `tests/test_bench.py:789` protects. **A rule whose whole
+content is "do not call this from there" cannot be enforced by exporting the thing.** Now
+`_is_environmental` plus `TestTheClassifierStaysInsideDb`, and both halves are mutation-verified:
+injecting that exact two-line patch turns it red, and renaming the function back to public turns its
+companion red.
+
+**The enumeration question got a better answer than "we were careful".** This is another allowlist
+of codes, and this repo has been bitten by enumerations six times — but the reviewer supplied the
+distinction worth keeping: in every prior case an unlisted member produced a *success-shaped wrong
+answer*; here `if is_contention(e) or not _is_environmental(e): raise` means an unlisted code
+produces the pre-CB-86 traceback. **An incomplete list fails toward the status quo, not toward a
+lie**, and contention is tested first, so even a mistaken future addition of 5/6 cannot swallow a
+retryable error. Two entries were kept OUT by measurement rather than reasoning: `SQLITE_PERM` (3)
+never occurs (`chmod 000` yields 14) and `SQLITE_NOTADB` (26) arrives as `DatabaseError` and could
+never reach the arm.
+
+**Process notes worth carrying.** One test was corrected mid-iteration for *looking* discriminating
+for the wrong reason — it asserted on the new helper, so it went red on main via `AttributeError`
+rather than on behaviour; the assertion was dropped and its class now states plainly that it pins
+preserved behaviour. And the efficiency review lane was skipped deliberately, with the number rather
+than a shrug: the new code runs only inside an `except`, and the suite went 70.40s → 71.66s for 19
+new tests, measured before skipping.
+
+**Net: 1 closed (CB-86), 1 filed (CB-100). Open 37 → 37.** CB-100 is `describe_root` reporting a
+`chmod 000` tracker as healthy while every verb now refuses it — **pre-existing**, made louder by
+this change, and deferred out of this tree on the reviewer's explicit recommendation rather than
+folded in.
+
+**Next:** CB-55, which now carries its three-transformation breakdown, the measured six-copy count,
+the `cliio.py` host recommendation, and a note that CB-78 left two of its six arms unreachable for
+pipe destinations. Then CB-99 (the `reqs-import` swallow), which should reuse CB-86's classifier
+rather than growing a second copy of the same enumeration.
