@@ -1292,3 +1292,77 @@ actually shrank, because the design cost was paid in iteration 5.
 **Next:** queue is medium/low only. Candidates worth ranking: CB-92-family is closed; CB-63
 (meta-batch, needs-decision), CB-37 (what enforces the CB-24 transaction rule — the obvious AST
 predicate certifies the bug it was built to catch), CB-21 (update-surface parity test).
+
+## Iteration 7 — 2026-08-19 · focus `codebugs` ("stabilization batch, one batch") · **CB-78, merge `88bfefe`**
+
+**Disposition: CB-78 fixed. CB-55 handed back to `open` with better evidence. CB-86's design
+ratified onto its card. CB-99 filed. Open 38 → 37.**
+
+**The headline is that the batch the user asked for did not survive review, and splitting it was
+forced by the rules rather than chosen.** The iteration opened with a genuine three-card cluster —
+CB-78 + CB-86 + CB-55, "the CLI's I/O error boundary" — and `/adversarial-review-x2` (Opus adversary
++ Codex/GPT-5.6-Sol in parallel, then an Opus defender over the union) killed it before a line of
+code was written. Both attackers reached the same verdict independently:
+
+- **The predicate never held.** The plan claimed predicate 1 of `bug-clustering.md` (*one causal
+  code change makes every reproduced symptom disappear*) while its own edit table listed **three**
+  causal changes, one per card. The table was the disproof printed directly beneath the claim.
+- **The "falsifiable evidence" self-destructed.** It justified the cluster with a contradiction
+  between two `except` arms, then stated two sentences later that the shipped CB-78 fix is a signal
+  disposition and adds no arm. A contradiction belonging to a *rejected* design cannot bind a tree.
+- **The edit count was over the hard ceiling of four** before anything else: CB-55's six call sites
+  are **three distinct transformations**, so even the most generous arithmetic gives 1 + 1 + 3 = 5.
+
+**Three of my `file:line` citations were fabricated, and I only caught them because the review
+did.** `findings.py:2216` is a dict field, not the `add` print (that is `:2144`); `db.py:1096` is a
+`try:`, not the WAL pragma (`:1111`) — I copied that number from CB-86's card without opening the
+file. Two stated premises were also simply false: "child processes stop inheriting `SIG_IGN`"
+(`subprocess` already restores it — `restore_signals=True` is the default, measured both ways) and
+"sqlite3 exception attributes are read-only" (they are assignable, and the test I cited as the
+precedent for a stub *assigns onto a real exception*). **The lesson is not "cite carefully" — it is
+that a number copied from a card is not a citation.**
+
+**A user decision was re-opened because measurement inverted its headline example.** The SIGPIPE/141
+semantics were ratified, then re-ratified after I measured that `export-csv /dev/stdout | gzip` —
+the very scenario I had argued from — already exits 1 with a clean `codebugs: [Errno 32] Broken
+pipe`, because `fsio.atomic_write` writes that path in place and CB-76's arm catches it. There was
+no exit-0 path there to protect, and 141 **removes** a working diagnostic on that one command. The
+ranking of the three original options was unchanged, so this was reported as a cost and re-ratified
+rather than re-litigated. (My example was also mis-spelled: `export-csv -` writes a file named `-`.)
+
+**Two design facts that only measurement could have produced, both from the defender:**
+1. **The "polite" variant defeats the fix.** Installing `SIG_DFL` inside `main()` and restoring it
+   in a `finally` — the obvious way to avoid mutating pytest's process state — puts the
+   block-buffered case back to **exit 120**, because that write is the interpreter's shutdown flush
+   and happens after `main()` returns. "No process-global mutation" and "fix the block-buffered
+   case" are incompatible inside one function; the wrapper split is the only shape satisfying both.
+2. **The leak was real, not theoretical.** Three test modules call `cli.main()` in-process, and a
+   two-test file reproduced `pytest -q -s . | head -2` dying at 141 mid-suite.
+
+**A defect I introduced inside the review's own fix, caught by mutation.** The altitude pass
+replaced a source-TEXT ratchet with an AST one (CLAUDE.md already ratified AST for the sibling
+`TestWriteCallSitesRatchet`). My first AST draft keyed on the callee's **module** being named
+`signal`, so `import signal as _s; _s.signal(_s.SIGPIPE, _s.SIG_DFL)` injected into `server.py` left
+it **green**. Now keyed on the callee's final name and verified red against three spellings, with the
+residual `getattr` evasion stated rather than implied. **Third iteration running where the evidence
+needed checking, not just the code.**
+
+**I also hit the `git checkout -- <file>` trap this repo documents** — the mutation loop's cleanup
+reverted an *uncommitted* `server.py` docstring I had added after the commit. Caught by reading
+`git status` rather than by any gate. "Commit first, mutate second" has to cover edits made *between*
+commits, not just the ones in the last commit.
+
+**Sibling sweep:** exactly two process entry points exist; `codebugs-mcp` → `server.main` is a
+deliberate NON-instance (its stdout is the JSON-RPC transport) and now says so at the call site
+rather than only in a plan.
+
+**Net: 1 closed (CB-78), 1 filed (CB-99). Open 38 → 37.** The filing is the review machinery
+working, not noise: CB-99 is a `except sqlite3.Error: skipped += 1` in `reqs.import_markdown` that
+turns a full disk into "Imported 0, skipped 47" at **exit 0** — found by the Codex attacker, and
+filed separately only after the defender *measured its claimed CB-86 bypass to be false*.
+
+**Next:** `fix/cb-86-tracker-unwritable`, whose design is fully ratified and written on the card —
+a typed `db.TrackerUnwritableError` raised inside `db._open`, never a central
+`sqlite3.OperationalError` arm at `cli.main` (the boundary option was refuted by this repo's own
+`tests/test_bench.py:789`, which ratifies the traceback as the post-commit discriminator). Then
+CB-55, which now carries its three-transformation breakdown and a `cliio.py` host recommendation.
