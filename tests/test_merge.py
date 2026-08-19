@@ -1109,8 +1109,8 @@ class TestTheMcpSurfaceCanCloseASession:
 
         `abandon_session` had no status gate at all, so the newly reachable tool
         could turn a successfully merged session into an abandoned one —
-        destroying the only record that the merge happened, which `merge_stats`
-        then tallies as abandoned work. That is CB-106's own third consequence,
+        destroying the only record that the merge happened, which `get_status`
+        then tallies under `abandoned_sessions`. That is CB-106's own third consequence,
         arriving through CB-106's own fix.
 
         The lock-revocation half is NOT gated here, deliberately: nothing in this
@@ -1135,11 +1135,26 @@ class TestTheMcpSurfaceCanCloseASession:
             self._call(mcp, "codemerge_abandon", session_id="D")
         with pytest.raises(ValueError, match="cannot be abandoned"):
             merge.abandon_session(conn, "D")
+
+        # The refusal path runs an UPDATE that matches zero rows, and an UPDATE
+        # takes the write lock BEFORE it discovers that. Raising out of there
+        # without ending the transaction leaves the next caller on this
+        # connection holding a lock it never took: `merge()` refuses an ambient
+        # transaction outright, and another connection gets "database is locked".
+        # "Nothing was written, so nothing to undo" is true about content and
+        # false about lock state — an earlier draft asserted exactly that.
+        assert conn.in_transaction is False, (
+            "a refused abandon must not leave a write transaction open"
+        )
+        self._call(mcp, "codemerge_start", session_id="E", branch="fix/e")
+        assert merge.merge(
+            conn, "E", expected_main_head="H0", current_main_head_fn=lambda: "H0"
+        )["proceed"] is True, "the connection must still be usable after a refusal"
         assert [s["session_id"] for s in merge.get_sessions(conn, status="done")] == ["D"], (
             "the record of a successful merge must survive an abandon attempt"
         )
 
-    def test_the_finish_description_names_only_statuses_finish_can_write(self, conn):
+    def test_the_finish_description_maps_each_success_value_to_what_it_writes(self, conn):
         """The docstring lied, and the lie was on the wire (`golden/mcp_schema.json`).
 
         It promised `status→abandoned` for `success=False` while the code writes
@@ -1149,11 +1164,17 @@ class TestTheMcpSurfaceCanCloseASession:
         The assertion derives the truth by RUNNING both arms rather than comparing
         against a fixed string, because a re-spelled enumeration is exactly how the
         description drifted from the code in the first place.
+
+        Residual, stated rather than left to be discovered: this checks the status
+        each arm NAMES, so a description that names both correctly and then lies in
+        prose ("False ends the session") still passes. Catching that needs a reader,
+        not a regex. What it does close is the drift that actually happened twice
+        here — a wrong status name, and the two arms swapped.
         """
         import re
 
         mcp = self._tools(conn)
-        reachable = set()
+        written = {}
         for i, success in enumerate((True, False)):
             sid = f"S{i}"
             merge.start_session(conn, session_id=sid, branch=f"fix/{sid}")
@@ -1161,26 +1182,32 @@ class TestTheMcpSurfaceCanCloseASession:
                 conn, sid, expected_main_head="H0", current_main_head_fn=lambda: "H0"
             )
             merge.finish(conn, sid, success=success)
-            reachable.add(
-                conn.execute(
-                    "SELECT status FROM codemerge_sessions WHERE session_id=?", (sid,)
-                ).fetchone()["status"]
-            )
-        assert reachable == {"done", "active"}, (
-            f"premise: finish writes exactly these two statuses, got {reachable}"
+            written[success] = conn.execute(
+                "SELECT status FROM codemerge_sessions WHERE session_id=?", (sid,)
+            ).fetchone()["status"]
+        assert written == {True: "done", False: "active"}, (
+            f"premise: this is what finish writes for each arm, got {written}"
         )
 
-        described = set(
-            re.findall(
-                r"status\s*(?:→|->)\s*(\w+)", self._descriptions(mcp)["codemerge_finish"]
+        desc = self._descriptions(mcp)["codemerge_finish"]
+        tokens = [
+            (m.start(), m.group(1)) for m in re.finditer(r"status\s*(?:→|->)\s*(\w+)", desc)
+        ]
+        assert tokens, "the description must still say what statuses finish writes"
+
+        # PER-ARM, not per-set. Set equality over the named statuses was the first
+        # attempt and review broke it in one edit: swapping the two arms names the
+        # same set and passes, while telling an agent that success=False closes the
+        # session for good — CB-106's lie restated, and worse than the original,
+        # which only got the status NAME wrong. Anchoring on the nearest status
+        # token after each literal also stops the guard false-refusing a truthful
+        # cross-reference such as "use codemerge_abandon (status→abandoned)",
+        # which set equality rejected.
+        for value, expected in written.items():
+            literal = re.search(rf"\b{value}\b", desc)
+            assert literal, f"the description never mentions success={value}"
+            following = [tok for pos, tok in tokens if pos > literal.start()]
+            assert following and following[0] == expected, (
+                f"success={value} writes '{expected}', but the description's "
+                f"nearest status after it is {following[:1] or 'nothing'}"
             )
-        )
-        assert described == reachable, (
-            "the description must name every status finish writes and no other. "
-            f"promised-but-unreachable={described - reachable}, "
-            f"written-but-undescribed={reachable - described}. "
-            "A subset assertion alone was shown insufficient in review: a description "
-            "saying only '(status→done)' and then asserting in PROSE that False closes "
-            "the session for good passed it, i.e. the opposite lie survived the guard "
-            "on half of this change."
-        )

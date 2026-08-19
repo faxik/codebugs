@@ -137,7 +137,7 @@ def start_session(
 
 
 def abandon_session(conn: sqlite3.Connection, session_id: str) -> dict[str, Any]:
-    """Mark a session abandoned, so its claims stop conflicting and its lock is freed.
+    """Mark a session abandoned, so its claims stop conflicting and it drops the lock.
 
     Precisely, because this text is also what an MCP client reads (CB-106) and an
     overclaiming description is the defect that card is about: the claim ROWS are
@@ -146,11 +146,11 @@ def abandon_session(conn: sqlite3.Connection, session_id: str) -> dict[str, Any]
     THIS session holds it (``WHERE id=1 AND session_id=?``).
 
     A ``done`` session is REFUSED. Abandoning one only destroys the record that
-    the merge succeeded — `merge_stats` would then tally finished work as
-    abandoned, which is the audit corruption CB-106 names as its third
-    consequence. The guard is a condition on the UPDATE rather than a Python
-    check on the row read above, so a session that reaches ``done`` concurrently
-    is refused too instead of losing the race.
+    the merge succeeded — `get_status` would then tally finished work under
+    ``abandoned_sessions``, which is the audit corruption CB-106 names as its
+    third consequence. The guard is a condition on the UPDATE rather than a
+    Python check on the row read above, so a session that reaches ``done``
+    concurrently is refused too instead of losing the race.
     """
     _get_session(conn, session_id)
 
@@ -161,12 +161,28 @@ def abandon_session(conn: sqlite3.Connection, session_id: str) -> dict[str, Any]
         (now, now, session_id),
     )
     # No RETURNING on this statement, so its outcome is read from rowcount and
-    # only from rowcount (the CB-30 rule). Nothing has been written when it is 0,
-    # so this refusal has nothing to undo.
+    # only from rowcount (the CB-30 rule).
     if cur.rowcount == 0:
+        # NOTHING WAS WRITTEN, BUT A TRANSACTION IS OPEN. The UPDATE took the
+        # write lock before matching zero rows, and a bare `raise` here would
+        # hand the next caller on this connection a held lock — under which
+        # `merge()` refuses outright and another connection gets
+        # "database is locked". "It wrote nothing, so there is nothing to undo"
+        # is true about CONTENT and false about LOCK STATE; an earlier draft of
+        # this function said exactly that and was wrong (adversarial review).
+        # Committing an empty transaction is the smallest correct end to it, and
+        # it matches what this function does on every other path.
+        observed = conn.execute(
+            "SELECT status FROM codemerge_sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        conn.commit()
+        if observed is None:
+            raise KeyError(f"Session '{session_id}' not found")
         raise ValueError(
-            f"Session '{session_id}' is 'done' and cannot be abandoned: that would "
-            "erase the record of a merge that succeeded. Nothing is holding it open."
+            f"Session '{session_id}' is '{observed['status']}' and cannot be abandoned: "
+            "that would erase the record of a merge that succeeded. Nothing is "
+            "holding it open — no 'done' session holds the merge lock, and its "
+            "claims are already excluded from conflict checks."
         )
     conn.execute(
         "UPDATE codemerge_locks SET session_id=NULL, acquired_at=NULL, expires_at=NULL "
@@ -600,9 +616,10 @@ def register_tools(mcp, conn_factory) -> None:
             base_commit: Git commit SHA this branch diverged from
             repo_root: Repo root path (default: cwd)
             allow_restart: If True, reuse this session_id when its previous
-                session is finished — 'abandoned' or 'done'. It does NOT
-                restart a live one: starting over an 'active' or 'merging'
-                session is an error whether or not this is set.
+                session is finished — 'abandoned' or 'done'. Restarting DELETES
+                that session's file claims, so re-claim anything you still need.
+                It does NOT restart a live one: starting over an 'active' or
+                'merging' session is an error whether or not this is set.
         """
         with conn_factory() as conn:
             return start_session(

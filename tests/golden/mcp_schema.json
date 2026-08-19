@@ -859,7 +859,7 @@
     "name": "codemerge_merge"
   },
   {
-    "description": "Start a new merge session for a branch.\n\nArgs:\n    session_id: Unique identifier for this merge session\n    branch: Git branch name being merged\n    description: Human-readable description of the work\n    base_commit: Git commit SHA this branch diverged from\n    repo_root: Repo root path (default: cwd)\n    allow_restart: If True, reuse this session_id when its previous\n        session is finished \u2014 'abandoned' or 'done'. It does NOT\n        restart a live one: starting over an 'active' or 'merging'\n        session is an error whether or not this is set.\n",
+    "description": "Start a new merge session for a branch.\n\nArgs:\n    session_id: Unique identifier for this merge session\n    branch: Git branch name being merged\n    description: Human-readable description of the work\n    base_commit: Git commit SHA this branch diverged from\n    repo_root: Repo root path (default: cwd)\n    allow_restart: If True, reuse this session_id when its previous\n        session is finished \u2014 'abandoned' or 'done'. Restarting DELETES\n        that session's file claims, so re-claim anything you still need.\n        It does NOT restart a live one: starting over an 'active' or\n        'merging' session is an error whether or not this is set.\n",
     "inputSchema": {
       "properties": {
         "allow_restart": {
