@@ -1582,3 +1582,171 @@ class TestRelativeGitEnvIsRefused:
             file_path="src/auth.py", reported_at_commit=sha, project_dir=project
         )
         assert result["file_status"] == "modified", result
+
+
+def _head_sha(project):
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=project, text=True).strip()
+
+
+class TestStalenessReadsTheNewestObservation:
+    """CB-53 — the `reported_at_commit` COLUMN is frozen at first report (ratified,
+    CB-63 variant (b)); the READER consults the occurrence ring instead. A defect
+    re-observed minutes ago on HEAD must not report stale by its first report — a
+    precision regression introduced by CB-43's dedup, which stopped minting a fresh
+    row (with a fresh commit stamp) per observation.
+
+    Fixtures re-observe through the PUBLIC `add_finding` — a dedup bump on the same
+    fingerprint input — because `occurrences` is a reserved meta key on both the add
+    and the update path, so the ring cannot be planted via meta on purpose."""
+
+    def _first_report(self, conn, sha, description="stale-looking bug"):
+        return findings.add_finding(
+            conn,
+            severity="high",
+            category="bug",
+            file="src/auth.py",
+            description=description,
+            reported_at_commit=sha,
+        )
+
+    def _reobserve(self, conn, sha, description="stale-looking bug"):
+        got = findings.add_finding(
+            conn,
+            severity="high",
+            category="bug",
+            file="src/auth.py",
+            description=description,
+            reported_at_commit=sha,
+        )
+        assert got["was_new"] is False, got
+        assert got["dedup_action"] == "bumped", got
+        return got
+
+    def test_a_reobservation_on_head_makes_a_modified_file_current(self, conn, git_project):
+        """MUTATION TEST (A1) — must fail with the reader unfixed: pre-fix the
+        verdict is `modified` (checked against the frozen first report) and
+        there is no `checked_commit` field at all."""
+        project, initial_sha = git_project
+        self._first_report(conn, initial_sha)
+        _commit_a_change(project)  # the file changes; the first report is now stale
+        head = _head_sha(project)
+        self._reobserve(conn, head)
+
+        got = provenance.check_findings(conn, project, finding_id="CB-1")
+        row = got["findings"][0]
+        assert row["file_status"] == "current", row
+        assert row["checked_commit"] == head, row
+        # First-report provenance is untouched — the column stays frozen.
+        assert row["reported_at_commit"] == initial_sha, row
+
+    def test_a_row_without_a_ring_keeps_the_first_report_verdict(self, conn, git_project):
+        """Legacy/NULL premise (A2): pre-dedup rows carry no ring, so behaviour
+        is the old one — the VERDICT half pins what the change deliberately
+        preserved; `checked_commit` names the same frozen commit."""
+        project, initial_sha = git_project
+        self._first_report(conn, initial_sha)
+        _commit_a_change(project)
+
+        got = provenance.check_findings(conn, project, finding_id="CB-1")
+        row = got["findings"][0]
+        assert row["file_status"] == "modified", row
+        assert row["checked_commit"] == initial_sha, row
+
+    def test_a_commitless_newest_observation_does_not_hide_an_earlier_commit(
+        self, conn, git_project
+    ):
+        """A3 — an observation whose auto-capture yielded no commit
+        (`reported_at_commit=None`) must not shadow an earlier ring entry WITH
+        a commit: any ring entry is newer than the first report by construction."""
+        project, initial_sha = git_project
+        self._first_report(conn, initial_sha)
+        _commit_a_change(project)
+        head = _head_sha(project)
+        self._reobserve(conn, head)
+        self._reobserve(conn, None)  # the newest entry carries no commit
+
+        got = provenance.check_findings(conn, project, finding_id="CB-1")
+        row = got["findings"][0]
+        assert row["file_status"] == "current", row
+        assert row["checked_commit"] == head, row
+
+    def test_a_ring_with_no_commits_falls_back_to_the_first_report(self, conn, git_project):
+        """A3 — a ring whose every entry lacks a commit decides nothing; the
+        frozen first report keeps deciding, exactly as with no ring at all."""
+        project, initial_sha = git_project
+        self._first_report(conn, initial_sha)
+        _commit_a_change(project)
+        self._reobserve(conn, None)
+
+        got = provenance.check_findings(conn, project, finding_id="CB-1")
+        row = got["findings"][0]
+        assert row["file_status"] == "modified", row
+        assert row["checked_commit"] == initial_sha, row
+
+    def test_hand_written_ring_garbage_never_crashes_the_check(self, conn, git_project):
+        """A3 — meta and ring can be hand-written (the reserved-key guard
+        postdates some rows), so the reader skips a non-dict entry, a non-string
+        commit and an empty-string commit without raising; the valid entry
+        underneath them still wins. The fixture writes raw SQL because the guard
+        (correctly) refuses this via the public API — it simulates a legacy row,
+        not a supported path."""
+        project, initial_sha = git_project
+        self._first_report(conn, initial_sha)
+        _commit_a_change(project)
+        head = _head_sha(project)
+        garbage_ring = [
+            {"at": "2026-01-01T00:00:00Z", "reported_at_commit": head},
+            "not-a-dict",
+            {"at": "2026-01-02T00:00:00Z", "reported_at_commit": 42},
+            {"at": "2026-01-03T00:00:00Z", "reported_at_commit": ""},
+            {"at": "2026-01-04T00:00:00Z"},
+            None,
+        ]
+        conn.execute(
+            "UPDATE findings SET meta = ? WHERE id = ?",
+            (json.dumps({"occurrences": garbage_ring}), "CB-1"),
+        )
+        conn.commit()
+
+        got = provenance.check_findings(conn, project, finding_id="CB-1")
+        row = got["findings"][0]
+        assert row["file_status"] == "current", row
+        assert row["checked_commit"] == head, row
+
+    def test_a_non_list_ring_falls_back_to_the_first_report(self, conn, git_project):
+        """A3 — `meta.occurrences` that is not a list (hand-written) is an empty
+        ring, mirroring `_bump_row`'s own defensive re-typing on the write side."""
+        project, initial_sha = git_project
+        self._first_report(conn, initial_sha)
+        _commit_a_change(project)
+        conn.execute(
+            "UPDATE findings SET meta = ? WHERE id = ?",
+            (json.dumps({"occurrences": 7}), "CB-1"),
+        )
+        conn.commit()
+
+        got = provenance.check_findings(conn, project, finding_id="CB-1")
+        row = got["findings"][0]
+        assert row["file_status"] == "modified", row
+        assert row["checked_commit"] == initial_sha, row
+
+    def test_two_findings_sharing_file_and_first_report_get_their_own_verdicts(
+        self, conn, git_project
+    ):
+        """CACHE DISCRIMINATION (A4) — the cache key must be (file, EFFECTIVE
+        commit). Keyed on the frozen column, these two rows share one cache
+        entry and whichever is computed first decides for both — either wrong
+        direction fails one of the four assertions."""
+        project, initial_sha = git_project
+        self._first_report(conn, initial_sha, description="bug one, never re-seen")
+        self._first_report(conn, initial_sha, description="bug two, re-observed on HEAD")
+        _commit_a_change(project)
+        head = _head_sha(project)
+        self._reobserve(conn, head, description="bug two, re-observed on HEAD")
+
+        got = provenance.check_findings(conn, project)
+        by_id = {r["finding_id"]: r for r in got["findings"]}
+        assert by_id["CB-1"]["file_status"] == "modified", by_id
+        assert by_id["CB-1"]["checked_commit"] == initial_sha, by_id
+        assert by_id["CB-2"]["file_status"] == "current", by_id
+        assert by_id["CB-2"]["checked_commit"] == head, by_id
