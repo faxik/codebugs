@@ -552,6 +552,35 @@ def file_status(
     return _verdict("deleted", f"{file_path} deleted since {reported_at_commit[:12]}")
 
 
+def _effective_commit(f: dict[str, Any]) -> Any:
+    """The commit staleness is checked against: newest ring observation, else first report.
+
+    CB-53 (ratified via CB-63): the ``reported_at_commit`` COLUMN is frozen at first
+    report — first-report provenance, immutable at update. Re-observations land in
+    the occurrence ring (``meta["occurrences"]``, CB-43), appended chronologically;
+    overflow truncation keeps first+last, so the newest entries are always at the
+    tail. The READER therefore consults the ring: scanning from the tail, the first
+    entry carrying a usable commit wins. An observation WITHOUT a commit
+    (auto-capture unavailable) must not hide an earlier one WITH a commit, because
+    any ring observation is newer than the first report by construction. Rows
+    predating dedup carry no ring and fall back to the frozen column — the old
+    behaviour, unchanged.
+
+    Defensive over shape, mirroring ``_bump_row``'s re-typing on the write side:
+    meta and ring can be hand-written, so a non-dict meta, non-list ring, non-dict
+    entry, or a None/empty/non-string commit is skipped, never raised.
+    """
+    meta = f.get("meta")
+    ring = meta.get("occurrences") if isinstance(meta, dict) else None
+    if isinstance(ring, list):
+        for entry in reversed(ring):
+            if isinstance(entry, dict):
+                commit = entry.get("reported_at_commit")
+                if isinstance(commit, str) and commit:
+                    return commit
+    return f.get("reported_at_commit")
+
+
 def check_findings(
     conn: sqlite3.Connection,
     project_dir: str | None = None,
@@ -561,7 +590,13 @@ def check_findings(
     category: str | None = None,
     file: str | None = None,
 ) -> dict[str, Any]:
-    """Batched staleness check across findings. Caches per (file, reported_at_commit).
+    """Batched staleness check across findings. Caches per (file, checked commit).
+
+    Each finding is checked against its newest observation's commit — the
+    occurrence ring — falling back to the frozen first-report column when the
+    ring carries none (`_effective_commit`, CB-53). The result reports both:
+    `checked_commit` is what the verdict was computed against;
+    `reported_at_commit` stays the first report.
 
     Filters forward to findings.query_findings; default status is 'open'.
     """
@@ -614,11 +649,15 @@ def check_findings(
     results = []
 
     for f in findings_list:
-        cache_key = (f["file"], f.get("reported_at_commit"))
+        # The cache key MUST use the effective commit: two findings sharing
+        # (file, first report) but re-observed at different commits would
+        # otherwise share one verdict — whichever was computed first (CB-53).
+        effective = _effective_commit(f)
+        cache_key = (f["file"], effective)
         if cache_key not in staleness_by_key:
             staleness_by_key[cache_key] = file_status(
                 file_path=f["file"],
-                reported_at_commit=f.get("reported_at_commit"),
+                reported_at_commit=effective,
                 project_dir=cwd,
                 _repo_root_hint=batch_root,
             )
@@ -630,6 +669,7 @@ def check_findings(
                 "file_status": staleness["file_status"],
                 "reason": staleness["reason"],
                 "reported_at_commit": f.get("reported_at_commit"),
+                "checked_commit": effective,
                 "current_head": current_head,
             }
         )
@@ -762,6 +802,13 @@ def register_tools(mcp, conn_factory) -> None:
         file: str | None = None,
     ) -> dict[str, Any]:
         """Check if findings are stale by comparing against git history.
+
+        Staleness is checked against each finding's NEWEST observation: a
+        deduplicated re-observation records its commit in the occurrence ring,
+        and that commit — not the frozen first-report `reported_at_commit` —
+        is what the file is compared from; findings with no ring fall back to
+        the first report. Each result carries `checked_commit`, the commit the
+        verdict was computed against.
 
         Returns file_status for each finding:
         - current: file unchanged since finding was reported
