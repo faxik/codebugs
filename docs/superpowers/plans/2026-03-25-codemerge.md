@@ -6,6 +6,25 @@
 
 **Architecture:** New `merge.py` DB layer (same pattern as `reqs.py`) with session/claim/lock tables in the existing SQLite DB. State machine enforces valid transitions (`active → merging → done`). CAS on `expected_main_head` closes the TOCTOU gap between conflict-check and merge. `BEGIN IMMEDIATE` transaction in `merge()` provides SQLite-level write lock to prevent concurrent lock acquisition. 5 MCP tools for agent-facing operations (start, check, claim, merge, finish); remaining operations via Python API + CLI subcommands.
 
+> **Amended 2026-08-19 (CB-106): the surface is SIX tools — `codemerge_abandon` was added.**
+> The sentence above is kept verbatim because it is what was built, and the amendment is
+> the point. Its premise — that abandon is not "agent-facing" — was falsified by using the
+> tools: an MCP client reaches `codemerge_merge`, gets a legitimate `main_moved` refusal
+> once the branch has landed by another route, and is then stranded in `active`, which
+> `codemerge_finish` refuses in both directions of `success`. With abandon routed to the
+> CLI, such a client had no exit at all, and `check_overlaps` matches
+> `status IN ('active','merging')` with no expiry and no reaper — so its file claims were
+> reported as conflicts to every later session forever. Note this RESTORES the original
+> design: `docs/2026-03-25-codemerge-design.md:157` specified `codemerge_abandon` as an MCP
+> tool and its line 493 counted abandon among the tools; this plan is where it was dropped.
+>
+> What was deliberately NOT changed, against CB-106's own suggestion: `finish(success=False)`
+> still reverts to `active`. The docstring at line 1275 below is the ratified semantics and
+> the code follows it; what had drifted was the docstring in `merge.py`, which promised
+> `status→abandoned` and now matches. "Release the lock, I will retry" and "this session is
+> over" are different intents, and keeping them different is what makes `codemerge_abandon`
+> the answer instead of overloading `success`.
+
 **Tech Stack:** Python 3.11+, SQLite (existing DB), FastMCP, pytest
 
 **Spec:** `docs/2026-03-25-codemerge-design.md` (original design) + race-condition analysis from brainstorming session.

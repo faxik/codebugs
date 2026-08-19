@@ -963,3 +963,181 @@ class TestMergeLockLease:
                 merge.merge(
                     conn, "A", expected_main_head="H0", current_main_head_fn=lambda: "H0"
                 )
+
+
+class TestTheMcpSurfaceCanCloseASession:
+    """CB-106: a client that can OPEN a session must be able to CLOSE it.
+
+    Found by USING the tools as an agent does. The dead end: `codemerge_start` →
+    `codemerge_claim` × N → the branch is then integrated by another route (this
+    repo's own `tools/worktree-finish.sh`, which holds its own flock), so
+    `codemerge_merge` legitimately refuses with `main_moved` and the session never
+    reaches 'merging'. `codemerge_finish` guards on 'merging' in BOTH directions of
+    `success`, so neither call closes it, and the session sits in 'active' holding
+    live file claims. `check_overlaps` matches `status IN ('active','merging')`
+    with no time bound and there is no reaper — the design doc defers auto-abandon
+    explicitly — so those files are reported as conflicts to every later session
+    forever. A cooperative detector that reliably cries wolf stops being consulted.
+
+    The fix is EXPOSURE, not new semantics. `abandon_session` already existed, and
+    the original design (`docs/2026-03-25-codemerge-design.md:157`) specified
+    `codemerge_abandon` as an MCP tool; the implementation plan narrowed the
+    surface to five "agent-facing" tools and routed abandon to the CLI instead,
+    which is CB-18's shape — a capability present in the domain layer is not
+    reachable until it is declared at the surface.
+
+    What was deliberately NOT changed: `finish(success=False)` still reverts to
+    'active'. The ratified design says so verbatim
+    (`docs/superpowers/plans/2026-03-25-codemerge.md:1263-1275`), and the two
+    intents are distinct — "my merge attempt failed, release the lock, let me
+    retry" is not "this session is over".
+    """
+
+    @pytest.fixture
+    def conn(self):
+        """Overrides the module fixture: `check_same_thread=False`.
+
+        The SDK dispatches a tool body on a worker thread, and the default
+        sqlite3 connection refuses to be used off its creating thread. Safe here
+        because the calls are strictly serialized by `asyncio.run`.
+        """
+        c = sqlite3.connect(":memory:", check_same_thread=False)
+        c.row_factory = sqlite3.Row
+        merge.ensure_schema(c)
+        yield c
+        c.close()
+
+    @staticmethod
+    def _tools(conn):
+        from contextlib import contextmanager
+
+        from mcp.server.mcpserver import MCPServer
+
+        @contextmanager
+        def factory():
+            # Deliberately does not close: the in-memory database IS this
+            # connection, so closing it between tool calls would destroy the
+            # tracker the next call has to see.
+            yield conn
+
+        mcp = MCPServer("codemerge-test")
+        merge.register_tools(mcp, factory)
+        return mcp
+
+    @staticmethod
+    def _call(mcp, name, **arguments):
+        import asyncio
+
+        return asyncio.run(mcp.call_tool(name, arguments))
+
+    @staticmethod
+    def _descriptions(mcp):
+        import asyncio
+
+        async def _list():
+            return {t.name: (t.description or "") for t in await mcp.list_tools()}
+
+        return asyncio.run(_list())
+
+    def _strand(self, conn, mcp):
+        """Drive the reproduced dead end and return the stranded session's id."""
+        self._call(mcp, "codemerge_start", session_id="A", branch="fix/a")
+        self._call(mcp, "codemerge_claim", session_id="A", file_path="src/shared.py")
+        # The branch landed by another route, so main has moved under the session.
+        refusal = merge.merge(
+            conn, "A", expected_main_head="H0", current_main_head_fn=lambda: "H1"
+        )
+        assert refusal["proceed"] is False and refusal["reason"] == "main_moved"
+        assert merge.get_sessions(conn, status="active")[0]["session_id"] == "A"
+        return "A"
+
+    def test_finish_is_a_dead_end_for_a_stranded_session(self, conn):
+        """PREMISE, preserved by this change rather than fixed by it.
+
+        Passes on both sides of the fix on purpose: it pins the guard that makes
+        the leak reachable, so if a later change quietly lets `finish` swallow an
+        'active' session, the reason `codemerge_abandon` exists disappears with it.
+        """
+        mcp = self._tools(conn)
+        self._strand(conn, mcp)
+        for success in (True, False):
+            with pytest.raises(ValueError, match="not in 'merging' state"):
+                merge.finish(conn, "A", success=success)
+
+    def test_a_stranded_session_can_be_closed_over_the_mcp_surface(self, conn):
+        """The acceptance criterion: an exit exists, and it is reachable by tool call."""
+        mcp = self._tools(conn)
+        self._strand(conn, mcp)
+
+        assert "codemerge_abandon" in self._descriptions(mcp), (
+            "the abandon path must be declared at the MCP surface, not CLI-only"
+        )
+        self._call(mcp, "codemerge_abandon", session_id="A")
+
+        assert [s["session_id"] for s in merge.get_sessions(conn, status="abandoned")] == ["A"]
+        assert merge.get_sessions(conn, status="active") == []
+
+    def test_the_closed_session_stops_reporting_conflicts_to_later_sessions(self, conn):
+        """The leak itself, not just the state flip.
+
+        A stranded session's claims are what poison every later `codemerge_check`;
+        asserting only on `status` would pass against a fix that closed the session
+        while leaving its claims live.
+        """
+        mcp = self._tools(conn)
+        self._strand(conn, mcp)
+        self._call(mcp, "codemerge_start", session_id="B", branch="fix/b")
+        self._call(mcp, "codemerge_claim", session_id="B", file_path="src/shared.py")
+
+        before = merge.check_overlaps(conn, "B")
+        assert before["clean"] is False, "premise: the stranded session blocks B"
+        assert before["conflicts"][0]["blocking_session"] == "A"
+
+        self._call(mcp, "codemerge_abandon", session_id="A")
+
+        after = merge.check_overlaps(conn, "B")
+        assert after["clean"] is True, (
+            "an abandoned session must stop reporting its files as conflicts"
+        )
+        assert after["conflicts"] == []
+
+    def test_the_finish_description_names_only_statuses_finish_can_write(self, conn):
+        """The docstring lied, and the lie was on the wire (`golden/mcp_schema.json`).
+
+        It promised `status→abandoned` for `success=False` while the code writes
+        'active'. That is the one thing an agent reads to decide what to call, so
+        it is a defect in the same sense CB-73 is.
+
+        The assertion derives the truth by RUNNING both arms rather than comparing
+        against a fixed string, because a re-spelled enumeration is exactly how the
+        description drifted from the code in the first place.
+        """
+        import re
+
+        mcp = self._tools(conn)
+        reachable = set()
+        for i, success in enumerate((True, False)):
+            sid = f"S{i}"
+            merge.start_session(conn, session_id=sid, branch=f"fix/{sid}")
+            merge.merge(
+                conn, sid, expected_main_head="H0", current_main_head_fn=lambda: "H0"
+            )
+            merge.finish(conn, sid, success=success)
+            reachable.add(
+                conn.execute(
+                    "SELECT status FROM codemerge_sessions WHERE session_id=?", (sid,)
+                ).fetchone()["status"]
+            )
+        assert reachable == {"done", "active"}, (
+            f"premise: finish writes exactly these two statuses, got {reachable}"
+        )
+
+        described = set(
+            re.findall(
+                r"status\s*(?:→|->)\s*(\w+)", self._descriptions(mcp)["codemerge_finish"]
+            )
+        )
+        assert described, "the description must still say what statuses finish writes"
+        assert described <= reachable, (
+            f"the tool description promises statuses finish cannot write: {described - reachable}"
+        )

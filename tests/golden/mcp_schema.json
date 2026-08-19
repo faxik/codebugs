@@ -744,6 +744,23 @@
     "name": "codebench_query"
   },
   {
+    "description": "Close a session for good, releasing its file claims and the merge lock.\n\nThis is the way OUT of a session that will not be merged under its own\nlock \u2014 including the case an agent hits routinely: the branch was\nintegrated by some other route (a merge harness holding its own lock), so\ncodemerge_merge refuses with reason='main_moved' and the session is\nstranded in 'active', which codemerge_finish will not accept. Until it is\nabandoned, its claimed files are reported as conflicts to every later\nsession, with no expiry \u2014 so closing it is what keeps codemerge_check\nworth consulting.\n\nAccepts a session in any state and is idempotent, so re-issuing it after\nan unclear failure is safe.\n\nArgs:\n    session_id: The merge session ID\n",
+    "inputSchema": {
+      "properties": {
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "title": "codemerge_abandonArguments",
+      "type": "object"
+    },
+    "name": "codemerge_abandon"
+  },
+  {
     "description": "Check for overlapping file claims with other sessions.\n\nReturns whether the session is clean to proceed, lists any conflicts,\nand records the current main HEAD for CAS comparison at merge time.\n\nArgs:\n    session_id: The merge session ID\n    main_changed_files: Files changed on main since base (optional, for overlap check)\n",
     "inputSchema": {
       "properties": {
@@ -798,7 +815,7 @@
     "name": "codemerge_claim"
   },
   {
-    "description": "Finish a merge session and release the lock.\n\nArgs:\n    session_id: The merge session ID\n    success: True if merge succeeded (status\u2192done), False if it failed (status\u2192abandoned)\n",
+    "description": "Finish a merge session and release the lock.\n\nCall this after codemerge_merge() returned proceed=true; the session must\nbe in 'merging' state or this refuses in BOTH directions of `success`.\n\nArgs:\n    session_id: The merge session ID\n    success: True if the merge succeeded (status\u2192done). False if the git\n        merge/cherry-pick failed (status\u2192active): the lock is released and\n        the session stays alive so it can try again. False does NOT close\n        the session \u2014 use codemerge_abandon for that.\n",
     "inputSchema": {
       "properties": {
         "session_id": {

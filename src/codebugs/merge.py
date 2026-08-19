@@ -656,12 +656,42 @@ def register_tools(mcp, conn_factory) -> None:
     ) -> dict[str, Any]:
         """Finish a merge session and release the lock.
 
+        Call this after codemerge_merge() returned proceed=true; the session must
+        be in 'merging' state or this refuses in BOTH directions of `success`.
+
         Args:
             session_id: The merge session ID
-            success: True if merge succeeded (status→done), False if it failed (status→abandoned)
+            success: True if the merge succeeded (status→done). False if the git
+                merge/cherry-pick failed (status→active): the lock is released and
+                the session stays alive so it can try again. False does NOT close
+                the session — use codemerge_abandon for that.
         """
         with conn_factory() as conn:
             return finish(conn, session_id, success=success)
+
+    @mcp.tool()
+    def codemerge_abandon(
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Close a session for good, releasing its file claims and the merge lock.
+
+        This is the way OUT of a session that will not be merged under its own
+        lock — including the case an agent hits routinely: the branch was
+        integrated by some other route (a merge harness holding its own lock), so
+        codemerge_merge refuses with reason='main_moved' and the session is
+        stranded in 'active', which codemerge_finish will not accept. Until it is
+        abandoned, its claimed files are reported as conflicts to every later
+        session, with no expiry — so closing it is what keeps codemerge_check
+        worth consulting.
+
+        Accepts a session in any state and is idempotent, so re-issuing it after
+        an unclear failure is safe.
+
+        Args:
+            session_id: The merge session ID
+        """
+        with conn_factory() as conn:
+            return abandon_session(conn, session_id)
 
 
 register_tool_provider("merge", register_tools)
