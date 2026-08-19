@@ -963,3 +963,251 @@ class TestMergeLockLease:
                 merge.merge(
                     conn, "A", expected_main_head="H0", current_main_head_fn=lambda: "H0"
                 )
+
+
+class TestTheMcpSurfaceCanCloseASession:
+    """CB-106: a client that can OPEN a session must be able to CLOSE it.
+
+    Found by USING the tools as an agent does. The dead end: `codemerge_start` →
+    `codemerge_claim` × N → the branch is then integrated by another route (this
+    repo's own `tools/worktree-finish.sh`, which holds its own flock), so
+    `codemerge_merge` legitimately refuses with `main_moved` and the session never
+    reaches 'merging'. `codemerge_finish` guards on 'merging' in BOTH directions of
+    `success`, so neither call closes it, and the session sits in 'active' holding
+    live file claims. `check_overlaps` matches `status IN ('active','merging')`
+    with no time bound and there is no reaper — the design doc defers auto-abandon
+    explicitly — so those files are reported as conflicts to every later session
+    forever. A cooperative detector that reliably cries wolf stops being consulted.
+
+    The fix is EXPOSURE, not new semantics. `abandon_session` already existed, and
+    the original design (`docs/2026-03-25-codemerge-design.md:157`) specified
+    `codemerge_abandon` as an MCP tool; the implementation plan narrowed the
+    surface to five "agent-facing" tools and routed abandon to the CLI instead,
+    which is CB-18's shape — a capability present in the domain layer is not
+    reachable until it is declared at the surface.
+
+    What was deliberately NOT changed: `finish(success=False)` still reverts to
+    'active'. The ratified design says so verbatim, in `codemerge_finish`'s
+    docstring inside `docs/superpowers/plans/2026-03-25-codemerge.md`:
+    "success: True = merged successfully (done), False = failed (revert to
+    active)". Cited by its text, not by a line number, because the same commit
+    edits that file and a line citation would be stale on arrival — as the first
+    draft of this docstring in fact was. The two intents are distinct: "my merge
+    attempt failed, release the lock, let me retry" is not "this session is over".
+    """
+
+    @pytest.fixture
+    def conn(self):
+        """Overrides the module fixture: `check_same_thread=False`.
+
+        The SDK dispatches a tool body on a worker thread, and the default
+        sqlite3 connection refuses to be used off its creating thread. Safe here
+        because the calls are strictly serialized by `asyncio.run`.
+        """
+        c = sqlite3.connect(":memory:", check_same_thread=False)
+        c.row_factory = sqlite3.Row
+        merge.ensure_schema(c)
+        yield c
+        c.close()
+
+    @staticmethod
+    def _tools(conn):
+        from contextlib import contextmanager
+
+        from mcp.server.mcpserver import MCPServer
+
+        @contextmanager
+        def factory():
+            # Deliberately does not close: the in-memory database IS this
+            # connection, so closing it between tool calls would destroy the
+            # tracker the next call has to see.
+            yield conn
+
+        mcp = MCPServer("codemerge-test")
+        merge.register_tools(mcp, factory)
+        return mcp
+
+    @staticmethod
+    def _call(mcp, name, **arguments):
+        import asyncio
+
+        return asyncio.run(mcp.call_tool(name, arguments))
+
+    @staticmethod
+    def _descriptions(mcp):
+        import asyncio
+
+        async def _list():
+            return {t.name: (t.description or "") for t in await mcp.list_tools()}
+
+        return asyncio.run(_list())
+
+    def _strand(self, conn, mcp):
+        """Drive the reproduced dead end and return the stranded session's id."""
+        self._call(mcp, "codemerge_start", session_id="A", branch="fix/a")
+        self._call(mcp, "codemerge_claim", session_id="A", file_path="src/shared.py")
+        # The branch landed by another route, so main has moved under the session.
+        refusal = merge.merge(
+            conn, "A", expected_main_head="H0", current_main_head_fn=lambda: "H1"
+        )
+        assert refusal["proceed"] is False and refusal["reason"] == "main_moved"
+        assert merge.get_sessions(conn, status="active")[0]["session_id"] == "A"
+        return "A"
+
+    def test_finish_is_a_dead_end_for_a_stranded_session(self, conn):
+        """PREMISE, preserved by this change rather than fixed by it.
+
+        Passes on both sides of the fix on purpose: it pins the guard that makes
+        the leak reachable, so if a later change quietly lets `finish` swallow an
+        'active' session, the reason `codemerge_abandon` exists disappears with it.
+        """
+        mcp = self._tools(conn)
+        self._strand(conn, mcp)
+        for success in (True, False):
+            with pytest.raises(ValueError, match="not in 'merging' state"):
+                merge.finish(conn, "A", success=success)
+
+    def test_a_stranded_session_can_be_closed_over_the_mcp_surface(self, conn):
+        """The acceptance criterion: an exit exists, and it is reachable by tool call."""
+        mcp = self._tools(conn)
+        self._strand(conn, mcp)
+
+        assert "codemerge_abandon" in self._descriptions(mcp), (
+            "the abandon path must be declared at the MCP surface, not CLI-only"
+        )
+        self._call(mcp, "codemerge_abandon", session_id="A")
+
+        assert [s["session_id"] for s in merge.get_sessions(conn, status="abandoned")] == ["A"]
+        assert merge.get_sessions(conn, status="active") == []
+
+    def test_the_closed_session_stops_reporting_conflicts_to_later_sessions(self, conn):
+        """The leak itself, not just the state flip.
+
+        A stranded session's claims are what poison every later `codemerge_check`;
+        asserting only on `status` would pass against a fix that closed the session
+        while leaving its claims live.
+        """
+        mcp = self._tools(conn)
+        self._strand(conn, mcp)
+        self._call(mcp, "codemerge_start", session_id="B", branch="fix/b")
+        self._call(mcp, "codemerge_claim", session_id="B", file_path="src/shared.py")
+
+        before = merge.check_overlaps(conn, "B")
+        assert before["clean"] is False, "premise: the stranded session blocks B"
+        assert before["conflicts"][0]["blocking_session"] == "A"
+
+        self._call(mcp, "codemerge_abandon", session_id="A")
+
+        after = merge.check_overlaps(conn, "B")
+        assert after["clean"] is True, (
+            "an abandoned session must stop reporting its files as conflicts"
+        )
+        assert after["conflicts"] == []
+
+    def test_abandoning_a_done_session_is_refused(self, conn):
+        """Exposure has to be safe, and this is the destructive half of it.
+
+        `abandon_session` had no status gate at all, so the newly reachable tool
+        could turn a successfully merged session into an abandoned one —
+        destroying the only record that the merge happened, which `get_status`
+        then tallies under `abandoned_sessions`. That is CB-106's own third consequence,
+        arriving through CB-106's own fix.
+
+        The lock-revocation half is NOT gated here, deliberately: nothing in this
+        module binds a session to its caller, and `codemerge_finish` — an MCP tool
+        since before this change — already lets any caller release another
+        session's lock (verified by running it). A gate on this one tool would buy
+        false assurance, so the missing actor binding is filed as its own card and
+        named in the tool description instead.
+        """
+        mcp = self._tools(conn)
+        merge.start_session(conn, session_id="D", branch="fix/d")
+        merge.merge(conn, "D", expected_main_head="H0", current_main_head_fn=lambda: "H0")
+        merge.finish(conn, "D", success=True)
+
+        # The SDK wraps a tool body's exception in ToolError, which is the
+        # documented contract ("MCP tools let exceptions propagate to the MCP
+        # server's built-in error handling"). What matters is that the REASON
+        # survives the wrapping and reaches the client.
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        with pytest.raises(ToolError, match="cannot be abandoned"):
+            self._call(mcp, "codemerge_abandon", session_id="D")
+        with pytest.raises(ValueError, match="cannot be abandoned"):
+            merge.abandon_session(conn, "D")
+
+        # The refusal path runs an UPDATE that matches zero rows, and an UPDATE
+        # takes the write lock BEFORE it discovers that. Raising out of there
+        # without ending the transaction leaves the next caller on this
+        # connection holding a lock it never took: `merge()` refuses an ambient
+        # transaction outright, and another connection gets "database is locked".
+        # "Nothing was written, so nothing to undo" is true about content and
+        # false about lock state — an earlier draft asserted exactly that.
+        assert conn.in_transaction is False, (
+            "a refused abandon must not leave a write transaction open"
+        )
+        self._call(mcp, "codemerge_start", session_id="E", branch="fix/e")
+        assert merge.merge(
+            conn, "E", expected_main_head="H0", current_main_head_fn=lambda: "H0"
+        )["proceed"] is True, "the connection must still be usable after a refusal"
+        assert [s["session_id"] for s in merge.get_sessions(conn, status="done")] == ["D"], (
+            "the record of a successful merge must survive an abandon attempt"
+        )
+
+    def test_the_finish_description_maps_each_success_value_to_what_it_writes(self, conn):
+        """The docstring lied, and the lie was on the wire (`golden/mcp_schema.json`).
+
+        It promised `status→abandoned` for `success=False` while the code writes
+        'active'. That is the one thing an agent reads to decide what to call, so
+        it is a defect in the same sense CB-73 is.
+
+        The assertion derives the truth by RUNNING both arms rather than comparing
+        against a fixed string, because a re-spelled enumeration is exactly how the
+        description drifted from the code in the first place.
+
+        Residual, stated rather than left to be discovered: this checks the status
+        each arm NAMES, so a description that names both correctly and then lies in
+        prose ("False ends the session") still passes. Catching that needs a reader,
+        not a regex. What it does close is the drift that actually happened twice
+        here — a wrong status name, and the two arms swapped.
+        """
+        import re
+
+        mcp = self._tools(conn)
+        written = {}
+        for i, success in enumerate((True, False)):
+            sid = f"S{i}"
+            merge.start_session(conn, session_id=sid, branch=f"fix/{sid}")
+            merge.merge(
+                conn, sid, expected_main_head="H0", current_main_head_fn=lambda: "H0"
+            )
+            merge.finish(conn, sid, success=success)
+            written[success] = conn.execute(
+                "SELECT status FROM codemerge_sessions WHERE session_id=?", (sid,)
+            ).fetchone()["status"]
+        assert written == {True: "done", False: "active"}, (
+            f"premise: this is what finish writes for each arm, got {written}"
+        )
+
+        desc = self._descriptions(mcp)["codemerge_finish"]
+        tokens = [
+            (m.start(), m.group(1)) for m in re.finditer(r"status\s*(?:→|->)\s*(\w+)", desc)
+        ]
+        assert tokens, "the description must still say what statuses finish writes"
+
+        # PER-ARM, not per-set. Set equality over the named statuses was the first
+        # attempt and review broke it in one edit: swapping the two arms names the
+        # same set and passes, while telling an agent that success=False closes the
+        # session for good — CB-106's lie restated, and worse than the original,
+        # which only got the status NAME wrong. Anchoring on the nearest status
+        # token after each literal also stops the guard false-refusing a truthful
+        # cross-reference such as "use codemerge_abandon (status→abandoned)",
+        # which set equality rejected.
+        for value, expected in written.items():
+            literal = re.search(rf"\b{value}\b", desc)
+            assert literal, f"the description never mentions success={value}"
+            following = [tok for pos, tok in tokens if pos > literal.start()]
+            assert following and following[0] == expected, (
+                f"success={value} writes '{expected}', but the description's "
+                f"nearest status after it is {following[:1] or 'nothing'}"
+            )

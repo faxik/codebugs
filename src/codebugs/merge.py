@@ -137,15 +137,53 @@ def start_session(
 
 
 def abandon_session(conn: sqlite3.Connection, session_id: str) -> dict[str, Any]:
-    """Mark a session as abandoned, releasing claims and lock."""
+    """Mark a session abandoned, so its claims stop conflicting and it drops the lock.
+
+    Precisely, because this text is also what an MCP client reads (CB-106) and an
+    overclaiming description is the defect that card is about: the claim ROWS are
+    not deleted, they stop being reported, because `check_overlaps` and
+    `get_status` select on the session's status. The lock is released only if
+    THIS session holds it (``WHERE id=1 AND session_id=?``).
+
+    A ``done`` session is REFUSED. Abandoning one only destroys the record that
+    the merge succeeded — `get_status` would then tally finished work under
+    ``abandoned_sessions``, which is the audit corruption CB-106 names as its
+    third consequence. The guard is a condition on the UPDATE rather than a
+    Python check on the row read above, so a session that reaches ``done``
+    concurrently is refused too instead of losing the race.
+    """
     _get_session(conn, session_id)
 
     now = utc_now()
-    conn.execute(
+    cur = conn.execute(
         "UPDATE codemerge_sessions SET status='abandoned', finished_at=?, last_activity=? "
-        "WHERE session_id=?",
+        "WHERE session_id=? AND status != 'done'",
         (now, now, session_id),
     )
+    # No RETURNING on this statement, so its outcome is read from rowcount and
+    # only from rowcount (the CB-30 rule).
+    if cur.rowcount == 0:
+        # NOTHING WAS WRITTEN, BUT A TRANSACTION IS OPEN. The UPDATE took the
+        # write lock before matching zero rows, and a bare `raise` here would
+        # hand the next caller on this connection a held lock — under which
+        # `merge()` refuses outright and another connection gets
+        # "database is locked". "It wrote nothing, so there is nothing to undo"
+        # is true about CONTENT and false about LOCK STATE; an earlier draft of
+        # this function said exactly that and was wrong (adversarial review).
+        # Committing an empty transaction is the smallest correct end to it, and
+        # it matches what this function does on every other path.
+        observed = conn.execute(
+            "SELECT status FROM codemerge_sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        conn.commit()
+        if observed is None:
+            raise KeyError(f"Session '{session_id}' not found")
+        raise ValueError(
+            f"Session '{session_id}' is '{observed['status']}' and cannot be abandoned: "
+            "that would erase the record of a merge that succeeded. Nothing is "
+            "holding it open — no 'done' session holds the merge lock, and its "
+            "claims are already excluded from conflict checks."
+        )
     conn.execute(
         "UPDATE codemerge_locks SET session_id=NULL, acquired_at=NULL, expires_at=NULL "
         "WHERE id=1 AND session_id=?",
@@ -577,7 +615,11 @@ def register_tools(mcp, conn_factory) -> None:
             description: Human-readable description of the work
             base_commit: Git commit SHA this branch diverged from
             repo_root: Repo root path (default: cwd)
-            allow_restart: If True, restart an existing active session
+            allow_restart: If True, reuse this session_id when its previous
+                session is finished — 'abandoned' or 'done'. Restarting DELETES
+                that session's file claims, so re-claim anything you still need.
+                It does NOT restart a live one: starting over an 'active' or
+                'merging' session is an error whether or not this is set.
         """
         with conn_factory() as conn:
             return start_session(
@@ -656,12 +698,50 @@ def register_tools(mcp, conn_factory) -> None:
     ) -> dict[str, Any]:
         """Finish a merge session and release the lock.
 
+        Call this after codemerge_merge() returned proceed=true; the session must
+        be in 'merging' state or this refuses in BOTH directions of `success`.
+
         Args:
             session_id: The merge session ID
-            success: True if merge succeeded (status→done), False if it failed (status→abandoned)
+            success: True if the merge succeeded (status→done). False if the git
+                merge/cherry-pick failed (status→active): the lock is released and
+                the session stays alive so it can try again. False does NOT close
+                the session — use codemerge_abandon for that.
         """
         with conn_factory() as conn:
             return finish(conn, session_id, success=success)
+
+    @mcp.tool()
+    def codemerge_abandon(
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Close a session for good, so its files stop blocking everyone else.
+
+        This is the way OUT of a session that will not be merged under its own
+        lock — including the case an agent hits routinely: the branch was
+        integrated by some other route (a merge harness holding its own lock), so
+        codemerge_merge refuses with reason='main_moved' and the session is
+        stranded in 'active', which codemerge_finish will not accept. Until it is
+        abandoned, its claimed files are reported as conflicts to every later
+        session, with no expiry — so closing it is what keeps codemerge_check
+        worth consulting.
+
+        What it does, stated exactly: the session's claim rows are NOT deleted,
+        they stop being reported, because the conflict query selects on session
+        status. The merge lock is released only if this session holds it.
+
+        Re-issuing it is safe: a second call on an already-abandoned session
+        changes nothing but the timestamps. A 'done' session is REFUSED — that
+        would erase the record of a merge that succeeded — and an unknown
+        session_id is an error.
+
+        Args:
+            session_id: The merge session ID. Whatever session is NAMED is the
+                one closed; nothing ties it to the caller, so passing a stale or
+                mistyped id closes someone else's work.
+        """
+        with conn_factory() as conn:
+            return abandon_session(conn, session_id)
 
 
 register_tool_provider("merge", register_tools)
@@ -719,7 +799,7 @@ def register_cli(sub, commands) -> None:
         try:
             result = abandon_session(conn, args.session_id)
             print(f"Abandoned: {result['session_id']}")
-        except KeyError as e:
+        except (KeyError, ValueError) as e:
             print(str(e), file=sys.stderr)
             sys.exit(1)
         finally:
