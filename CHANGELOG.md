@@ -7,6 +7,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`codebugs reqs-import` no longer reports success when the database gives out
+  mid-import (CB-99).** The per-row insert was guarded by `except sqlite3.Error` — the
+  whole SQLite exception tree — so a full disk or an I/O error part-way through was
+  counted as a *malformed row* and the command printed `Imported 0 requirements,
+  skipped 47.` and exited **0**. Measured with a simulated `SQLITE_FULL`:
+  `{'imported': 0, 'skipped': 2}`, no error at all.
+
+  The guard now catches only `IntegrityError` — constraint violations, i.e. genuinely
+  "this row is wrong". Anything about the statement or the environment propagates, so
+  the command fails loudly instead of quietly.
+
+  **One consequence worth knowing.** The commit happens at the end of the import, so a
+  failure part-way now leaves **nothing** written rather than a partial import reported
+  as success.
+
+  **A nonzero `skipped` is still ordinary and does not mean this fix misfired** — it
+  counts malformed table rows (a row with fewer than four columns), which is what it
+  always counted and what you should read it as.
 - **A tracker you cannot write to now says so, instead of crashing or telling you to
   run `init` (CB-86).** On a read-only mount, a tracker owned by another user, a
   directory the process cannot write, or a full disk, `codebugs` behaved in one of two
