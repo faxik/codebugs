@@ -429,6 +429,74 @@ def _get_active_blockers_by_type(
     return [_evaluate_blocker(conn, row) for row in rows]
 
 
+def _active_counts(evaluated: list[dict[str, Any]]) -> dict[str, int]:
+    """Active-blocker count per ``item_id``, from ALREADY-EVALUATED rows.
+
+    PURE — it issues no SQL. That is the whole point: the expensive part is
+    ``_get_active_blockers_by_type``, so every consumer that needs a different
+    projection of the same evaluation derives it here instead of scanning again
+    (CB-69). ``query_deferred_entities`` carried its own copy of this loop; a
+    second definition of one aggregation contract in one file is the drift this
+    repo keeps filing cards about.
+    """
+    counts: dict[str, int] = {}
+    for b in evaluated:
+        if b["is_active"]:
+            counts[b["item_id"]] = counts.get(b["item_id"], 0) + 1
+    return counts
+
+
+def _restrict_ids(
+    deferred: set[str], *, id: str | None = None, ids: list[str] | None = None
+) -> list[str]:
+    """Pure id-intersection half of ``deferred_id_restriction``."""
+    requested = {i for i in ([id] if id else []) + list(ids or []) if i}
+    return sorted(deferred & requested) if requested else sorted(deferred)
+
+
+def deferred_ids_and_counts(
+    conn: sqlite3.Connection,
+    entity_type: str,
+    *,
+    id: str | None = None,
+    ids: list[str] | None = None,
+) -> tuple[list[str], dict[str, int]]:
+    """Both halves of the deferred projection from ONE evaluation (CB-69).
+
+    The wrappers need the restricted id set AND the per-id active count, and were
+    calling ``deferred_id_restriction`` then ``blocker_counts_for`` back to back —
+    two independent scans of the blocker table, each re-resolving every
+    ``entity_resolved`` dependency's status. Measured at 30 such blockers: 62
+    statements where 31 would do.
+
+    **Why this takes ``entity_type`` and returns BOTH halves, rather than the two
+    helpers gaining a ``counts=`` parameter.** A precomputed summary is a plain
+    dict that records neither its entity-type scope nor when it was evaluated, so
+    a ``finding``-scoped summary handed to a ``requirement`` query returns the
+    empty set — with no error — and the callers short-circuit an empty deferred
+    set into a ZERO-ROW PAGE. That is CB-25/CB-28's failure shape, an empty queue
+    indistinguishable from a correct one, installed by the fix for a performance
+    bug. Taking the scope once makes the mismatch unrepresentable; returning both
+    halves together makes pairing mismatched ones unrepresentable too.
+
+    **"One pass" means one pass over the blockers TABLE, not one SQL statement.**
+    Entity-trigger evaluation is still ``1 + B`` statements, because each
+    ``entity_resolved`` blocker resolves its dependency individually. Batching that
+    is a different mechanism and is deliberately out of scope.
+
+    **Snapshot semantics — this IS a behaviour change, stated rather than asserted
+    away.** The two calls previously took two independent snapshots and could
+    legitimately disagree: a ``date`` trigger crossing its deadline between them
+    yielded an id in the restricted set with a count of 0, and another connection
+    can resolve or cancel a blocker in that window. The two halves are now always
+    mutually consistent. A single-threaded differential test cannot observe this,
+    which is why it is documented.
+    """
+    counts = _active_counts(_get_active_blockers_by_type(conn, entity_type))
+    restricted = _restrict_ids(set(counts), id=id, ids=ids)
+    return restricted, {i: counts[i] for i in restricted}
+
+
 def query_deferred_entities(
     conn: sqlite3.Connection,
     entity_type: str,
@@ -449,12 +517,7 @@ def query_deferred_entities(
     dropping them.
     """
     evaluated = _get_active_blockers_by_type(conn, entity_type)
-
-    # Build blocker counts per item from already-evaluated data
-    active_counts: dict[str, int] = {}
-    for b in evaluated:
-        if b["is_active"]:
-            active_counts[b["item_id"]] = active_counts.get(b["item_id"], 0) + 1
+    active_counts = _active_counts(evaluated)
 
     kind = entity_kind(entity_type)
     if not active_counts:
@@ -487,8 +550,13 @@ def query_deferred_entities(
 def get_deferred_item_ids(
     conn: sqlite3.Connection, entity_type: str
 ) -> set[str]:
-    """Return set of item IDs that have active blockers of given entity type."""
-    return {b["item_id"] for b in _get_active_blockers_by_type(conn, entity_type) if b["is_active"]}
+    """Return set of item IDs that have active blockers of given entity type.
+
+    A caller that also needs the per-id counts must use ``deferred_ids_and_counts``
+    instead of pairing this with ``blocker_counts_for`` — that pairing is the
+    double evaluation CB-69 was filed for.
+    """
+    return set(_active_counts(_get_active_blockers_by_type(conn, entity_type)))
 
 
 def deferred_id_restriction(
@@ -514,21 +582,24 @@ def deferred_id_restriction(
     reappearing inside CB-28's fix, the same way the naive predicate reintroduced
     CB-25 inside its fix. `TestDeferredEmptyIntersection` pins it.
     """
-    deferred = get_deferred_item_ids(conn, entity_type)
-    requested = {i for i in ([id] if id else []) + list(ids or []) if i}
-    return sorted(deferred & requested) if requested else sorted(deferred)
+    return _restrict_ids(get_deferred_item_ids(conn, entity_type), id=id, ids=ids)
 
 
 def blocker_counts_for(
     conn: sqlite3.Connection, entity_type: str, entity_ids: list[str]
 ) -> dict[str, int]:
-    """Active-blocker count per id, for annotating a forwarded deferred query."""
-    counts: dict[str, int] = {}
+    """Active-blocker count per id, for annotating a forwarded deferred query.
+
+    Kept as-is for existing callers. A caller that ALSO needs the deferred id set
+    must use ``deferred_ids_and_counts`` rather than calling both — see CB-69.
+
+    The signature keeps its positional arguments deliberately: the missing
+    keyword-only ``*`` is CB-68's question over a nine-site population, and fixing
+    one site by hand is what that card explicitly refuses.
+    """
     wanted = set(entity_ids)
-    for b in _get_active_blockers_by_type(conn, entity_type):
-        if b["is_active"] and b["item_id"] in wanted:
-            counts[b["item_id"]] = counts.get(b["item_id"], 0) + 1
-    return counts
+    counts = _active_counts(_get_active_blockers_by_type(conn, entity_type))
+    return {i: c for i, c in counts.items() if i in wanted}
 
 
 def get_deferred_counts(

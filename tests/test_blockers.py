@@ -786,3 +786,166 @@ class TestResolveBlockerIsOneTransaction:
             "SELECT cancelled_at FROM blockers WHERE id = ?", (b["id"],)
         ).fetchone()
         assert row["cancelled_at"] is None, "the nested call must roll back with its caller"
+
+
+# ---------------------------------------------------------------------------
+# CB-69 — the deferred path evaluated the blocker set twice.
+# ---------------------------------------------------------------------------
+
+
+class _CountingConnection(sqlite3.Connection):
+    """Counts executed statements.
+
+    A LOCAL copy: `conftest.py` is reserved for the one tracker-root guard, so
+    each test file owns its fixtures (CLAUDE.md, Testing).
+    """
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.n = 0
+
+    def execute(self, sql, *a, **kw):
+        self.n += 1
+        return super().execute(sql, *a, **kw)
+
+
+def _counting_project(tmp_path, *, n_blockers, trigger):
+    """`n_blockers` blockers of one trigger type, each on its own finding."""
+    db.init_project(str(tmp_path))
+    c = sqlite3.connect(
+        os.path.join(str(tmp_path), ".codebugs", "findings.db"),
+        factory=_CountingConnection,
+    )
+    c.row_factory = sqlite3.Row
+    for i in range(n_blockers * 2):
+        findings.add_finding(
+            c, finding_id=f"CB-{i + 1}", description=f"d{i}",
+            severity="low", category="bug", file="a.py",
+        )
+    for i in range(n_blockers):
+        if trigger == "entity_resolved":
+            blockers.add_blocker(
+                c, item_id=f"CB-{i + 1}", blocked_by=f"CB-{n_blockers + i + 1}", reason="r"
+            )
+        elif trigger == "manual":
+            blockers.add_blocker(c, item_id=f"CB-{i + 1}", trigger_type="manual", reason="r")
+        else:
+            blockers.add_blocker(
+                c, item_id=f"CB-{i + 1}", trigger_type="date",
+                trigger_at="2099-01-01", reason="r",
+            )
+    c.n = 0
+    return c
+
+
+class TestDeferredSinglePass:
+    """CB-69: `deferred_id_restriction` + `blocker_counts_for` each scanned the
+    blocker table and re-resolved every `entity_resolved` dependency."""
+
+    @pytest.mark.parametrize("n", [2, 10])
+    def test_one_pass_instead_of_two(self, tmp_path, n):
+        """Measured at TWO sizes, because one cannot distinguish a halved constant
+        from a halved linear term: the old cost is `2*(1+B)`, the new is `1+B`."""
+        c = _counting_project(tmp_path, n_blockers=n, trigger="entity_resolved")
+        ids, counts = blockers.deferred_ids_and_counts(c, "finding")
+        assert c.n == 1 + n, c.n
+        assert len(ids) == n and len(counts) == n
+        c.close()
+
+    @pytest.mark.parametrize("n", [2, 10])
+    def test_the_old_pairing_still_costs_double(self, tmp_path, n):
+        """Pins the baseline the fix is measured against, so the improvement cannot
+        silently evaporate. Both helpers are KEPT for existing callers."""
+        c = _counting_project(tmp_path, n_blockers=n, trigger="entity_resolved")
+        blockers.deferred_id_restriction(c, "finding")
+        first = c.n
+        c.n = 0
+        blockers.blocker_counts_for(c, "finding", [f"CB-{i + 1}" for i in range(n)])
+        second = c.n
+        assert first == 1 + n and second == 1 + n
+        c.close()
+
+    def test_date_and_manual_triggers_cost_no_entity_reads(self, tmp_path):
+        """The card says 'every entity-type blocker resolution goes through EntityRef
+        status reads'. True only for `entity_resolved`: `is_blocker_satisfied` reads
+        no entity for a date compare or a manual null-check, so the per-blocker term
+        vanishes and only the single scan remains."""
+        for trigger in ("manual", "date"):
+            sub = tmp_path / trigger
+            sub.mkdir()
+            c = _counting_project(sub, n_blockers=10, trigger=trigger)
+            blockers.deferred_ids_and_counts(c, "finding")
+            assert c.n == 1, (trigger, c.n)
+            c.close()
+
+
+class TestDeferredIdsAndCountsDifferential:
+    """The combined accessor must agree with the two helpers it replaces."""
+
+    def _fixture(self, conn):
+        for i in range(6):
+            _add_finding(conn, f"CB-{i + 1}")
+        _add_finding(conn, "CB-90")
+        blockers.add_blocker(conn, item_id="CB-1", blocked_by="CB-90", reason="entity")
+        blockers.add_blocker(conn, item_id="CB-2", trigger_type="manual", reason="manual")
+        blockers.add_blocker(
+            conn, item_id="CB-3", trigger_type="date", trigger_at="2099-01-01", reason="date"
+        )
+        # A second blocker on CB-1 so at least one count is > 1.
+        blockers.add_blocker(conn, item_id="CB-1", trigger_type="manual", reason="second")
+
+    @pytest.mark.parametrize(
+        "kw", [{}, {"id": "CB-1"}, {"ids": ["CB-1", "CB-3"]}, {"ids": ["CB-6"]}]
+    )
+    def test_agrees_with_the_two_helpers(self, conn, kw):
+        self._fixture(conn)
+        want_ids = blockers.deferred_id_restriction(conn, "finding", **kw)
+        want_counts = blockers.blocker_counts_for(conn, "finding", want_ids)
+        got_ids, got_counts = blockers.deferred_ids_and_counts(conn, "finding", **kw)
+        assert got_ids == want_ids
+        assert got_counts == want_counts
+
+    def test_the_fixture_is_not_vacuous(self, conn):
+        """All three trigger types present, a multi-blocker id, and a non-empty
+        result — otherwise the differential above compares two empty sets."""
+        self._fixture(conn)
+        ids, counts = blockers.deferred_ids_and_counts(conn, "finding")
+        assert set(ids) == {"CB-1", "CB-2", "CB-3"}
+        assert counts["CB-1"] == 2
+        assert max(counts.values()) > 1
+
+    def test_counts_are_restricted_to_the_returned_ids(self, conn):
+        """The counts half must never carry an id the ids half filtered out —
+        a caller zipping them would otherwise annotate a row it never selected."""
+        self._fixture(conn)
+        ids, counts = blockers.deferred_ids_and_counts(conn, "finding", ids=["CB-1"])
+        assert ids == ["CB-1"]
+        assert set(counts) == {"CB-1"}
+
+    def test_empty_intersection_returns_empty_not_everything(self, conn):
+        """CB-28's standing trap: an empty deferred set must stay empty. The
+        wrappers short-circuit on it; returning "no filter" would show the whole
+        table."""
+        self._fixture(conn)
+        ids, counts = blockers.deferred_ids_and_counts(conn, "finding", ids=["CB-6"])
+        assert ids == [] and counts == {}
+
+
+class TestActiveCountsIsTheSingleDefinition:
+    def test_query_deferred_entities_uses_the_shared_aggregation(self, conn):
+        """`query_deferred_entities` carried its own copy of the counting loop. Two
+        definitions of one aggregation contract in one file is the drift this repo
+        keeps filing cards about, so it now derives from `_active_counts` too."""
+        import ast
+        import pathlib
+        src = pathlib.Path(blockers.__file__).read_text()
+        tree = ast.parse(src)
+        fn = next(
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "query_deferred_entities"
+        )
+        calls = {
+            c.func.id for c in ast.walk(fn)
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+        }
+        assert "_active_counts" in calls

@@ -813,7 +813,8 @@ def register_tools(mcp, conn_factory):
                 # Pseudo-status resolved to an id restriction so the ordinary query
                 # applies `priority` and every sibling filter. The twin of the
                 # findings wrapper above; see its comment for why (CB-28).
-                deferred_ids = blockers.deferred_id_restriction(
+                # ONE evaluation for both halves (CB-69) — see the findings twin.
+                deferred_ids, deferred_counts = blockers.deferred_ids_and_counts(
                     conn, ENTITY_REQUIREMENT, id=id, ids=ids
                 )
                 if not deferred_ids:
@@ -829,9 +830,8 @@ def register_tools(mcp, conn_factory):
                 group_by=group_by, limit=limit, offset=offset,
             )
             if deferred_ids is not None and not result.get("grouped"):
-                counts = blockers.blocker_counts_for(conn, ENTITY_REQUIREMENT, deferred_ids)
                 for row in result["requirements"]:
-                    row["blocker_count"] = counts.get(row["id"], 0)
+                    row["blocker_count"] = deferred_counts.get(row["id"], 0)
             return result
 
     @mcp.tool()
