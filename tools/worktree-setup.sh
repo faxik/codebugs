@@ -6,7 +6,7 @@
 # own dev environment, and claims the card in codebugs.
 #
 # Ported from ../autosorter/tools/worktree-setup.sh (2026-08-16). Two deliberate
-# divergences, both load-bearing — see [2/4] (venv) and the branch-type guard.
+# divergences, both load-bearing — see [3/5] (venv) and the branch-type guard.
 #
 # Example: tools/worktree-setup.sh fix/cb-50-worktree-harness main
 
@@ -73,7 +73,6 @@ CB_IDS=$(printf '%s' "${BRANCH_NAME}" \
     | sed -E 's/^cb-?/CB-/' \
     | sort -u || true)
 
-_claim_ids=""
 for cb in ${CB_IDS}; do
     num="${cb#CB-}"
     others=$(git -C "${REPO_ROOT}" branch --format='%(refname:short)' \
@@ -97,33 +96,154 @@ for cb in ${CB_IDS}; do
         fi
     fi
 
-    # Registry check. Best-effort: a machine without the codebugs CLI still gets
-    # the pure-git guard above. CODEBUGS_SETUP_NO_CLAIM lets the tests exercise
-    # the guard without writing to the real findings database.
-    if command -v codebugs >/dev/null 2>&1 && [[ -z "${CODEBUGS_SETUP_NO_CLAIM:-}" ]]; then
-        status=$(codebugs get "${cb}" 2>/dev/null \
-            | sed -nE 's/^[[:space:]]*"status":[[:space:]]*"([^"]+)".*/\1/p' | head -1 || true)
-        case "${status}" in
-            open) _claim_ids="${_claim_ids} ${cb}" ;;
-            in_progress)
-                # A warning, not a refusal: a stale in_progress claim is common
-                # enough that refusing here would train people to reach for
-                # --allow-duplicate reflexively, which would blunt the branch
-                # check above — the one with teeth.
-                echo "⚠ ${cb} already reads in_progress in codebugs."
-                echo "  No branch carries it, so this may be stale — confirm nobody"
-                echo "  is mid-flight before continuing."
-                echo ""
-                ;;
-            "") : ;;
-            *) echo "  note: ${cb} currently reads '${status}' in codebugs." ;;
-        esac
-    fi
+    # The registry pre-check that used to live here is GONE (CB-58). It read the
+    # card's status and admitted only `open` ones to the claim list — a second
+    # gate answering the same question as `codebugs claim` itself, from a
+    # scraped status field rather than from the ledger. Two gates that can
+    # disagree is this repo's shared-predicate lesson; the claim's own outcomes
+    # (held_by_other / entity_terminal) report strictly more, so the exit-code
+    # handling in [1/5] below is now the single reader of that question.
+    :
 done
 
 mkdir -p "${WORKTREE_DIR}"
 
-echo "[1/4] Creating worktree..."
+# ---------------------------------------------------------------------------
+# [1/5] Claim the cards — BEFORE anything is created (CB-58).
+#
+# This used to be step [4/4], a loop of `codebugs update --status in_progress`,
+# and the comment above it claimed "creating the worktree IS the claim, which
+# makes the registry authoritative by construction". It was neither. A status
+# flip carries no holder, so nothing could say WHO was building the card; it
+# has no release path, so an abandoned branch left the card `in_progress`
+# forever; and it offers no exclusion, so two setups could build one card past
+# the tracker — only the pure-git branch guard above had teeth.
+#
+# `codebugs claim` supplies all three: the holder triple names us, mutual
+# exclusion is a partial unique index (a database guarantee, not discipline),
+# and `release` exists. The status flip is not lost — it comes free as the
+# claim's PROJECTION (EntityKind.busy_status), so the card still reads
+# `in_progress` while we hold it, and closing the card auto-releases the claim
+# in the same transaction.
+#
+# ORDER IS THE POINT. Claiming after `git worktree add` would mean the losing
+# side of a race had already created a branch and a directory before being told
+# no. Claiming first makes the refusal free, which is the same reason
+# _guard_branch_type runs before anything is created.
+#
+# WHAT THIS DOES NOT DO, stated because the honest scope matters: a branch
+# abandoned AFTER a successful setup still leaves a live claim. Steal and expiry
+# are deliberately deferred (CLAUDE.md, Claims module → deferred by design). That
+# is strictly better than the anonymous `in_progress` it replaces — the claim
+# names holder and repo, `codebugs who-holds` reports it, and any close releases
+# it — but it is not the same as the claim disappearing.
+# ---------------------------------------------------------------------------
+_claimed_ids=""
+
+# EXIT trap: release everything this run took, if this run does not finish.
+# Armed only after the first successful claim, disarmed on success. Without it
+# an abort between the claim and a ready worktree leaks a claim that names a
+# branch which does not exist — worse than the leak it replaces, because it
+# looks authoritative.
+_release_claims_on_abort() {
+    local rc=$?
+    [[ -z "${_claimed_ids}" ]] && return "${rc}"
+    echo "" >&2
+    echo "Setup did not complete — releasing the claim(s) it took:" >&2
+    for _cb in ${_claimed_ids}; do
+        if codebugs release "${_cb}" --holder "${BRANCH_NAME}" --holder-kind branch \
+            --repo "${REPO_ROOT}" --reason "worktree-setup aborted" >/dev/null 2>&1; then
+            echo "  ✓ ${_cb} released" >&2
+        else
+            # Guarded: a failed cleanup must not mask the real abort. Print the
+            # exact command instead, so the leak is recoverable by hand.
+            echo "  ⚠ ${_cb} NOT released — run:" >&2
+            echo "      codebugs release ${_cb} --holder ${BRANCH_NAME} \\" >&2
+            echo "          --holder-kind branch --repo ${REPO_ROOT}" >&2
+        fi
+    done
+    return "${rc}"
+}
+
+echo "[1/5] Claiming cards..."
+if [[ -z "${CB_IDS}" ]]; then
+    echo "  (branch names no card — nothing to claim)"
+elif ! command -v codebugs >/dev/null 2>&1; then
+    # Distinguish "nothing to do" from "could not look" — they printed the same
+    # line once, so a machine without the CLI reported the same success as a
+    # branch carrying no card id (cross-model review).
+    echo "  ⚠ codebugs CLI not on PATH — ${CB_IDS//$'\n'/ } NOT claimed."
+    echo "    The branch-name collision guard above still ran; it is pure git."
+elif [[ -n "${CODEBUGS_SETUP_NO_CLAIM:-}" ]]; then
+    echo "  (claiming disabled by CODEBUGS_SETUP_NO_CLAIM)"
+else
+    for cb in ${CB_IDS}; do
+        # Exit codes ARE the API here (CLAUDE.md, Claims module): 0 proceed,
+        # 3 held by someone else, 4 already resolved, 5 too contended to tell.
+        _rc=0
+        codebugs claim "${cb}" --holder "${BRANCH_NAME}" --holder-kind branch \
+            --repo "${REPO_ROOT}" --note "worktree-setup" >/dev/null 2>&1 || _rc=$?
+
+        if [[ "${_rc}" -eq 5 ]]; then
+            # `undetermined` means the database was too contended to answer, not
+            # that the claim failed. The primitive is an idempotent upsert, so
+            # re-issuing the IDENTICAL call converges on already_mine and can
+            # never double-claim. One retry, then degrade.
+            _rc=0
+            codebugs claim "${cb}" --holder "${BRANCH_NAME}" --holder-kind branch \
+                --repo "${REPO_ROOT}" --note "worktree-setup" >/dev/null 2>&1 || _rc=$?
+        fi
+
+        case "${_rc}" in
+            0)
+                _claimed_ids="${_claimed_ids} ${cb}"
+                trap _release_claims_on_abort EXIT
+                echo "  ✓ ${cb} claimed by ${BRANCH_NAME} (status projected to in_progress)"
+                ;;
+            3)
+                # THE SETUP GATE — the one tracker call in this harness that may
+                # be fatal. Everything else degrades, because everything else
+                # runs where a false refusal costs more than a missed write.
+                echo "" >&2
+                echo "ERROR: ${cb} is already claimed by someone else:" >&2
+                codebugs who-holds "${cb}" 2>/dev/null | sed 's/^/    /' >&2
+                echo "" >&2
+                echo "  Two sessions building one card duplicates the work. Either have" >&2
+                echo "  the holder release it (the holder triple above is what release" >&2
+                echo "  authorizes on):" >&2
+                echo "      codebugs release ${cb} --holder <holder> \\" >&2
+                echo "          --holder-kind <kind> --repo <repo>" >&2
+                echo "" >&2
+                echo "  or, to build WITHOUT holding the card at all:" >&2
+                echo "      CODEBUGS_SETUP_NO_CLAIM=1 $0 ${BRANCH_NAME}" >&2
+                echo "" >&2
+                echo "  Note --allow-duplicate deliberately does NOT punch through this." >&2
+                echo "  It answers a different question (another BRANCH carries the id)," >&2
+                echo "  and since this repo never deletes merged branches it is needed" >&2
+                echo "  for ordinary follow-up work — overloading it would make the" >&2
+                echo "  claim gate routinely bypassed." >&2
+                exit 3
+                ;;
+            4)
+                # entity_terminal: the card is already resolved. A warning, not a
+                # refusal — a follow-up branch on a fixed card is legitimate, and
+                # claiming would be the thing that wrongly reopened it.
+                echo "  ⚠ ${cb} is already resolved — building without a claim."
+                echo "    A follow-up branch on a closed card is fine; nothing was"
+                echo "    reopened. Use --allow-terminal by hand if you really want it."
+                ;;
+            5)
+                echo "  ⚠ ${cb} — tracker too contended to claim, twice. Proceeding"
+                echo "    UNCLAIMED. The branch-name collision guard above still ran."
+                ;;
+            *)
+                echo "  ⚠ ${cb} — claim failed (exit ${_rc}). Proceeding UNCLAIMED."
+                ;;
+        esac
+    done
+fi
+
+echo "[2/5] Creating worktree..."
 git -C "${REPO_ROOT}" worktree add -b "${BRANCH_NAME}" "${WORKTREE_PATH}" "${BASE_BRANCH}"
 
 # ---------------------------------------------------------------------------
@@ -141,7 +261,7 @@ git -C "${REPO_ROOT}" worktree add -b "${BRANCH_NAME}" "${WORKTREE_PATH}" "${BAS
 # long ago — works without the flag. Priming here means the first test command
 # in the worktree works whether or not the operator remembers `--extra dev`.
 # ---------------------------------------------------------------------------
-echo "[2/4] Priming the worktree's own dev environment (uv sync --extra dev)..."
+echo "[3/5] Priming the worktree's own dev environment (uv sync --extra dev)..."
 if command -v uv >/dev/null 2>&1; then
     if (cd "${WORKTREE_PATH}" && uv sync --extra dev >/dev/null 2>&1); then
         echo "  ✓ .venv built in the worktree with the dev extra"
@@ -152,7 +272,7 @@ else
     echo "  ⚠ uv not found — the worktree has no environment yet"
 fi
 
-echo "[3/4] Verifying..."
+echo "[4/5] Verifying..."
 ACTUAL_HEAD=$(git -C "${WORKTREE_PATH}" rev-parse HEAD)
 EXPECTED_HEAD=$(git -C "${REPO_ROOT}" rev-parse "${BASE_BRANCH}")
 if [[ "${ACTUAL_HEAD}" == "${EXPECTED_HEAD}" ]]; then
@@ -174,36 +294,22 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# [4/4] Claim the card. Until now LOCK depended on a session remembering to do
-# it, and a status field nobody reads stops nobody. Creating the worktree IS the
-# claim, which makes the registry authoritative by construction.
+# [5/5] Disarm the abort trap. Everything the claim protected now exists, so
+# from here an abort is the operator's problem and the claim is theirs to hold.
 #
-# Only `open` cards are flipped (decided in the guard loop above): a follow-up
-# branch on a `fixed` card must never silently reopen it. No --notes — that
-# field is a whole-value overwrite and would destroy the card's existing notes.
+# This has to happen BEFORE the closing banner: the trap is on EXIT, which fires
+# on success too, so leaving it armed would release the claim of every setup
+# that worked.
 # ---------------------------------------------------------------------------
-echo "[4/4] Claiming cards..."
-if [[ -z "${_claim_ids}" ]]; then
-    # Distinguish "nothing to do" from "could not look". They printed the same
-    # line before, so a machine without the CLI silently reported the same
-    # success as a branch carrying no card id — a status write nobody made,
-    # indistinguishable from one nobody needed (cross-model review).
-    if [[ -n "${CB_IDS}" ]] && ! command -v codebugs >/dev/null 2>&1; then
-        echo "  ⚠ codebugs CLI not on PATH — ${CB_IDS//$'\n'/ } NOT claimed."
-        echo "    The branch-name collision guard above still ran; it is pure git."
-    elif [[ -n "${CODEBUGS_SETUP_NO_CLAIM:-}" ]]; then
-        echo "  (claiming disabled by CODEBUGS_SETUP_NO_CLAIM)"
-    else
-        echo "  (nothing to claim)"
-    fi
+echo "[5/5] Handing over..."
+trap - EXIT
+if [[ -n "${_claimed_ids}" ]]; then
+    echo "  Holding:${_claimed_ids} — released automatically when the card is closed,"
+    echo "  or by hand: codebugs release <CB-N> --holder ${BRANCH_NAME} \\"
+    echo "      --holder-kind branch --repo ${REPO_ROOT}"
+else
+    echo "  No claim held by this worktree."
 fi
-for cb in ${_claim_ids}; do
-    if codebugs update "${cb}" --status in_progress >/dev/null 2>&1; then
-        echo "  ✓ ${cb} → in_progress (claimed by ${BRANCH_NAME})"
-    else
-        echo "  ⚠ ${cb} → could not claim; mark it in_progress by hand"
-    fi
-done
 
 echo ""
 echo "=== Worktree ready ==="

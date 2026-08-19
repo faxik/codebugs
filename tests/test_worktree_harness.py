@@ -1935,3 +1935,297 @@ class TestPreCommitHook:
             text=True,
         )
         assert result.returncode == 0
+
+
+# ===========================================================================
+# CB-58 — the claims wiring.
+#
+# Two classes, matching this file's existing split: structural tests that the
+# scripts CALL the right thing in the right phase, and behavioural tests that
+# actually RUN worktree-setup.sh against a stub `codebugs` and assert on what
+# it does. Both are needed for the reason the file's other docstrings give:
+# a per-guard test cannot see the composition, and a structural test cannot
+# see whether the composition behaves.
+# ===========================================================================
+
+
+def code_only(src: str) -> str:
+    """Drop whole-line shell comments.
+
+    A text ratchet that reads comments FALSE-REFUSES the documentation that
+    keeps its own rule understood — this file's `TestWriteCallSitesRatchet`
+    sibling in tests/test_fsio.py records the same lesson, and two of the tests
+    below tripped on the very comments explaining why the old spelling is gone.
+
+    Whole-line only, on purpose. Stripping inline `#` would have to parse shell
+    quoting, and every string this class searches for lives in code, not in a
+    trailing comment.
+    """
+    return "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
+
+
+class TestClaimsWiringStructure:
+    """The scripts must reach the claims ledger, not flip a status field.
+
+    Before CB-58 the "claim" was `codebugs update --status in_progress`: no
+    holder, no exclusion, no release path. These pin the properties whose
+    failure mode is silent — a script that still runs, still prints ticks, and
+    quietly holds nothing.
+
+    Every assertion reads `code_only(...)`: the scripts document the OLD
+    spelling in order to explain why it is gone, so a raw text search reports
+    the defect it just fixed.
+    """
+
+    SETUP = REPO_ROOT / "tools" / "worktree-setup.sh"
+    FINISH = REPO_ROOT / "tools" / "worktree-finish.sh"
+
+    def test_setup_claims_through_the_ledger(self) -> None:
+        src = code_only(self.SETUP.read_text())
+        assert "codebugs claim" in src, "setup does not claim through claims.py"
+        assert "--holder-kind branch" in src, (
+            "the claim carries no holder KIND — ownership is the full triple"
+        )
+        assert '--holder "${BRANCH_NAME}"' in src, "the claim does not name the branch as holder"
+        assert '--repo "${REPO_ROOT}"' in src, "the claim carries no repo — the triple is partial"
+
+    def test_setup_no_longer_flips_status_by_hand(self) -> None:
+        """The anonymous status write is GONE, not merely supplemented.
+
+        Leaving it would give two writers for one fact, and the status flip is
+        already implied by the claim's projection (EntityKind.busy_status).
+        """
+        src = code_only(self.SETUP.read_text())
+        assert "--status in_progress" not in src, (
+            "setup still flips the status directly; the claim's projection does that"
+        )
+
+    def test_setup_claims_before_it_creates_anything(self) -> None:
+        """A refusal must be free.
+
+        Same rule as _guard_branch_type running before `worktree add`: if the
+        claim came after, the losing side of a race would already own a branch
+        and a directory by the time it was told no.
+        """
+        src = code_only(self.SETUP.read_text())
+        assert src.index("codebugs claim") < src.index("worktree add"), (
+            "the card is claimed after the worktree is created"
+        )
+
+    def test_setup_arms_an_exit_trap_that_releases(self) -> None:
+        """Without this, an abort between claim and ready worktree leaks a
+        claim naming a branch that does not exist — worse than the anonymous
+        `in_progress` it replaces, because it looks authoritative."""
+        src = code_only(self.SETUP.read_text())
+        assert "trap _release_claims_on_abort EXIT" in src, "setup arms no release trap"
+        assert "codebugs release" in src, "the trap has nothing to release with"
+
+    def test_setup_disarms_the_trap_on_success(self) -> None:
+        """An EXIT trap fires on success too.
+
+        Left armed, every setup that WORKED would release its own claim on the
+        way out — the failure this whole card is about, reintroduced inside its
+        own fix.
+        """
+        src = code_only(self.SETUP.read_text())
+        assert "trap - EXIT" in src, "the EXIT trap is never disarmed"
+        assert src.index("trap _release_claims_on_abort EXIT") < src.index("trap - EXIT")
+
+    def test_setup_refusal_on_held_by_other_is_fatal(self) -> None:
+        """Exit 3 is the setup gate — the one tracker call allowed to be fatal."""
+        src = code_only(self.SETUP.read_text())
+        assert "exit 3" in src, "held_by_other does not refuse the setup"
+
+    def test_finish_releases_what_the_branch_held(self) -> None:
+        src = code_only(self.FINISH.read_text())
+        assert "codebugs release" in src, "finish never releases the branch's claims"
+        assert '--holder "${BRANCH}"' in src, "the release does not name the branch as holder"
+        assert "--holder-kind branch" in src
+
+    def test_finish_release_is_never_fatal(self) -> None:
+        """The merge has already landed by then.
+
+        A missing CLI or a contended tracker must never turn a successful
+        integration into a failure — the asymmetry with setup's gate is the
+        design, so it is pinned rather than left to a reader's goodwill.
+        """
+        src = code_only(self.FINISH.read_text())
+        after = src[src.index("Releasing claims held by") :]
+        release_block = after[: after.index("=== Integration complete ===")]
+        for bad in ("exit 1", "exit 3", "|| exit"):
+            assert bad not in release_block, (
+                f"finish's release path can abort the run ({bad!r}); the merge has landed"
+            )
+
+    def test_finish_releases_only_after_the_merge_landed(self) -> None:
+        src = code_only(self.FINISH.read_text())
+        assert src.index("merge \"${BRANCH}\" --no-ff") < src.index("codebugs release"), (
+            "finish releases the claim before the merge has landed"
+        )
+
+    def test_finish_does_not_opt_out_of_restore(self) -> None:
+        """Restore is left ON deliberately (see the comment at the call site).
+
+        A card still reading `in_progress` reads that way only because our claim
+        projected it there; with the worktree gone, `open` is the honest state.
+        The restore is a CAS, so it can never resurrect a card someone closed.
+        """
+        src = code_only(self.FINISH.read_text())
+        assert "--no-restore" not in src
+
+
+class TestClaimsWiringBehaviour:
+    """Run worktree-setup.sh for real against a stub `codebugs`.
+
+    Structural tests cannot tell a wired script from a working one. These use a
+    throwaway repo with `tools/` copied in (so the script resolves that repo as
+    its root) and a stub `codebugs` on PATH that records argv and returns
+    scripted exit codes — the codes are the documented shell API, so scripting
+    them is scripting the real contract.
+    """
+
+    @pytest.fixture
+    def harness(self, repo: Path) -> dict:
+        """A throwaway repo carrying its own copy of tools/, plus stub bins."""
+        shutil.copytree(REPO_ROOT / "tools", repo / "tools")
+        git(repo, "add", "tools")
+        git(repo, "commit", "-m", "tools")
+
+        bin_dir = repo / "stubbin"
+        bin_dir.mkdir()
+        log = repo / "codebugs.log"
+
+        stub = bin_dir / "codebugs"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            f'printf "%s\\n" "$*" >> "{log}"\n'
+            'case "$1" in\n'
+            '  claim)   exit "${STUB_CLAIM_RC:-0}" ;;\n'
+            '  release) exit "${STUB_RELEASE_RC:-0}" ;;\n'
+            '  who-holds) echo "holder: someone-else"; exit 0 ;;\n'
+            "  *) exit 0 ;;\n"
+            "esac\n"
+        )
+        stub.chmod(0o755)
+
+        # uv is stubbed to fail fast: the venv-priming and import-check steps
+        # are guarded and only print a warning, and a real `uv sync` here would
+        # cost seconds per test for nothing this class asserts.
+        uv = bin_dir / "uv"
+        uv.write_text("#!/usr/bin/env bash\nexit 1\n")
+        uv.chmod(0o755)
+
+        # Assert the fixture exists. TestKnownLimits shipped green for a week
+        # because its fixture silently never installed anything.
+        assert stub.is_file() and uv.is_file()
+        return {"repo": repo, "bin": bin_dir, "log": log}
+
+    def _run(self, harness: dict, branch: str, **env_over: str):
+        env = {
+            "PATH": f"{harness['bin']}:/usr/bin:/bin",
+            "HOME": str(harness["repo"]),
+            **env_over,
+        }
+        return subprocess.run(
+            [str(harness["repo"] / "tools" / "worktree-setup.sh"), branch],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(harness["repo"]),
+        )
+
+    def _log(self, harness: dict) -> list[str]:
+        p = harness["log"]
+        return p.read_text().splitlines() if p.exists() else []
+
+    def test_claim_is_issued_with_the_full_holder_triple(self, harness: dict) -> None:
+        result = self._run(harness, "fix/cb-1-thing")
+        assert result.returncode == 0, result.stderr
+        claims = [ln for ln in self._log(harness) if ln.startswith("claim ")]
+        assert len(claims) == 1, self._log(harness)
+        assert "CB-1" in claims[0]
+        assert "--holder fix/cb-1-thing" in claims[0]
+        assert "--holder-kind branch" in claims[0]
+        assert f"--repo {harness['repo']}" in claims[0]
+
+    def test_held_by_other_refuses_the_setup_with_code_3(self, harness: dict) -> None:
+        """The setup gate. Nothing may be created when someone else holds it."""
+        result = self._run(harness, "fix/cb-2-thing", STUB_CLAIM_RC="3")
+        assert result.returncode == 3, (result.returncode, result.stdout, result.stderr)
+        assert not (harness["repo"] / ".worktrees" / "fix-cb-2-thing").exists(), (
+            "a refused setup still created the worktree"
+        )
+        assert "holder: someone-else" in result.stderr, (
+            "the refusal does not name the incumbent holder"
+        )
+
+    def test_entity_terminal_warns_but_proceeds(self, harness: dict) -> None:
+        """A follow-up branch on a closed card is legitimate work."""
+        result = self._run(harness, "fix/cb-3-thing", STUB_CLAIM_RC="4")
+        assert result.returncode == 0, result.stderr
+        assert (harness["repo"] / ".worktrees" / "fix-cb-3-thing").exists()
+        assert "already resolved" in result.stdout
+
+    def test_undetermined_is_retried_exactly_once_then_degrades(self, harness: dict) -> None:
+        """`undetermined` means the DB could not answer, not that we lost.
+
+        The primitive is an idempotent upsert, so re-issuing the identical call
+        converges rather than double-claiming — but it may not loop forever.
+        """
+        result = self._run(harness, "fix/cb-4-thing", STUB_CLAIM_RC="5")
+        assert result.returncode == 0, result.stderr
+        claims = [ln for ln in self._log(harness) if ln.startswith("claim ")]
+        assert len(claims) == 2, f"expected one retry, got {len(claims)}: {claims}"
+        assert claims[0] == claims[1], "the retry must be the IDENTICAL call"
+        assert (harness["repo"] / ".worktrees" / "fix-cb-4-thing").exists()
+
+    def test_abort_after_claiming_runs_the_release_trap(self, harness: dict) -> None:
+        """The acceptance criterion: setup → abort leaves no claim behind.
+
+        The abort is forced by pre-creating the branch, so `git worktree add -b`
+        fails AFTER the claim has been taken — the exact window the trap exists
+        for.
+        """
+        git(harness["repo"], "branch", "fix/cb-5-thing")
+        result = self._run(harness, "fix/cb-5-thing")
+        assert result.returncode != 0, "the setup was expected to abort"
+        log = self._log(harness)
+        assert any(ln.startswith("claim ") for ln in log), "nothing was claimed; test is vacuous"
+        releases = [ln for ln in log if ln.startswith("release ")]
+        assert releases, f"the abort leaked the claim — no release issued: {log}"
+        assert "CB-5" in releases[0]
+        assert "--holder fix/cb-5-thing" in releases[0]
+
+    def test_successful_setup_does_not_release(self, harness: dict) -> None:
+        """The mirror of the test above, and it is not redundant.
+
+        An EXIT trap fires on success too, so a missing `trap - EXIT` would
+        release the claim of every setup that worked — and every other test
+        here would still pass.
+        """
+        result = self._run(harness, "fix/cb-6-thing")
+        assert result.returncode == 0, result.stderr
+        assert not [ln for ln in self._log(harness) if ln.startswith("release ")], (
+            "a successful setup released its own claim"
+        )
+
+    def test_no_claim_env_var_still_skips_the_tracker_entirely(self, harness: dict) -> None:
+        """Pre-existing semantics the tests rely on; they must survive."""
+        result = self._run(harness, "fix/cb-7-thing", CODEBUGS_SETUP_NO_CLAIM="1")
+        assert result.returncode == 0, result.stderr
+        assert self._log(harness) == [], "CODEBUGS_SETUP_NO_CLAIM did not suppress the claim"
+        assert (harness["repo"] / ".worktrees" / "fix-cb-7-thing").exists()
+
+    def test_missing_cli_degrades_loudly_rather_than_silently(self, harness: dict) -> None:
+        """"Could not look" must never print the same as "nothing to do"."""
+        (harness["bin"] / "codebugs").unlink()
+        result = self._run(harness, "fix/cb-8-thing")
+        assert result.returncode == 0, result.stderr
+        assert "NOT claimed" in result.stdout
+        assert (harness["repo"] / ".worktrees" / "fix-cb-8-thing").exists()
+
+    def test_a_branch_naming_no_card_claims_nothing(self, harness: dict) -> None:
+        result = self._run(harness, "refactor/no-card-here")
+        assert result.returncode == 0, result.stderr
+        assert self._log(harness) == []
+        assert (harness["repo"] / ".worktrees" / "refactor-no-card-here").exists()

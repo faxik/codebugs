@@ -348,6 +348,55 @@ else
     echo "      git -C ${WORKTREE_PATH} status --short"
 fi
 
+# ---------------------------------------------------------------------------
+# Release whatever this branch still holds (CB-58).
+#
+# GUARDED, NEVER FATAL, and that asymmetry with worktree-setup.sh is the whole
+# design. The merge has already landed by this point, so a missing CLI, an
+# unreachable tracker or a contended database must never turn a successful
+# integration into a failure — the worst it may do is leave a claim behind and
+# say so. `codebugs claim` at setup is the ONE tracker call in this harness
+# allowed to be fatal, because there nothing has been created yet and a refusal
+# is free.
+#
+# RESTORE IS LEFT ON (no --no-restore), deliberately:
+#   - If the operator already closed the card, `_auto_release_on_terminal` fired
+#     inside that status write and there is no live claim left — this call
+#     reports `not_claimed`, exit 0, and changes nothing.
+#   - If the card is still open, its status reads `in_progress` only because our
+#     claim projected it there. The worktree is about to be gone, so nobody is
+#     mid-flight: restoring it to `open` is the honest state, and it is exactly
+#     the `in_progress`-forever leak CB-58 was filed for.
+# The restore cannot resurrect finished work: it is a CAS that only writes if the
+# status still holds the value the claim projected.
+# ---------------------------------------------------------------------------
+_finish_cb_ids=$(printf '%s' "${BRANCH}" | grep -oiE 'cb-?[0-9]+' \
+    | tr '[:upper:]' '[:lower:]' | sed -E 's/^cb-?/CB-/' | sort -u || true)
+
+if [[ -n "${_finish_cb_ids}" ]] && command -v codebugs >/dev/null 2>&1; then
+    echo ""
+    echo "Releasing claims held by ${BRANCH}..."
+    for _cb in ${_finish_cb_ids}; do
+        _rrc=0
+        codebugs release "${_cb}" --holder "${BRANCH}" --holder-kind branch \
+            --repo "${REPO_ROOT}" --reason "worktree-finish" >/dev/null 2>&1 || _rrc=$?
+        case "${_rrc}" in
+            # 0 covers both `released` and `not_claimed` — the second is the
+            # normal case when the card was closed by hand first, so it is not
+            # worth a warning.
+            0) echo "  ✓ ${_cb} released (or was not held)" ;;
+            3) echo "  · ${_cb} is held by someone else — left alone." ;;
+            *) echo "  ⚠ ${_cb} not released (exit ${_rrc}). The merge LANDED; this is"
+               echo "    tracker bookkeeping only. Retry:"
+               echo "      codebugs release ${_cb} --holder ${BRANCH} \\"
+               echo "          --holder-kind branch --repo ${REPO_ROOT}" ;;
+        esac
+    done
+elif [[ -n "${_finish_cb_ids}" ]]; then
+    echo ""
+    echo "  ⚠ codebugs CLI not on PATH — ${_finish_cb_ids//$'\n'/ } still claimed."
+fi
+
 echo ""
 echo "=== Integration complete ==="
 git -C "${REPO_ROOT}" log --oneline -1 | sed 's/^/  /'
