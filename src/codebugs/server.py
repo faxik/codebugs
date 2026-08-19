@@ -215,7 +215,17 @@ SERVER_NAMES = {
 
 
 def main():
-    """Run the MCP server with optional mode selection."""
+    """Run the MCP server with optional mode selection.
+
+    DELIBERATELY NOT GIVEN CB-78's SIGPIPE TREATMENT, and this is the call site
+    rather than a plan note because the next person auditing the two entry points
+    for consistency would otherwise either "fix" the asymmetry or re-derive it.
+    `cli.run` restores `SIG_DFL` so a dead reader kills the process at 141; here
+    stdout is the stdio JSON-RPC **transport**, not a report stream. A write
+    failure on it is a protocol event the SDK's error handling should observe,
+    and nobody pipes an MCP server into `head`. Dying silently by signal when a
+    client disconnects is a different question with a different owner.
+    """
     parser = argparse.ArgumentParser(description="Codebugs MCP server")
     parser.add_argument(
         "--mode",

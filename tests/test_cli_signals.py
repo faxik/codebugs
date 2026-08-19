@@ -21,6 +21,7 @@ Every test here is POSIX-only: Windows has no SIGPIPE, which is exactly why
 
 from __future__ import annotations
 
+import ast
 import os
 import pathlib
 import signal
@@ -45,6 +46,13 @@ def _env() -> dict[str, str]:
     `PYTHONUNBUFFERED` is removed rather than left to chance: it would silently
     turn the block-buffered case into the unbuffered one, collapsing the two
     parametrised runs into the same experiment while both still passed.
+
+    Dropping `CODEBUGS_ROOT` is belt-and-braces, NOT coverage — say it that way
+    rather than claiming the case is handled twice. `tests/conftest.py`'s autouse
+    fixture already deletes it from this process before `os.environ` is copied
+    here, so no test can discriminate the two while that fixture holds. It stays
+    because the failure mode it guards is silent corruption of the developer's
+    real tracker, which CLAUDE.md records actually happening.
     """
     env = {**os.environ, "PYTHONPATH": str(_REPO_ROOT / "src")}
     env.pop("PYTHONUNBUFFERED", None)
@@ -132,14 +140,22 @@ class TestExportToDevStdout:
     """
 
     def test_export_csv_to_dev_stdout_dies_at_141_without_a_message(self, project):
+        # THREE rows, and the size is deliberately irrelevant — an earlier draft
+        # padded this to ~21 KB, which reads as a threshold someone would later
+        # "tune" against the 64 KB pipe buffer. `_run_into_a_dead_reader` closes
+        # the read end BEFORE the child writes anything, so this is the
+        # close-without-draining branch, which fires at any output size (see
+        # `cli.run`'s docstring for both branches). The rows exist only so the
+        # exporter has something to stream through `atomic_write`'s
+        # held-open-inode path, which is the mechanism under test.
         conn = db.connect(str(project))
         try:
             from codebugs import findings
 
-            for i in range(60):
+            for i in range(3):
                 findings.add_finding(
                     conn, severity="low", category="test",
-                    description=f"row {i} " + "padding " * 40, file="x.py",
+                    description=f"row {i} for the /dev/stdout export path", file="x.py",
                 )
         finally:
             conn.close()
@@ -162,22 +178,84 @@ class TestMainDoesNotTouchProcessSignalState:
     def test_calling_main_leaves_the_sigpipe_disposition_alone(self, project, monkeypatch):
         before = signal.getsignal(signal.SIGPIPE)
         monkeypatch.setattr(sys, "argv", ["codebugs", "--tracker-root", str(project), "stats"])
-        cli.main()
-        assert signal.getsignal(signal.SIGPIPE) is before
+        try:
+            cli.main()
+            assert signal.getsignal(signal.SIGPIPE) is before
+        finally:
+            # RESTORE UNCONDITIONALLY. Without this, the one failure this test
+            # exists to catch — `main` acquiring the disposition — leaves the
+            # pytest process under SIG_DFL for every test after it, which is
+            # exactly the mid-suite `pytest … | head` cascade the class docstring
+            # cites as the reason the wrapper split exists. One clear red would
+            # become a confusing multi-failure run whose cause is the test that
+            # already named it.
+            signal.signal(signal.SIGPIPE, before)
 
-    def test_run_is_the_only_place_the_disposition_is_installed(self):
+    def test_the_sigpipe_disposition_is_installed_in_exactly_one_place(self):
         """Structural, and deliberately so: a behavioural test of `run` would have
         to install SIG_DFL in the pytest process to observe it, which is the very
-        thing the test above forbids."""
-        import inspect
+        thing the test above forbids.
 
-        source = pathlib.Path(inspect.getfile(cli)).read_text()
-        assert source.count("signal.signal(") == 1, (
-            "the SIGPIPE disposition must be installed in exactly one place; "
-            "a second site is how the two entry points start disagreeing"
+        BY AST OVER THE WHOLE PACKAGE, and both halves of that were earned. The
+        first draft read `cli.py` as TEXT and counted `"signal.signal("`, which
+        CLAUDE.md's CLI section already ratifies against for the sibling ratchet:
+        `TestWriteCallSitesRatchet` went to AST after its text draft matched
+        `open(path, "w")` inside `fsio.py`'s own docstrings. `cli.run`'s docstring
+        escaped that only by never spelling the call with parentheses — one
+        editorial change away from a red suite over no defect.
+
+        And it swept ONE FILE while its failure message promised "exactly one
+        place", so a `signal.signal(SIGPIPE, …)` added in `server.py` or any
+        domain module was invisible to the guard written to hold the composition
+        — this repo's own "a check that validates elements cannot validate their
+        composition", committed inside the check meant to prevent it.
+
+        MUTATION-VERIFIED against three spellings injected into `server.py`
+        (`signal.signal(...)`, `import signal as _s; _s.signal(...)`, and
+        `from signal import signal`), each of which turns this red. The first
+        AST draft caught only the first of the three, because it required the
+        callee's module to literally be named `signal` — found by running the
+        mutation rather than by reading the predicate.
+
+        RESIDUAL LIMIT, stated rather than implied by silence: a dynamic call
+        (`getattr(signal, "signal")(...)`) is still invisible. Unlike
+        `TestWriteCallSitesRatchet`, which keys on a mode string and genuinely
+        cannot be spelled around, this one keys on a name and therefore bounds
+        accident, not intent.
+        """
+        sites: list[tuple[str, str]] = []
+        for path in sorted((_REPO_ROOT / "src" / "codebugs").rglob("*.py")):
+            tree = ast.parse(path.read_text())
+            owner: dict[int, str] = {}
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                    for child in ast.walk(node):
+                        owner[id(child)] = node.name
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                fn = node.func
+                # The callee's FINAL NAME only — never the module it was reached
+                # through. Keying on `signal.signal` was this ratchet's own first
+                # defect, caught by mutating `server.py` with
+                # `import signal as _s; _s.signal(_s.SIGPIPE, _s.SIG_DFL)`: the
+                # guard stayed green against a real second install site. Matching
+                # the attribute name also covers `from signal import signal`.
+                called = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
+                if called == "signal" and "SIGPIPE" in ast.unparse(node):
+                    sites.append(
+                        (
+                            path.relative_to(_REPO_ROOT).as_posix(),
+                            # "<module>" would be a real finding, not a miss: a
+                            # module-level install fires on import, which is far
+                            # worse than one in `main`.
+                            owner.get(id(node), "<module>"),
+                        )
+                    )
+        assert sites == [("src/codebugs/cli.py", "run")], (
+            f"the SIGPIPE disposition must be installed in exactly one place, `cli.run`; "
+            f"found {sites}. A second site is how the two entry points start disagreeing."
         )
-        assert "signal.signal(" in inspect.getsource(cli.run)
-        assert "signal.signal(" not in inspect.getsource(cli.main)
 
 
 class TestConsoleScriptTargetsTheWrapper:
