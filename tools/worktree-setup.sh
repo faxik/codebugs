@@ -187,6 +187,13 @@ else
             # that the claim failed. The primitive is an idempotent upsert, so
             # re-issuing the IDENTICAL call converges on already_mine and can
             # never double-claim. One retry, then degrade.
+            #
+            # SLEEP FIRST — FINAL-DESIGN.md §6.2(a) has it and my first draft did
+            # not. An immediate retry is the one most likely to meet the SAME
+            # contention: `undetermined` means another connection holds the write
+            # lock, and nothing has changed a microsecond later. Retrying without
+            # waiting makes the retry mostly decorative.
+            sleep 1
             _rc=0
             codebugs claim "${cb}" --holder "${BRANCH_NAME}" --holder-kind branch \
                 --repo "${REPO_ROOT}" --note "worktree-setup" >/dev/null 2>&1 || _rc=$?
@@ -202,6 +209,19 @@ else
                 # THE SETUP GATE — the one tracker call in this harness that may
                 # be fatal. Everything else degrades, because everything else
                 # runs where a false refusal costs more than a missed write.
+                #
+                # THE ESCAPE HATCH IS RATIFIED (owner, 2026-08-19) AND DIVERGES
+                # FROM FINAL-DESIGN.md §6.2(a) ON PURPOSE. That doc clears both
+                # `3` and `4` with `--allow-duplicate`. Here it must not, and the
+                # reason is local: `--allow-duplicate` clears the pure-git guard
+                # above, which fires whenever another branch carries this id —
+                # and this repo NEVER deletes merged branches (:93-94), so the
+                # flag is needed for ORDINARY follow-up work. One flag for both
+                # jobs would mean an operator typing it for the routine reason
+                # silently punches through a LIVE concurrent claim, i.e. the gate
+                # would be off exactly when people are doing normal work.
+                # CODEBUGS_SETUP_NO_CLAIM is the deliberate, typed alternative:
+                # it builds with NO claim rather than stealing someone else's.
                 echo "" >&2
                 echo "ERROR: ${cb} is already claimed by someone else:" >&2
                 codebugs who-holds "${cb}" 2>/dev/null | sed 's/^/    /' >&2

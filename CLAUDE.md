@@ -557,15 +557,29 @@ delete, so `release_reason` (`explicit` | `terminal:<status>`) is a queryable re
   fatal — the setup gate. Everything else is guarded, so a missing or contended tracker can never
   abort a finish after the merge has landed.
   **This repo's own `tools/worktree-*.sh` now follow the same shape (CB-58)** — see the Workflow
-  section for the exit-code handling and the trap. Two details worth carrying to any third adopter,
-  because both were only obvious after building it: **the fatal/guarded asymmetry is about WHEN,
-  not about importance** — setup may abort because nothing has been created yet and a refusal is
-  free, while finish runs after the merge has landed, where a false failure over tracker
-  bookkeeping is the worse outcome; and **finish leaves restore ON** (no `--no-restore`), because a
-  card still reading `in_progress` reads that way only from our own projection, so with the
-  worktree gone `open` is the honest state. The restore is a CAS against the projected value, so it
-  can never resurrect a card someone already closed — the common case, where the operator closed
-  the card first, comes back `not_claimed` at exit 0 and writes nothing.
+  section for the exit-code handling and the trap. One detail worth carrying to any third adopter,
+  because it was only obvious after building it: **the fatal/guarded asymmetry is about WHEN, not
+  about importance** — setup may abort because nothing has been created yet and a refusal is free,
+  while finish runs after the merge has landed, where a false failure over tracker bookkeeping is
+  the worse outcome.
+  **Two places codebugs deliberately diverges from `FINAL-DESIGN.md` §6.2–§6.3, both because that
+  section was written for autosorter's script and one of its premises does not hold here.** Do not
+  "fix" either back without reading this.
+  1. **`--allow-duplicate` does NOT clear a `held_by_other` refusal** (design §6.2(a) has it clear
+     both `3` and `4`). That flag also clears the pure-git branch guard, and this repo never deletes
+     merged branches, so it is needed for *ordinary follow-up work* — one flag for both jobs would
+     turn the claim gate off exactly when people are doing normal work. `CODEBUGS_SETUP_NO_CLAIM=1`
+     is the typed alternative and it builds with **no** claim rather than stealing one. **Ratified
+     by the owner, 2026-08-19**, against the design doc, on this reasoning.
+  2. **Finish leaves restore ON** (design §6.3 passes `--no-restore`). The design's own text says
+     why the difference is correct: there, `[7b/9] auto-resolve-codebugs.py` has already flipped the
+     card to `fixed` from a `Fixes:` trailer, so the release is a no-op and `--no-restore` guards a
+     rare case. **This repo has no auto-resolve step** — `worktree-finish.sh` tells the operator to
+     close the card by hand — so the card is typically still `in_progress`, and `--no-restore` would
+     leave every finished branch's card `in_progress` with no holder: CB-58's own defect,
+     reintroduced by CB-58's fix. Restore is a CAS against the projected value, so it still cannot
+     resurrect a card someone already closed; the operator-closed case returns `not_claimed` at
+     exit 0 and writes nothing.
 - Deferred by design, not forgotten: `steal`, claim history queries, audit/divergence tooling,
   retention, `expected_status`/`changed`, and `pull_next` integration.
   See `docs/superpowers/plans/design-council-entity-claims/FINAL-DESIGN.md` §10.

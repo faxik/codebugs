@@ -2251,6 +2251,24 @@ class TestClaimsWiringBehaviour:
         assert claims[0] == claims[1], "the retry must be the IDENTICAL call"
         assert (harness["repo"] / ".worktrees" / "fix-cb-4-thing").exists()
 
+    def test_the_retry_waits_before_re_issuing(self) -> None:
+        """An immediate retry meets the same contention it just lost to.
+
+        `undetermined` means another connection holds the write lock; nothing
+        has changed a microsecond later, so a retry with no wait is mostly
+        decoration. FINAL-DESIGN.md §6.2(a) carries the sleep; my first draft
+        did not. Structural, because asserting on wall-clock would make the
+        suite slow AND flaky to buy nothing.
+        """
+        src = code_only(
+            (REPO_ROOT / "tools" / "worktree-setup.sh").read_text()
+        )
+        retry_at = src.index('if [[ "${_rc}" -eq 5 ]]; then')
+        second_call = src.index("codebugs claim", retry_at)
+        assert "sleep" in src[retry_at:second_call], (
+            "the undetermined retry re-issues with no wait"
+        )
+
     def test_abort_after_claiming_runs_the_release_trap(self, harness: dict) -> None:
         """The acceptance criterion: setup → abort leaves no claim behind.
 
