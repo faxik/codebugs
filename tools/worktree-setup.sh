@@ -249,6 +249,24 @@ echo "[2/5] Creating worktree..."
 git -C "${REPO_ROOT}" worktree add -b "${BRANCH_NAME}" "${WORKTREE_PATH}" "${BASE_BRANCH}"
 
 # ---------------------------------------------------------------------------
+# DISARM HERE — the instant the worktree exists, and not one step later.
+#
+# The disarm point is RATIFIED, not a matter of taste:
+# docs/superpowers/plans/design-council-entity-claims/FINAL-DESIGN.md §6.2(d)
+# places it immediately after `git worktree add`, and §6.4 states the reason —
+# a trap armed to the END OF THE SCRIPT "releases ownership while a real
+# worktree sits on disk", which is the WORSE failure. This script's first draft
+# disarmed at [5/5] and was exactly that rejected alternative: the verify step
+# below assigns from an unguarded `$(git ... rev-parse HEAD)`, so under `set -e`
+# a failure there would abort with the worktree on disk AND hand the card back.
+#
+# The residual is deliberate and documented in §6.4: an abort between here and
+# the end leaves the claim held. That is correct — the branch genuinely exists,
+# so the claim is not lying, and `who-holds` plus one `release` recovers it.
+# ---------------------------------------------------------------------------
+trap - EXIT
+
+# ---------------------------------------------------------------------------
 # [3/5] DIVERGENCE FROM AUTOSORTER, and the reason is in CLAUDE.md.
 #
 # autosorter symlinks the root .venv into each worktree, because its dependency
@@ -296,15 +314,11 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# [5/5] Disarm the abort trap. Everything the claim protected now exists, so
-# from here an abort is the operator's problem and the claim is theirs to hold.
-#
-# This has to happen BEFORE the closing banner: the trap is on EXIT, which fires
-# on success too, so leaving it armed would release the claim of every setup
-# that worked.
+# [5/5] Report what is held. The trap was disarmed back at [2/5], the moment the
+# worktree existed — see the rationale there; it is a ratified design point, not
+# a placement choice.
 # ---------------------------------------------------------------------------
 echo "[5/5] Handing over..."
-trap - EXIT
 if [[ -n "${_claimed_ids}" ]]; then
     echo "  Holding:${_claimed_ids} — released automatically when the card is closed,"
     echo "  or by hand: codebugs release <CB-N> --holder ${BRANCH_NAME} \\"

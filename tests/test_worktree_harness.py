@@ -2059,6 +2059,31 @@ class TestClaimsWiringStructure:
         assert "trap - EXIT" in src, "the EXIT trap is never disarmed"
         assert src.index("trap _release_claims_on_abort EXIT") < src.index("trap - EXIT")
 
+    def test_the_trap_is_disarmed_the_moment_the_worktree_exists(self) -> None:
+        """The disarm POINT is ratified, not a matter of taste.
+
+        FINAL-DESIGN.md §6.2(d) puts it immediately after `git worktree add`,
+        and §6.4 gives the reason: a trap armed to the end of the script
+        "releases ownership while a real worktree sits on disk", which is the
+        worse failure. This script's first draft disarmed at [5/5] and was
+        exactly that rejected alternative — reachable, because the verify step
+        assigns from an unguarded command substitution that `set -e` turns into
+        an abort.
+
+        So: nothing that can FAIL may sit between the two. Asserted as "no
+        command lines between them", which is stricter than the design needs and
+        cannot drift into a judgement call about which commands are guarded.
+        """
+        src = code_only(self.SETUP.read_text())
+        add_at = src.index("worktree add -b")
+        disarm_at = src.index("trap - EXIT")
+        assert add_at < disarm_at, "the trap is disarmed before the worktree exists"
+        between = src[src.index("\n", add_at) : disarm_at]
+        assert not [ln for ln in between.splitlines() if ln.strip()], (
+            "a step sits between `git worktree add` and the disarm; if it fails, the "
+            f"trap hands back a card whose worktree is on disk. Found: {between!r}"
+        )
+
     def test_setup_refusal_on_held_by_other_is_fatal(self) -> None:
         """Exit 3 is the setup gate — the one tracker call allowed to be fatal."""
         src = code_only(self.SETUP.read_text())
