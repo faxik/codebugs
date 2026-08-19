@@ -138,15 +138,20 @@ def list_milestone_items(
 
     The public read counterpart to ``get_milestone_status`` for external
     read-only consumers (codashboard). ``live_only`` applies the canonical
-    terminal-source filter (``reconcile.source_is_terminal``) — the CB-26
+    terminal-source filter (``reconcile.live_source_clause``) — the CB-26
     guarantee — making this safe for queue-shaped reads; without it, rows are
     reported as stored, the same contract ``get_milestone_status`` keeps. The
-    filter runs BEFORE ``limit``/``offset`` so a page is never silently short
-    (the same ordering ``triage_inbox`` documents for its own LIMIT).
+    filter is now IN THE SQL, so it necessarily runs before ``limit``/``offset``
+    and a page is never silently short (CB-31; it used to be a Python
+    comprehension applied after the query).
+
+    ``id ASC`` breaks ties, because ``created_at`` is whole-second and the
+    ``offset``/``limit`` slicing below means tie order decides which rows a page
+    contains.
     """
     if not _milestone_exists(conn, milestone_id):
         raise KeyError(f"Milestone not found: {milestone_id}")
-    conditions = ["milestone_id = ?"]
+    conditions = ["mi.milestone_id = ?"]
     params: list[Any] = [milestone_id]
     if statuses is not None:
         for status in statuses:
@@ -156,21 +161,22 @@ def list_milestone_items(
                 )
         if not statuses:
             return []
-        conditions.append(f"status IN ({','.join('?' * len(statuses))})")
+        conditions.append(f"mi.status IN ({','.join('?' * len(statuses))})")
         params.extend(statuses)
+    if live_only:
+        # Spliced last, so its parameters follow milestone_id and statuses in the
+        # same order the fragments appear in the text (CB-20).
+        clause, live_params = reconcile.live_source_clause(conn, alias="mi")
+        conditions.append(f"({clause})")
+        params.extend(live_params)
     rows = conn.execute(
-        "SELECT * FROM milestone_items "
+        "SELECT mi.* FROM milestone_items mi "
         f"WHERE {' AND '.join(conditions)} "
-        "ORDER BY CASE WHEN status IN ('open','in_progress') THEN 0 ELSE 1 END, "
-        "priority ASC, created_at ASC",
+        "ORDER BY CASE WHEN mi.status IN ('open','in_progress') THEN 0 ELSE 1 END, "
+        "mi.priority ASC, mi.created_at ASC, mi.id ASC",
         params,
     ).fetchall()
     items = [_row_to_item(r) for r in rows]
-    if live_only:
-        items = [
-            i for i in items
-            if not reconcile.source_is_terminal(conn, i["item_kind"], i["item_ref"])
-        ]
     if offset:
         items = items[offset:]
     if limit is not None:

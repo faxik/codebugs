@@ -12,8 +12,8 @@ Two mechanisms, deliberately both:
   router, registered through ``db.register_status_change_hook``. It keeps the
   STORED rows correct, so ``milestone_status`` rollups and audit history mean
   something.
-* **Defensive** — ``source_is_terminal`` filters the queue reads themselves.
-  This is not belt-and-braces, it is the only reason the invariant can be
+* **Defensive** — ``live_source_clause`` filters the queue reads themselves, in
+  SQL. This is not belt-and-braces, it is the only reason the invariant can be
   claimed at all: several writers bypass the hook entirely (``add_milestone_item``
   inserts ``open`` even for an already-terminal source, ``set_item_status`` can
   reopen, ``release_item(status='abandoned')`` reopens unconditionally, the
@@ -22,15 +22,32 @@ Two mechanisms, deliberately both:
 
 Scoped to ``kind='stream'`` milestones on purpose — see ``_STREAM_ONLY`` below.
 
-**Where the defensive filter is NOT applied, and why.** ``triage_inbox`` and
-``capacity._candidates`` answer "what work should I pick up", so a terminal source
-must never appear. ``foundation.get_milestone_status`` answers a different
-question — "what does this milestone contain" — and a rollup that hid rows would
-misreport the stored state it exists to describe, so it deliberately reports the
-table as it is. That is a real seam, though: the filter is applied by hand at two
-call sites and nothing structurally stops a third queue read from forgetting it.
-A shared "live items" seam (a view, or one query builder every read goes through)
-is the deeper fix and is filed as its own card.
+**Where the defensive filter IS applied.** Three queue reads, each answering "what
+work should I pick up", all now going through ``live_source_clause`` (CB-31):
+``triage.triage_inbox``, ``capacity._candidates`` and
+``foundation.list_milestone_items(live_only=True)``. That third one was added
+after CB-31 was filed and remembered the rule on its own — which is precisely the
+argument the card made, so the seam exists to stop the fourth from having to.
+
+**Where it is NOT applied, and why — both sites, deliberately.**
+
+* ``foundation.get_milestone_status`` answers "what does this milestone contain",
+  and a rollup that hid rows would misreport the stored state it exists to
+  describe.
+* ``closegate``'s unfinished gate reads stored status, so a stored-``open`` item
+  over a terminal source produces a FALSE REFUSAL of ``milestone_close`` — and
+  that is correct: ``done_commit`` is never a gate, so hiding those rows would let
+  a release close over a missed integration (CB-32, and see ``_STREAM_ONLY``).
+
+An exclusion list that omits a site is the same defect as a call-site list that
+omits one, which is why both are named here rather than only the obvious one.
+
+**Why a query builder and not a VIEW.** Measured: ``CREATE VIEW`` over a missing
+source table SUCCEEDS, and the first ``SELECT`` from it raises ``no such table``.
+A view therefore fails CLOSED, with a crash, for exactly the raw-connection
+callers this design must keep working — the opposite of the contract. (The
+weaker objection, that a view's DDL would hardcode the terminal sets, does not
+hold: it could be regenerated from ``kind.terminal`` on every schema init.)
 """
 
 from __future__ import annotations
@@ -40,7 +57,7 @@ from collections.abc import Callable
 from typing import Any
 
 from codebugs import entities
-from codebugs.types import utc_now
+from codebugs.types import is_sql_identifier, utc_now
 
 from codebugs.milestones._schema import (
     ENTITY_KIND_TO_ITEM_KIND,
@@ -83,10 +100,18 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
 def _milestones_ready(conn: sqlite3.Connection) -> bool:
     """Both tables the reconciler writes must exist.
 
-    Raw ``sqlite3.connect()`` callers (e.g. ``tests/test_sweep.py``) invoke
-    ``add_finding`` / ``update_finding`` on connections that never initialised
-    milestones. Probing only ``milestone_items`` would still explode on the audit
-    insert, so probe what is actually written.
+    Raw ``sqlite3.connect()`` callers invoke ``add_finding`` / ``update_finding``
+    on connections that never initialised milestones. Probing only
+    ``milestone_items`` would still explode on the audit insert, so probe what is
+    actually written.
+
+    This docstring used to cite ``tests/test_sweep.py``; that file initialises only
+    the sweep schema and never reaches this path. The real precedents are the
+    milestone hooks running on findings-only databases —
+    ``tests/test_milestones_reconcile.py:333-348`` and
+    ``tests/test_milestones.py:360-375``. The distinction matters because CB-31's
+    plan inherited the wrong citation from here and applied it to QUEUE READS,
+    which have a different set of raw-connection callers again.
     """
     return _table_exists(conn, "milestone_items") and _table_exists(conn, "milestone_audit")
 
@@ -116,6 +141,90 @@ def source_is_terminal(conn: sqlite3.Connection, item_kind: str, item_ref: str) 
     if kind is None or not _table_exists(conn, kind.table):
         return False
     return entities.EntityRef(item_ref, kind).is_resolved(conn)
+
+
+def live_source_clause(
+    conn: sqlite3.Connection, *, alias: str
+) -> tuple[str, list[Any]]:
+    """SQL keeping only ``milestone_items`` rows whose SOURCE entity is still live.
+
+    The COMPOSED twin of ``source_is_terminal``, for the reads that must not hand
+    out finished work. Returns ``(fragment, params)`` where the fragment is ALWAYS
+    a valid boolean expression — the literal ``1`` when no source table is present
+    — so no call site needs an ``if fragment:`` branch. Point-of-use discipline is
+    the wrong enforcement layer (CB-41), including for this seam's own adoption.
+
+    Both halves are built by ``entities`` from the same ``EntityKind`` — the row-wise
+    one in ``EntityRef.is_resolved``, the set-wise one in
+    ``EntityKind.terminal_exists_sql``, declared a few lines apart — and a
+    differential test compares them. State the strength of that honestly: the test
+    is a SAMPLE over a fixture, not a proof, so it would not catch a change made to
+    only one of them that every fixture row happens to agree on (a status
+    normalization on the Python side is the concrete example, since every fixture
+    row stores a canonical status). Co-location is what makes them hard to drift;
+    the test is what makes a drift likely to be noticed.
+
+    **Why this is ``NOT EXISTS`` and never ``status NOT IN (...)`` over a LEFT JOIN
+    or a scalar subquery.** A missing source row yields NULL, ``NULL NOT IN (...)``
+    is NULL, and ``WHERE NULL`` EXCLUDES the row — silently inverting fail-open into
+    a queue that hides work. ``NOT EXISTS`` is never NULL, so a row is hidden only on
+    AFFIRMATIVE proof: recognised kind, existing source table, matching row, terminal
+    status. Every unknown keeps the row live, exactly as ``source_is_terminal`` does.
+
+    **``alias`` is REQUIRED, and that is not stylistic.** The correlated columns must
+    be qualified, because inside the subquery an unqualified ``item_kind`` /
+    ``item_ref`` resolves against the SOURCE table first and only reaches
+    ``milestone_items`` because ``findings`` and ``requirements`` happen to lack those
+    column names today. Measured with an ``item_kind`` column added to ``findings``:
+    the unqualified form stopped referencing the outer ``item_kind`` altogether and
+    hid an ``external`` row that must stay live — failing CLOSED, hiding live work,
+    which is the one failure this predicate exists to prevent. It is a BARE
+    identifier (this function appends the ``.``) so a caller cannot smuggle in a
+    fragment, and it is validated: ``EntityKind`` validates ``table`` at construction
+    (CB-22), nothing validated ``alias``.
+
+    Callers must compute this ONCE per traversal and reuse it. It probes
+    ``sqlite_master`` per kind, so rebuilding it per bucket inside ``pull_next``'s
+    ``BEGIN IMMEDIATE`` would add reads to an exclusive-lock hold — the opposite of
+    why this exists.
+    """
+    if not is_sql_identifier(alias):
+        raise ValueError(
+            f"alias must be a plain SQL identifier, got {alias!r}"
+        )
+
+    fragments: list[str] = []
+    params: list[Any] = []
+    for kind in entities.ENTITY_KINDS:
+        # `.get`, never `[...]`: ENTITY_KIND_TO_ITEM_KIND is not total over
+        # ENTITY_KINDS by contract, and an unmapped kind must fail OPEN (skip the
+        # fragment) exactly as `_entity_kind_for` does, not raise KeyError.
+        item_kind = ENTITY_KIND_TO_ITEM_KIND.get(kind.name)
+        if item_kind is None or not kind.terminal:
+            continue
+        # An absent source table drops out of BOTH the SQL and the params, which
+        # keeps raw-sqlite3 callers (milestone hooks on a findings-only database)
+        # working and is fail-open by construction.
+        if not _table_exists(conn, kind.table):
+            continue
+        # The entity half — table, status column, terminal vocabulary — is built by
+        # `entities`, which owns those tables. This module contributes only its own
+        # `milestone_items` columns.
+        exists_sql, terminal = kind.terminal_exists_sql(
+            ref_expr=f"{alias}.item_ref"
+        )
+        # `IS`, not `=`, and that is load-bearing. `item_kind` is NOT NULL in this
+        # repo's schema but nullable on the bare schemas raw callers build, and
+        # `NULL = ?` yields NULL: `NOT (NULL AND EXISTS(...))` is NULL, and WHERE
+        # NULL EXCLUDES the row. `IS` is SQLite's null-safe comparison, so an
+        # unknown kind reads as "not this kind" and the row stays live.
+        fragments.append(f"NOT ({alias}.item_kind IS ? AND {exists_sql})")
+        params.append(item_kind)
+        params.extend(terminal)
+
+    if not fragments:
+        return "1", []
+    return " AND ".join(fragments), params
 
 
 def _live_rows(

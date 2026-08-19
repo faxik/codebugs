@@ -96,6 +96,55 @@ class EntityKind:
             return self.sort_col, []
         return t.rank_case_sql(self.sort_col, self.sort_vocabulary)
 
+    def terminal_exists_sql(self, *, ref_expr: str) -> tuple[str, list[str]]:
+        """``(fragment, params)`` that is TRUE for a row whose entity of THIS kind
+        exists and is terminal — the set-wise twin of ``EntityRef.is_resolved``.
+
+        It lives here, and not in the module that wanted it, because this is where
+        the table, the status column and the terminal vocabulary are declared and
+        validated. A caller in another domain composing this SQL itself would be
+        reaching into these tables directly and would carry a ``# noqa: S608``
+        justified by a check living in a file it does not own — which is exactly
+        what CB-31's first implementation did.
+
+        ``ref_expr`` is a QUALIFIED column (``<alias>.<column>``) naming the outer
+        row's entity id. Both halves are validated as bare identifiers, so this
+        stays composable without becoming a hole.
+
+        Params splice at the fragment's textual position, same contract as
+        ``order_by`` (CB-20).
+
+        **The caller owns null-safety on its own discriminator.** This fragment is
+        only ever TRUE or FALSE, never NULL, so ``NOT(...)`` over it is safe; but a
+        caller ANDing it with a comparison of its own must use a null-safe operator
+        (``IS``), or a NULL there makes the whole conjunction NULL and ``WHERE
+        NULL`` silently EXCLUDES the row.
+        """
+        parts = ref_expr.split(".")
+        if len(parts) != 2 or not all(t.is_sql_identifier(p) for p in parts):
+            raise ValueError(
+                f"ref_expr must be '<alias>.<column>' with bare identifiers, "
+                f"got {ref_expr!r}"
+            )
+        for col in ("id", "status"):
+            if col not in self.readable_cols:
+                raise ValueError(
+                    f"Column {col!r} is not readable for kind {self.name!r}"
+                )
+        # sorted(): frozenset iteration order is unstable, and unstable SQL text
+        # makes a template-asserting test flaky.
+        terminal = sorted(self.terminal)
+        placeholders = ", ".join("?" * len(terminal))
+        # noqa justified structurally, the same way `_read`'s is: `table` is
+        # validated in __post_init__ (CB-22), the two column names are checked
+        # against readable_cols just above, and `ref_expr` is validated as a pair
+        # of bare identifiers. Every value is bound.
+        fragment = (
+            f"EXISTS (SELECT 1 FROM {self.table} _src "  # noqa: S608
+            f"WHERE _src.id = {ref_expr} AND _src.status IN ({placeholders}))"
+        )
+        return fragment, terminal
+
 
 ENTITY_KINDS: tuple[EntityKind, ...] = (
     EntityKind(

@@ -347,3 +347,402 @@ class TestSchemaProbe:
             "SELECT status FROM findings WHERE id='CB-99'"
         ).fetchone()["status"] == "fixed"
         c.close()
+
+
+# ---------------------------------------------------------------------------
+# CB-31 — the composed twin: one SQL clause instead of a per-row predicate.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingConnection(sqlite3.Connection):
+    """Counts every executed statement TEMPLATE.
+
+    A LOCAL copy on purpose: the house `RecordingConnection` lives in
+    `test_bench.py`, `test_reqs.py`, `test_findings.py` and `test_merge.py`, and
+    `conftest.py` is reserved for the one tracker-root guard, so each file carries
+    its own (CLAUDE.md, Testing).
+    """
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.recorded_sql: list[str] = []
+
+    def execute(self, sql, *a, **kw):
+        self.recorded_sql.append(sql)
+        return super().execute(sql, *a, **kw)
+
+
+def _raw_item(conn, item_kind, item_ref, milestone_id="stream/triage"):
+    """Insert a milestone_items row directly, bypassing every writer."""
+    conn.execute(
+        "INSERT INTO milestone_items (milestone_id, item_kind, item_ref, size, "
+        "priority, status, acceptance, meta_json, created_at, updated_at) "
+        "VALUES (?, ?, ?, 'triage', 100, 'open', '', '{}', "
+        "'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        (milestone_id, item_kind, item_ref),
+    )
+    conn.commit()
+    return conn.execute(
+        "SELECT id FROM milestone_items WHERE item_ref = ? AND item_kind = ? "
+        "ORDER BY id DESC LIMIT 1", (item_ref, item_kind)
+    ).fetchone()["id"]
+
+
+def _differential_fixture(conn):
+    """Rows spanning every classification, INCLUDING the two that alone discriminate
+    the realistic NULL-unsafe mutant. Returns {label: milestone_items.id}.
+
+    Measured in review: a scalar-subquery mutant keeps only `bug_live`. It is caught
+    by `external_over_terminal` and `bug_missing_source` and by nothing else, so an
+    "externals are covered" fixture whose external points at a LIVE finding is
+    vacuous against the very mistake this test exists to kill.
+    """
+    conn.execute("DELETE FROM milestone_items")
+    conn.commit()
+    _add_finding(conn, "CB-T")
+    findings.update_finding(conn, "CB-T", status="fixed")
+    _add_finding(conn, "CB-L")
+    reqs.add_requirement(
+        conn, req_id="FR-T", description="r", section="S", priority="must"
+    )
+    reqs.update_requirement(conn, "FR-T", status="implemented")
+    reqs.add_requirement(
+        conn, req_id="FR-L", description="r", section="S", priority="must"
+    )
+    conn.execute("DELETE FROM milestone_items")
+    conn.commit()
+    return {
+        "bug_terminal": _raw_item(conn, "bug", "CB-T"),
+        "bug_live": _raw_item(conn, "bug", "CB-L"),
+        "req_terminal": _raw_item(conn, "requirement", "FR-T"),
+        "req_live": _raw_item(conn, "requirement", "FR-L"),
+        # DISCRIMINATOR 1: an external whose ref matches a TERMINAL finding.
+        "external_over_terminal": _raw_item(conn, "external", "CB-T"),
+        # DISCRIMINATOR 2: a bug whose source row does not exist.
+        "bug_missing_source": _raw_item(conn, "bug", "CB-GONE"),
+    }
+
+
+def _sql_live_ids(conn, clause, params):
+    return {
+        r[0] for r in conn.execute(
+            f"SELECT mi.id FROM milestone_items mi WHERE ({clause})", params  # noqa: S608
+        ).fetchall()
+    }
+
+
+def _python_live_ids(conn):
+    from codebugs.milestones import reconcile
+    rows = conn.execute("SELECT id, item_kind, item_ref FROM milestone_items").fetchall()
+    return {
+        r["id"] for r in rows
+        if not reconcile.source_is_terminal(conn, r["item_kind"], r["item_ref"])
+    }
+
+
+class TestLiveSourceClauseDifferential:
+    """The SQL clause and `source_is_terminal` must never disagree.
+
+    A second copy of "is this entity terminal" is the drift this repo keeps filing
+    cards about, so the guarantee is a differential assertion rather than two
+    enumerations that happen to match today.
+    """
+
+    def test_agrees_with_source_is_terminal_row_for_row(self, conn):
+        from codebugs.milestones import reconcile
+        ids = _differential_fixture(conn)
+        clause, params = reconcile.live_source_clause(conn, alias="mi")
+        sql_live = _sql_live_ids(conn, clause, params)
+
+        assert sql_live == _python_live_ids(conn)
+
+        # Non-vacuity: both verdict classes non-empty, and one hidden row PER KIND.
+        # Comparing two empty sets would otherwise pass.
+        assert len(ids) == 6
+        hidden = set(ids.values()) - sql_live
+        assert ids["bug_terminal"] in hidden
+        assert ids["req_terminal"] in hidden
+        assert sql_live == {
+            ids["bug_live"], ids["req_live"],
+            ids["external_over_terminal"], ids["bug_missing_source"],
+        }
+
+    def test_kills_the_scalar_subquery_mutant(self, conn):
+        """The NAMED mutant: `(SELECT status ...) NOT IN (...)`.
+
+        This is the realistic NULL-unsafe mistake — unlike a LEFT JOIN, it IS
+        expressible as a WHERE fragment, so the seam's `(sql, params)` shape does
+        not foreclose it. NULL NOT IN (...) is NULL and `WHERE NULL` excludes, so
+        it silently HIDES live work.
+        """
+        from codebugs.milestones import reconcile
+        ids = _differential_fixture(conn)
+        mutant = (
+            "(SELECT _s.status FROM findings _s WHERE _s.id = mi.item_ref) "
+            "NOT IN ('fixed', 'not_a_bug', 'wont_fix')"
+        )
+        mutant_live = _sql_live_ids(conn, mutant, [])
+        canonical, params = reconcile.live_source_clause(conn, alias="mi")
+        canonical_live = _sql_live_ids(conn, canonical, params)
+
+        assert mutant_live != canonical_live
+        # And precisely WHICH rows it loses — the two discriminators.
+        assert ids["external_over_terminal"] in canonical_live - mutant_live
+        assert ids["bug_missing_source"] in canonical_live - mutant_live
+
+
+class TestLiveSourceClauseAlias:
+    def test_alias_must_be_a_bare_identifier(self, conn):
+        from codebugs.milestones import reconcile
+        for bad in ("mi.", "mi x", "", "mi;--", "mi\n"):
+            with pytest.raises(ValueError, match="plain SQL identifier"):
+                reconcile.live_source_clause(conn, alias=bad)
+
+    def test_correlated_columns_are_qualified(self, conn):
+        from codebugs.milestones import reconcile
+        clause, _ = reconcile.live_source_clause(conn, alias="mi")
+        # `IS`, not `=` — see test_a_null_item_kind_stays_live.
+        assert "mi.item_kind IS ?" in clause
+        assert "_src.id = mi.item_ref" in clause
+
+    def test_a_shadowing_source_column_cannot_disable_the_filter(self, tmp_path):
+        """Measured regression. With the correlated columns unqualified, a source
+        table that gains an `item_kind` column silently captures the reference: the
+        subquery stops mentioning the OUTER item_kind and hides an `external` row
+        that must stay live. Fail-CLOSED, hiding live work.
+
+        Raw minimal schema, because the real `findings` table has no such column.
+        """
+        from codebugs.milestones import reconcile
+        c = sqlite3.connect(str(tmp_path / "shadow.db"))
+        c.row_factory = sqlite3.Row
+        c.execute(
+            "CREATE TABLE findings (id TEXT PRIMARY KEY, status TEXT NOT NULL, "
+            "item_kind TEXT, item_ref TEXT)"
+        )
+        c.execute(
+            "CREATE TABLE milestone_items (id INTEGER PRIMARY KEY, "
+            "item_kind TEXT, item_ref TEXT)"
+        )
+        c.execute("INSERT INTO findings VALUES ('CB-1', 'fixed', 'bug', 'CB-1')")
+        c.execute("INSERT INTO milestone_items VALUES (1, 'bug', 'CB-1')")
+        c.execute("INSERT INTO milestone_items VALUES (2, 'external', 'CB-1')")
+        c.commit()
+        clause, params = reconcile.live_source_clause(c, alias="mi")
+        assert _sql_live_ids(c, clause, params) == {2}, (
+            "the external row must stay live despite the shadow column"
+        )
+        c.close()
+
+
+class TestTerminalExistsSqlGuards:
+    """`EntityKind.terminal_exists_sql` validates what it interpolates, at the
+    place those things are DECLARED (CB-22, CB-31)."""
+
+    def test_ref_expr_must_be_a_qualified_pair_of_identifiers(self):
+        kind = entities.ENTITY_KINDS[0]
+        for bad in ("mi.item_ref; DROP TABLE findings", "item_ref", "a.b.c", "mi.", ""):
+            with pytest.raises(ValueError, match="ref_expr"):
+                kind.terminal_exists_sql(ref_expr=bad)
+
+    def test_a_kind_that_cannot_read_status_is_refused(self):
+        """The `readable_cols` allowlist is the discriminator, and without this it
+        is unfalsifiable: both real kinds declare `id` and `status`, so deleting
+        the check changes nothing observable. `dataclasses.replace` is how this
+        repo's other EntityKind guards are exercised."""
+        import dataclasses
+        kind = dataclasses.replace(
+            entities.ENTITY_KINDS[0], readable_cols=frozenset({"id", "description"})
+        )
+        with pytest.raises(ValueError, match="not readable"):
+            kind.terminal_exists_sql(ref_expr="mi.item_ref")
+
+
+class TestLiveSourceClauseTableAvailability:
+    """Every unknown fails OPEN. An absent source table drops out of BOTH the SQL
+    and the parameter list."""
+
+    def _bare(self, tmp_path, name, tables):
+        c = sqlite3.connect(str(tmp_path / name))
+        c.row_factory = sqlite3.Row
+        for t in tables:
+            c.execute(f"CREATE TABLE {t} (id TEXT PRIMARY KEY, status TEXT NOT NULL)")  # noqa: S608
+        c.execute(
+            "CREATE TABLE milestone_items (id INTEGER PRIMARY KEY, "
+            "item_kind TEXT, item_ref TEXT)"
+        )
+        c.execute("INSERT INTO milestone_items VALUES (1, 'bug', 'CB-1')")
+        c.commit()
+        return c
+
+    @pytest.mark.parametrize(
+        "tables,fragments,nparams",
+        [
+            (("findings", "requirements"), 2, 3 + 1 + 4 + 1),
+            (("findings",), 1, 3 + 1),
+            (("requirements",), 1, 4 + 1),
+            ((), 0, 0),
+        ],
+    )
+    def test_matrix(self, tmp_path, tables, fragments, nparams):
+        from codebugs.milestones import reconcile
+        c = self._bare(tmp_path, f"m{len(tables)}{fragments}.db", tables)
+        clause, params = reconcile.live_source_clause(c, alias="mi")
+        assert clause.count("EXISTS (SELECT 1 FROM") == fragments
+        assert len(params) == nparams
+        assert clause.count("?") == nparams
+        if fragments == 0:
+            assert clause == "1"
+        # Fail-open in every shape: with no findings row present nothing is hidden.
+        assert _sql_live_ids(c, clause, params) == {1}
+        c.close()
+
+    def test_a_null_item_kind_stays_live(self, tmp_path):
+        """Fail-open on the discriminator itself.
+
+        The clause ANDs `item_kind IS ?` with an EXISTS. With `=` instead of `IS`,
+        a NULL item_kind makes the conjunction NULL, `NOT NULL` is NULL, and WHERE
+        NULL EXCLUDES the row — hiding live work on the quietest possible input.
+        `item_kind` is NOT NULL in this repo's schema but nullable on the bare
+        schemas raw callers build, which is exactly where a queue read would meet
+        one.
+        """
+        from codebugs.milestones import reconcile
+        c = self._bare(tmp_path, "nullkind.db", ("findings", "requirements"))
+        c.execute("INSERT INTO findings VALUES ('CB-1', 'fixed')")
+        c.execute("INSERT INTO milestone_items VALUES (2, NULL, 'CB-1')")
+        c.commit()
+        clause, params = reconcile.live_source_clause(c, alias="mi")
+        assert _sql_live_ids(c, clause, params) == {2}
+        c.close()
+
+    def test_a_terminal_source_is_hidden_only_on_affirmative_proof(self, tmp_path):
+        from codebugs.milestones import reconcile
+        c = self._bare(tmp_path, "proof.db", ("findings", "requirements"))
+        clause, params = reconcile.live_source_clause(c, alias="mi")
+        assert _sql_live_ids(c, clause, params) == {1}  # no source row -> live
+        c.execute("INSERT INTO findings VALUES ('CB-1', 'fixed')")
+        c.commit()
+        assert _sql_live_ids(c, clause, params) == set()  # now proven terminal
+        c.close()
+
+
+class TestLiveSourceClauseCost:
+    """The card's second, independent reason: per-row I/O, some of it inside
+    `pull_next`'s BEGIN IMMEDIATE window."""
+
+    def _recording(self, tmp_path):
+        db.init_project(str(tmp_path))
+        c = sqlite3.connect(
+            str(tmp_path / ".codebugs" / "findings.db"), factory=_RecordingConnection
+        )
+        c.row_factory = sqlite3.Row
+        return c
+
+    @pytest.mark.parametrize("n", [2, 5])
+    def test_triage_inbox_statement_count_is_constant_in_row_count(self, tmp_path, n):
+        """Counts the TOTAL statement population, not just the ones naming
+        `milestone_items` — the old 1+2N implementation also issued exactly ONE
+        statement against that table, so the qualifier alone cannot discriminate.
+        The extra two are `live_source_clause`'s per-kind sqlite_master probes.
+        """
+        c = self._recording(tmp_path)
+        for i in range(n):
+            _add_finding(c, f"CB-{i + 1}")
+        c.recorded_sql.clear()
+        rows = milestones.triage_inbox(c, limit=50)
+        assert len(rows) == n
+        assert len(c.recorded_sql) == 3, c.recorded_sql
+        assert sum("milestone_items" in s for s in c.recorded_sql) == 1
+        assert sum("sqlite_master" in s for s in c.recorded_sql) == 2
+        c.close()
+
+    def test_candidates_builds_the_clause_once_for_all_four_buckets(self, tmp_path):
+        """Rebuilding it per bucket would add eight sqlite_master reads inside the
+        exclusive-lock hold — worse than the defect being fixed."""
+        c = self._recording(tmp_path)
+        _add_finding(c, "CB-1")
+        c.recorded_sql.clear()
+        milestones.pull_next(
+            c, agent_id="a", capacity={"triage": 5, "small": 5, "large": 5}
+        )
+        assert sum("sqlite_master" in s for s in c.recorded_sql) == 2, c.recorded_sql
+        c.close()
+
+
+class TestLiveSourceClauseAdoption:
+    def test_pull_next_refuses_a_terminal_source_in_a_release_milestone(self, conn):
+        """The only fixture proving the SQL predicate — not the hook — protects
+        `pull_next`: the reconciler is scoped to streams on purpose (CB-32), so a
+        release item over a resolved finding stays stored-`open`."""
+        milestones.create_milestone(
+            conn, id="release/9.9", kind="release", description="r"
+        )
+        _add_finding(conn, "CB-50")
+        milestones.add_milestone_item(
+            conn, milestone_id="release/9.9", item_kind="bug", item_ref="CB-50"
+        )
+        findings.update_finding(conn, "CB-50", status="fixed")
+        row = conn.execute(
+            "SELECT status FROM milestone_items WHERE milestone_id='release/9.9'"
+        ).fetchone()
+        assert row["status"] == "open", "premise: the hook leaves release items alone"
+
+        conn.execute("DELETE FROM milestone_items WHERE milestone_id='stream/triage'")
+        conn.commit()
+        assert milestones.pull_next(
+            conn, agent_id="a", capacity={"triage": 5, "small": 5, "large": 5}
+        ) is None
+
+    def test_list_milestone_items_filters_before_offset(self, conn):
+        """Stale rows placed BEFORE the offset boundary. If the filter ran after
+        the slice, the offset would consume them and the page would be short."""
+        milestones.create_milestone(
+            conn, id="release/8.8", kind="release", description="r"
+        )
+        conn.execute("DELETE FROM milestone_items")
+        conn.commit()
+        for i in range(2):
+            _add_finding(conn, f"CB-S{i}")
+            findings.update_finding(conn, f"CB-S{i}", status="fixed")
+            _raw_item(conn, "bug", f"CB-S{i}", milestone_id="release/8.8")
+        for i in range(3):
+            _add_finding(conn, f"CB-Q{i}")
+            _raw_item(conn, "bug", f"CB-Q{i}", milestone_id="release/8.8")
+
+        page = milestones.list_milestone_items(
+            conn, milestone_id="release/8.8", live_only=True, offset=1, limit=2
+        )
+        assert [i["item_ref"] for i in page] == ["CB-Q1", "CB-Q2"]
+
+
+class TestLiveSourceClauseCallSites:
+    """Pins the population. It cannot PREVENT a fourth queue read from forgetting
+    the filter — nothing local can — but it makes adding one a decision someone
+    records, the same shape as TestOpenCallSitesRatchet."""
+
+    def test_call_sites_are_pinned(self):
+        import ast
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parent.parent / "src" / "codebugs" / "milestones"
+        found = set()
+        for path in sorted(root.glob("*.py")):
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for sub in ast.walk(node):
+                    if not isinstance(sub, ast.Call):
+                        continue
+                    fn = sub.func
+                    name = (
+                        fn.attr if isinstance(fn, ast.Attribute)
+                        else fn.id if isinstance(fn, ast.Name) else None
+                    )
+                    if name == "live_source_clause":
+                        found.add((path.name, node.name))
+        assert found == {
+            ("triage.py", "triage_inbox"),
+            ("capacity.py", "_candidates"),
+            ("foundation.py", "list_milestone_items"),
+        }, found
