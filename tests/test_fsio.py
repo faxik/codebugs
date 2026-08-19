@@ -415,14 +415,31 @@ class TestCompatibility:
         assert rc == 0
         assert "FR-001" in capsys.readouterr().out
 
-    def test_a_broken_pipe_on_the_stdout_branch_still_propagates(
+    def test_a_simulated_broken_pipe_on_the_stdout_branch_still_propagates(
         self, populated, monkeypatch, capsys
     ):
         """The naive version of this check — "stdout still works" — passes
         whether or not the branch was wrongly wrapped in `except OSError`
         (Codex). The discriminator is that a BrokenPipeError from the stdout
-        write must NOT become `codebugs: ...` + exit 1, because that decision
-        belongs to CB-78.
+        write must NOT become `codebugs: ...` + exit 1.
+
+        RENAMED AND RE-DOCUMENTED BY CB-78, because what it pins changed
+        underneath it and the old name concealed that. This test INJECTS the
+        exception by monkeypatching `print`; it does not use a real pipe. Since
+        `cli.run` installs `SIG_DFL`, a REAL closed pipe no longer produces a
+        `BrokenPipeError` anywhere in the process — it dies by signal (141)
+        before Python sees `EPIPE`. So this exercises the handler's arm
+        placement under an injected failure, which is still worth pinning (a
+        future `except OSError` around the stdout branch would swallow a
+        non-pipe stdout failure exactly the same way), but it is NOT evidence
+        about what a closed pipe does in production. That is
+        `tests/test_cli_signals.py`, which uses a real pipe and a real
+        subprocess.
+
+        It also calls `cli.main()` rather than `cli.run()`, so no signal
+        disposition is installed and the injected exception is reachable at all
+        — the split exists precisely so an in-process caller keeps Python's
+        default behaviour.
         """
         real_print = print
 

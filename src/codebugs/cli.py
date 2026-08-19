@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sqlite3
 import sys
 
@@ -155,5 +156,73 @@ def main() -> None:
         sys.exit(5)
 
 
-if __name__ == "__main__":
+def run() -> None:
+    """PROCESS entry point: restore POSIX SIGPIPE semantics, then run `main`.
+
+    CB-78. Python installs ``SIG_IGN`` for ``SIGPIPE`` at startup, which converts
+    the kernel's "your reader is gone" signal into an ``EPIPE`` write failure. A
+    verb whose mutation had ALREADY COMMITTED then reported that as a failure —
+    measured against 39d176a with the write confirmed present in the tracker
+    afterwards:
+
+        codebugs add … | true   (-u)     BrokenPipeError traceback,  exit 1
+        codebugs add … | true   (block)  "Exception ignored on flushing
+                                          sys.stdout: BrokenPipeError", exit 120
+
+    ``SIG_DFL`` gives ``exit 141`` (128 + SIGPIPE) and an empty stderr in BOTH
+    buffering modes. 141 is the point, not a side effect: it is the only outcome
+    that stays distinguishable from a real failure (1), which "silent exit 0" and
+    "silent exit 1" both destroy. Ratified by the user 2026-08-19, twice — the
+    second time knowing that `export-csv /dev/stdout` into a dead reader trades a
+    working one-line diagnostic for a silent 141.
+
+    TWO PROPERTIES OF THIS FUNCTION ARE LOAD-BEARING. Neither is decoration, and
+    both were established by measurement after review reproduced the failures.
+
+    **It is separate from `main` because `main` is imported and called
+    IN-PROCESS.** ``tests/test_fsio.py``, ``tests/test_findings.py`` and
+    ``tests/manual/repro_cb76_truncation.py`` all call ``cli.main()`` directly and
+    deliberately, so that injected failures reach it. ``signal.signal`` is an
+    unrestored, process-global mutation: installed inside ``main`` it would leave
+    the whole pytest session running under ``SIG_DFL``, and a two-test file
+    reproduced that — ``pytest -q -s . | head -2`` died at 141 with empty stderr
+    mid-suite, where the same file without the signal call exits 1. It also raises
+    ``ValueError: signal only works in main thread of the main interpreter`` off
+    the main thread, which the ``hasattr`` guard does not cover, so ``main`` would
+    become unusable off-thread for a reason unrelated to its job.
+
+    **It must NEVER restore the previous disposition.** The obvious "polite"
+    variant — install, call ``main``, restore in a ``finally`` — was measured and
+    it REINTRODUCES the defect: ``add | true`` under block buffering goes back to
+    ``exit 120`` and "Exception ignored on flushing sys.stdout", because that
+    write is the interpreter's shutdown flush and happens after ``main`` returns.
+    "Do not mutate process-global state" and "fix the block-buffered case" are
+    incompatible inside one function; splitting the executable wrapper from the
+    importable body is what makes both true at once.
+
+    ``hasattr``: Windows has no ``SIGPIPE``.
+
+    DEPLOYMENT CAVEAT, invisible in the diff: a console shim generated before this
+    change imports ``main`` BY NAME, so an existing install keeps the old
+    behaviour until ``pipx reinstall codebugs`` / ``pip install -e .`` regenerates
+    it. ``tests/test_cli_signals.py::TestConsoleScriptTargetsTheWrapper`` pins the
+    declaration; nothing can pin someone else's installed shim.
+
+    WHEN THIS IS OBSERVABLE AT ALL (measured; the honest condition has two
+    branches and stating only the second is wrong): either the reader closes
+    WITHOUT draining, at any output size — a 656-byte export into ``( exit 0 )``
+    reproduces — or un-drained output exceeds the pipe buffer, 65536 bytes here
+    via ``F_GETPIPE_SZ``. A one-line ``add`` or a 6.5 KB ``query`` piped to
+    ``head -1`` never reaches the state, because ``head`` drains it first.
+
+    Note ``codebugs --help | head -0`` now exits 141 rather than 0: the
+    disposition is installed above argument parsing, deliberately, since argparse
+    writes to stdout too.
+    """
+    if hasattr(signal, "SIGPIPE"):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     main()
+
+
+if __name__ == "__main__":
+    run()

@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **A closed pipe now ends a `codebugs` command at exit 141, silently, instead of
+  reporting a committed write as a failure (CB-78).** Piping any verb into a reader
+  that goes away — `| head`, `| true`, a `gzip` that dies — used to print a Python
+  `BrokenPipeError` traceback and exit **1**, or, under the default block buffering,
+  `Exception ignored on flushing sys.stdout` and exit **120**. In both cases the
+  command's work had **already committed**: `codebugs add … | true` filed the finding
+  and then reported failure.
+
+  `codebugs` now restores the POSIX default for `SIGPIPE`, so it dies by signal like
+  any other Unix filter (`yes | head` does the same). **Exit 141 means "the reader of
+  my stdout went away", and is deliberately distinguishable from exit 1, "the command
+  failed"** — that is why the process does not simply exit 0: a truncated
+  `codebugs export-csv /dev/stdout | gzip > backup.gz` must never look like a
+  successful backup.
+
+  **What this costs you, stated rather than left to be discovered.** Where a
+  broken pipe previously produced a readable line, it is now silent. Concretely,
+  `codebugs export-csv /dev/stdout` and `codebugs reqs-export` into a dead reader used
+  to print `codebugs: [Errno 32] Broken pipe` and exit 1; they now exit 141 with empty
+  stderr. `codebugs --help | head -0` exits 141 rather than 0. Both outcomes are
+  non-zero, so no `set -e` script changes behaviour, but a script that matched on
+  stderr text will see nothing.
+
+  It is only observable when the reader closes **without draining** the output (at any
+  size), or when un-drained output exceeds the pipe buffer (64 KB on Linux). A one-line
+  `codebugs add` piped to `head -1` is unaffected, because `head` reads it first.
+
+  **If you installed `codebugs` before this release, re-install it** — `pipx reinstall
+  codebugs`, or `pip install -e .` in a checkout. The console script is generated at
+  install time and the old one bypasses the new entry point, so the fix will not reach
+  you otherwise.
+
 ### Added
 - **`codebugs restore-csv <file>` — put a backup back exactly as it was (CB-97).**
   `import-csv` folds someone else's findings into yours and gives them fresh ids;

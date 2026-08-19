@@ -1079,9 +1079,18 @@ def register_cli(sub, commands) -> None:
 
         if args.file:
             # CB-76, twin of findings._cmd_export_csv. The stdout branch below
-            # stays OUTSIDE both the helper and the guard: wrapping it would
-            # turn a BrokenPipeError on a closed pipe into `codebugs: ...` +
-            # exit 1, which is CB-78's open question, not this card's.
+            # stays OUTSIDE both the helper and the guard.
+            #
+            # CB-78 ANSWERED the open question this comment used to defer: a
+            # closed pipe now kills the process by SIGPIPE (exit 141, empty
+            # stderr) before any `BrokenPipeError` exists to catch, because
+            # `cli.run` installs `SIG_DFL`. So the reason for keeping the stdout
+            # branch outside has changed rather than gone away — it is no longer
+            # "that decision belongs to CB-78", it is that wrapping it could only
+            # ever catch a NON-pipe stdout failure, and that arm below is
+            # correspondingly unreachable for a pipe or FIFO destination. Left in
+            # place for regular-file and device destinations; see CB-55, which
+            # owns the consolidation of these six arms and carries this note.
             try:
                 with atomic_write(args.file) as f:
                     f.write(md)
