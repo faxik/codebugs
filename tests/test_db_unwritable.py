@@ -142,7 +142,23 @@ class TestCantopenIsAmbiguousAndExistenceDecides:
 
 
 class TestNonEnvironmentalFailuresKeepTheirTraceback:
-    """The allowlist must fail toward the STATUS QUO, not toward a wrong answer."""
+    """The allowlist must fail toward the STATUS QUO, not toward a wrong answer.
+
+    BOTH TESTS HERE PASS AGAINST THE UNFIXED TREE TOO, and that is correct rather
+    than a gap — say it in the docstring, per CLAUDE.md, or a reader cannot tell
+    these from broken tests. They pin behaviour this change deliberately
+    PRESERVES: before the fix `_open` had no `except` at all, so of course these
+    errors propagated. There is no state in which they discriminate, because the
+    defect being fixed is about which failures get CONVERTED, and these are the
+    ones that must not be. What they guard is the future: a later widening of the
+    allowlist, or a `try` moved one line outwards, turns them red.
+
+    (An earlier draft of the first test also asserted `is_environmental(...) is
+    False`, which made it appear to fail against main — but on an `AttributeError`
+    for the missing helper, not on behaviour. A test that looks discriminating for
+    the wrong reason is worse than one honestly labelled, so the assertion is
+    gone.)
+    """
 
     def test_a_schema_error_inside_the_ensure_loop_still_propagates(self, tmp_path, monkeypatch):
         """The `ensure_fn` loop is the deepest of the three raise sites, so it is
@@ -155,7 +171,7 @@ class TestNonEnvironmentalFailuresKeepTheirTraceback:
         monkeypatch.setattr(db, "_resolved_order", lambda: [boom])
         with pytest.raises(sqlite3.OperationalError) as excinfo:
             db._open(str(tmp_path / "fresh.db"), create=True)
-        assert db.is_environmental(excinfo.value) is False
+        assert "no such table" in str(excinfo.value)
 
     def test_contention_inside_the_ensure_loop_still_propagates(self, tmp_path, monkeypatch):
         """Re-raised untouched so `cli.main`'s exit-5 arm still sees it. Converting
