@@ -16,11 +16,11 @@ from codebugs.types import (
     SEVERITIES,
     is_vocabulary_filter_active,
     rank_case_sql,
-    severity_rank,
     resolve_finding_status,
     resolve_requirement_status,
     resolve_priority,
     resolve_severity,
+    severity_rank,
 )
 
 

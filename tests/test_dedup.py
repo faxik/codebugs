@@ -10,8 +10,11 @@ migration through full ensure_schema, and concurrency.
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import os
+import pathlib
 import sqlite3
 import threading
 
@@ -904,6 +907,48 @@ class TestImportDoesNotEscalate:
         # fix that simply broke import dedup.
         assert row["occurrence_count"] == 2
         assert report.imported == 0
+
+
+class TestEscalateOptOutRatchet:
+    """`escalate=False` has exactly ONE call site, and that count is pinned (CB-52).
+
+    CLAUDE.md states the count, and in this repo a stated count is held by a test —
+    `_open`'s creating callers, the `BEGIN IMMEDIATE` sites, the branch-predicate
+    constructions. The document also records what happens when one is left as prose:
+    "three copies" was really four, and CB-24's four sites were really nineteen.
+    Opting out of the escalation invariant is exactly the kind of thing that spreads
+    quietly, so a second opt-out must break this test and be argued for.
+
+    Read by AST, not by grep: `tests/test_fsio.py::TestWriteCallSitesRatchet` was
+    first written as a text search and matched its own docstrings.
+    """
+
+    def test_exactly_one_call_site_opts_out_of_escalation(self):
+        source = pathlib.Path(findings.__file__).read_text()
+        opt_outs = [
+            node
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call)
+            for kw in node.keywords
+            if kw.arg == "escalate"
+            and isinstance(kw.value, ast.Constant)
+            and kw.value.value is False
+        ]
+        assert len(opt_outs) == 1, (
+            f"expected exactly one `escalate=False` call site (import_findings), "
+            f"found {len(opt_outs)} at lines {[n.lineno for n in opt_outs]}"
+        )
+
+    def test_the_public_add_surface_cannot_opt_out(self):
+        """`escalate` is deliberately absent from add_finding's signature.
+
+        `annotate` IS exposed there; `escalate` is not, so an MCP or CLI caller
+        cannot turn the invariant off by argument — only the in-package import path
+        can. The asymmetry reads as drift and is the deliberate choice, so a future
+        "harmonize the two flags" cleanup would be a regression.
+        """
+        assert "escalate" not in inspect.signature(findings.add_finding).parameters
+        assert "annotate" in inspect.signature(findings.add_finding).parameters
 
 
 class TestBumpSqlComposition:

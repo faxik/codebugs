@@ -416,7 +416,7 @@ def _bump_row(
     now: str,
     entry: dict[str, Any],
     reopen: bool = False,
-    observed_severity: str | None = None,
+    observed_severity: str,
     escalate: bool = True,
 ) -> sqlite3.Row:
     """Record an occurrence on an existing finding; optionally reopen it (regression).
@@ -433,14 +433,18 @@ def _bump_row(
     this repository (CB-51) and a peer's CSV must not re-rate a local card on
     foreign evidence.
 
-    PARAMETER ORDER IS LOAD-BEARING and the reason the severity value is appended
-    HERE rather than at the end: `meta = ?` is not part of `sets` — it is spliced
-    after `{sets}` in the statement below and its parameter is appended last. The
-    only other extension of `sets` is the literal `status = 'open'`, which consumes
-    no parameter, so this function has never before had to get the ordering right.
-    A severity parameter appended after `meta` binds the meta JSON into `severity`,
-    which the CHECK constraint rejects as an `IntegrityError` — outside this
-    module's documented `ValueError`/`KeyError` contract.
+    EVERY fragment is appended to `sets` together with its parameter, and nothing is
+    spliced outside the builder — that pairing is what keeps placeholder order and
+    parameter order the same thing rather than two things a reader must keep in
+    step. `meta = ?` used to sit in the statement template with its parameter added
+    after the builder had finished, which was harmless only while the sole extension
+    of `sets` was the literal `status = 'open'` (no parameter). CB-52 added the first
+    parameter-consuming extension, so the hazard became live: a value appended on the
+    wrong side of `meta` binds the meta JSON into `severity`, which the CHECK
+    constraint rejects as an `IntegrityError` — outside this module's documented
+    `ValueError`/`KeyError` contract. Making the pairing structural costs three lines
+    and replaces four separate prose warnings; point-of-use discipline is the wrong
+    enforcement layer (CB-41).
 
     Raises json.JSONDecodeError on malformed stored meta BEFORE any write — the add
     fails cleanly with nothing landed, which is the honest half of the CB-16 rule.
@@ -468,18 +472,18 @@ def _bump_row(
         regressed.append({"at": now, "from_status": row["status"]})
         meta["regressed"] = regressed
         sets += ", status = 'open'"
-    # Appended BEFORE the meta parameter — see the ordering note in the docstring.
     # Assigned at most once, from one computed value (CB-16).
-    if escalate and observed_severity is not None:
+    if escalate:
         escalated = _escalated_severity(row["severity"], observed_severity)
         if escalated is not None:
             sets += ", severity = ?"
             params.append(escalated)
+    sets += ", meta = ?"
     params.append(json.dumps(meta))
     params.append(row["id"])
 
     return conn.execute(
-        f"UPDATE findings SET {sets}, meta = ? WHERE id = ? RETURNING *",  # noqa: S608
+        f"UPDATE findings SET {sets} WHERE id = ? RETURNING *",  # noqa: S608
         params,
     ).fetchone()
 
