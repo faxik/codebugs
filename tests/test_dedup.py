@@ -11,6 +11,7 @@ migration through full ensure_schema, and concurrency.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 
@@ -18,6 +19,24 @@ import pytest
 
 from codebugs import db, findings
 from codebugs.types import FINDING_STATUSES
+
+
+class RecordingConnection(sqlite3.Connection):
+    """Records SQL *templates*, as issued, before parameters are bound.
+
+    Defined here rather than imported from `tests/test_findings.py` — this project
+    keeps fixtures per test file. `set_trace_callback` is not a substitute: it
+    reports statements with parameters already expanded, so it cannot tell a real
+    `severity = ?` assignment from that text sitting inside a description value.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.recorded_sql: list[str] = []
+
+    def execute(self, sql, *args, **kwargs):
+        self.recorded_sql.append(sql)
+        return super().execute(sql, *args, **kwargs)
 
 
 @pytest.fixture
@@ -33,9 +52,9 @@ def conn(tmp_project):
     c.close()
 
 
-def _add(conn, *, desc="the failure text", cat="bug", file="a.py", **kw):
+def _add(conn, *, desc="the failure text", cat="bug", file="a.py", severity="high", **kw):
     return findings.add_finding(
-        conn, severity="high", category=cat, file=file, description=desc, **kw
+        conn, severity=severity, category=cat, file=file, description=desc, **kw
     )
 
 
@@ -745,3 +764,179 @@ class TestCsvIdentityRoundTrip:
         count = ca.execute("SELECT COUNT(*) c FROM findings").fetchone()["c"]
         ca.close()
         assert count == 1, "same-tracker re-import must not duplicate or resurrect"
+
+
+class TestBumpEscalatesSeverity:
+    """Severity is monotonic under observation (CB-52).
+
+    Before this, `_bump_row` wrote only occurrence_count/last_seen_at/updated_at/meta,
+    so a card filed `low` and re-observed `critical` stayed `low` and was invisible to
+    `query(severity="critical")` — the tracker's primary read path. The newest
+    assessment existed only inside the meta.occurrences ring.
+
+    Ratified contract (the CB-63 field-freshness decision, option (a) for this
+    column): a bump writes the MORE SEVERE of (stored, observed). Escalation only.
+    """
+
+    def test_a_more_severe_observation_escalates_the_stored_row(self, conn):
+        first = _add(conn, severity="low", desc="admin route skips the token check")
+        second = _add(conn, severity="critical", desc="admin route skips the token check")
+
+        assert second["id"] == first["id"], "precondition: this must be a dedup bump"
+        assert second["was_new"] is False
+        assert second["severity"] == "critical"
+        assert findings.get_finding(conn, first["id"])["severity"] == "critical"
+
+    def test_the_escalated_row_is_reachable_by_the_primary_read_path(self, conn):
+        """The user-visible half: query(severity=) must find what was just observed."""
+        f = _add(conn, severity="low", desc="admin route skips the token check")
+        _add(conn, severity="critical", desc="admin route skips the token check")
+
+        hits = findings.query_findings(conn, severity="critical")["findings"]
+        assert [h["id"] for h in hits] == [f["id"]]
+
+    def test_the_ring_still_records_every_observation(self, conn):
+        """Escalating the column must not stop the ring recording what was seen."""
+        f = _add(conn, severity="low", desc="admin route skips the token check")
+        _add(conn, severity="critical", desc="admin route skips the token check")
+        _add(conn, severity="medium", desc="admin route skips the token check")
+
+        row = findings.get_finding(conn, f["id"])
+        assert row["occurrence_count"] == 3
+        assert [e["severity"] for e in row["meta"]["occurrences"]] == ["critical", "medium"]
+
+    def test_NEGATIVE_CONTROL_a_less_severe_observation_does_not_downgrade(self, conn):
+        """PASSES ON BOTH SIDES BY CONSTRUCTION — and that is the point.
+
+        Unfixed code writes no severity at all, so "a critical row stays critical"
+        cannot fail against it. This pins behaviour the change deliberately
+        PRESERVES (escalation is one-way), so it is labelled rather than counted as
+        evidence the fix works. See CLAUDE.md's corollary on tests that pass on both
+        sides.
+        """
+        f = _add(conn, severity="critical", desc="admin route skips the token check")
+        bumped = _add(conn, severity="low", desc="admin route skips the token check")
+
+        assert bumped["id"] == f["id"]
+        assert bumped["severity"] == "critical"
+        assert findings.get_finding(conn, f["id"])["severity"] == "critical"
+
+    def test_an_equal_observation_leaves_the_row_alone(self, conn):
+        f = _add(conn, severity="medium", desc="admin route skips the token check")
+        bumped = _add(conn, severity="medium", desc="admin route skips the token check")
+        assert bumped["severity"] == "medium"
+        assert findings.get_finding(conn, f["id"])["occurrence_count"] == 2
+
+    def test_a_regression_reopen_escalates_too(self, conn):
+        """A fixed card re-observed as worse: it reopens AND takes the new severity."""
+        f = _add(conn, severity="low", desc="admin route skips the token check")
+        findings.update_finding(conn, finding_id=f["id"], status="fixed")
+
+        reopened = _add(conn, severity="critical", desc="admin route skips the token check")
+
+        assert reopened["id"] == f["id"]
+        row = findings.get_finding(conn, f["id"])
+        assert row["status"] == "open"
+        assert row["severity"] == "critical"
+
+    def test_batch_add_escalates_the_same_way(self, conn):
+        f = _add(conn, severity="low", desc="admin route skips the token check")
+        findings.batch_add_findings(
+            conn,
+            [
+                {
+                    "severity": "critical",
+                    "category": "bug",
+                    "file": "a.py",
+                    "description": "admin route skips the token check",
+                }
+            ],
+        )
+        assert findings.get_finding(conn, f["id"])["severity"] == "critical"
+
+    def test_premise_the_check_constraint_forecloses_an_unknown_stored_severity(self, conn):
+        """PREMISE PIN, not coverage: no row can hold a severity outside the vocabulary.
+
+        `_escalated_severity` ranks an unrecognised value LAST so it can never
+        outrank a real observation. Measured here rather than asserted in prose:
+        that branch is UNREACHABLE from this table, because the CHECK constraint
+        refuses the write even through raw SQL. So the unknown-last behaviour is
+        defence-in-depth, covered as a unit in
+        `tests/test_types.py::TestSeverityRank`, and NOT a live path — said plainly
+        instead of claiming a coverage this test cannot provide.
+
+        If this test ever fails, the CHECK constraint has been weakened and the
+        escalation comparison genuinely can meet an unknown stored value.
+        """
+        f = _add(conn, severity="low", desc="admin route skips the token check")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("UPDATE findings SET severity = 'sev1' WHERE id = ?", (f["id"],))
+
+
+class TestImportDoesNotEscalate:
+    """An import is not an observation, so it does not re-rate a local card (CB-51).
+
+    `import_findings` reaches `_bump_row` through `_add_one`, so without an explicit
+    carve-out a peer's CSV rating THEIR card `critical` would silently re-rate the
+    local card on foreign evidence — reversing a decision ratified two cards earlier.
+    """
+
+    def test_a_foreign_row_bumps_but_does_not_re_rate(self, conn):
+        local = _add(conn, severity="low", desc="admin route skips the token check")
+
+        report = findings.import_findings(
+            conn,
+            [
+                {
+                    "id": "CB-9001",
+                    "severity": "critical",
+                    "category": "bug",
+                    "file": "a.py",
+                    "description": "admin route skips the token check",
+                }
+            ],
+        )
+
+        row = findings.get_finding(conn, local["id"])
+        assert row["severity"] == "low", "an import must not re-rate a local card"
+        # The carve-out is scoped to escalation: dedup itself still works, so the
+        # observation is still counted. Without this half the test would pass for a
+        # fix that simply broke import dedup.
+        assert row["occurrence_count"] == 2
+        assert report.imported == 0
+
+
+class TestBumpSqlComposition:
+    """`_bump_row` assigns each column exactly once, asserted on the TEMPLATE (CB-16).
+
+    SQLite silently accepts `SET severity = ?, severity = ?` and applies only the
+    last, and `meta = ?` is spliced AFTER the built `sets` clause with its parameter
+    appended last — so a severity parameter in the wrong position binds the meta JSON
+    into `severity`. Asserting on the template (not on `set_trace_callback`, which
+    expands parameters) is what makes the count exact.
+    """
+
+    def test_one_assignment_per_column_and_correct_parameter_binding(self, tmp_project):
+        db.connect(tmp_project).close()  # apply every module's schema to the file
+        path = os.path.join(tmp_project, ".codebugs", "findings.db")
+        c = sqlite3.connect(path, factory=RecordingConnection)
+        c.row_factory = sqlite3.Row
+        try:
+            f = _add(c, severity="low", desc="admin route skips the token check")
+            c.recorded_sql.clear()
+            _add(c, severity="critical", desc="admin route skips the token check")
+
+            updates = [s for s in c.recorded_sql if "UPDATE findings SET" in s]
+            assert len(updates) == 1, updates
+            sql = updates[0]
+            assert sql.count("severity = ?") == 1, sql
+            assert sql.count("meta = ?") == 1, sql
+
+            # Binding proof, not just shape: a misplaced parameter would put the
+            # meta JSON into severity (IntegrityError) or the severity string into
+            # meta (a JSON decode failure on the next read).
+            row = findings.get_finding(c, f["id"])
+            assert row["severity"] == "critical"
+            assert isinstance(row["meta"], dict)
+        finally:
+            c.close()

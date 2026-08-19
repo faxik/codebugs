@@ -16,6 +16,7 @@ from codebugs.types import (
     SEVERITIES,
     is_vocabulary_filter_active,
     rank_case_sql,
+    severity_rank,
     resolve_finding_status,
     resolve_requirement_status,
     resolve_priority,
@@ -278,3 +279,43 @@ class TestIsVocabularyFilterActive:
                 return 0
 
         assert is_vocabulary_filter_active(Liar("open")) is True
+
+
+class TestSeverityRank:
+    """`severity_rank` is the Python-side twin of `rank_case_sql` (CB-52).
+
+    It exists so the escalation in `findings._bump_row` can compare two severities
+    without a second, hand-written precedence table — the duplicated-rather-than-
+    shared hazard CB-22 records. Reorder SEVERITIES and both sides follow.
+    """
+
+    def test_rank_follows_the_declared_vocabulary_order(self):
+        assert [severity_rank(s) for s in SEVERITIES] == list(range(len(SEVERITIES)))
+
+    def test_lower_rank_means_more_severe(self):
+        # The direction that matters: index 0 is MOST severe, so escalation takes
+        # the MINIMUM rank. A `max()` over ranks would select `low`.
+        assert severity_rank("critical") < severity_rank("high")
+        assert severity_rank("high") < severity_rank("medium")
+        assert severity_rank("medium") < severity_rank("low")
+
+    def test_unknown_value_sorts_last_and_can_never_outrank_a_real_one(self):
+        # Same convention as rank_case_sql's `ELSE len(vocabulary)`: a legacy or
+        # corrupt stored value must never win an escalation comparison.
+        assert severity_rank("sev1") == len(SEVERITIES)
+        assert severity_rank("") == len(SEVERITIES)
+        for real in SEVERITIES:
+            assert severity_rank(real) < severity_rank("not-a-severity")
+
+    def test_it_does_not_resolve_spelling(self):
+        # Deliberately NOT a resolver: callers pass canonical values that
+        # `resolve_severity` has already normalized. Treating "HIGH" as known here
+        # would put a second normalization policy in a second place.
+        assert severity_rank("HIGH") == len(SEVERITIES)
+
+    @pytest.mark.parametrize("value", [None, 0, [], {}])
+    def test_non_string_input_is_unknown_rather_than_a_crash(self, value):
+        # The escalation compares a STORED value against an OBSERVED one; a row
+        # written before the CHECK constraint could hold anything. Ranking it last
+        # keeps the comparison total instead of raising inside an open transaction.
+        assert severity_rank(value) == len(SEVERITIES)

@@ -242,3 +242,31 @@ def rank_case_sql(column: str, vocabulary: tuple[str, ...]) -> tuple[str, list[s
 
     whens = " ".join(f"WHEN ? THEN {i}" for i in range(len(vocabulary)))
     return f"CASE {column} {whens} ELSE {len(vocabulary)} END", list(vocabulary)
+
+
+def severity_rank(severity: object) -> int:
+    """Position of ``severity`` in the declared precedence. LOWER is MORE severe.
+
+    The Python-side twin of ``rank_case_sql``, and derived from the same tuple for
+    the same reason: a second hand-written precedence table is one drift from
+    disagreeing with the first (CB-22). Reorder ``SEVERITIES`` and both follow.
+
+    **Direction is the trap this function exists to remove.** ``SEVERITIES`` runs
+    most-severe-first, so escalating to "the worse of two" is ``min`` over ranks,
+    never ``max`` — over either the ranks or the strings. Callers should read
+    ``SEVERITIES[min(severity_rank(a), severity_rank(b))]`` and nothing else.
+
+    Deliberately NOT a resolver: callers pass values ``resolve_severity`` has
+    already normalized, and accepting ``"HIGH"`` here would put a second
+    normalization policy in a second place.
+
+    Anything unrecognised — a legacy value, a corrupt one, a non-string from a row
+    written before the CHECK constraint — ranks LAST (``len(SEVERITIES)``), the same
+    convention as ``rank_case_sql``'s ``ELSE``. That keeps the comparison total and
+    one-directional: an unknown stored value can never outrank a real observation,
+    and ranking it cannot raise inside an open transaction.
+    """
+    try:
+        return SEVERITIES.index(severity)  # type: ignore[arg-type]
+    except ValueError:
+        return len(SEVERITIES)

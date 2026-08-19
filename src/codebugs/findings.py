@@ -21,6 +21,7 @@ from codebugs.types import (
     rank_case_sql,
     resolve_finding_status,
     resolve_severity,
+    severity_rank,
     utc_now,
 )
 
@@ -392,6 +393,22 @@ def _occurrence_entry(
     return entry
 
 
+def _escalated_severity(stored: object, observed: str) -> str | None:
+    """The new severity when ``observed`` is MORE severe than ``stored``, else None.
+
+    Severity is monotonic under observation (CB-52): a re-observation may raise a
+    finding's severity, never lower it. `SEVERITIES` runs most-severe-first, so the
+    worse of two is the one with the SMALLER rank — `max()`, over either the ranks
+    or the strings, is the backwards implementation this helper exists to foreclose.
+
+    Returns None when nothing should be written, which is what keeps the assignment
+    off the SET clause entirely on the common no-change path.
+    """
+    if severity_rank(observed) < severity_rank(stored):
+        return observed
+    return None
+
+
 def _bump_row(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
@@ -399,6 +416,8 @@ def _bump_row(
     now: str,
     entry: dict[str, Any],
     reopen: bool = False,
+    observed_severity: str | None = None,
+    escalate: bool = True,
 ) -> sqlite3.Row:
     """Record an occurrence on an existing finding; optionally reopen it (regression).
 
@@ -407,6 +426,21 @@ def _bump_row(
     — never rowcount (the RETURNING rule). Runs inside the caller's open transaction;
     the meta read-modify-write is safe only because add's whole body sits in db.txn
     (CB-24). The raw row is returned for conversion AFTER the transaction closes.
+
+    SEVERITY IS MONOTONIC UNDER OBSERVATION (CB-52): a bump writes the more severe
+    of (stored, observed) and never lowers it. `escalate=False` opts a caller out —
+    exactly one does, `import_findings`, because an import is not an observation of
+    this repository (CB-51) and a peer's CSV must not re-rate a local card on
+    foreign evidence.
+
+    PARAMETER ORDER IS LOAD-BEARING and the reason the severity value is appended
+    HERE rather than at the end: `meta = ?` is not part of `sets` — it is spliced
+    after `{sets}` in the statement below and its parameter is appended last. The
+    only other extension of `sets` is the literal `status = 'open'`, which consumes
+    no parameter, so this function has never before had to get the ordering right.
+    A severity parameter appended after `meta` binds the meta JSON into `severity`,
+    which the CHECK constraint rejects as an `IntegrityError` — outside this
+    module's documented `ValueError`/`KeyError` contract.
 
     Raises json.JSONDecodeError on malformed stored meta BEFORE any write — the add
     fails cleanly with nothing landed, which is the honest half of the CB-16 rule.
@@ -434,6 +468,13 @@ def _bump_row(
         regressed.append({"at": now, "from_status": row["status"]})
         meta["regressed"] = regressed
         sets += ", status = 'open'"
+    # Appended BEFORE the meta parameter — see the ordering note in the docstring.
+    # Assigned at most once, from one computed value (CB-16).
+    if escalate and observed_severity is not None:
+        escalated = _escalated_severity(row["severity"], observed_severity)
+        if escalated is not None:
+            sets += ", severity = ?"
+            params.append(escalated)
     params.append(json.dumps(meta))
     params.append(row["id"])
 
@@ -499,6 +540,7 @@ def _add_one(
     reported_at_ref: str | None,
     fingerprint: str | None,
     annotate: bool = True,
+    escalate: bool = True,
 ) -> tuple[dict[str, Any] | None, sqlite3.Row | None, bool, str]:
     """One observation through the identity function, inside an OPEN transaction.
 
@@ -532,9 +574,25 @@ def _add_one(
             reported_at_ref=reported_at_ref,
         )
         if live is not None:
-            return None, _bump_row(conn, live, now=now, entry=entry), False, "bumped"
+            raw = _bump_row(
+                conn,
+                live,
+                now=now,
+                entry=entry,
+                observed_severity=severity,
+                escalate=escalate,
+            )
+            return None, raw, False, "bumped"
         if closed is not None and closed["status"] in _REOPEN_STATUSES:
-            raw = _bump_row(conn, closed, now=now, entry=entry, reopen=True)
+            raw = _bump_row(
+                conn,
+                closed,
+                now=now,
+                entry=entry,
+                reopen=True,
+                observed_severity=severity,
+                escalate=escalate,
+            )
             # Fire like update_finding does: the write changed the row, inside this
             # transaction, so claims/milestone reconciliation land atomically with it.
             db.run_status_change_hooks(conn, closed["id"], closed["status"], "open")
@@ -937,6 +995,12 @@ def import_findings(
                     reported_at_ref=None,
                     fingerprint=fingerprint,
                     annotate=False,
+                    # An import is not an observation (CB-51), so it records the
+                    # occurrence but does not RE-RATE the local card: a peer's
+                    # tracker calling their copy `critical` is their assessment of
+                    # their repository, not evidence about this one. Same reason
+                    # `annotate=False` sits one line above.
+                    escalate=False,
                 )
             except ValueError as e:
                 errors.append(ImportRowError(label, str(e)))
