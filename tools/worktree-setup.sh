@@ -106,8 +106,6 @@ for cb in ${CB_IDS}; do
     :
 done
 
-mkdir -p "${WORKTREE_DIR}"
-
 # ---------------------------------------------------------------------------
 # [1/5] Claim the cards — BEFORE anything is created (CB-58).
 #
@@ -243,11 +241,15 @@ else
     done
 fi
 
+# The container directory is created HERE, not before the claim: a refused
+# setup must leave nothing at all behind, and that includes .worktrees/.
+mkdir -p "${WORKTREE_DIR}"
+
 echo "[2/5] Creating worktree..."
 git -C "${REPO_ROOT}" worktree add -b "${BRANCH_NAME}" "${WORKTREE_PATH}" "${BASE_BRANCH}"
 
 # ---------------------------------------------------------------------------
-# [2/4] DIVERGENCE FROM AUTOSORTER, and the reason is in CLAUDE.md.
+# [3/5] DIVERGENCE FROM AUTOSORTER, and the reason is in CLAUDE.md.
 #
 # autosorter symlinks the root .venv into each worktree, because its dependency
 # tree is heavy and its editable install is not what tests resolve through.

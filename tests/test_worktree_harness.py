@@ -2276,3 +2276,18 @@ class TestClaimsWiringBehaviour:
         assert result.returncode == 0, result.stderr
         assert self._log(harness) == []
         assert (harness["repo"] / ".worktrees" / "refactor-no-card-here").exists()
+
+    def test_a_refused_setup_creates_literally_nothing(self, harness: dict) -> None:
+        """Even `.worktrees/` itself.
+
+        Found by reading the finished script end to end rather than section by
+        section: `mkdir -p "${WORKTREE_DIR}"` still sat ABOVE the claim, so the
+        gate that exists to make a refusal free left a directory behind. The
+        cost is trivial and the principle is not — "claim before anything is
+        created" is either true or it is a slogan.
+        """
+        result = self._run(harness, "fix/cb-9-thing", STUB_CLAIM_RC="3")
+        assert result.returncode == 3
+        assert not (harness["repo"] / ".worktrees").exists(), (
+            "a refused setup created the .worktrees/ container"
+        )
