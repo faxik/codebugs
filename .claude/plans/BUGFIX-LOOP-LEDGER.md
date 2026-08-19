@@ -1369,7 +1369,7 @@ CB-55, which now carries its three-transformation breakdown and a `cliio.py` hos
 
 ## Iteration 8 — 2026-08-19 · focus `codebugs` · **CB-86, merge `c05250a`**
 
-**Disposition: CB-86 fixed, FULL, with three limits named on the card. CB-100 filed. Open 37 → 37.**
+**Disposition: CB-86 fixed, FULL, with three limits named on the card. CB-100 filed. Open 37 → 38.**
 
 **The design had already been ratified in iteration 7's review, so this iteration opened with a
 reproducer instead of a design round** — the same payoff iteration 6 recorded. All four shapes were
@@ -1413,7 +1413,11 @@ preserved behaviour. And the efficiency review lane was skipped deliberately, wi
 than a shrug: the new code runs only inside an `except`, and the suite went 70.40s → 71.66s for 19
 new tests, measured before skipping.
 
-**Net: 1 closed (CB-86), 1 filed (CB-100). Open 37 → 37.** CB-100 is `describe_root` reporting a
+**Net: 1 closed (CB-86), 1 filed (CB-100). Open 37 → 38** — and the arithmetic is worth stating
+because I got it wrong in the first draft of this row: closing CB-86 did NOT decrease the open
+count, since the card was already `in_progress` and therefore not counted as open. Only the new
+filing moved the number. Across iterations 7 and 8 together the queue is flat at 38: two closed,
+two filed, one (CB-55) returned to `open` with better evidence than it had.** CB-100 is `describe_root` reporting a
 `chmod 000` tracker as healthy while every verb now refuses it — **pre-existing**, made louder by
 this change, and deferred out of this tree on the reviewer's explicit recommendation rather than
 folded in.
