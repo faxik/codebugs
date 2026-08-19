@@ -786,3 +786,343 @@ class TestResolveBlockerIsOneTransaction:
             "SELECT cancelled_at FROM blockers WHERE id = ?", (b["id"],)
         ).fetchone()
         assert row["cancelled_at"] is None, "the nested call must roll back with its caller"
+
+
+# ---------------------------------------------------------------------------
+# CB-69 — the deferred path evaluated the blocker set twice.
+# ---------------------------------------------------------------------------
+
+
+class _CountingConnection(sqlite3.Connection):
+    """Counts executed statements.
+
+    A LOCAL copy: `conftest.py` is reserved for the one tracker-root guard, so
+    each test file owns its fixtures (CLAUDE.md, Testing).
+    """
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.n = 0
+
+    def execute(self, sql, *a, **kw):
+        self.n += 1
+        return super().execute(sql, *a, **kw)
+
+
+def _counting_project(tmp_path, *, n_blockers, trigger):
+    """`n_blockers` blockers of one trigger type, each on its own finding."""
+    db.init_project(str(tmp_path))
+    c = sqlite3.connect(
+        os.path.join(str(tmp_path), ".codebugs", "findings.db"),
+        factory=_CountingConnection,
+    )
+    c.row_factory = sqlite3.Row
+    for i in range(n_blockers * 2):
+        findings.add_finding(
+            c, finding_id=f"CB-{i + 1}", description=f"d{i}",
+            severity="low", category="bug", file="a.py",
+        )
+    for i in range(n_blockers):
+        if trigger == "entity_resolved":
+            blockers.add_blocker(
+                c, item_id=f"CB-{i + 1}", blocked_by=f"CB-{n_blockers + i + 1}", reason="r"
+            )
+        elif trigger == "manual":
+            blockers.add_blocker(c, item_id=f"CB-{i + 1}", trigger_type="manual", reason="r")
+        else:
+            blockers.add_blocker(
+                c, item_id=f"CB-{i + 1}", trigger_type="date",
+                trigger_at="2099-01-01", reason="r",
+            )
+    c.n = 0
+    return c
+
+
+class TestDeferredSinglePass:
+    """CB-69: `deferred_id_restriction` + `blocker_counts_for` each scanned the
+    blocker table and re-resolved every `entity_resolved` dependency."""
+
+    @pytest.mark.parametrize("n", [2, 10])
+    def test_one_pass_instead_of_two(self, tmp_path, n):
+        """Measured at TWO sizes, because one cannot distinguish a halved constant
+        from a halved linear term: the old cost is `2*(1+B)`, the new is `1+B`."""
+        c = _counting_project(tmp_path, n_blockers=n, trigger="entity_resolved")
+        ids, counts = blockers.deferred_ids_and_counts(c, "finding")
+        assert c.n == 1 + n, c.n
+        assert len(ids) == n and len(counts) == n
+        c.close()
+
+    @pytest.mark.parametrize("n", [2, 10])
+    def test_the_old_pairing_still_costs_double(self, tmp_path, n):
+        """Pins the baseline the fix is measured against, so the improvement cannot
+        silently evaporate. Both helpers are KEPT for existing callers."""
+        c = _counting_project(tmp_path, n_blockers=n, trigger="entity_resolved")
+        blockers.deferred_id_restriction(c, "finding")
+        first = c.n
+        c.n = 0
+        blockers.blocker_counts_for(c, "finding", [f"CB-{i + 1}" for i in range(n)])
+        second = c.n
+        assert first == 1 + n and second == 1 + n
+        c.close()
+
+    def test_date_and_manual_triggers_cost_no_entity_reads(self, tmp_path):
+        """The card says 'every entity-type blocker resolution goes through EntityRef
+        status reads'. True only for `entity_resolved`: `is_blocker_satisfied` reads
+        no entity for a date compare or a manual null-check, so the per-blocker term
+        vanishes and only the single scan remains."""
+        for trigger in ("manual", "date"):
+            sub = tmp_path / trigger
+            sub.mkdir()
+            c = _counting_project(sub, n_blockers=10, trigger=trigger)
+            blockers.deferred_ids_and_counts(c, "finding")
+            assert c.n == 1, (trigger, c.n)
+            c.close()
+
+
+class TestDeferredIdsAndCountsDifferential:
+    """The combined accessor must agree with the two helpers it replaces."""
+
+    def _fixture(self, conn):
+        for i in range(6):
+            _add_finding(conn, f"CB-{i + 1}")
+        _add_finding(conn, "CB-90")
+        blockers.add_blocker(conn, item_id="CB-1", blocked_by="CB-90", reason="entity")
+        blockers.add_blocker(conn, item_id="CB-2", trigger_type="manual", reason="manual")
+        blockers.add_blocker(
+            conn, item_id="CB-3", trigger_type="date", trigger_at="2099-01-01", reason="date"
+        )
+        # A second blocker on CB-1 so at least one count is > 1.
+        blockers.add_blocker(conn, item_id="CB-1", trigger_type="manual", reason="second")
+        # INACTIVE rows, and they are what make `is_active` load-bearing. Without
+        # them every fixture blocker is active, so dropping the `is_active` test in
+        # `_active_counts` changes nothing and the differential passes against a
+        # broken aggregation (mutation M4 survived until these were added).
+        _add_finding(conn, "CB-95")
+        findings.update_finding(conn, "CB-95", status="fixed")
+        blockers.add_blocker(conn, item_id="CB-4", blocked_by="CB-95", reason="satisfied")
+        cancelled = blockers.add_blocker(
+            conn, item_id="CB-5", trigger_type="manual", reason="cancelled"
+        )
+        conn.execute(
+            "UPDATE blockers SET cancelled_at = '2026-01-01T00:00:00Z' WHERE id = ?",
+            (cancelled["id"],),
+        )
+        conn.commit()
+
+    @pytest.mark.parametrize(
+        "kw", [{}, {"id": "CB-1"}, {"ids": ["CB-1", "CB-3"]}, {"ids": ["CB-6"]}]
+    )
+    def test_agrees_with_the_two_helpers(self, conn, kw):
+        self._fixture(conn)
+        want_ids = blockers.deferred_id_restriction(conn, "finding", **kw)
+        want_counts = blockers.blocker_counts_for(conn, "finding", want_ids)
+        got_ids, got_counts = blockers.deferred_ids_and_counts(conn, "finding", **kw)
+        assert got_ids == want_ids
+        assert got_counts == want_counts
+
+    def test_the_fixture_is_not_vacuous(self, conn):
+        """All three trigger types, a multi-blocker id, a non-empty result — AND an
+        inactive row of each kind (satisfied, cancelled) that must be EXCLUDED.
+
+        The exclusions are the discriminating half: without them nothing
+        distinguishes a correct aggregation from one that ignores `is_active`.
+        """
+        self._fixture(conn)
+        ids, counts = blockers.deferred_ids_and_counts(conn, "finding")
+        assert set(ids) == {"CB-1", "CB-2", "CB-3"}
+        assert counts["CB-1"] == 2
+        assert "CB-4" not in counts, "a SATISFIED blocker must not count as active"
+        assert "CB-5" not in counts, "a CANCELLED blocker must not count as active"
+
+    def test_counts_are_restricted_to_the_returned_ids(self, conn):
+        """The counts half must never carry an id the ids half filtered out —
+        a caller zipping them would otherwise annotate a row it never selected."""
+        self._fixture(conn)
+        ids, counts = blockers.deferred_ids_and_counts(conn, "finding", ids=["CB-1"])
+        assert ids == ["CB-1"]
+        assert set(counts) == {"CB-1"}
+
+    def test_empty_intersection_returns_empty_not_everything(self, conn):
+        """CB-28's standing trap: an empty deferred set must stay empty. The
+        wrappers short-circuit on it; returning "no filter" would show the whole
+        table."""
+        self._fixture(conn)
+        ids, counts = blockers.deferred_ids_and_counts(conn, "finding", ids=["CB-6"])
+        assert ids == [] and counts == {}
+
+
+class TestActiveCountsIsTheSingleDefinition:
+    """EVERY function that evaluates the blocker set must derive its per-item
+    aggregation from `_active_counts`, or be named in ``EXEMPT`` with a reason.
+
+    The first version of this test asserted ONE call site while `_active_counts`'
+    own docstring claimed "every consumer" — and the counter-example
+    (`get_deferred_counts`, re-deriving "has an active blocker" by hand) sat 170
+    lines below in the same file. That is this repo's enumeration failure in
+    miniature: a check that validates one element cannot validate the composition.
+    So the ratchet asserts the COMPLEMENT — every evaluator, minus a named
+    exemption list — in the shape of TestOpenCallSitesRatchet.
+
+    **Residual, measured rather than assumed.** This keys on the CALL, not on the
+    result being used. A function that still calls `_active_counts` while
+    hand-deriving one of its projections passes here — and ruff does not catch it
+    either when the result is used for something else (verified: the variant that
+    hand-derives `deferred_count` while `active_counts` still feeds
+    `currently_unblocked_count` is clean under `ruff check`). The realistic
+    regression — dropping the call — IS caught, and mutation M8 pins that. Stating
+    the gap because a ratchet described better than it behaves is worse than none.
+    """
+
+    # name -> why it may re-derive. Empty today, deliberately: `get_deferred_counts`
+    # was the one candidate and it turned out only `overdue_count` needs the
+    # trigger fields, so its `deferred_count` now derives from the shared map.
+    EXEMPT: dict[str, str] = {}
+
+    def test_every_evaluator_derives_from_the_shared_aggregation(self):
+        import ast
+        import pathlib
+        tree = ast.parse(pathlib.Path(blockers.__file__).read_text())
+
+        def called_names(node):
+            return {
+                c.func.id for c in ast.walk(node)
+                if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+            }
+
+        offenders = []
+        evaluators = []
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.FunctionDef):
+                continue
+            names = called_names(fn)
+            if "_get_active_blockers_by_type" not in names:
+                continue
+            evaluators.append(fn.name)
+            if fn.name in self.EXEMPT or "_active_counts" in names:
+                continue
+            offenders.append(fn.name)
+
+        # Non-vacuity: if the evaluator set is ever empty the assertion below is
+        # free, which is exactly how a ratchet stops ratcheting.
+        assert len(evaluators) >= 4, evaluators
+        assert offenders == [], (
+            f"{offenders} evaluate the blocker set without deriving from "
+            "_active_counts; add to EXEMPT with a reason, or derive from it"
+        )
+
+
+class TestDeferredWrappersUseTheSinglePass:
+    """The wrappers are where CB-69's cost actually lands, so the wrappers are
+    where it must be pinned.
+
+    Mutation testing found this gap: reverting either wrapper to the old
+    `deferred_id_restriction` + `blocker_counts_for` pairing left every other test
+    green, because the ANSWERS are identical — only the statement count differs.
+    A test over `blockers.py` alone structurally cannot see a wrapper regression.
+    """
+
+    def _tools(self, conn, module):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def factory():
+            yield conn
+
+        class FakeMCP:
+            def __init__(self):
+                self.tools = {}
+
+            def tool(self, *a, **k):
+                def deco(fn):
+                    self.tools[fn.__name__] = fn
+                    return fn
+
+                return deco
+
+        m = FakeMCP()
+        module.register_tools(m, factory)
+        return m.tools
+
+    def _counting_conn(self, tmp_path):
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        db.init_project(str(tmp_path))
+        c = sqlite3.connect(
+            os.path.join(str(tmp_path), ".codebugs", "findings.db"),
+            factory=_CountingConnection,
+        )
+        c.row_factory = sqlite3.Row
+        return c
+
+    # Both helpers put ALL `n` blockers on ONE item, so the number of rows the
+    # domain query returns is 1 at every size and only the blocker count varies.
+    # An earlier draft scaled the row count with `n` too, which would let a future
+    # per-returned-row cost in `query_findings` move the delta for a reason that
+    # has nothing to do with CB-69 — while the failure message blamed a double
+    # evaluation.
+
+    def _findings_cost(self, tmp_path, n):
+        c = self._counting_conn(tmp_path / f"f{n}")
+        for i in range(n + 1):
+            findings.add_finding(
+                c, finding_id=f"CB-{i + 1}", description=f"d{i}",
+                severity="low", category="bug", file="a.py",
+            )
+        for i in range(n):
+            blockers.add_blocker(
+                c, item_id="CB-1", blocked_by=f"CB-{i + 2}", reason=f"r{i}"
+            )
+        tools = self._tools(c, findings)
+        c.n = 0
+        result = tools["query"](status="deferred")
+        assert result["total"] == 1
+        assert result["findings"][0]["blocker_count"] == n
+        cost = c.n
+        c.close()
+        return cost
+
+    def _reqs_cost(self, tmp_path, n):
+        c = self._counting_conn(tmp_path / f"r{n}")
+        reqs.add_requirement(
+            c, req_id="FR-1", description="r", section="core", priority="should",
+        )
+        for i in range(n):
+            findings.add_finding(
+                c, finding_id=f"CB-{i + 1}", description=f"d{i}",
+                severity="low", category="bug", file="a.py",
+            )
+            blockers.add_blocker(
+                c, item_id="FR-1", blocked_by=f"CB-{i + 1}", reason=f"r{i}"
+            )
+        tools = self._tools(c, reqs)
+        c.n = 0
+        result = tools["reqs_query"](status="deferred")
+        assert result["total"] == 1
+        # The findings twin asserts this and the reqs one did not, so DELETING the
+        # whole annotation block in reqs.py left the entire suite green — verified
+        # by mutation. That hole predates CB-69; this branch rewrote the line, so
+        # it closes it.
+        assert result["requirements"][0]["blocker_count"] == n
+        cost = c.n
+        c.close()
+        return cost
+
+    @pytest.mark.parametrize(
+        "cost_fn", ["_findings_cost", "_reqs_cost"], ids=["findings", "reqs"]
+    )
+    def test_the_blocker_set_is_evaluated_once_per_wrapper_call(self, tmp_path, cost_fn):
+        """Asserts the LINEAR TERM, not a total.
+
+        An exact statement total is fixture-specific — it folds in whatever the
+        domain query itself costs — and pinning one is how a measurement becomes
+        anecdote (the mistake this iteration caught on a sibling card). What the
+        fix changes is the COEFFICIENT on the per-blocker term: one evaluation
+        costs `1 + B` reads, the old pairing cost `2 * (1 + B)`. So measure at two
+        sizes and assert the delta equals the size difference exactly.
+        """
+        cost = getattr(self, cost_fn)
+        small, large = 2, 6
+        delta = cost(tmp_path, large) - cost(tmp_path, small)
+        assert delta == large - small, (
+            f"expected one evaluation (delta {large - small}), got {delta} — "
+            "a delta of twice that means the blocker set is evaluated twice"
+        )

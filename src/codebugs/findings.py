@@ -2078,7 +2078,10 @@ def register_tools(mcp, conn_factory) -> None:
                 # returned every deferred finding and the caller read that as the
                 # critical ones — a success payload with the arguments discarded,
                 # which is CB-15's failure mode reached through routing (CB-28).
-                deferred_ids = blockers.deferred_id_restriction(
+                # ONE evaluation for both halves (CB-69): pairing
+                # `deferred_id_restriction` with `blocker_counts_for` scanned the
+                # blocker table twice and re-resolved every entity dependency.
+                deferred_ids, deferred_counts = blockers.deferred_ids_and_counts(
                     conn, ENTITY_FINDING, id=id, ids=ids
                 )
                 if not deferred_ids:
@@ -2111,9 +2114,8 @@ def register_tools(mcp, conn_factory) -> None:
                 offset=offset,
             )
             if deferred_ids is not None and not result.get("grouped"):
-                counts = blockers.blocker_counts_for(conn, ENTITY_FINDING, deferred_ids)
                 for row in result["findings"]:
-                    row["blocker_count"] = counts.get(row["id"], 0)
+                    row["blocker_count"] = deferred_counts.get(row["id"], 0)
             return result
 
     @mcp.tool()
