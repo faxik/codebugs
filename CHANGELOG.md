@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **A tracker you cannot write to now says so, instead of crashing or telling you to
+  run `init` (CB-86).** On a read-only mount, a tracker owned by another user, a
+  directory the process cannot write, or a full disk, `codebugs` behaved in one of two
+  wrong ways depending on how you had pointed it at the tracker:
+
+  - discovered by walking up from the current directory → a raw Python traceback;
+  - named with `--tracker-root` or `$CODEBUGS_ROOT` → the clean but **wrong** message
+    `no readable findings.db at … ; run codebugs init for that project`, which advises
+    you to create a tracker that already exists and which `init` would refuse anyway.
+
+  Both now print one line naming the real problem — `cannot open findings.db at … for
+  writing (…); check permissions on the file and its directory, and free disk space` —
+  and exit 1.
+
+  **A genuinely missing tracker still says `run codebugs init`.** SQLite reports the
+  same error code for "the file is not there" and "the file is there and you may not
+  open it", so the two are told apart by whether the file exists. One known gap: if the
+  *parent directory* is unreadable, the file cannot be seen either, and the message
+  falls back to "not found" — which is what it said before too.
+
+  Unaffected on purpose: a failure that happens *after* the tracker opened
+  successfully — a disk that fills mid-command — still ends in a traceback. That is
+  deliberate; the traceback is what tells you the failure came after work had begun.
+
 ### Changed
 - **A closed pipe now ends a `codebugs` command at exit 141, silently, instead of
   reporting a committed write as a failure (CB-78).** Piping any verb into a reader

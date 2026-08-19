@@ -141,7 +141,14 @@ def main() -> None:
         sys.exit(1)
     try:
         commands[args.command](args)
-    except (db.DatabaseNotFoundError, db.TrackerExistsError) as e:
+    except (db.DatabaseNotFoundError, db.TrackerExistsError, db.TrackerUnwritableError) as e:
+        # `TrackerUnwritableError` (CB-86) is a TYPE here rather than a
+        # classification made at this boundary, and the difference is the whole
+        # design. A `sqlite3.OperationalError` arm added here could not tell a
+        # pre-write failure from a post-commit one — the constraint CB-55 states
+        # and `tests/test_bench.py:789` enforces by requiring a post-commit
+        # failure to keep its traceback. `db._open` raises this before it returns
+        # a connection, so the type carries that provenance with it.
         print(f"codebugs: {e}", file=sys.stderr)
         sys.exit(1)
     except sqlite3.OperationalError as e:
