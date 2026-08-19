@@ -893,6 +893,21 @@ class TestDeferredIdsAndCountsDifferential:
         )
         # A second blocker on CB-1 so at least one count is > 1.
         blockers.add_blocker(conn, item_id="CB-1", trigger_type="manual", reason="second")
+        # INACTIVE rows, and they are what make `is_active` load-bearing. Without
+        # them every fixture blocker is active, so dropping the `is_active` test in
+        # `_active_counts` changes nothing and the differential passes against a
+        # broken aggregation (mutation M4 survived until these were added).
+        _add_finding(conn, "CB-95")
+        findings.update_finding(conn, "CB-95", status="fixed")
+        blockers.add_blocker(conn, item_id="CB-4", blocked_by="CB-95", reason="satisfied")
+        cancelled = blockers.add_blocker(
+            conn, item_id="CB-5", trigger_type="manual", reason="cancelled"
+        )
+        conn.execute(
+            "UPDATE blockers SET cancelled_at = '2026-01-01T00:00:00Z' WHERE id = ?",
+            (cancelled["id"],),
+        )
+        conn.commit()
 
     @pytest.mark.parametrize(
         "kw", [{}, {"id": "CB-1"}, {"ids": ["CB-1", "CB-3"]}, {"ids": ["CB-6"]}]
@@ -906,13 +921,18 @@ class TestDeferredIdsAndCountsDifferential:
         assert got_counts == want_counts
 
     def test_the_fixture_is_not_vacuous(self, conn):
-        """All three trigger types present, a multi-blocker id, and a non-empty
-        result — otherwise the differential above compares two empty sets."""
+        """All three trigger types, a multi-blocker id, a non-empty result — AND an
+        inactive row of each kind (satisfied, cancelled) that must be EXCLUDED.
+
+        The exclusions are the discriminating half: without them nothing
+        distinguishes a correct aggregation from one that ignores `is_active`.
+        """
         self._fixture(conn)
         ids, counts = blockers.deferred_ids_and_counts(conn, "finding")
         assert set(ids) == {"CB-1", "CB-2", "CB-3"}
         assert counts["CB-1"] == 2
-        assert max(counts.values()) > 1
+        assert "CB-4" not in counts, "a SATISFIED blocker must not count as active"
+        assert "CB-5" not in counts, "a CANCELLED blocker must not count as active"
 
     def test_counts_are_restricted_to_the_returned_ids(self, conn):
         """The counts half must never carry an id the ids half filtered out —
@@ -949,3 +969,109 @@ class TestActiveCountsIsTheSingleDefinition:
             if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
         }
         assert "_active_counts" in calls
+
+
+class TestDeferredWrappersUseTheSinglePass:
+    """The wrappers are where CB-69's cost actually lands, so the wrappers are
+    where it must be pinned.
+
+    Mutation testing found this gap: reverting either wrapper to the old
+    `deferred_id_restriction` + `blocker_counts_for` pairing left every other test
+    green, because the ANSWERS are identical — only the statement count differs.
+    A test over `blockers.py` alone structurally cannot see a wrapper regression.
+    """
+
+    def _tools(self, conn, module):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def factory():
+            yield conn
+
+        class FakeMCP:
+            def __init__(self):
+                self.tools = {}
+
+            def tool(self, *a, **k):
+                def deco(fn):
+                    self.tools[fn.__name__] = fn
+                    return fn
+
+                return deco
+
+        m = FakeMCP()
+        module.register_tools(m, factory)
+        return m.tools
+
+    def _counting_conn(self, tmp_path):
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        db.init_project(str(tmp_path))
+        c = sqlite3.connect(
+            os.path.join(str(tmp_path), ".codebugs", "findings.db"),
+            factory=_CountingConnection,
+        )
+        c.row_factory = sqlite3.Row
+        return c
+
+    def _findings_cost(self, tmp_path, n):
+        c = self._counting_conn(tmp_path / f"f{n}")
+        for i in range(n * 2):
+            findings.add_finding(
+                c, finding_id=f"CB-{i + 1}", description=f"d{i}",
+                severity="low", category="bug", file="a.py",
+            )
+        for i in range(n):
+            blockers.add_blocker(
+                c, item_id=f"CB-{i + 1}", blocked_by=f"CB-{n + i + 1}", reason="r"
+            )
+        tools = self._tools(c, findings)
+        c.n = 0
+        result = tools["query"](status="deferred")
+        assert result["total"] == n
+        assert all(r["blocker_count"] == 1 for r in result["findings"])
+        cost = c.n
+        c.close()
+        return cost
+
+    def _reqs_cost(self, tmp_path, n):
+        c = self._counting_conn(tmp_path / f"r{n}")
+        for i in range(n):
+            reqs.add_requirement(
+                c, req_id=f"FR-{i + 1}", description=f"r{i}",
+                section="core", priority="should",
+            )
+            findings.add_finding(
+                c, finding_id=f"CB-{i + 1}", description=f"d{i}",
+                severity="low", category="bug", file="a.py",
+            )
+            blockers.add_blocker(
+                c, item_id=f"FR-{i + 1}", blocked_by=f"CB-{i + 1}", reason="r"
+            )
+        tools = self._tools(c, reqs)
+        c.n = 0
+        result = tools["reqs_query"](status="deferred")
+        assert result["total"] == n
+        cost = c.n
+        c.close()
+        return cost
+
+    @pytest.mark.parametrize(
+        "cost_fn", ["_findings_cost", "_reqs_cost"], ids=["findings", "reqs"]
+    )
+    def test_the_blocker_set_is_evaluated_once_per_wrapper_call(self, tmp_path, cost_fn):
+        """Asserts the LINEAR TERM, not a total.
+
+        An exact statement total is fixture-specific — it folds in whatever the
+        domain query itself costs — and pinning one is how a measurement becomes
+        anecdote (the mistake this iteration caught on a sibling card). What the
+        fix changes is the COEFFICIENT on the per-blocker term: one evaluation
+        costs `1 + B` reads, the old pairing cost `2 * (1 + B)`. So measure at two
+        sizes and assert the delta equals the size difference exactly.
+        """
+        cost = getattr(self, cost_fn)
+        small, large = 2, 6
+        delta = cost(tmp_path, large) - cost(tmp_path, small)
+        assert delta == large - small, (
+            f"expected one evaluation (delta {large - small}), got {delta} — "
+            "a delta of twice that means the blocker set is evaluated twice"
+        )
