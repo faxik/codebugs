@@ -313,27 +313,27 @@ class TestFindingsIntegration:
     def test_annotation_lands_in_inserted_row(self, conn):
         db.register_pre_add_resolver("t.a", lambda c, o: {"ka": o["category"]}, meta_keys=("ka",))
         result = findings.add_finding(
-            conn, severity="low", category="cat-x", file="f", description=LONG_DESC
+            conn, severity="low", category="cat-x", file="f", description=LONG_DESC, new_category=True
         )
-        assert result["meta"]["ka"] == "cat-x"
+        assert result["meta"]["ka"] == "cat_x"  # observation normalized before resolvers (CB-60)
         stored = findings.get_finding(conn, result["id"])
-        assert stored["meta"]["ka"] == "cat-x"  # in the INSERT, not a later UPDATE
+        assert stored["meta"]["ka"] == "cat_x"  # in the INSERT, not a later UPDATE
 
     def test_bump_does_not_fire_resolvers(self, conn):
         calls = []
         db.register_pre_add_resolver("t.a", lambda c, o: calls.append(1), meta_keys=("ka",))
         kw = dict(severity="low", category="c", file="f", description=LONG_DESC)
-        findings.add_finding(conn, **kw)
-        second = findings.add_finding(conn, **kw)
+        findings.add_finding(conn, **kw, new_category=True)
+        second = findings.add_finding(conn, **kw, new_category=True)
         assert second["dedup_action"] == "bumped" and len(calls) == 1
 
     def test_reopen_does_not_fire_resolvers(self, conn):
         calls = []
         db.register_pre_add_resolver("t.a", lambda c, o: calls.append(1) or None, meta_keys=("ka",))
         kw = dict(severity="low", category="c", file="f", description=LONG_DESC)
-        first = findings.add_finding(conn, **kw)
+        first = findings.add_finding(conn, **kw, new_category=True)
         findings.update_finding(conn, first["id"], status="fixed")
-        again = findings.add_finding(conn, **kw)
+        again = findings.add_finding(conn, **kw, new_category=True)
         assert again["dedup_action"] == "reopened" and len(calls) == 1
 
     def test_recurrence_insert_fires_resolvers(self, conn):
@@ -342,9 +342,9 @@ class TestFindingsIntegration:
             "t.a", lambda c, o: seen.append(o["dedup_action"]) or None, meta_keys=("ka",)
         )
         kw = dict(severity="low", category="c", file="f", description=LONG_DESC)
-        first = findings.add_finding(conn, **kw)
+        first = findings.add_finding(conn, **kw, new_category=True)
         findings.update_finding(conn, first["id"], status="wont_fix")
-        again = findings.add_finding(conn, **kw)
+        again = findings.add_finding(conn, **kw, new_category=True)
         assert again["dedup_action"] == "recurrence_of_closed"
         assert seen == ["created", "recurrence_of_closed"]
 
@@ -370,7 +370,7 @@ class TestFindingsIntegration:
             category="c",
             file="f",
             description=LONG_DESC,
-            annotate=False,
+            annotate=False, new_category=True,
         )
         assert calls == []
 
@@ -401,7 +401,7 @@ class TestFindingsIntegration:
                     "file": "f",
                     "description": LONG_DESC + "2",
                 },
-            ],
+            ], new_category=True,
         )
         assert seen_counts == [0, 1]
 
@@ -414,7 +414,7 @@ class TestFindingsIntegration:
                 category="c",
                 file="f",
                 description="d",
-                meta={"ka": "spoof"},
+                meta={"ka": "spoof"}, new_category=True,
             )
 
     def test_resolver_errors_refused_on_update(self, conn):
@@ -432,7 +432,7 @@ class TestFindingsIntegration:
     def test_failed_resolver_finding_still_lands_with_error_stamp(self, conn):
         db.register_pre_add_resolver("t.bad", lambda c, o: 1 / 0, meta_keys=("ka",))
         result = findings.add_finding(
-            conn, severity="low", category="c", file="f", description=LONG_DESC
+            conn, severity="low", category="c", file="f", description=LONG_DESC, new_category=True
         )
         assert result["was_new"] is True
         assert result["meta"]["resolver_errors"][0]["resolver"] == "t.bad"
@@ -471,7 +471,12 @@ class TestFindingsIntegration:
                 " during close: unable to open database file, worker shutdown aborted"
             )
             a = findings.add_finding(
-                conn, severity="low", category="gate", file="f", description=base
+                conn,
+                severity="low",
+                category="gate",
+                file="f",
+                description=base,
+                new_category=True,
             )
             b = findings.add_finding(
                 conn,

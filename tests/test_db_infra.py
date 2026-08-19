@@ -42,7 +42,7 @@ class TestConnect:
         project = str(tmp_path)
         db.init_project(project)
         c1 = db.connect(project)
-        findings.add_finding(c1, severity="low", category="x", file="a.py", description="d")
+        findings.add_finding(c1, severity="low", category="x", file="a.py", description="d", new_category=True)
         c1.close()
 
         c2 = db.connect(project)
@@ -214,7 +214,7 @@ class TestWorktreeDiscovery:
         monkeypatch.chdir(wt)
         c = db.connect()
         try:
-            findings.add_finding(c, severity="low", category="x", file="a.py", description="d")
+            findings.add_finding(c, severity="low", category="x", file="a.py", description="d", new_category=True)
         finally:
             c.close()
         assert not (wt / ".codebugs").exists(), "no throwaway DB in the worktree"
@@ -459,7 +459,7 @@ class TestInitProject:
         monkeypatch.chdir(tmp_path)
         db.init_project()
         c = db.connect()
-        findings.add_finding(c, severity="low", category="x", file="a.py", description="d")
+        findings.add_finding(c, severity="low", category="x", file="a.py", description="d", new_category=True)
         c.close()
 
         result = db.init_project()
@@ -770,7 +770,7 @@ class TestTrackerRootOverride:
         monkeypatch.setenv(db.ENV_ROOT, str(declared))
         c = db.connect()
         try:
-            findings.add_finding(c, severity="low", category="x", file="a.py", description="d")
+            findings.add_finding(c, severity="low", category="x", file="a.py", description="d", new_category=True)
         finally:
             c.close()
         for root, expected in ((declared, 1), (elsewhere, 0)):

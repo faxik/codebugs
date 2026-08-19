@@ -38,11 +38,11 @@ def main() -> int:
         db.init_project(root)
         conn = db.connect(project_dir=root)
 
-        first = findings.add_finding(conn, severity="low", source="repro", **OBS)
+        first = findings.add_finding(conn, severity="low", source="repro", **OBS, new_category=True)
         fid = first["id"]
         print(f"1st observation: {fid} severity={first['severity']!r}")
 
-        second = findings.add_finding(conn, severity="critical", source="repro", **OBS)
+        second = findings.add_finding(conn, severity="critical", source="repro", **OBS, new_category=True)
         print(
             f"2nd observation: {second['id']} severity={second['severity']!r} "
             f"(was_new={second.get('was_new')}, action={second.get('dedup_action')})"

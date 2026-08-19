@@ -222,13 +222,13 @@ class TestTheFourShapesEndToEnd:
     def test_A_read_only_tracker_directory(self, project):
         os.chmod(project.root, 0o555)
         self._assert_clean_refusal(
-            _cli(project.dir, "add", "-f", "x.py", "-c", "t", "-s", "low", "-d", "shape A")
+            _cli(project.dir, "add", "-f", "x.py", "-c", "t", "-s", "low", "-d", "shape A", "--new-category")
         )
 
     def test_B_read_only_database_file(self, project):
         os.chmod(project.dbfile, 0o444)
         self._assert_clean_refusal(
-            _cli(project.dir, "add", "-f", "x.py", "-c", "t", "-s", "low", "-d", "shape B")
+            _cli(project.dir, "add", "-f", "x.py", "-c", "t", "-s", "low", "-d", "shape B", "--new-category")
         )
 
     def test_C2_unopenable_database_on_the_walk_route(self, project):
@@ -253,7 +253,7 @@ class TestTheHealthyPathIsUntouched:
     `try`."""
 
     def test_a_writable_tracker_still_works(self, project):
-        r = _cli(project.dir, "add", "-f", "x.py", "-c", "t", "-s", "low", "-d", "healthy")
+        r = _cli(project.dir, "add", "-f", "x.py", "-c", "t", "-s", "low", "-d", "healthy", "--new-category")
         assert r.returncode == 0, r.stdout + r.stderr
         assert "Added:" in r.stdout, r.stdout
 

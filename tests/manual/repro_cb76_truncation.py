@@ -55,7 +55,7 @@ def main() -> int:
         db.init_project(project)
         conn = db.connect(project)
         findings.add_finding(
-            conn, severity="high", category="bug", file="a.py", description="something broke"
+            conn, severity="high", category="bug", file="a.py", description="something broke", new_category=True
         )
         conn.close()
 

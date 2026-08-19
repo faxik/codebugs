@@ -25,7 +25,7 @@ def add(conn, description, **kw):
     kw.setdefault("severity", "medium")
     kw.setdefault("category", "correctness")
     kw.setdefault("file", "a.py")
-    return findings.add_finding(conn, description=description, **kw)["id"]
+    return findings.add_finding(conn, description=description, **kw, new_category=True)["id"]
 
 
 class TestExtraction:
@@ -233,10 +233,18 @@ class TestTagPivots:
         assert grouping.tag_report(conn, min_pair_count=1)["pairs_total"] == 1
 
     def test_variants_span_tags_and_categories(self, conn):
+        # Twin category spellings can no longer arise through the observation
+        # path (CB-60 normalizes them at write time), but pre-CB-60 rows and
+        # explicit-id adds still carry them verbatim — file the fixture through
+        # the explicit-id path, which is exactly the legacy data the report-time
+        # variant detection exists for.
         add(conn, "a card filed under the underscore spelling",
             category="process_improvement", tags=["follow-up"])
-        add(conn, "a card filed under the hyphen spelling",
-            category="process-improvement", tags=["follow_up"])
+        findings.add_finding(
+            conn, severity="medium", category="process-improvement", file="a.py",
+            description="a card filed under the hyphen spelling",
+            tags=["follow_up"], finding_id="CB-777",
+        )
         rep = grouping.tag_report(conn)
         by_key = {v["key"]: v for v in rep["variants"]}
         assert {entry["label"] for entry in by_key["processimprovement"]["labels"]} == {
