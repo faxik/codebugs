@@ -25,6 +25,7 @@ POSIX-only: every shape is built from Unix permission bits.
 
 from __future__ import annotations
 
+import ast
 import os
 import pathlib
 import sqlite3
@@ -273,21 +274,41 @@ class TestTheClassifierStaysInsideDb:
     `TestOpenCallSitesRatchet`, the `BEGIN IMMEDIATE` count in `test_claims.py`,
     and `TestWriteCallSitesRatchet`. So it is pinned here.
 
-    RESIDUAL LIMIT, stated rather than implied: this is a NAME check. A caller
-    could still re-derive the predicate by hand, or reach it through `getattr`.
-    It bounds accident, not intent — which is the honest claim for every ratchet
-    in this repo that keys on a name rather than on a value like a file mode.
+    BY AST, NOT BY SOURCE TEXT — and the first draft of this ratchet was the text
+    version, which CB-99 then tripped FALSELY: that card's fix carries a comment
+    explaining *why it does not* reach for this classifier, and merely naming it
+    in prose turned the suite red. CLAUDE.md already records this exact lesson for
+    `TestWriteCallSitesRatchet` ("the first draft of that ratchet grepped source
+    text and matched `open(path, "w")` inside three of `fsio.py`'s own
+    docstrings"), so it was made one iteration after being cited. A guard that
+    cannot tell a reference from a mention punishes the documentation that keeps
+    the rule understood.
+
+    RESIDUAL LIMIT, stated rather than implied: this is still a NAME check, now
+    over the syntax tree. A caller could re-derive the predicate by hand or reach
+    it through `getattr`. It bounds accident, not intent — the honest claim for
+    every ratchet in this repo that keys on a name rather than on a value like a
+    file mode.
     """
 
     def test_only_db_names_the_environmental_classifier(self):
         src = pathlib.Path(db.__file__).parent
-        offenders = [
-            f"{path.relative_to(src.parent).as_posix()}:{i}"
-            for path in sorted(src.rglob("*.py"))
-            if path.name != "db.py"
-            for i, line in enumerate(path.read_text().splitlines(), 1)
-            if "_is_environmental" in line
-        ]
+        offenders = []
+        for path in sorted(src.rglob("*.py")):
+            if path.name == "db.py":
+                continue
+            for node in ast.walk(ast.parse(path.read_text())):
+                named = (
+                    node.attr
+                    if isinstance(node, ast.Attribute)
+                    else node.id
+                    if isinstance(node, ast.Name)
+                    else None
+                )
+                if named == "_is_environmental":
+                    offenders.append(
+                        f"{path.relative_to(src.parent).as_posix()}:{node.lineno}"
+                    )
         assert offenders == [], (
             "the environmental classifier is private to db.py on purpose — a caller "
             f"at the CLI boundary is the design CB-86 rejected. Found: {offenders}"
