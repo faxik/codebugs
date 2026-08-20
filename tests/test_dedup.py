@@ -583,10 +583,13 @@ class TestStoredCorruptionClassification:
     """Pre-write vs post-commit corruption must be distinguishable (Codex round 3).
 
     Malformed stored META raises json.JSONDecodeError from _bump_row BEFORE any
-    write — the transaction rolls back and NOTHING lands. Malformed stored TAGS
-    raises only in _finalize_add, AFTER the bump committed — that arrives as
-    PostCommitCorruptionError so a caller (the CSV import loop) never claims
-    "the write landed" for a rollback, or the reverse.
+    write — the transaction rolls back and NOTHING lands. Since BT-4 (the tags
+    contract) malformed stored TAGS is the SAME class on the promote-tags bump
+    path: the union strict-parses the stored column pre-write, so the add fails
+    with nothing landed instead of committing and then failing at serialization.
+    PostCommitCorruptionError survives as the defensive classifier for a frame
+    that DID commit and only then could not serialize — see its docstring for
+    what is still reachable.
     """
 
     def test_malformed_stored_meta_is_prewrite_and_rolls_back(self, conn):
@@ -598,20 +601,38 @@ class TestStoredCorruptionClassification:
         row = conn.execute("SELECT occurrence_count FROM findings").fetchone()
         assert row["occurrence_count"] == 1, "rolled back — nothing may land"
 
-    def test_malformed_stored_tags_is_postcommit_and_lands(self, conn):
+    def test_malformed_stored_tags_is_prewrite_and_rolls_back(self, conn):
+        """DELIBERATELY CHANGED by BT-4 (was `..._is_postcommit_and_lands`).
+
+        Before the tags contract, a bump never read the tags column, so malformed
+        stored tags surfaced only in _finalize_add AFTER the bump committed —
+        classified as PostCommitCorruptionError, occurrence_count landed at 2.
+        The ratified tags contract strict-parses the stored column PRE-write on
+        the promote-tags path (the union cannot be computed from a value that
+        does not parse), which moves this corruption class to the same side as
+        malformed stored meta: raw json.JSONDecodeError, transaction rolled
+        back, NOTHING lands. The import path (`promote_tags=False`) neither
+        reads nor writes the column, so an import's live-hit on a corrupt row
+        still lands — today's behaviour, deliberately kept.
+        """
         _add(conn)
         conn.execute("UPDATE findings SET tags = '[not json' WHERE 1=1")
         conn.commit()
-        with pytest.raises(findings.PostCommitCorruptionError):
-            _add(conn)  # bump commits; tags parse fails only at serialization
+        with pytest.raises(json.JSONDecodeError):
+            _add(conn)  # bump path strict-parses tags pre-write (BT-4)
         row = conn.execute("SELECT occurrence_count FROM findings").fetchone()
-        assert row["occurrence_count"] == 2, "the bump committed before the raise"
+        assert row["occurrence_count"] == 1, "rolled back — nothing may land"
 
     def test_ambient_transaction_add_keeps_raw_jsondecodeerror(self, conn):
         """Under an ambient transaction the add's frame commits NOTHING, so a
-        malformed-tags conversion failure must stay a raw JSONDecodeError — the
-        owner rolls the unit back, and a PostCommitCorruptionError claiming
-        "recorded" would mislead retry/accounting logic (Codex round 4)."""
+        malformed-tags failure must stay a raw JSONDecodeError — the owner
+        rolls the unit back, and a PostCommitCorruptionError claiming
+        "recorded" would mislead retry/accounting logic (Codex round 4).
+
+        Since BT-4 the raise point moved: the JSONDecodeError now comes from
+        _bump_row's pre-write strict parse of the stored tags column, not from
+        _finalize_add's post-conversion. The asserted contract — same exception
+        class, owner rolls back, occurrence_count stays 1 — is unchanged."""
         _add(conn)
         conn.execute("UPDATE findings SET tags = '[not json' WHERE 1=1")
         conn.commit()
@@ -623,6 +644,9 @@ class TestStoredCorruptionClassification:
         assert row["occurrence_count"] == 1, "the owner rolled the bump back"
 
     def test_ambient_transaction_batch_keeps_raw_jsondecodeerror(self, conn):
+        """Same contract as the add twin above; since BT-4 the JSONDecodeError
+        is raised pre-write from _bump_row's tags strict parse rather than at
+        _finalize_add — class, rollback and count are unchanged."""
         _add(conn)
         conn.execute("UPDATE findings SET tags = '[not json' WHERE 1=1")
         conn.commit()
@@ -985,3 +1009,175 @@ class TestBumpSqlComposition:
             assert isinstance(row["meta"], dict)
         finally:
             c.close()
+
+    def test_tags_assignment_once_and_bound_to_tags_column(self, tmp_project):
+        """BT-4 extension: a bump carrying a NEW tag emits exactly one `tags = ?`
+        inside the same built SET clause, paired with its own parameter.
+
+        Binding proof, not just shape: a parameter appended on the wrong side
+        would bind the tags JSON into `meta` (or vice versa) — so the row is
+        read back and each column must hold its own value.
+        """
+        db.connect(tmp_project).close()
+        path = os.path.join(tmp_project, ".codebugs", "findings.db")
+        c = sqlite3.connect(path, factory=RecordingConnection)
+        c.row_factory = sqlite3.Row
+        try:
+            f = _add(c, desc="admin route skips the token check", tags=["stored"])
+            c.recorded_sql.clear()
+            _add(c, desc="admin route skips the token check", tags=["observed"])
+
+            updates = [s for s in c.recorded_sql if "UPDATE findings SET" in s]
+            assert len(updates) == 1, updates
+            sql = updates[0]
+            assert sql.count("tags = ?") == 1, sql
+            assert sql.count("meta = ?") == 1, sql
+
+            row = findings.get_finding(c, f["id"])
+            assert row["tags"] == ["stored", "observed"]
+            assert isinstance(row["meta"], dict), "tags JSON must not land in meta"
+        finally:
+            c.close()
+
+
+class TestTagsUnionOnBump:
+    """The BT-4 tags contract: an observation's tags reach the COLUMN, not only
+    the ring — union on live and reopen bumps, exact equality, first-encountered
+    order, dedup, one serialization. Removal is deliberately NOT built:
+    update_finding(tags=) stays a full replace, sub-decision open with the owner.
+    """
+
+    def test_reobserved_tag_is_found_by_query_tag(self, conn):
+        """The acceptance mutation probe: reverting the union write makes the
+        re-observed tag invisible to `query(tag=)`, the tag-filtering read path."""
+        f = _add(conn)
+        again = _add(conn, tags=["regress-tag"])
+        assert again["id"] == f["id"] and again["dedup_action"] == "bumped"
+        res = findings.query_findings(conn, tag="regress-tag")
+        assert [r["id"] for r in res["findings"]] == [f["id"]]
+
+    def test_reopen_bump_unions_tags(self, conn):
+        """A regression IS an observation, so the reopen bump unions too."""
+        f = _add(conn, tags=["t1"])
+        findings.update_finding(conn, f["id"], status="fixed")
+        again = _add(conn, tags=["fixed-in-1.2"])
+        assert again["dedup_action"] == "reopened"
+        assert again["tags"] == ["t1", "fixed-in-1.2"]
+        row = findings.get_finding(conn, f["id"])
+        assert row["tags"] == ["t1", "fixed-in-1.2"]
+
+    def test_union_is_first_encountered_exact_and_deduplicated(self, conn):
+        f = _add(conn, tags=["a", "B"])
+        again = _add(conn, tags=["B", "b", "a", "c"])
+        assert again["id"] == f["id"]
+        assert again["tags"] == ["a", "B", "b", "c"], (
+            "stored before observed, first-encountered order, duplicates dropped"
+        )
+
+    def test_exact_string_equality_no_casefold(self, conn):
+        f = _add(conn, tags=["Tag"])
+        again = _add(conn, tags=["tag"])
+        assert again["id"] == f["id"]
+        assert again["tags"] == ["Tag", "tag"], "`Tag` != `tag` — both live"
+
+    def test_import_live_hit_does_not_promote_foreign_tags(self, conn):
+        """An import is not an observation (CB-51): a live-hit bump records the
+        occurrence — and its tags in the ring — but foreign tags must not leak
+        into the local column."""
+        local = _add(conn, tags=["local"], desc="admin route skips the token check")
+        report = findings.import_findings(
+            conn,
+            [
+                {
+                    "id": "CB-9001",
+                    "severity": "high",
+                    "category": "bug",
+                    "file": "a.py",
+                    "description": "admin route skips the token check",
+                    "tags": '["foreign"]',
+                }
+            ],
+        )
+        assert report.merged == 1
+        row = findings.get_finding(conn, local["id"])
+        assert row["tags"] == ["local"], "foreign tags leaked into the column"
+        assert row["occurrence_count"] == 2
+        assert row["meta"]["occurrences"][-1]["tags"] == ["foreign"], (
+            "the ring must still carry the observation's tags"
+        )
+
+    def test_merge_iterates_once_and_serializes_once(self, conn):
+        """CB-82's shape, per the test_bench precedent: the observation container
+        is iterated ONCE by the merge and the merged list is `json.dumps`ed ONCE
+        — so a container that mutates between iterations cannot store a view the
+        merge never saw. `_n <= 1`: the single sanctioned Python-level iteration
+        sees "obs"; any second iteration (a check-then-rebuild, or a second
+        serialization walking the caller's container) sees "MUTATED" and fails
+        the column assertion. (json.dumps of a list subclass reads internal
+        storage, not __iter__, so the counter meters Python-level loops.)
+        """
+
+        class Shifting(list):
+            def __init__(self):
+                super().__init__(["obs"])
+                self._n = 0
+
+            def __iter__(self):
+                self._n += 1
+                return iter(["obs"] if self._n <= 1 else ["MUTATED"])
+
+        f = _add(conn, tags=["base"])
+        _add(conn, tags=Shifting())
+        stored = conn.execute(
+            "SELECT tags FROM findings WHERE id = ?", (f["id"],)
+        ).fetchone()["tags"]
+        assert json.loads(stored) == ["base", "obs"], (
+            f"stored a view the merge never saw: {stored}"
+        )
+        assert "MUTATED" not in stored
+
+    def test_update_finding_status_does_not_touch_tags(self, conn):
+        """Passes on BOTH sides — pins behaviour BT-4 deliberately preserves:
+        the manual update path acquires NO union (it never calls _bump_row), so
+        a plain status write leaves the tags column byte-identical, and
+        update_finding(tags=) stays a full replace."""
+        f = _add(conn, tags=["keep", "keep-too"])
+        before = conn.execute("SELECT tags FROM findings WHERE id = ?", (f["id"],)).fetchone()
+        findings.update_finding(conn, f["id"], status="in_progress")
+        after = conn.execute("SELECT tags FROM findings WHERE id = ?", (f["id"],)).fetchone()
+        assert after["tags"] == before["tags"]
+        replaced = findings.update_finding(conn, f["id"], tags=["only-this"])
+        assert replaced["tags"] == ["only-this"], "update(tags=) must stay a full replace"
+
+
+class TestPromoteTagsOptOutRatchet:
+    """`promote_tags=False` has exactly ONE call site, and the count is pinned.
+
+    Same shape as TestEscalateOptOutRatchet one class up (CB-52): a stated count
+    is held by a test, read by AST rather than grep. `import_findings` is the one
+    sanctioned opt-out — an import is not an observation, so foreign tags stay
+    out of the local column. A second opt-out must break this and be argued for.
+    """
+
+    def test_exactly_one_call_site_opts_out_of_tag_promotion(self):
+        source = pathlib.Path(findings.__file__).read_text()
+        opt_outs = [
+            node
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call)
+            for kw in node.keywords
+            if kw.arg == "promote_tags"
+            and isinstance(kw.value, ast.Constant)
+            and kw.value.value is False
+        ]
+        assert len(opt_outs) == 1, (
+            f"expected exactly one `promote_tags=False` call site (import_findings), "
+            f"found {len(opt_outs)} at lines {[n.lineno for n in opt_outs]}"
+        )
+
+    def test_the_public_add_surface_cannot_opt_out(self):
+        """`promote_tags` is deliberately absent from both public add signatures —
+        no MCP or CLI caller can turn the union off by argument; only the
+        in-package import path can. Mirrors the escalate asymmetry (CB-52)."""
+        assert "promote_tags" not in inspect.signature(findings.add_finding).parameters
+        assert "promote_tags" not in inspect.signature(findings.batch_add_findings).parameters

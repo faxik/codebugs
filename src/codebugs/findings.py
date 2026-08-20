@@ -77,6 +77,13 @@ _POST_MIGRATION_INDEXES = (
     "WHERE fingerprint IS NOT NULL AND status IN ("
     + ", ".join(f"'{s}'" for s in LIVE_STATUSES)
     + ")",
+    # CB-115: both historical creators of this index live on migration paths a FRESH
+    # database never takes (_migrate_statuses early-returns because SCHEMA already
+    # spells 'in_progress'; the provenance ALTER is guarded by a column check that is
+    # false because SCHEMA carries the column), so fresh databases had no
+    # reported_at_ref index at all. Declared here — not in SCHEMA — for the reasons
+    # in the comment above; on migrated databases IF NOT EXISTS makes it a no-op.
+    "CREATE INDEX IF NOT EXISTS idx_findings_reported_at_ref ON findings(reported_at_ref)",
 )
 
 
@@ -471,6 +478,7 @@ def _occurrence_entry(
     *,
     now: str,
     severity: str,
+    category: str,
     file: str,
     description: str,
     source: str,
@@ -481,15 +489,24 @@ def _occurrence_entry(
 ) -> dict[str, Any]:
     """One bounded record of a deduplicated observation.
 
-    Carries enough of the discarded observation (severity, description, file, tags,
-    meta, refs) that a false merge can be un-merged from the ring alone. `meta`
-    matters most: volatile meta values are exactly what fingerprint normalization
-    strips, so without them the ring cannot show WHICH observations a too-coarse
-    fingerprint merged (Codex review of this range).
+    Carries enough of the discarded observation (severity, category, description,
+    file, tags, meta, refs) that a false merge can be un-merged from the ring alone.
+    `meta` matters most: volatile meta values are exactly what fingerprint
+    normalization strips, so without them the ring cannot show WHICH observations a
+    too-coarse fingerprint merged (Codex review of this range).
+
+    `category` is REQUIRED and written unconditionally — never `if category:` —
+    because `""` is a legal category, and its absence in a ring entry would be
+    indistinguishable from a pre-CB-113 entry written before the key existed.
+    Category is an identity input, so a supplied-fingerprint merge across
+    category spellings is reconstructable only if each entry records what was
+    observed: the observation path passes the normalized spelling, import passes
+    the peer's verbatim one (CB-51).
     """
     entry: dict[str, Any] = {
         "at": now,
         "severity": severity,
+        "category": category,
         "file": file,
         "description": description[:_OCC_DESC_CAP],
         "source": source,
@@ -527,6 +544,7 @@ def _bump_row(
     reopen: bool = False,
     observed_severity: str,
     escalate: bool = True,
+    promote_tags: bool = True,
 ) -> sqlite3.Row:
     """Record an occurrence on an existing finding; optionally reopen it (regression).
 
@@ -542,6 +560,16 @@ def _bump_row(
     this repository (CB-51) and a peer's CSV must not re-rate a local card on
     foreign evidence.
 
+    TAGS UNION UNDER OBSERVATION (BT-4): a bump merges the observation's tags
+    (`entry["tags"]`) into the `tags` column — exact string equality (no
+    casefold), first-encountered order (stored before observed), deduplicated,
+    the merged container serialized exactly once (CB-82). `promote_tags=False`
+    opts a caller out; exactly one does, `import_findings` again, and on that
+    path the column is neither read nor written — the ring still carries the
+    observation's tags. Removal is deliberately NOT built here:
+    `update_finding(tags=)` stays a full replace, so a hand-removed tag returns
+    with the next observation carrying it (sub-decision open with the owner).
+
     EVERY fragment is appended to `sets` together with its parameter, and nothing is
     spliced outside the builder — that pairing is what keeps placeholder order and
     parameter order the same thing rather than two things a reader must keep in
@@ -555,8 +583,11 @@ def _bump_row(
     and replaces four separate prose warnings; point-of-use discipline is the wrong
     enforcement layer (CB-41).
 
-    Raises json.JSONDecodeError on malformed stored meta BEFORE any write — the add
-    fails cleanly with nothing landed, which is the honest half of the CB-16 rule.
+    Raises json.JSONDecodeError on malformed stored meta — and, on the
+    `promote_tags` path, on malformed stored tags — BEFORE any write: the add
+    fails cleanly with nothing landed, which is the honest half of the CB-16
+    rule. The tags strict parse MOVED the malformed-stored-tags corruption
+    class from post-commit (`PostCommitCorruptionError`) to pre-write (BT-4).
     """
     meta = json.loads(row["meta"])
     # Defensive re-typing for rows written before the reserved-key guard existed
@@ -587,6 +618,26 @@ def _bump_row(
         if escalated is not None:
             sets += ", severity = ?"
             params.append(escalated)
+    if promote_tags:
+        # Strict parse of the stored column, PRE-write (symmetric with `meta`
+        # at the top): the union cannot be computed from a value that does not
+        # parse, so malformed stored tags fail the add with nothing landed. A
+        # valid but non-list value is DISPLACED, not merged — the ring guard's
+        # convention above, never a TypeError.
+        stored_tags = json.loads(row["tags"])
+        merged: list[Any] = []
+        base = stored_tags if isinstance(stored_tags, list) else []
+        for tag in (*base, *entry["tags"]):
+            # `not in` is exact equality over a tiny list — no casefold, no
+            # hashing (a foreign-written unhashable member must displace-safely,
+            # not raise), first-encountered wins.
+            if tag not in merged:
+                merged.append(tag)
+        if merged != stored_tags:
+            # Serialized ONCE; this exact string is the bound parameter (CB-82).
+            # Appended INSIDE the builder, paired with its parameter (CB-16).
+            sets += ", tags = ?"
+            params.append(json.dumps(merged))
     sets += ", meta = ?"
     params.append(json.dumps(meta))
     params.append(row["id"])
@@ -654,7 +705,9 @@ def _add_one(
     fingerprint: str | None,
     annotate: bool = True,
     escalate: bool = True,
-    mint_category: bool = False,
+    promote_tags: bool = True,
+    new_category: bool = False,
+    gate_category: bool = True,
 ) -> tuple[dict[str, Any] | None, sqlite3.Row | None, bool, str]:
     """One observation through the identity function, inside an OPEN transaction.
 
@@ -666,7 +719,18 @@ def _add_one(
 
     `severity` and `fingerprint` arrive already validated — validation must run before
     the caller opens its transaction, so invalid input raises immediately instead of
-    an OperationalError after a busy_timeout wait under contention.
+    an OperationalError after a busy_timeout wait under contention. `category`
+    likewise arrives already normalized on the observation path (verbatim on the
+    import path, CB-51) — but the CB-60 mint GATE runs HERE, on the insert
+    continuation, AFTER the bump/reopen branches have returned (CB-113(b)): an
+    observation of a known live or reopenable card creates nothing, so refusing it
+    over a category spelling would lose the occurrence — count, ring evidence,
+    regression reopen — about a row that already exists. Only an observation that
+    would CREATE a row (`finding_id is None and gate_category`, plain insert and
+    recurrence_of_closed alike) is gated; a permitted mint stamps
+    `meta.category_minted`. `gate_category=False` opts a caller out — exactly one
+    does, `import_findings` (an import is not an observation), pinned by
+    `tests/test_category_gate.py::TestGateCategoryOptOutRatchet`.
     """
     now = utc_now()
     dedup_action = "created"
@@ -679,6 +743,7 @@ def _add_one(
         entry = _occurrence_entry(
             now=now,
             severity=severity,
+            category=category,
             file=file,
             description=description,
             source=source,
@@ -695,6 +760,7 @@ def _add_one(
                 entry=entry,
                 observed_severity=severity,
                 escalate=escalate,
+                promote_tags=promote_tags,
             )
             return None, raw, False, "bumped"
         if closed is not None and closed["status"] in _REOPEN_STATUSES:
@@ -706,6 +772,7 @@ def _add_one(
                 reopen=True,
                 observed_severity=severity,
                 escalate=escalate,
+                promote_tags=promote_tags,
             )
             # Fire like update_finding does: the write changed the row, inside this
             # transaction, so claims/milestone reconciliation land atomically with it.
@@ -727,14 +794,27 @@ def _add_one(
                 f"omit finding_id to record an occurrence on it instead"
             )
 
+    # The CB-60 mint gate, on the insert continuation ONLY (CB-113(b)): the
+    # bump/reopen branches returned above, so an observation of a known card was
+    # recorded regardless of its category spelling — the ring carries the observed
+    # form as evidence. From here on this observation CREATES a row (plain insert
+    # or recurrence_of_closed), which is where an ungated spelling forks identity.
+    # The explicit-id predicate is preserved: an asserted identity stores its
+    # category verbatim, ungated, as before.
+    mint_category = False
+    if finding_id is None and gate_category:
+        mint_category = _gate_category(
+            _existing_categories(conn), category, new_category=new_category
+        )
+
     fid = finding_id or _next_id(conn)
     meta_final = dict(meta or {})
     if recurrence_of is not None:
         meta_final["recurrence_of"] = recurrence_of
     if mint_category:
-        # The CB-60 gate decided this observation MINTS its category; the stamp
-        # makes minting countable (query(meta_key="category_minted")). Lands only
-        # on the insert path — a dedup bump returned above records no minting.
+        # The gate decided this observation MINTS its category; the stamp makes
+        # minting countable (query(meta_key="category_minted")). Lands only on
+        # the insert path — a dedup bump returned above records no minting.
         meta_final["category_minted"] = True
     if finding_id is None and annotate:
         # Pre-add resolvers (CB-45): annotate-only. THE predicate is
@@ -792,7 +872,8 @@ class PostCommitCorruptionError(Exception):
     """The dedup write COMMITTED, then the matched row's stored data failed to parse.
 
     Distinct from the pre-write ``json.JSONDecodeError`` that ``_bump_row``
-    raises on malformed stored ``meta`` — there the transaction rolls back and
+    raises on malformed stored ``meta`` — and, since BT-4, on malformed stored
+    ``tags`` on the ``promote_tags`` path — there the transaction rolls back and
     nothing lands. A caller deciding "did the observation land?" must not have
     to guess between the two (Codex round-3 review). Raised ONLY when the add's
     own frame committed: under an ambient transaction nothing has committed yet
@@ -802,6 +883,15 @@ class PostCommitCorruptionError(Exception):
     raising raw ``JSONDecodeError`` on its own committed path too,
     deliberately: its CLI re-raise contract is pinned by
     ``TestRetriageCliContract``.
+
+    HONEST REACHABILITY NOTE (BT-4): for ``tags`` this class is no longer
+    reachable through the bump paths that call ``_finalize_add`` — with
+    ``promote_tags=True`` the strict parse raises pre-write, and the one
+    ``promote_tags=False`` caller (``import_findings``) never calls
+    ``_finalize_add`` at all. The class is NOT deleted: it is the defensive
+    classifier for any frame that committed and only then failed to serialize
+    (``_finalize_add`` still parses the whole returned row), and the
+    minimal-form decision is to keep that guard rather than reason it away.
     """
 
 
@@ -865,11 +955,16 @@ def add_finding(
     None`` — the same predicate as dedup and the resolvers; an explicit id
     asserts identity and stores the category verbatim): the spelling is
     normalized via ``types.normalize_category`` BEFORE fingerprint derivation,
-    so twin spellings hash and store one canonical name. A category the tracker
-    does not already hold requires ``new_category=True`` — without it a
-    near-miss of an existing name raises ``ValueError`` naming the canonical
-    spelling, and a genuinely new name raises listing the nearest existing
-    ones. A permitted mint stamps ``meta.category_minted: true`` so
+    so twin spellings hash and store one canonical name. The mint GATE is
+    decided AFTER the dedup branch is known (inside ``_add_one``, CB-113(b)):
+    an observation matching a known live or reopenable card is recorded
+    ALWAYS — bump and reopen never raise over a category spelling, the ring
+    carries the observed form as evidence. Only an observation that would
+    CREATE a row (plain insert or recurrence-of-closed) is gated: a category
+    the tracker does not already hold requires ``new_category=True`` — without
+    it a near-miss of an existing name raises ``ValueError`` naming the
+    canonical spelling, and a genuinely new name raises listing the nearest
+    existing ones. A permitted mint stamps ``meta.category_minted: true`` so
     ``query(meta_key="category_minted")`` counts minting events. ``""`` stays
     a legal, ungated category.
 
@@ -897,12 +992,11 @@ def add_finding(
     severity = resolve_severity(severity)
     fingerprint = _validate_fingerprint(fingerprint)
     _validate_meta_keys(meta)
-    mint_category = False
     if finding_id is None:
+        # Pure normalization stays pre-txn (it is validation, and it is the
+        # fingerprint-derivation input); the mint GATE runs inside _add_one on
+        # the insert continuation, after the dedup branch is known (CB-113(b)).
         category = normalize_category(category)
-        mint_category = _gate_category(
-            _existing_categories(conn), category, new_category=new_category
-        )
 
     with db.txn(conn) as owned:
         inserted, raw_row, was_new, dedup_action = _add_one(
@@ -919,7 +1013,7 @@ def add_finding(
             reported_at_ref=reported_at_ref,
             fingerprint=fingerprint,
             annotate=annotate,
-            mint_category=mint_category,
+            new_category=new_category,
         )
     return _finalize_add(inserted, raw_row, was_new, dedup_action, committed=owned)
 
@@ -1047,13 +1141,15 @@ def import_findings(
     TWO IMPORT-SPECIFIC RULES, each closing a reproduced defect:
 
     1. **An import never reopens a decided card.** A fingerprint hit on a
-       `fixed`/`stale` row would normally REOPEN it as a regression — correct for
-       an observation, wrong for an import, which is a statement about someone
-       else's tracker. Measured before the fix: a foreign row whose id did not
-       even exist locally flipped a local `fixed` card to `open`. A hit on a LIVE
-       row still bumps (another sighting of a card you already have is a real
-       occurrence), and a `wont_fix` hit still files a linked recurrence row —
-       neither is a filed defect and neither is changed here.
+       `fixed` row — the whole of `_REOPEN_STATUSES` — would normally REOPEN it
+       as a regression — correct for an observation, wrong for an import, which
+       is a statement about someone else's tracker. (`stale` is a LIVE status:
+       a hit on it bumps, it never reopens.) Measured before the fix: a foreign
+       row whose id did not even exist locally flipped a local `fixed` card to
+       `open`. A hit on a LIVE row still bumps (another sighting of a card you
+       already have is a real occurrence), and a `wont_fix` hit still files a
+       linked recurrence row — neither is a filed defect and neither is changed
+       here.
 
     2. **An id identifies a row only together with its content.** The guard this
        replaces asked `SELECT 1 FROM findings WHERE id = ?`, which is bare-id
@@ -1145,6 +1241,16 @@ def import_findings(
                     # their repository, not evidence about this one. Same reason
                     # `annotate=False` sits one line above.
                     escalate=False,
+                    # Same class of reason (BT-4): an import is not an observation,
+                    # so a peer's tags are not promoted into the local column —
+                    # the ring records them, the column stays this tracker's own.
+                    promote_tags=False,
+                    # Same class of reason again (CB-60/CB-113): an import is not
+                    # an observation, so a peer's category lands verbatim, ungated
+                    # and unstamped — a backup with old or foreign spellings must
+                    # restore. The single sanctioned opt-out; pinned by
+                    # TestGateCategoryOptOutRatchet.
+                    gate_category=False,
                 )
             except ValueError as e:
                 errors.append(ImportRowError(label, str(e)))
@@ -1428,35 +1534,37 @@ def batch_add_findings(
 
     Category canon (CB-60): ``new_category`` is batch-wide permission, applied
     per member on the observation path (no ``id`` key — an explicit id stores
-    its category verbatim, same as ``add_finding``). Members are judged in
-    input order against the table PLUS categories earlier members of this batch
-    were permitted to mint, and only the first member introducing a category
-    carries the ``category_minted`` stamp — one minting event, not one per row.
+    its category verbatim, same as ``add_finding``). The mint GATE is decided
+    inside ``_add_one``, per member, AFTER that member's dedup branch is known
+    (CB-113(b)): a member whose fingerprint matches a known live or reopenable
+    card is recorded regardless of its category spelling. Insert-path members
+    are judged in input order against the table PLUS categories earlier members
+    of this batch minted — an earlier mint is an INSERT inside the open
+    transaction, visible to the gate's canon read on the same connection — and
+    only the first member introducing a category carries the
+    ``category_minted`` stamp: one minting event, not one per row. A gate
+    refusal mid-batch propagates and rolls back the whole batch, so nothing
+    lands, exactly as when the gate ran up front.
     """
-    # Validate EVERY member before the transaction opens: invalid input raises
+    # Validate every ARGUMENT before the transaction opens: invalid input raises
     # immediately, not after a busy_timeout wait, and never half-applies a batch.
-    known_categories: dict[str, str] | None = None
-    validated: list[tuple[str, str | None, str, bool]] = []
+    # The category mint gate is the one deliberate exception — it depends on the
+    # member's dedup branch, so it runs inside the transaction (CB-113(b)); its
+    # refusal rolls back the whole batch, preserving the nothing-lands property.
+    validated: list[tuple[str, str | None, str]] = []
     for i, f in enumerate(findings):
         unknown = set(f) - _BATCH_MEMBER_KEYS
         if unknown:
             raise ValueError(f"findings[{i}]: unknown keys {sorted(unknown)}")
         _validate_meta_keys(f.get("meta"))
         category = f["category"]
-        mint = False
         if f.get("id") is None:
             category = normalize_category(category)
-            if known_categories is None:
-                known_categories = _existing_categories(conn)
-            mint = _gate_category(known_categories, category, new_category=new_category)
-            if mint:
-                known_categories[category] = category
         validated.append(
             (
                 resolve_severity(f.get("severity", "medium")),
                 _validate_fingerprint(f.get("fingerprint")),
                 category,
-                mint,
             )
         )
 
@@ -1465,7 +1573,7 @@ def batch_add_findings(
     # member's returned occurrence_count. Input order is preserved by construction.
     outcomes = []
     with db.txn(conn) as owned:
-        for f, (severity, fingerprint, category, mint) in zip(findings, validated, strict=True):
+        for f, (severity, fingerprint, category) in zip(findings, validated, strict=True):
             outcomes.append(
                 _add_one(
                     conn,
@@ -1480,7 +1588,7 @@ def batch_add_findings(
                     reported_at_commit=f.get("reported_at_commit"),
                     reported_at_ref=f.get("reported_at_ref"),
                     fingerprint=fingerprint,
-                    mint_category=mint,
+                    new_category=new_category,
                 )
             )
     return [_finalize_add(*outcome, committed=owned) for outcome in outcomes]
@@ -2072,7 +2180,10 @@ def register_tools(mcp, conn_factory) -> None:
                       Call `categories` first to reuse existing category names.
                       Spelling is normalized (casefold, hyphen/whitespace -> "_");
                       a category this tracker does not already hold is REFUSED
-                      with a hint unless new_category=true.
+                      with a hint unless new_category=true — but only when the
+                      observation would CREATE a row: a fingerprint match on a
+                      known live or fixed finding is recorded regardless, with
+                      the observed category kept in the occurrence ring.
             file: File path relative to project root
             description: What's wrong
             source: Who created this finding (default: claude)
