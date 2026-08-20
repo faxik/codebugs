@@ -943,6 +943,10 @@ def add_finding(
     ``severity`` is normalized, not exact-matched: case and surrounding whitespace
     are forgiven, aliases are not (CB-19). The stored value is always canonical.
 
+    ``source``, top-level ``meta`` and ``reported_at_ref`` are observation-frozen
+    (BT-4): a dedup bump never updates those columns — the occurrence ring
+    (``meta.occurrences``) carries each later observation's values as evidence.
+
     The whole body runs in ``db.txn`` — the fingerprint lookup plus conditional
     write is a read-modify-write (CB-24). Do not restore a ``conn.commit()`` here:
     ``db.txn`` yields ``False`` under an ambient transaction, and committing then
@@ -1562,7 +1566,10 @@ def update_finding(
 
     ``notes`` replaces the notes wholesale; ``append_note`` adds a newline-joined
     line, preserving prior history. Note: reported_at_commit is intentionally
-    excluded — it is immutable after insert.
+    excluded — it is immutable after insert. ``reported_at_ref`` here is the
+    SANCTIONED manual mutation of an observation-frozen column (BT-4): a dedup
+    bump never moves it, this call does — a release is tagged after filing. Do
+    not confuse the pair: the commit is immutable, the ref is mutable by design.
 
     ``severity`` re-triages in place, mirroring ``priority`` on
     ``reqs.update_requirement`` (CB-17). It is validated here with the same
@@ -2135,11 +2142,25 @@ def register_tools(mcp, conn_factory) -> None:
                       with a hint unless new_category=true.
             file: File path relative to project root
             description: What's wrong
-            source: Who created this finding (default: claude)
+            source: First reporter of this defect (default: claude). Frozen at
+                    first report by design (BT-4): a re-observation keeps the
+                    original; newest sources live in the occurrence ring
+                    (meta.occurrences[*].source) — and an imported observation's
+                    ring source can be a peer tracker's.
             tags: Optional tags for grouping
-            meta: Optional JSON metadata (lines, module, rule_code, etc.)
+            meta: Optional JSON metadata (lines, module, rule_code, etc.).
+                  Top-level meta is the row's AUTHORED state, observation-frozen
+                  (BT-4): a re-observation's meta lands only as per-occurrence
+                  evidence in meta.occurrences[*].meta. Promoting specific keys
+                  into the row is a future allowlist by measured demand, not a
+                  general merge.
             reported_at_commit: Git SHA when finding was created (auto-detected from HEAD if omitted)
-            reported_at_ref: Version/tag label (e.g. "v2.1.0"), always caller-supplied
+            reported_at_ref: Version/tag label (e.g. "v2.1.0"), always caller-supplied.
+                             Observation-frozen: a bump never updates it
+                             (per-occurrence refs stay in the ring as evidence) —
+                             but manually mutable BY DESIGN via
+                             update(reported_at_ref=), since a release is tagged
+                             after filing.
             fingerprint: Stable identity token for this defect, computed from the
                          INVARIANT part of the observation (normalized error
                          signature + failing test + anchor file — no timestamps,
@@ -2239,7 +2260,11 @@ def register_tools(mcp, conn_factory) -> None:
                          This is the safe way to add evidence to a long-lived card.
             tags: Replace tags list
             meta_update: Merge additional metadata keys
-            reported_at_ref: Update version/tag label (e.g. "v2.1.0")
+            reported_at_ref: Update version/tag label (e.g. "v2.1.0"). This is
+                             the SANCTIONED manual mutation of an
+                             observation-frozen column (BT-4): observations
+                             never move it, this call does — a release is
+                             tagged after filing.
         """
         with conn_factory() as conn:
             result = update_finding(
@@ -2292,14 +2317,25 @@ def register_tools(mcp, conn_factory) -> None:
             severity: Filter by severity (critical, high, medium, low)
             category: Filter by exact category
             file: Filter by file path (substring match)
-            source: Filter by source (claude, ruff, human, etc.)
+            source: Filter by source (claude, ruff, human, etc.). Compares the
+                    FIRST reporter — the column is frozen at first report
+                    (BT-4); later observations' sources live only in the
+                    occurrence ring (meta.occurrences[*].source), and an
+                    imported observation's ring source can be a peer tracker's.
             tag: Filter by tag (finds findings containing this tag)
-            meta_key: Filter by metadata key existence
-            meta_value: Filter by metadata value (requires meta_key)
+            meta_key: Filter by metadata key existence. Reads the row's AUTHORED
+                      top-level meta (the column), never the occurrence ring.
+            meta_value: Filter by metadata value (requires meta_key; same
+                        authored top-level meta as meta_key — ring meta is not
+                        consulted)
             commit: Filter by reported_at_commit (prefix match, hex validated)
-            ref: Filter by reported_at_ref (exact match)
+            ref: Filter by reported_at_ref (exact match, never prefix) — matches
+                 the first-observed or manually assigned release ref (BT-4);
+                 per-occurrence refs in the ring are not consulted.
             fingerprint: Filter by identity fingerprint (exact match)
             group_by: Group results by: file, category, severity, status, source
+                      (source groups count FIRST reporters — the column is
+                      frozen at first report)
             limit: Max results (default 100)
             offset: Pagination offset
         """
@@ -2373,6 +2409,8 @@ def register_tools(mcp, conn_factory) -> None:
 
         Args:
             group_by: Group by: severity, category, status, file, source
+                      (source buckets count FIRST reporters — the column is
+                      frozen at first report, BT-4)
         """
         with conn_factory() as conn:
             return get_stats(conn, group_by=group_by)

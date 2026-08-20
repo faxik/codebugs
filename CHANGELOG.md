@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- **The dedup freeze of `source`, top-level `meta` and `reported_at_ref` is now a
+  declared contract, on every reader (BT-4).** No behaviour changed. `source` stores
+  the FIRST reporter — later observations' sources live only in the occurrence ring,
+  and an imported observation's ring source can be a peer tracker's. Top-level `meta`
+  is the row's authored state — a re-observation's meta lands only as per-occurrence
+  ring evidence, and `query(meta_key=)`/`meta_value` read the authored column.
+  `reported_at_ref` is observation-frozen but manually mutable by design via
+  `update(reported_at_ref=)` (a release is tagged after filing); `query(ref=)`
+  matches the first-observed or manually assigned ref exactly, never the ring.
+  Declared in the MCP tool descriptions (`add`, `update`, `query`, `stats`) and the
+  domain docstrings, pinned by prose↔code and behaviour tests.
+
 ### Fixed
 - **Re-reporting a known defect with new tags now adds them to the card (BT-4).** Since
   findings gained an identity function, a second report of the same defect bumps the
