@@ -1428,6 +1428,24 @@ class TestProvenance:
         assert result["total"] == 1
         assert result["findings"][0]["reported_at_ref"] == "v2.1.0"
 
+    def test_query_by_ref_is_exact_not_prefix(self, conn):
+        """Pins DELIBERATELY PRESERVED behaviour (BT-4 T-11 — green on both
+        sides of the docs-only change): `ref` matches the stored value — the
+        first-observed or manually assigned release ref — EXACTLY. "v1" must
+        not prefix-match a "v1.0" row, unlike the `commit` filter, which is
+        documented prefix. The sibling test above cannot see a prefix mutant
+        because it queries the full value only."""
+        findings.add_finding(
+            conn,
+            severity="high",
+            category="bug",
+            file="a.py",
+            description="d",
+            reported_at_ref="v1.0", new_category=True,
+        )
+        assert findings.query_findings(conn, ref="v1")["total"] == 0
+        assert findings.query_findings(conn, ref="v1.0")["total"] == 1
+
     def test_update_reported_at_ref(self, conn):
         f = findings.add_finding(
             conn,

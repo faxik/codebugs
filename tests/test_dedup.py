@@ -331,6 +331,42 @@ class TestOccurrenceRing:
         assert entry["reported_at_ref"] == "v2.0"
 
 
+class TestObservationFrozenFields:
+    """BT-4 (T-11): `source` and top-level `meta` are observation-frozen BY
+    DESIGN — a bump refreshes severity (CB-52, escalation only) and unions tags
+    (BT-4) and touches no other observation-supplied column; the ring carries
+    the later observation's values as evidence.
+
+    Every test here pins DELIBERATELY PRESERVED behaviour — green on both sides
+    of the T-11 docs-only change (per the Testing-section corollary, said here
+    so a reader can tell these from broken pins): T-11 declares the freeze in
+    prose, and these tests hold the behaviour that prose now promises.
+    """
+
+    def test_a_bump_keeps_the_first_reporter_and_rings_the_new_source(self, conn):
+        first = _add(conn, source="human")
+        bumped = _add(conn, source="ruff")
+        assert bumped["id"] == first["id"] and bumped["dedup_action"] == "bumped"
+        assert bumped["source"] == "human", "the column is the FIRST reporter, frozen"
+        assert bumped["meta"]["occurrences"][-1]["source"] == "ruff", (
+            "the ring must carry the later observation's source as evidence"
+        )
+
+    def test_a_bump_keeps_observed_meta_out_of_the_row_and_in_the_ring(self, conn):
+        _add(conn)
+        bumped = _add(conn, meta={"k": "v"})
+        assert bumped["dedup_action"] == "bumped"
+        assert "k" not in bumped["meta"], (
+            "top-level meta is the row's AUTHORED state; observation meta must not merge in"
+        )
+        assert bumped["meta"]["occurrences"][-1]["meta"] == {"k": "v"}, (
+            "the ring entry must carry the observation's meta as per-occurrence evidence"
+        )
+        assert findings.query_findings(conn, meta_key="k")["total"] == 0, (
+            "query(meta_key=) reads the authored top-level state, never the ring"
+        )
+
+
 class TestBatchIdentity:
     def test_results_are_input_ordered(self, conn):
         # Ids CB-1, CB-10, CB-2 come back in B-tree order from a bulk SELECT..IN;
