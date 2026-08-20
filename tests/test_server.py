@@ -398,3 +398,39 @@ class TestAttentionOverTheWire:
         assert member["dedup_action"] == "bumped", "precondition: this must be a dedup bump"
         assert member["attention"] == [self.ESCALATED]
         assert json.loads(res.content[0].text)["attention"] == [self.ESCALATED]
+
+    def test_a_category_divergence_is_visible_over_the_wire(self, tracker):
+        """T-15's signal reaches the client on both forms too.
+
+        A caller-supplied fingerprint is what makes two DIFFERENT categories
+        match at all: on the derived path the category is a fingerprint input, so
+        a different category is a different hash. No `new_category` is needed on
+        the second call — the CB-60 mint gate runs on the insert continuation
+        only, and a bump returns before it.
+        """
+        mcp, _ = _server_with_middleware(tracker)
+        self._call(
+            mcp,
+            "add",
+            {
+                **self._member("low", "the first observation text"),
+                "category": "alpha_svc",
+                "fingerprint": "svc:login:timeout",
+                "new_category": True,
+            },
+        )
+
+        res = self._call(
+            mcp,
+            "add",
+            {
+                **self._member("low", "an entirely different observation text"),
+                "category": "Beta-Svc",
+                "fingerprint": "svc:login:timeout",
+            },
+        )
+
+        diverged = {"signal": "category_divergence", "observed": "beta_svc", "stored": "alpha_svc"}
+        assert res.structured_content["dedup_action"] == "bumped"
+        assert res.structured_content["attention"] == [diverged]
+        assert json.loads(res.content[0].text)["attention"] == [diverged]
