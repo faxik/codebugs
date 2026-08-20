@@ -62,6 +62,34 @@ fi
 SLUG="$1"
 COMMIT_MSG="${2:-}"
 
+# EVERY re-run hint echoes back the message the aborted run was given (CB-116).
+#
+# The exit-13 refusal below fires precisely BECAUSE main moved during the run —
+# and main moving is the condition that used to break the derived subject. So a
+# hint printing the bare short form routed the operator out of one instance of
+# this defect and straight into another: the observed CB-111 merge subject was
+# produced on exactly such a retry. This is orthogonal to the derivation fix and
+# would be needed even if the derivation were perfect, because the operator's
+# EXPLICIT message must survive a refusal that was never their fault.
+#
+# It preserves the `--merge-msg` and NOTHING ELSE, which is deliberate rather
+# than partial: `--skip-checks` and `--allow-stale-base` are relaxations, so
+# dropping them makes the retry stricter, and the positional commit message only
+# applies to a worktree that is still dirty, which after a first run it is not.
+# An explicit message is the one argument whose loss is silent and costly.
+#
+# Single-quoted rather than %q-escaped: the line exists to be copy-pasted, and
+# `%q` renders every space as `\ `, which a Cyrillic-heavy message turns into
+# noise. The `'\''` dance is the standard POSIX single-quote escape and it round
+# -trips a message containing a quote.
+_retry_hint() {
+    local line="tools/worktree-finish.sh ${SLUG}"
+    if [[ -n "${MERGE_MSG}" ]]; then
+        line="${line} --merge-msg '${MERGE_MSG//\'/\'\\\'\'}'"
+    fi
+    echo "      ${line}"
+}
+
 # Resolve slug → path, accepting either the full directory name
 # (fix-cb-50-thing) or the branch suffix (cb-50-thing).
 _resolve_worktree_path() {
@@ -165,7 +193,7 @@ if [[ "${WORKTREE_BASE}" != "${CURRENT_MAIN}" ]]; then
         echo "  ✗ Conflicts. Resolve them IN THE WORKTREE, then re-run:"
         echo "      cd ${WORKTREE_PATH}"
         echo "      # resolve, then: git add <files> && git commit"
-        echo "      tools/worktree-finish.sh ${SLUG}"
+        _retry_hint
         exit 1
     fi
 else
@@ -192,6 +220,88 @@ fi
 # forward-merge used, so it cannot drift from it by construction.
 TESTED_MAIN="${CURRENT_MAIN}"
 TESTED_HEAD=$(git -C "${WORKTREE_PATH}" rev-parse HEAD)
+
+# ---------------------------------------------------------------------------
+# THE INTEGRATION MESSAGE, derived from the commits MAIN DOES NOT HAVE (CB-116).
+#
+# CLAUDE.md specifies "Merge <branch>: <what changed> (CB-NN)", and calls the
+# merge commit what makes a card's whole iteration recoverable as one unit. The
+# derivation used to read `log -1 --no-merges` on the worktree tip — but [5/7]
+# above has just merged MAIN into that tip, so the newest non-merge commit there
+# is main's whenever main moved during the branch's life. Landing CB-111
+# produced exactly that: a merge closing CB-111 whose subject was an unrelated
+# plan note naming CB-113/114/115. A derivation whose input the same script
+# rewrote two steps earlier is not a defaulting convenience, it is a guess about
+# a value it destroyed.
+#
+# `${TESTED_MAIN}..${TESTED_HEAD}` is exactly what this merge is about to ADD to
+# main: after the forward-merge main is an ancestor of HEAD, so the range is the
+# whole delta and nothing main already has can appear in it. Note the defect was
+# never topological — it was `git log`'s reverse-CHRONOLOGICAL order picking
+# main's newer timestamp — but restricting the RANGE alone does not make the
+# ordering irrelevant, and an earlier draft of this comment claimed it did.
+#
+# --first-parent is what makes the pick the branch's OWN line, and it is not
+# decoration. Measured (both reviewers reproduced it independently, and so did
+# I): a branch that merges a SIBLING branch whose commits are older puts the
+# sibling's commit first in date order, so the plain range picks it — the CB-116
+# symptom arriving through a second door, and on that shape the range-only fix
+# is WORSE than the code it replaces. Following first parents skips every
+# absorbed lineage, including the forward-merge of main itself.
+#
+# --reverse takes the FIRST commit of that line, not the last. Measured over
+# main's own first-parent line: of the 47 integration merges whose branch
+# carried two or more commits, the first commit's subject was judged closer to
+# the message a human actually wrote in 38 and the last in 7 (that split is a
+# JUDGEMENT and does not partition the 47 — two were not classified either way;
+# the 47 itself reproduces mechanically). Five of the 47 open with the extinct
+# `wip(cb-NN): checkpoint before …` form. Branches here end on review fixups
+# ("close the altitude findings", "record the round-2 outcomes"), which describe
+# the iteration's tail rather than its subject. Do NOT collapse this to
+# `--reverse -1`: git applies the count BEFORE reversing, so that yields the
+# NEWEST commit and silently reinstates the last-commit behaviour.
+#
+# KNOWN LIMIT, stated rather than guessed at: `worktree-setup.sh <branch> [base]`
+# can cut a branch from a NON-MAIN base, and that base's commits are on this
+# branch's own first-parent line, so the derivation names the base's first commit.
+# No ordering flag reaches that case (measured — --first-parent and --topo-order
+# both pick the base commit), because it is not a traversal question: the commits
+# really are this branch's ancestry and this merge really does land them. Pass
+# --merge-msg on a branch cut from a non-main base.
+#
+# Derived HERE rather than at the merge below so the empty-population refusal is
+# free — under the lock it would cost the whole ~70s gate run first. It cannot
+# drift from what is landed: both inputs are the pinned TESTED_* values, and the
+# in-lock re-checks refuse with exit 13 if either has moved.
+if [[ -n "${MERGE_MSG}" ]]; then
+    INTEGRATION_MSG="${MERGE_MSG}"
+else
+    _own_subjects=$(git -C "${WORKTREE_PATH}" log --first-parent --reverse --no-merges \
+        --format=%s "${TESTED_MAIN}..${TESTED_HEAD}" 2>/dev/null || true)
+    # The first NON-EMPTY subject, not the first line. `git commit
+    # --allow-empty-message` puts an empty line at the head of the population,
+    # and testing the first line instead of the population made the refusal
+    # below print "carries no commit of its own" about a branch that carries
+    # several — a false refusal that also states something untrue about the
+    # repository, which is worse than the refusal itself.
+    _subject=$(printf '%s\n' "${_own_subjects}" | grep -m1 -v '^[[:space:]]*$' || true)
+    if [[ -z "${_subject}" ]]; then
+        echo ""
+        echo "  ✗ ${BRANCH} carries no commit of its own, with a subject, that main"
+        echo "    does not already have — so there is no subject to derive that"
+        echo "    would be true."
+        echo "    (_guard_nonempty_diff passed, so the CONTENT is real — it arrived"
+        echo "     through a merge commit rather than through a commit of this"
+        echo "     branch's own first-parent line, or through empty subjects.)"
+        echo "    Say what changed explicitly:"
+        echo "      tools/worktree-finish.sh ${SLUG} --merge-msg 'Merge ${BRANCH}: … (CB-NN)'"
+        exit 1
+    fi
+    _ids=$(printf '%s' "${BRANCH}" | grep -oiE 'cb-?[0-9]+' \
+        | tr '[:upper:]' '[:lower:]' | sed -E 's/^cb-?/CB-/' | sort -u | paste -sd, - || true)
+    INTEGRATION_MSG="Merge ${BRANCH}: ${_subject}"
+    [[ -n "${_ids}" ]] && INTEGRATION_MSG="${INTEGRATION_MSG} (${_ids})"
+fi
 
 # ---------------------------------------------------------------------------
 # Gates run in the WORKTREE, on the post-forward-merge tree — the combined
@@ -264,7 +374,7 @@ if [[ "${CURRENT_MAIN}" != "${TESTED_MAIN}" ]]; then
     echo "      main is now:    ${CURRENT_MAIN:0:9}"
     echo "    Landing now would merge a tree that was never tested against the"
     echo "    current main. Re-run — it will forward-merge and re-test:"
-    echo "      tools/worktree-finish.sh ${SLUG}"
+    _retry_hint
     flock -u 9
     exit 13
 fi
@@ -275,27 +385,10 @@ CURRENT_HEAD=$(git -C "${WORKTREE_PATH}" rev-parse HEAD)
 if [[ "${CURRENT_HEAD}" != "${TESTED_HEAD}" ]]; then
     echo "  ✗ ${BRANCH} moved while this finish was running:"
     echo "      tested: ${TESTED_HEAD:0:9}   now: ${CURRENT_HEAD:0:9}"
-    echo "    Re-run to test what is actually there."
+    echo "    Re-run to test what is actually there:"
+    _retry_hint
     flock -u 9
     exit 13
-fi
-
-# The integration message CLAUDE.md specifies: "Merge <branch>: <what changed>
-# (CB-NN)". The merge commit is what makes a card's whole iteration recoverable
-# as one unit — which is exactly what the 2026-08-16 fast-forward destroyed.
-if [[ -z "${MERGE_MSG}" ]]; then
-    # --no-merges: after [5/7] the tip is usually the forward-merge, whose
-    # auto-subject is "Merge commit '<sha>' into <branch>". Using it produced
-    #   Merge fix/cb-99-x: Merge commit '54bfab9…' into fix/cb-99-x (CB-99)
-    # — the "what changed" slot filled with noise, in the common case where the
-    # branch was behind main. The merge commit is the ONE artifact this card
-    # exists to protect, so it gets the last real subject, not the plumbing.
-    _subject=$(git -C "${WORKTREE_PATH}" log -1 --no-merges --format=%s 2>/dev/null || true)
-    [[ -z "${_subject}" ]] && _subject=$(git -C "${WORKTREE_PATH}" log -1 --format=%s)
-    _ids=$(printf '%s' "${BRANCH}" | grep -oiE 'cb-?[0-9]+' \
-        | tr '[:upper:]' '[:lower:]' | sed -E 's/^cb-?/CB-/' | sort -u | paste -sd, - || true)
-    MERGE_MSG="Merge ${BRANCH}: ${_subject}"
-    [[ -n "${_ids}" ]] && MERGE_MSG="${MERGE_MSG} (${_ids})"
 fi
 
 # ALWAYS --no-ff. A fast-forward scatters the iteration across main's history
@@ -313,15 +406,15 @@ fi
 # independent reader of the same rule rather than a new obstacle — and if the
 # two ever disagree, that disagreement is a defect worth failing on, not
 # suppressing.
-if git -C "${REPO_ROOT}" merge "${BRANCH}" --no-ff -m "${MERGE_MSG}"; then
-    echo "  ✓ Merged: ${MERGE_MSG}"
+if git -C "${REPO_ROOT}" merge "${BRANCH}" --no-ff -m "${INTEGRATION_MSG}"; then
+    echo "  ✓ Merged: ${INTEGRATION_MSG}"
 else
     echo "  ✗ Merge failed (conflict, or the pre-merge-commit hook refused it)."
     echo "    Resolve IN THE WORKTREE, never on main:"
     echo "      cd ${REPO_ROOT} && git merge --abort"
     echo "      cd ${WORKTREE_PATH} && git merge ${CURRENT_MAIN}"
     echo "      # resolve, git add <files> && git commit"
-    echo "      tools/worktree-finish.sh ${SLUG}"
+    _retry_hint
     flock -u 9
     exit 1
 fi
