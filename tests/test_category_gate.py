@@ -12,6 +12,10 @@ CB-51).
 
 from __future__ import annotations
 
+import ast
+import inspect
+import pathlib
+
 import pytest
 
 from codebugs import db, findings
@@ -283,6 +287,150 @@ class TestStampReservation:
         row = _add(conn, cat="real_cat", new_category=True)
         fixed = findings.update_finding(conn, row["id"], meta_update={"category_minted": False})
         assert fixed["meta"]["category_minted"] is False
+
+
+class TestOccurrenceRingCarriesCategory:
+    """BT-4 / CB-113 ring half: every ring entry records the observation's category.
+
+    The ring is the un-merge evidence (CB-43); category is an identity input, so
+    a merged-away observation whose category differed from the stored one must be
+    reconstructable from the ring alone. The key is written unconditionally —
+    `""` is a legal category, and its absence in the ring would be
+    indistinguishable from pre-fix entries.
+    """
+
+    def test_bump_ring_entry_carries_the_observed_normalized_category(self, conn):
+        _add(conn, cat="proc_fail", new_category=True)
+        second = _add(conn, cat="Proc-Fail")  # normalized twin -> bumps
+        assert second["dedup_action"] == "bumped"
+        assert second["meta"]["occurrences"][-1]["category"] == "proc_fail"
+
+    def test_empty_category_is_recorded_not_omitted(self, conn):
+        _add(conn, cat="", fingerprint="ring-empty-cat")
+        second = _add(conn, desc=LONG_B, cat="", fingerprint="ring-empty-cat")
+        assert second["dedup_action"] == "bumped"
+        entry = second["meta"]["occurrences"][-1]
+        assert "category" in entry
+        assert entry["category"] == ""
+
+
+class TestKnownCardObservationIsNotGated:
+    """CB-113(b): the category gate must not destroy an observation of a KNOWN card.
+
+    The gate exists to stop identity forks at MINT time (CB-60). An observation
+    whose supplied fingerprint matches a live or reopenable card creates nothing —
+    refusing it loses the occurrence (count, ring evidence, regression reopen)
+    over a spelling dispute about a row that already exists. The gate therefore
+    runs on the insert continuation only; bump and reopen record always, and the
+    ring carries the observed spelling as the evidence.
+    """
+
+    def test_live_bump_with_near_miss_typo_records_the_occurrence(self, conn):
+        first = _add(conn, cat="process_improvement", new_category=True, fingerprint="tok-live")
+        second = findings.add_finding(
+            conn,
+            severity="medium",
+            category="process_improvemnt",  # near-miss typo, no flag
+            file="a.py",
+            description=LONG_B,
+            fingerprint="tok-live",
+        )
+        assert second["id"] == first["id"]
+        assert second["dedup_action"] == "bumped"
+        assert second["occurrence_count"] == 2
+        # The ring is the evidence channel: it carries the observed spelling.
+        assert second["meta"]["occurrences"][-1]["category"] == "process_improvemnt"
+        # The stored column is untouched — the gate never rewrites, and a bump
+        # does not adopt the typo.
+        assert second["category"] == "process_improvement"
+
+    def test_reopen_with_near_miss_typo_is_not_lost(self, conn):
+        first = _add(conn, cat="process_improvement", new_category=True, fingerprint="tok-reopen")
+        findings.update_finding(conn, first["id"], status="fixed")
+        second = findings.add_finding(
+            conn,
+            severity="medium",
+            category="process_improvemnt",  # near-miss typo, no flag
+            file="a.py",
+            description=LONG_B,
+            fingerprint="tok-reopen",
+        )
+        assert second["id"] == first["id"]
+        assert second["dedup_action"] == "reopened"
+        assert second["status"] == "open"
+        assert second["meta"]["occurrences"][-1]["category"] == "process_improvemnt"
+
+    def test_recurrence_of_closed_is_still_gated(self, conn):
+        """A wont_fix hit files a NEW row (decision stays decided) — that is the
+        insert path, so the mint gate still applies to it, exactly as before."""
+        first = _add(conn, cat="process_improvement", new_category=True, fingerprint="tok-rec")
+        findings.update_finding(conn, first["id"], status="wont_fix")
+        with pytest.raises(ValueError, match="new_category"):
+            findings.add_finding(
+                conn,
+                severity="medium",
+                category="process_improvemnt",
+                file="a.py",
+                description=LONG_B,
+                fingerprint="tok-rec",
+            )
+
+    def test_batch_member_bumping_live_card_with_typo_is_not_refused(self, conn):
+        _add(conn, cat="process_improvement", new_category=True, fingerprint="tok-batch")
+        results = findings.batch_add_findings(
+            conn,
+            [
+                {
+                    "severity": "low",
+                    "category": "process_improvemnt",  # near-miss typo, no flag
+                    "file": "f",
+                    "description": LONG_B,
+                    "fingerprint": "tok-batch",
+                },
+            ],
+        )
+        assert results[0]["dedup_action"] == "bumped"
+        assert results[0]["meta"]["occurrences"][-1]["category"] == "process_improvemnt"
+
+
+class TestGateCategoryOptOutRatchet:
+    """`gate_category=False` has exactly ONE call site, and that count is pinned.
+
+    Same shape as `tests/test_dedup.py::TestEscalateOptOutRatchet` (CB-52) and
+    `TestPromoteTagsOptOutRatchet` (BT-4): an opt-out of an identity invariant
+    spreads quietly, so a second one must break this test and be argued for.
+    The one site is `import_findings` — an import is not an observation (CB-51),
+    so a peer's category lands verbatim, ungated. Read by AST, not by grep.
+    """
+
+    def test_exactly_one_call_site_opts_out_of_the_gate(self):
+        source = pathlib.Path(findings.__file__).read_text()
+        opt_outs = [
+            node
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call)
+            for kw in node.keywords
+            if kw.arg == "gate_category"
+            and isinstance(kw.value, ast.Constant)
+            and kw.value.value is False
+        ]
+        assert len(opt_outs) == 1, (
+            f"expected exactly one `gate_category=False` call site (import_findings), "
+            f"found {len(opt_outs)} at lines {[n.lineno for n in opt_outs]}"
+        )
+
+    def test_the_public_add_surface_cannot_opt_out(self):
+        """`gate_category` is deliberately absent from the public signatures.
+
+        `new_category` IS exposed (permission to mint is the caller's call);
+        `gate_category` is not, so no MCP or CLI caller can turn the gate off
+        by argument — only the in-package import path can. Symmetric with the
+        `escalate` reservation (CB-52).
+        """
+        assert "gate_category" not in inspect.signature(findings.add_finding).parameters
+        assert "gate_category" not in inspect.signature(findings.batch_add_findings).parameters
+        assert "new_category" in inspect.signature(findings.add_finding).parameters
+        assert "new_category" in inspect.signature(findings.batch_add_findings).parameters
 
 
 class TestImportIsNotGated:
