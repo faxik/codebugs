@@ -153,6 +153,222 @@ class TestAbandonSession:
         assert result["status"] == "abandoned"
 
 
+class CommitFiringConnection(sqlite3.Connection):
+    """One-shot hook fired the instant the write transaction closes.
+
+    Copied in shape from ``tests/test_milestones.py::CommitPausingConnection`` and
+    for the same reason: **two seams, deliberately**. Unfixed ``abandon_session``
+    closes with ``conn.commit()``; the fixed one closes with ``db.txn``'s
+    ``conn.execute("COMMIT")``. A hook keyed on only one of them gives a vacuous
+    pass on the other, which is precisely the failure this test class exists to
+    catch.
+
+    The hook runs AFTER the underlying commit in both cases — firing before it
+    lands would leave the write lock held, so the second connection writing inside
+    the hook would block until ``busy_timeout`` expired instead of racing.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.after_commit = None
+
+    def _fire(self):
+        if self.after_commit:
+            hook, self.after_commit = self.after_commit, None
+            hook()
+
+    def commit(self):
+        super().commit()
+        self._fire()
+
+    def execute(self, sql, *args, **kwargs):
+        cur = super().execute(sql, *args, **kwargs)
+        if sql.lstrip().upper().startswith("COMMIT"):
+            self._fire()
+        return cur
+
+
+class TestAbandonSessionReturnsTheRowItWrote:
+    """CB-111: the dict is the row THIS call wrote, never a later re-read.
+
+    ``abandon_session`` used to end with ``conn.commit()`` followed by a fresh
+    ``SELECT *``, so anything that touched the session inside that window was
+    reported as the outcome of the abandon. That was unobservable while the only
+    caller printed ``result['session_id']`` — the one column that cannot go stale —
+    and became live when CB-106 exposed ``codemerge_abandon`` as an MCP tool, which
+    hands the whole dict to the client. An agent then reads ``status: 'active'``
+    for a call that wrote ``abandoned``, concludes it failed, and re-issues it
+    against a session someone has since restarted.
+
+    Trap worth naming for the next reader (the RETURNING rule): once the statement
+    carries ``RETURNING``, its ``rowcount`` is 0 until the cursor is exhausted, so
+    re-expressing the refusal as ``cursor yielded no row`` is not cosmetic. A fix
+    that adds ``RETURNING`` and keeps ``if cur.rowcount == 0`` refuses EVERY
+    successful call; that mutant is caught by ``TestAbandonSession`` above, which
+    is why no test here duplicates it.
+    """
+
+    def _seed(self, tmp_path, status="active"):
+        """A file-backed DB holding one session, so a second connection can race."""
+        path = str(tmp_path / "merge.db")
+        c = sqlite3.connect(path)
+        c.row_factory = sqlite3.Row
+        try:
+            merge.ensure_schema(c)
+            merge.start_session(c, session_id="s1", branch="fix/x")
+            if status != "active":
+                c.execute(
+                    "UPDATE codemerge_sessions SET status=? WHERE session_id='s1'", (status,)
+                )
+            c.commit()
+        finally:
+            c.close()
+        return path
+
+    def _open(self, path, factory=sqlite3.Connection):
+        c = sqlite3.connect(path, factory=factory)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA busy_timeout=5000")
+        return c
+
+    def test_a_restart_inside_the_commit_window_is_not_reported_as_the_outcome(self, tmp_path):
+        """The discriminator: restart the session the instant the commit lands.
+
+        Fixed, the row was captured by ``RETURNING`` before the commit, so the call
+        reports the ``abandoned`` it wrote. Unfixed, the trailing ``SELECT`` runs
+        after the hook and reports the competitor's ``active`` — a successful write
+        described as a failure.
+        """
+        path = self._seed(tmp_path)
+        c = self._open(path, factory=CommitFiringConnection)
+        try:
+            def restart_from_another_connection():
+                other = self._open(path)
+                try:
+                    other.execute(
+                        "UPDATE codemerge_sessions SET status='active', finished_at=NULL "
+                        "WHERE session_id='s1'"
+                    )
+                    other.commit()
+                finally:
+                    other.close()
+
+            c.after_commit = restart_from_another_connection
+            result = merge.abandon_session(c, "s1")
+        finally:
+            c.close()
+
+        assert c.after_commit is None, (
+            "vacuous test: the hook never fired, so no commit seam was observed — "
+            "check that both seams (conn.commit and execute('COMMIT')) are hooked"
+        )
+        assert result["status"] == "abandoned", (
+            "the call must report the row it wrote, not whatever the session "
+            f"became afterwards, got {result['status']!r}"
+        )
+        assert result["finished_at"] is not None, (
+            "finished_at came from the post-commit re-read, not from the write"
+        )
+
+    def test_it_does_not_commit_an_ambient_transaction(self, tmp_path):
+        """Under a caller's open transaction the abandon must not make it permanent.
+
+        The bare ``conn.commit()`` was CB-24 consequence (1) — the ambient-commit
+        hazard ``merge()`` and ``pull_next`` were cured of by CB-40: a caller with
+        unrelated uncommitted DML had it silently committed, so its own
+        compensating ``ROLLBACK`` afterwards undid nothing. ``db.txn`` yields
+        False here and writes no COMMIT, leaving the caller in charge.
+        """
+        path = self._seed(tmp_path)
+        c = self._open(path)
+        try:
+            c.execute("BEGIN IMMEDIATE")
+            c.execute("UPDATE codemerge_sessions SET description='caller work' "
+                      "WHERE session_id='s1'")
+            merge.abandon_session(c, "s1")
+            assert c.in_transaction, "the caller's transaction was closed by the callee"
+            c.execute("ROLLBACK")
+        finally:
+            c.close()
+
+        checker = self._open(path)
+        try:
+            row = checker.execute(
+                "SELECT status, description FROM codemerge_sessions WHERE session_id='s1'"
+            ).fetchone()
+        finally:
+            checker.close()
+        assert row["description"] != "caller work", "the caller's DML was committed for it"
+        assert row["status"] == "active", "the abandon was committed inside the caller's txn"
+
+    def test_the_refusal_path_does_not_commit_an_ambient_transaction(self, tmp_path):
+        """Same, for the ``done`` refusal — it carried its own ``conn.commit()``.
+
+        That commit was deliberate: without ``db.txn`` the UPDATE itself took the
+        write lock before finding it matched no row, so a bare ``raise`` stranded
+        the lock on the connection. It still had to be REMOVED rather than kept,
+        because inside ``with db.txn(...)`` it commits from within the context
+        manager. Note what does NOT happen here: ``db.txn`` yields False under an
+        ambient transaction and performs no rollback either — the caller keeps the
+        transaction, which is exactly what the ``in_transaction`` assertion below
+        pins, and the caller's own ``ROLLBACK`` is what undoes the abandon.
+        """
+        path = self._seed(tmp_path, status="done")
+        c = self._open(path)
+        try:
+            c.execute("BEGIN IMMEDIATE")
+            c.execute("UPDATE codemerge_sessions SET description='caller work' "
+                      "WHERE session_id='s1'")
+            with pytest.raises(ValueError, match="cannot be abandoned"):
+                merge.abandon_session(c, "s1")
+            assert c.in_transaction, "the caller's transaction was closed by the callee"
+            c.execute("ROLLBACK")
+        finally:
+            c.close()
+
+        checker = self._open(path)
+        try:
+            row = checker.execute(
+                "SELECT description FROM codemerge_sessions WHERE session_id='s1'"
+            ).fetchone()
+        finally:
+            checker.close()
+        assert row["description"] != "caller work", "the caller's DML was committed for it"
+
+    def test_the_refusal_path_still_releases_the_write_lock_unchanged(self, tmp_path):
+        """PRESERVED behaviour, so this test PASSES against the unfixed code too.
+
+        Said plainly per the repo's rule about tests that do not discriminate. The
+        removed ``conn.commit()`` provided this by committing an empty transaction;
+        ``db.txn`` provides it by rolling back. The point of pinning it beside the
+        change is that the property had to survive the removal of the mechanism
+        that used to deliver it — losing it would strand the write lock on the
+        connection for the next caller.
+
+        ``TestTheMcpSurfaceCanCloseASession::test_abandoning_a_done_session_is_refused``
+        already asserts ``in_transaction`` after a refusal; what is new here is the
+        second-connection probe, which observes the lock directly rather than
+        through this connection's autocommit flag.
+        """
+        path = self._seed(tmp_path, status="done")
+        c = self._open(path)
+        try:
+            with pytest.raises(ValueError, match="cannot be abandoned"):
+                merge.abandon_session(c, "s1")
+            assert not c.in_transaction, "the refusal left a transaction open"
+
+            other = self._open(path)
+            try:
+                # Raises OperationalError('database is locked') if the refusal
+                # left this connection's frame holding RESERVED.
+                other.execute("BEGIN IMMEDIATE")
+                other.execute("ROLLBACK")
+            finally:
+                other.close()
+        finally:
+            c.close()
+
+
 class TestClaims:
     def test_add_claim(self, conn):
         merge.start_session(conn, session_id="s1", branch="b1", description="d1")
