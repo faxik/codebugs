@@ -9,3 +9,4 @@
 - BT-2 — (кандидат DIR-1) судьба лизинга и слотов: liveness/владение — та же фиксация задним числом, `DIR-1-trust-coordination.md:161`
 - BT-3 — (кандидат DIR-1) подготовка В-5 (exposure-RFC) к ратификации — та же фиксация, `DIR-1-trust-coordination.md:178`
 - BT-4 — (DIR-2) контракт свежести остальных колонок дедуплицированной карты (из CB-103) — 2026-08-20, DIR-2, `BT-4-field-freshness-contract.md`
+- Т-6 — (DIR-1) CB-111: `abandon_session` перечитывает строку после коммита, и с CB-106 это видно MCP-клиенту — 2026-08-20, DIR-1, `L3-BRIEF-DIR-1-T6-cb111-abandon-returning.md` (механическая полоса)
