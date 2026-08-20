@@ -151,48 +151,75 @@ def abandon_session(conn: sqlite3.Connection, session_id: str) -> dict[str, Any]
     third consequence. The guard is a condition on the UPDATE rather than a
     Python check on the row read above, so a session that reaches ``done``
     concurrently is refused too instead of losing the race.
+
+    **The dict returned is the row this call WROTE, captured by ``RETURNING``
+    (CB-111).** It used to be a fresh ``SELECT`` issued after ``conn.commit()``,
+    so a session restarted inside that window came back as ``status: 'active'``
+    for a call that had just written ``abandoned`` — harmless while the only
+    caller printed ``session_id``, and a live lie once CB-106 exposed the whole
+    dict over MCP. Because THAT statement carries ``RETURNING`` — the
+    ``codemerge_locks`` update deliberately does not — its ``rowcount`` must
+    never be read (the RETURNING rule): measured, it is 0 right after
+    ``execute()`` even on a matching row and only becomes 1 after ``fetchone()``,
+    so a ``rowcount == 0`` refusal placed where the old one was fires on every
+    successful call. The outcome is read by FETCHING instead.
+
+    Do not restore a ``conn.commit()`` on any path: ``db.txn`` owns the commit,
+    and under an ambient transaction it yields False, so a commit here would
+    make the caller's unrelated work permanent — CB-24 consequence (1), the
+    hazard ``merge()`` and ``pull_next`` were cured of by CB-40.
+
+    **Under an ambient transaction the dict describes an UNCOMMITTED row**, and
+    the caller's own ``ROLLBACK`` erases it. That is the ambient-transaction
+    invariant `claims.py` documents, not a defect here: this is a release rather
+    than an acquisition, so it does not refuse the way ``merge()`` does. It is
+    unreachable today — both callers (the MCP tool and the CLI handler) open a
+    fresh connection.
     """
     _get_session(conn, session_id)
 
     now = utc_now()
-    cur = conn.execute(
-        "UPDATE codemerge_sessions SET status='abandoned', finished_at=?, last_activity=? "
-        "WHERE session_id=? AND status != 'done'",
-        (now, now, session_id),
-    )
-    # No RETURNING on this statement, so its outcome is read from rowcount and
-    # only from rowcount (the CB-30 rule).
-    if cur.rowcount == 0:
-        # NOTHING WAS WRITTEN, BUT A TRANSACTION IS OPEN. The UPDATE took the
-        # write lock before matching zero rows, and a bare `raise` here would
-        # hand the next caller on this connection a held lock — under which
-        # `merge()` refuses outright and another connection gets
-        # "database is locked". "It wrote nothing, so there is nothing to undo"
-        # is true about CONTENT and false about LOCK STATE; an earlier draft of
-        # this function said exactly that and was wrong (adversarial review).
-        # Committing an empty transaction is the smallest correct end to it, and
-        # it matches what this function does on every other path.
-        observed = conn.execute(
-            "SELECT status FROM codemerge_sessions WHERE session_id = ?", (session_id,)
-        ).fetchone()
-        conn.commit()
-        if observed is None:
-            raise KeyError(f"Session '{session_id}' not found")
-        raise ValueError(
-            f"Session '{session_id}' is '{observed['status']}' and cannot be abandoned: "
-            "that would erase the record of a merge that succeeded. Nothing is "
-            "holding it open — no 'done' session holds the merge lock, and its "
-            "claims are already excluded from conflict checks."
+    with db.txn(conn):
+        cur = conn.execute(
+            "UPDATE codemerge_sessions SET status='abandoned', finished_at=?, last_activity=? "
+            "WHERE session_id=? AND status != 'done' RETURNING *",
+            (now, now, session_id),
         )
-    conn.execute(
-        "UPDATE codemerge_locks SET session_id=NULL, acquired_at=NULL, expires_at=NULL "
-        "WHERE id=1 AND session_id=?",
-        (session_id,),
-    )
-    conn.commit()
-    return dict(conn.execute(
-        "SELECT * FROM codemerge_sessions WHERE session_id = ?", (session_id,)
-    ).fetchone())
+        # Exhaust the cursor inside the block: db.txn issues COMMIT on exit, and
+        # an open RETURNING cursor at that point is a statement still in progress
+        # — moving this fetch below the block makes every abandon die with
+        # "cannot commit transaction - SQL statements in progress" (measured).
+        # One fetchone() suffices only because `session_id` is TEXT PRIMARY KEY,
+        # so the WHERE matches at most one row; widen that predicate and this
+        # must become a fetchall().
+        updated = cur.fetchone()
+        if updated is None:
+            # NOTHING WAS WRITTEN, AND ON THIS FRAME'S OWN TRANSACTION THE WRITE
+            # LOCK IS HELD — `db.txn` took it at BEGIN IMMEDIATE, before the
+            # UPDATE ever matched zero rows. Raising is safe there because the
+            # context manager rolls back on the way out; a bare `raise` under the
+            # old hand-rolled discipline handed the next caller on this connection
+            # a held lock, under which `merge()` refuses outright and another
+            # connection gets "database is locked". Under an AMBIENT transaction
+            # `db.txn` does nothing at all — no rollback — and that is correct:
+            # the lock and the decision to undo belong to the caller.
+            observed = conn.execute(
+                "SELECT status FROM codemerge_sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            if observed is None:
+                raise KeyError(f"Session '{session_id}' not found")
+            raise ValueError(
+                f"Session '{session_id}' is '{observed['status']}' and cannot be abandoned: "
+                "that would erase the record of a merge that succeeded. Nothing is "
+                "holding it open — no 'done' session holds the merge lock, and its "
+                "claims are already excluded from conflict checks."
+            )
+        conn.execute(
+            "UPDATE codemerge_locks SET session_id=NULL, acquired_at=NULL, expires_at=NULL "
+            "WHERE id=1 AND session_id=?",
+            (session_id,),
+        )
+    return dict(updated)
 
 
 def finish(
