@@ -72,6 +72,12 @@ COMMIT_MSG="${2:-}"
 # would be needed even if the derivation were perfect, because the operator's
 # EXPLICIT message must survive a refusal that was never their fault.
 #
+# It preserves the `--merge-msg` and NOTHING ELSE, which is deliberate rather
+# than partial: `--skip-checks` and `--allow-stale-base` are relaxations, so
+# dropping them makes the retry stricter, and the positional commit message only
+# applies to a worktree that is still dirty, which after a first run it is not.
+# An explicit message is the one argument whose loss is silent and costly.
+#
 # Single-quoted rather than %q-escaped: the line exists to be copy-pasted, and
 # `%q` renders every space as `\ `, which a Cyrillic-heavy message turns into
 # noise. The `'\''` dance is the standard POSIX single-quote escape and it round
@@ -228,21 +234,40 @@ TESTED_HEAD=$(git -C "${WORKTREE_PATH}" rev-parse HEAD)
 # rewrote two steps earlier is not a defaulting convenience, it is a guess about
 # a value it destroyed.
 #
-# `${TESTED_MAIN}..${TESTED_HEAD}` is the branch's own work by construction:
-# after the forward-merge main is an ancestor of HEAD, so the range is exactly
-# what the merge is about to add. Note the defect was never topological — it was
-# `git log`'s reverse-CHRONOLOGICAL order picking main's newer timestamp — and
-# restricting the range makes the ordering irrelevant rather than fighting it.
+# `${TESTED_MAIN}..${TESTED_HEAD}` is exactly what this merge is about to ADD to
+# main: after the forward-merge main is an ancestor of HEAD, so the range is the
+# whole delta and nothing main already has can appear in it. Note the defect was
+# never topological — it was `git log`'s reverse-CHRONOLOGICAL order picking
+# main's newer timestamp — but restricting the RANGE alone does not make the
+# ordering irrelevant, and an earlier draft of this comment claimed it did.
 #
-# --reverse takes the FIRST such commit, not the last. Measured over main's own
-# first-parent line: of the 47 integration merges whose branch carried two or
-# more commits, the first commit's subject is closer to the message a human
-# actually wrote in 38, the last in 7 — and 5 of those 7 are the extinct
-# `wip(cb-NN): checkpoint before mutation` opener. Branches here end on review
-# fixups ("close the altitude findings", "record the round-2 outcomes"), which
-# describe the iteration's tail rather than its subject. Do NOT collapse this to
+# --first-parent is what makes the pick the branch's OWN line, and it is not
+# decoration. Measured (both reviewers reproduced it independently, and so did
+# I): a branch that merges a SIBLING branch whose commits are older puts the
+# sibling's commit first in date order, so the plain range picks it — the CB-116
+# symptom arriving through a second door, and on that shape the range-only fix
+# is WORSE than the code it replaces. Following first parents skips every
+# absorbed lineage, including the forward-merge of main itself.
+#
+# --reverse takes the FIRST commit of that line, not the last. Measured over
+# main's own first-parent line: of the 47 integration merges whose branch
+# carried two or more commits, the first commit's subject was judged closer to
+# the message a human actually wrote in 38 and the last in 7 (that split is a
+# JUDGEMENT and does not partition the 47 — two were not classified either way;
+# the 47 itself reproduces mechanically). Five of the 47 open with the extinct
+# `wip(cb-NN): checkpoint before …` form. Branches here end on review fixups
+# ("close the altitude findings", "record the round-2 outcomes"), which describe
+# the iteration's tail rather than its subject. Do NOT collapse this to
 # `--reverse -1`: git applies the count BEFORE reversing, so that yields the
 # NEWEST commit and silently reinstates the last-commit behaviour.
+#
+# KNOWN LIMIT, stated rather than guessed at: `worktree-setup.sh <branch> [base]`
+# can cut a branch from a NON-MAIN base, and that base's commits are on this
+# branch's own first-parent line, so the derivation names the base's first commit.
+# No ordering flag reaches that case (measured — --first-parent and --topo-order
+# both pick the base commit), because it is not a traversal question: the commits
+# really are this branch's ancestry and this merge really does land them. Pass
+# --merge-msg on a branch cut from a non-main base.
 #
 # Derived HERE rather than at the merge below so the empty-population refusal is
 # free — under the lock it would cost the whole ~70s gate run first. It cannot
@@ -251,15 +276,23 @@ TESTED_HEAD=$(git -C "${WORKTREE_PATH}" rev-parse HEAD)
 if [[ -n "${MERGE_MSG}" ]]; then
     INTEGRATION_MSG="${MERGE_MSG}"
 else
-    _own_subjects=$(git -C "${WORKTREE_PATH}" log --reverse --no-merges --format=%s \
-        "${TESTED_MAIN}..${TESTED_HEAD}" 2>/dev/null || true)
-    _subject="${_own_subjects%%$'\n'*}"
+    _own_subjects=$(git -C "${WORKTREE_PATH}" log --first-parent --reverse --no-merges \
+        --format=%s "${TESTED_MAIN}..${TESTED_HEAD}" 2>/dev/null || true)
+    # The first NON-EMPTY subject, not the first line. `git commit
+    # --allow-empty-message` puts an empty line at the head of the population,
+    # and testing the first line instead of the population made the refusal
+    # below print "carries no commit of its own" about a branch that carries
+    # several — a false refusal that also states something untrue about the
+    # repository, which is worse than the refusal itself.
+    _subject=$(printf '%s\n' "${_own_subjects}" | grep -m1 -v '^[[:space:]]*$' || true)
     if [[ -z "${_subject}" ]]; then
         echo ""
-        echo "  ✗ ${BRANCH} carries no commit of its own that main does not already"
-        echo "    have, so there is no subject to derive that would be true."
+        echo "  ✗ ${BRANCH} carries no commit of its own, with a subject, that main"
+        echo "    does not already have — so there is no subject to derive that"
+        echo "    would be true."
         echo "    (_guard_nonempty_diff passed, so the CONTENT is real — it arrived"
-        echo "     through a merge commit rather than a commit of this branch.)"
+        echo "     through a merge commit rather than through a commit of this"
+        echo "     branch's own first-parent line, or through empty subjects.)"
         echo "    Say what changed explicitly:"
         echo "      tools/worktree-finish.sh ${SLUG} --merge-msg 'Merge ${BRANCH}: … (CB-NN)'"
         exit 1
