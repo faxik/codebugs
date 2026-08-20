@@ -7,6 +7,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **Re-reporting a known defect with new tags now adds them to the card (BT-4).** Since
+  findings gained an identity function, a second report of the same defect bumps the
+  existing row — but the bump left the `tags` column frozen at the first report, so a
+  tag arriving with a later observation survived only inside the `meta.occurrences`
+  ring. The visible cost was on the tag-filtering read paths: `query(tag=)` and
+  `tag-report` never saw the re-observed tag.
+
+  A bump now stores the **union** of (stored, observed) tags: exact string equality
+  (`Tag` and `tag` are different tags — no case folding), first-encountered order with
+  stored tags before observed ones, duplicates dropped.
+
+  **A regression reopen unions too** — a regression is an observation, so a
+  `fixed-in-1.2` tag carried by the re-report lands on the reopened card.
+
+  **Importing does not promote foreign tags.** `import-csv` records the occurrence —
+  the ring still carries the peer's tags — but the local column stays this tracker's
+  own: an import is not an observation. That opt-out has exactly one call site
+  (`import_findings`), pinned by an AST ratchet, and is deliberately not exposed on
+  the public add surface.
+
+  **Corruption classification moved for stored tags.** The union strict-parses the
+  stored column before writing, so a bump over malformed stored tags now fails
+  pre-write with nothing landed (it used to commit the bump and then raise
+  `PostCommitCorruptionError` at serialization). The import path neither reads nor
+  writes the column, so an import's live-hit on a corrupt row still lands.
+
+  **Tag removal stays a full replace for now** — `update(tags=)` overwrites the whole
+  list, so a hand-removed tag returns with the next observation that carries it. The
+  sub-decision (a cap, tombstones, or a `finding_tags` table) is open with the owner.
 - **Re-reporting a known defect as more severe now raises its severity (CB-52).** Since
   findings gained an identity function, a second report of the same defect no longer
   creates a row — it bumps the existing one. But the bump wrote only the occurrence
