@@ -18,6 +18,7 @@ from codebugs.types import (
     SEVERITIES,
     is_text_filter_active,
     is_vocabulary_filter_active,
+    normalize_category,
     rank_case_sql,
     resolve_finding_status,
     resolve_severity,
@@ -253,18 +254,126 @@ def _validate_meta_keys(meta: dict[str, Any] | None, *, updating: bool = False) 
     the registry, never from a literal here: core findings must not know any
     one extension's key names (the seam exists so extensions declare their meta
     contract at registration). `resolver_errors` stays refused on both paths.
+
+    `category_minted` (CB-60) is refused on ADD only: it is the gate's own
+    output and a caller supplying it would spoof the mint count, but a
+    permanently unrepairable stamp is the CB-26 shape, so update(meta_update=)
+    may rewrite a false one.
     """
     if not meta:
         return
     reserved = _RESERVED_META_KEYS | db.resolver_reserved_meta_keys()
     if updating:
         reserved -= db.resolver_updatable_meta_keys()
+    else:
+        reserved |= _ADD_ONLY_RESERVED_META_KEYS
     hit = reserved & set(meta)
     if hit:
         raise ValueError(
             f"meta keys {sorted(hit)} are reserved for the identity machinery "
             f"(they are its output, not input — strip them before re-submitting)"
         )
+
+
+# --- Category canon (CB-60) -----------------------------------------------------------
+#
+# Category is an identity input (the auto:v1 fingerprint hashes it; similarity groups and
+# annotates strictly inside it), so minting a NEW category must be a visible decision, not
+# a typo: twin spellings fork identity forever, silently. The gate below lives on the
+# OBSERVATION path only — add_finding / batch_add_findings with no explicit finding_id.
+# An explicit id asserts identity and bypasses it (the same predicate as dedup and the
+# pre-add resolvers); import_findings calls _add_one directly and stores categories
+# verbatim (CB-51: an import is not an observation, and a backup with old spellings must
+# restore); restore_findings is a raw INSERT and never reaches this code at all.
+
+# Written by the gate when an observation mints a new category, so
+# query(meta_key="category_minted") counts minting events. Reserved on ADD only:
+# caller-supplied it would spoof that count, but an unrepairable stamp is the CB-26
+# shape, so update(meta_update=) may rewrite a false one — unlike _RESERVED_META_KEYS,
+# which are refused on both paths.
+_ADD_ONLY_RESERVED_META_KEYS = frozenset({"category_minted"})
+
+
+def _levenshtein(a: str, b: str) -> int:
+    """Plain edit distance. Category names are short and few — no cap needed."""
+    if len(a) < len(b):
+        a, b = b, a
+    previous = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        current = [i]
+        for j, cb in enumerate(b, start=1):
+            current.append(
+                min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (ca != cb))
+            )
+        previous = current
+    return previous[-1]
+
+
+def _near_hit_threshold(name: str) -> int:
+    """Max edit distance at which a proposed name counts as a NEAR-MISS of an
+    existing one. Conservative and length-scaled — a false "did you mean" on a
+    genuinely distinct short name is worse than a missed hint, and the flag
+    escapes either refusal anyway, so this only shapes the message."""
+    n = len(name)
+    if n < 5:
+        return 0
+    if n < 12:
+        return 1
+    return 2
+
+
+def _existing_categories(conn: sqlite3.Connection) -> dict[str, str]:
+    """Normalized name -> a stored spelling, for every category the table holds.
+
+    The canon is what the TABLE holds (terminal rows included — a category used
+    only by fixed cards still exists). Keyed by normalized form so a stored
+    pre-CB-60 spelling ("process-improvement") still legitimizes its normalized
+    twin; ORDER BY makes "which stored spelling represents it" deterministic.
+    """
+    out: dict[str, str] = {}
+    for row in conn.execute("SELECT DISTINCT category FROM findings ORDER BY category"):
+        # SQLite's dynamic typing lets an explicit-id add store a non-string
+        # category. Skip it rather than raise: one legacy weird row must not
+        # brick every future observation add, and a non-string name cannot
+        # legitimize any observation's spelling anyway (observations are
+        # normalized, and normalize_category refuses non-strings at input).
+        if isinstance(row["category"], str):
+            out.setdefault(normalize_category(row["category"]), row["category"])
+    return out
+
+
+def _gate_category(existing: dict[str, str], norm: str, *, new_category: bool) -> bool:
+    """Decide whether an already-normalized category may be filed. True = it MINTS.
+
+    An existing name (normalized-equal to any stored spelling) passes with no
+    flag and mints nothing — so does ``""``, the legal uncategorized value.
+    Anything else needs ``new_category=True``; without it a near-miss is refused
+    naming the canonical spelling, and a genuinely new name is refused listing
+    the nearest existing ones. The flag is PERMISSION, not assertion: passing it
+    for an existing category is a harmless no-op.
+    """
+    if norm == "" or norm in existing:
+        return False
+    if new_category:
+        return True
+    ranked = sorted((_levenshtein(norm, known), known) for known in existing)
+    threshold = _near_hit_threshold(norm)
+    if ranked and ranked[0][0] <= threshold:
+        canonical = existing[ranked[0][1]]
+        raise ValueError(
+            f"category {norm!r} looks like a near-miss of existing category "
+            f"{canonical!r} — use the existing spelling, or pass new_category=True "
+            f"to deliberately mint a new category"
+        )
+    if ranked:
+        nearest = ", ".join(repr(existing[known]) for _, known in ranked[:3])
+        hint = f"nearest existing: {nearest}"
+    else:
+        hint = "this tracker has no categories yet"
+    raise ValueError(
+        f"category {norm!r} does not exist in this tracker ({hint}); "
+        f"pass new_category=True to mint it deliberately"
+    )
 
 
 # Occurrence ring: keep-first + keep-last, NOT drop-oldest — the earliest observations
@@ -545,6 +654,7 @@ def _add_one(
     fingerprint: str | None,
     annotate: bool = True,
     escalate: bool = True,
+    mint_category: bool = False,
 ) -> tuple[dict[str, Any] | None, sqlite3.Row | None, bool, str]:
     """One observation through the identity function, inside an OPEN transaction.
 
@@ -621,6 +731,11 @@ def _add_one(
     meta_final = dict(meta or {})
     if recurrence_of is not None:
         meta_final["recurrence_of"] = recurrence_of
+    if mint_category:
+        # The CB-60 gate decided this observation MINTS its category; the stamp
+        # makes minting countable (query(meta_key="category_minted")). Lands only
+        # on the insert path — a dedup bump returned above records no minting.
+        meta_final["category_minted"] = True
     if finding_id is None and annotate:
         # Pre-add resolvers (CB-45): annotate-only. THE predicate is
         # `finding_id is None` — an explicit id asserts identity and bypasses
@@ -739,11 +854,24 @@ def add_finding(
     reported_at_ref: str | None = None,
     fingerprint: str | None = None,
     annotate: bool = True,
+    new_category: bool = False,
 ) -> dict[str, Any]:
     """Record an observation. Returns the created OR matched finding as a dict.
 
     ``annotate=False`` skips the pre-add resolvers (CB-45) for this insert;
     used by CSV import — an import is not an observation.
+
+    Category canon (CB-60), on the OBSERVATION path only (``finding_id is
+    None`` — the same predicate as dedup and the resolvers; an explicit id
+    asserts identity and stores the category verbatim): the spelling is
+    normalized via ``types.normalize_category`` BEFORE fingerprint derivation,
+    so twin spellings hash and store one canonical name. A category the tracker
+    does not already hold requires ``new_category=True`` — without it a
+    near-miss of an existing name raises ``ValueError`` naming the canonical
+    spelling, and a genuinely new name raises listing the nearest existing
+    ones. A permitted mint stamps ``meta.category_minted: true`` so
+    ``query(meta_key="category_minted")`` counts minting events. ``""`` stays
+    a legal, ungated category.
 
     Identity (CB-43): an observation whose ``fingerprint`` matches a live finding
     bumps that finding's ``occurrence_count`` and returns it (``was_new: False,
@@ -769,6 +897,12 @@ def add_finding(
     severity = resolve_severity(severity)
     fingerprint = _validate_fingerprint(fingerprint)
     _validate_meta_keys(meta)
+    mint_category = False
+    if finding_id is None:
+        category = normalize_category(category)
+        mint_category = _gate_category(
+            _existing_categories(conn), category, new_category=new_category
+        )
 
     with db.txn(conn) as owned:
         inserted, raw_row, was_new, dedup_action = _add_one(
@@ -785,6 +919,7 @@ def add_finding(
             reported_at_ref=reported_at_ref,
             fingerprint=fingerprint,
             annotate=annotate,
+            mint_category=mint_category,
         )
     return _finalize_add(inserted, raw_row, was_new, dedup_action, committed=owned)
 
@@ -938,7 +1073,12 @@ def import_findings(
     """
     imported = merged = skipped_present = skipped_decided = 0
     errors: list[ImportRowError] = []
-    dropped_keys = _RESERVED_META_KEYS | db.resolver_reserved_meta_keys()
+    # The add-only reservation (category_minted, CB-60) is stripped here too, or an
+    # export carrying a mint stamp would be refused row-by-row on re-import — and a
+    # peer's minting decision is theirs, not this tracker's.
+    dropped_keys = (
+        _RESERVED_META_KEYS | _ADD_ONLY_RESERVED_META_KEYS | db.resolver_reserved_meta_keys()
+    )
 
     with db.txn(conn):
         for index, row in enumerate(rows, start=1):
@@ -1269,6 +1409,8 @@ def _import_would_reopen(
 def batch_add_findings(
     conn: sqlite3.Connection,
     findings: list[dict[str, Any]],
+    *,
+    new_category: bool = False,
 ) -> list[dict[str, Any]]:
     """Record multiple observations at once. Returns one result per input, in input
     order.
@@ -1283,19 +1425,38 @@ def batch_add_findings(
     single transaction — so two members of one batch sharing a fingerprint yield
     one insert plus one bump. MUST NOT delegate to add_finding() in a loop (that
     produces N commits).
+
+    Category canon (CB-60): ``new_category`` is batch-wide permission, applied
+    per member on the observation path (no ``id`` key — an explicit id stores
+    its category verbatim, same as ``add_finding``). Members are judged in
+    input order against the table PLUS categories earlier members of this batch
+    were permitted to mint, and only the first member introducing a category
+    carries the ``category_minted`` stamp — one minting event, not one per row.
     """
     # Validate EVERY member before the transaction opens: invalid input raises
     # immediately, not after a busy_timeout wait, and never half-applies a batch.
-    validated: list[tuple[str, str | None]] = []
+    known_categories: dict[str, str] | None = None
+    validated: list[tuple[str, str | None, str, bool]] = []
     for i, f in enumerate(findings):
         unknown = set(f) - _BATCH_MEMBER_KEYS
         if unknown:
             raise ValueError(f"findings[{i}]: unknown keys {sorted(unknown)}")
         _validate_meta_keys(f.get("meta"))
+        category = f["category"]
+        mint = False
+        if f.get("id") is None:
+            category = normalize_category(category)
+            if known_categories is None:
+                known_categories = _existing_categories(conn)
+            mint = _gate_category(known_categories, category, new_category=new_category)
+            if mint:
+                known_categories[category] = category
         validated.append(
             (
                 resolve_severity(f.get("severity", "medium")),
                 _validate_fingerprint(f.get("fingerprint")),
+                category,
+                mint,
             )
         )
 
@@ -1304,12 +1465,12 @@ def batch_add_findings(
     # member's returned occurrence_count. Input order is preserved by construction.
     outcomes = []
     with db.txn(conn) as owned:
-        for f, (severity, fingerprint) in zip(findings, validated, strict=True):
+        for f, (severity, fingerprint, category, mint) in zip(findings, validated, strict=True):
             outcomes.append(
                 _add_one(
                     conn,
                     severity=severity,
-                    category=f["category"],
+                    category=category,
                     file=f["file"],
                     description=f["description"],
                     source=f.get("source", "human"),
@@ -1319,6 +1480,7 @@ def batch_add_findings(
                     reported_at_commit=f.get("reported_at_commit"),
                     reported_at_ref=f.get("reported_at_ref"),
                     fingerprint=fingerprint,
+                    mint_category=mint,
                 )
             )
     return [_finalize_add(*outcome, committed=owned) for outcome in outcomes]
@@ -1892,6 +2054,7 @@ def register_tools(mcp, conn_factory) -> None:
         reported_at_commit: str | None = None,
         reported_at_ref: str | None = None,
         fingerprint: str | None = None,
+        new_category: bool = False,
     ) -> dict[str, Any]:
         """Record a code finding observation (deduplicated by fingerprint).
 
@@ -1907,6 +2070,9 @@ def register_tools(mcp, conn_factory) -> None:
             severity: critical, high, medium, or low (case-insensitive, no aliases)
             category: Finding category (e.g. tz_naive_datetime, n_plus_one, missing_validation).
                       Call `categories` first to reuse existing category names.
+                      Spelling is normalized (casefold, hyphen/whitespace -> "_");
+                      a category this tracker does not already hold is REFUSED
+                      with a hint unless new_category=true.
             file: File path relative to project root
             description: What's wrong
             source: Who created this finding (default: claude)
@@ -1919,6 +2085,10 @@ def register_tools(mcp, conn_factory) -> None:
                          signature + failing test + anchor file — no timestamps,
                          SHAs, run ids). Same defect → same fingerprint. The
                          `auto:` prefix is reserved for server-derived values.
+            new_category: Explicit permission to MINT a category the tracker does
+                          not hold yet (CB-60). Minting is stamped as
+                          meta.category_minted for later counting. Existing
+                          categories never need this.
         """
         if reported_at_commit is None:
             reported_at_commit = db.git_rev_parse("HEAD", silent=True)
@@ -1935,6 +2105,7 @@ def register_tools(mcp, conn_factory) -> None:
                 reported_at_commit=reported_at_commit,
                 reported_at_ref=reported_at_ref,
                 fingerprint=fingerprint,
+                new_category=new_category,
             )
 
     @mcp.tool()
@@ -1942,6 +2113,7 @@ def register_tools(mcp, conn_factory) -> None:
         findings: list[dict[str, Any]],
         reported_at_commit: str | None = None,
         reported_at_ref: str | None = None,
+        new_category: bool = False,
     ) -> list[dict[str, Any]]:
         """Record multiple finding observations at once (deduplicated by fingerprint).
 
@@ -1958,6 +2130,9 @@ def register_tools(mcp, conn_factory) -> None:
                                 Per-finding values override this.
             reported_at_ref: Default version label for all findings.
                              Per-finding values override this.
+            new_category: Batch-wide permission to MINT categories the tracker
+                          does not hold yet (CB-60); the first member introducing
+                          a category is stamped meta.category_minted.
         """
         default_commit = (
             reported_at_commit
@@ -1973,7 +2148,7 @@ def register_tools(mcp, conn_factory) -> None:
                 f["reported_at_ref"] = reported_at_ref
             enriched.append(f)
         with conn_factory() as conn:
-            return batch_add_findings(conn, enriched)
+            return batch_add_findings(conn, enriched, new_category=new_category)
 
     @mcp.tool()
     def update(
@@ -2186,6 +2361,7 @@ def register_cli(sub, commands) -> None:
                 tags=tags,
                 meta=meta or None,
                 fingerprint=args.fingerprint,
+                new_category=args.new_category,
             )
         except json.JSONDecodeError:
             # MUST stay ahead of the ValueError arm, which it subclasses — the
@@ -2548,6 +2724,11 @@ def register_cli(sub, commands) -> None:
     p.add_argument(
         "--fingerprint",
         help="Stable identity token; same defect -> same fingerprint (dedup key)",
+    )
+    p.add_argument(
+        "--new-category",
+        action="store_true",
+        help="Permit minting a category this tracker does not hold yet (CB-60)",
     )
 
     p = sub.add_parser("update", help="Update a finding")

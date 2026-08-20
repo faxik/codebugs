@@ -85,7 +85,7 @@ class TestPostAddHookAtomicity:
                 severity="high",
                 category="bug",
                 file="a.py",
-                description="d",
+                description="d", new_category=True,
             )
         finally:
             db._post_add_hooks[:] = [
@@ -102,7 +102,7 @@ class TestPostAddHookAtomicity:
             severity="low",
             category="x",
             file="a.py",
-            description="d",
+            description="d", new_category=True,
         )
         assert proxy.commit_count == 1
 
@@ -130,7 +130,7 @@ class TestPostAddHookAtomicity:
                         "description": "d2",
                     },
                     {"severity": "low", "category": "perf", "file": "c.py", "description": "d3"},
-                ],
+                ], new_category=True,
             )
         finally:
             db._post_add_hooks[:] = [h for h in db._post_add_hooks if h.name != "test.batch_hook"]

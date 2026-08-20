@@ -57,7 +57,7 @@ def conn(tmp_project):
 
 def _add(conn, *, desc="the failure text", cat="bug", file="a.py", severity="high", **kw):
     return findings.add_finding(
-        conn, severity=severity, category=cat, file=file, description=desc, **kw
+        conn, severity=severity, category=cat, file=file, description=desc, **kw, new_category=True
     )
 
 
@@ -342,7 +342,7 @@ class TestBatchIdentity:
             {"severity": "low", "category": "c", "file": "f.py", "description": f"d{i}", "id": fid}
             for i, fid in enumerate(["CB-10", "CB-2", "CB-1"])
         ]
-        out = findings.batch_add_findings(conn, members)
+        out = findings.batch_add_findings(conn, members, new_category=True)
         assert [r["id"] for r in out] == ["CB-10", "CB-2", "CB-1"]
 
     def test_in_batch_self_dedup(self, conn):
@@ -351,7 +351,7 @@ class TestBatchIdentity:
             [
                 {"severity": "high", "category": "c", "file": "f.py", "description": "same"},
                 {"severity": "high", "category": "c", "file": "f.py", "description": "same"},
-            ],
+            ], new_category=True,
         )
         assert len(out) == 2, "one result per input, even when deduplicated"
         assert out[0]["dedup_action"] == "created"
@@ -374,7 +374,7 @@ class TestBatchIdentity:
                         "description": "b",
                         "fingerprit": "typo",
                     },
-                ],
+                ], new_category=True,
             )
         assert conn.execute("SELECT COUNT(*) c FROM findings").fetchone()["c"] == 0, (
             "validation failures must not half-apply a batch"
@@ -634,7 +634,7 @@ class TestStoredCorruptionClassification:
         }
         with pytest.raises(json.JSONDecodeError):
             with db.txn(conn):
-                findings.batch_add_findings(conn, [member])
+                findings.batch_add_findings(conn, [member], new_category=True)
         row = conn.execute("SELECT occurrence_count FROM findings").fetchone()
         assert row["occurrence_count"] == 1, "the owner rolled the bump back"
 
@@ -743,7 +743,7 @@ class TestCsvIdentityRoundTrip:
             category="gate",
             file="tools/gate.sh",
             description="gate died (slug: fix-cb-9-x) log /tmp/gate-fix-cb-9-x.log",
-            meta={"slug": "fix-cb-9-x", "log": "/tmp/gate-fix-cb-9-x.log"},
+            meta={"slug": "fix-cb-9-x", "log": "/tmp/gate-fix-cb-9-x.log"}, new_category=True,
         )
         ca.close()
         csv_path = str(tmp_path / "out.csv")
@@ -853,7 +853,7 @@ class TestBumpEscalatesSeverity:
                     "file": "a.py",
                     "description": "admin route skips the token check",
                 }
-            ],
+            ], new_category=True,
         )
         assert findings.get_finding(conn, f["id"])["severity"] == "critical"
 

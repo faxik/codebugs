@@ -107,7 +107,7 @@ class TestAClosedReaderKillsTheProcessBySignal:
     def test_a_committed_add_dies_at_141_with_no_output(self, project, unbuffered):
         desc = f"cb-78 pipe {unbuffered}"
         rc, stderr = _run_into_a_dead_reader(
-            project, "add", "-f", "x.py", "-c", "test", "-s", "low", "-d", desc,
+            project, "add", "-f", "x.py", "-c", "test", "-s", "low", "-d", desc, "--new-category",
             unbuffered=unbuffered,
         )
 
@@ -155,7 +155,7 @@ class TestExportToDevStdout:
             for i in range(3):
                 findings.add_finding(
                     conn, severity="low", category="test",
-                    description=f"row {i} for the /dev/stdout export path", file="x.py",
+                    description=f"row {i} for the /dev/stdout export path", file="x.py", new_category=True,
                 )
         finally:
             conn.close()

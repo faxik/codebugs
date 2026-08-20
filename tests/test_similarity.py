@@ -311,10 +311,10 @@ class TestGroupReport:
 class TestAnnotateResolver:
     def test_second_similar_add_gets_similar_to(self, conn):
         first = findings.add_finding(
-            conn, severity="low", category="gate", file="f", description=LONG_A
+            conn, severity="low", category="gate", file="f", description=LONG_A, new_category=True
         )
         second = findings.add_finding(
-            conn, severity="low", category="gate", file="f", description=LONG_A2
+            conn, severity="low", category="gate", file="f", description=LONG_A2, new_category=True
         )
         assert second["was_new"] is True  # near-duplicate, NOT identical: no dedup
         [entry] = second["meta"]["similar_to"]
@@ -324,32 +324,32 @@ class TestAnnotateResolver:
 
     def test_first_add_has_no_annotation(self, conn):
         first = findings.add_finding(
-            conn, severity="low", category="gate", file="f", description=LONG_A
+            conn, severity="low", category="gate", file="f", description=LONG_A, new_category=True
         )
         assert "similar_to" not in first["meta"]
 
     def test_short_description_not_annotated(self, conn):
-        findings.add_finding(conn, severity="low", category="gate", file="f", description="Bug 1x")
+        findings.add_finding(conn, severity="low", category="gate", file="f", description="Bug 1x", new_category=True)
         second = findings.add_finding(
-            conn, severity="low", category="gate", file="f", description="Bug 2x"
+            conn, severity="low", category="gate", file="f", description="Bug 2x", new_category=True
         )
         assert "similar_to" not in second["meta"]
 
     def test_dissimilar_not_annotated(self, conn):
-        findings.add_finding(conn, severity="low", category="gate", file="f", description=LONG_A)
+        findings.add_finding(conn, severity="low", category="gate", file="f", description=LONG_A, new_category=True)
         second = findings.add_finding(
-            conn, severity="low", category="gate", file="f", description=LONG_B
+            conn, severity="low", category="gate", file="f", description=LONG_B, new_category=True
         )
         assert "similar_to" not in second["meta"]
 
     def test_dismissed_candidate_annotated_with_status(self, conn):
         first = findings.add_finding(
-            conn, severity="low", category="gate", file="f", description=LONG_A
+            conn, severity="low", category="gate", file="f", description=LONG_A, new_category=True
         )
         findings.update_finding(conn, first["id"], status="not_a_bug")
         # near-duplicate, not identical: identity's recurrence path stays out
         second = findings.add_finding(
-            conn, severity="low", category="gate", file="f", description=LONG_A2
+            conn, severity="low", category="gate", file="f", description=LONG_A2, new_category=True
         )
         [entry] = second["meta"]["similar_to"]
         assert entry["id"] == first["id"] and entry["status"] == "not_a_bug"
@@ -362,14 +362,14 @@ class TestAnnotateResolver:
                 category="gate",
                 file="f",
                 description="d",
-                meta={"similar_to": []},
+                meta={"similar_to": []}, new_category=True,
             )
 
     def test_rescrub_can_rewrite_similar_to_via_update(self, conn):
         # Review SERIOUS-10: the reservation is add-side only — an unrepairable
         # annotation would be the CB-26 shape.
         first = findings.add_finding(
-            conn, severity="low", category="gate", file="f", description=LONG_A
+            conn, severity="low", category="gate", file="f", description=LONG_A, new_category=True
         )
         updated = findings.update_finding(conn, first["id"], meta_update={"similar_to": []})
         assert updated["meta"]["similar_to"] == []
@@ -377,8 +377,8 @@ class TestAnnotateResolver:
     def test_suite_annotation_ratchet(self, conn):
         # Cheap ratchet (review CX-missing-9): if future fixtures start acquiring
         # annotations unintentionally, this count moves and the diff shows it.
-        findings.add_finding(conn, severity="low", category="gate", file="f", description=LONG_A)
-        findings.add_finding(conn, severity="low", category="gate", file="f", description=LONG_A2)
+        findings.add_finding(conn, severity="low", category="gate", file="f", description=LONG_A, new_category=True)
+        findings.add_finding(conn, severity="low", category="gate", file="f", description=LONG_A2, new_category=True)
         n = conn.execute(
             "SELECT COUNT(*) AS n FROM findings, json_each(findings.meta) "
             "WHERE json_each.key = 'similar_to'"

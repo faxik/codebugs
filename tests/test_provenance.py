@@ -161,7 +161,7 @@ class TestCheckFindings:
             category="bug",
             file="src/auth.py",
             description="auth bug",
-            reported_at_commit=initial_sha,
+            reported_at_commit=initial_sha, new_category=True,
         )
 
         result = provenance.check_findings(conn, project, finding_id="CB-1")
@@ -176,7 +176,7 @@ class TestCheckFindings:
             category="bug",
             file="src/auth.py",
             description="open bug",
-            reported_at_commit=initial_sha,
+            reported_at_commit=initial_sha, new_category=True,
         )
         findings.update_finding(conn, "CB-1", status="fixed")
         findings.add_finding(
@@ -185,7 +185,7 @@ class TestCheckFindings:
             category="style",
             file="src/auth.py",
             description="open style",
-            reported_at_commit=initial_sha,
+            reported_at_commit=initial_sha, new_category=True,
         )
 
         result = provenance.check_findings(conn, project, status="open")
@@ -202,7 +202,7 @@ class TestCheckFindings:
                 category="bug",
                 file="src/auth.py",
                 description=f"bug {i}",
-                reported_at_commit=initial_sha,
+                reported_at_commit=initial_sha, new_category=True,
             )
 
         result = provenance.check_findings(conn, project)
@@ -225,7 +225,7 @@ class TestResolveTrailers:
 
     def _add(self, conn):
         return findings.add_finding(
-            conn, severity="high", category="bug", file="src/auth.py", description="x"
+            conn, severity="high", category="bug", file="src/auth.py", description="x", new_category=True
         )["id"]
 
     def test_resolves_flips_to_fixed(self, git_project, conn):
@@ -308,7 +308,7 @@ class TestFalseyStatusDoesNotSilentlyDefaultToOpen:
             category="bug",
             file="src/auth.py",
             description="d",
-            reported_at_commit=sha,
+            reported_at_commit=sha, new_category=True,
         )
 
     @pytest.mark.parametrize("falsey", [0, False, [], {}])
@@ -329,7 +329,7 @@ class TestFalseyStatusDoesNotSilentlyDefaultToOpen:
             category="bug",
             file="src/auth.py",
             description="already fixed",
-            reported_at_commit=sha,
+            reported_at_commit=sha, new_category=True,
         )
         findings.update_finding(conn, other["id"], status="fixed")
         got = provenance.check_findings(conn, project, status=empty)
@@ -352,7 +352,7 @@ class TestFindingIdBranchHonoursItsFilters:
             category="bug",
             file="src/auth.py",
             description="d",
-            reported_at_commit=sha,
+            reported_at_commit=sha, new_category=True,
         )
 
     def test_status_filter_excluding_the_finding_yields_nothing(self, conn, git_project):
@@ -824,7 +824,7 @@ class TestPathIsResolvedBeforeItIsJudged:
                 category="c",
                 file=f"src/f{i}.py",
                 description=f"finding {i}",
-                reported_at_commit=sha,
+                reported_at_commit=sha, new_category=True,
             )
 
         calls = {"n": 0}
@@ -1166,7 +1166,7 @@ class TestFileIsRootRelative:
             category="test",
             file="src/auth.py",
             description="root-relative by contract",
-            reported_at_commit=sha,
+            reported_at_commit=sha, new_category=True,
         )
         result = provenance.check_findings(conn, os.path.join(project, "src"))
         assert result["total"] == 1, result
@@ -1607,6 +1607,7 @@ class TestStalenessReadsTheNewestObservation:
             file="src/auth.py",
             description=description,
             reported_at_commit=sha,
+            new_category=True,  # CB-60 gate: first observation in a fresh tracker mints "bug"
         )
 
     def _reobserve(self, conn, sha, description="stale-looking bug"):

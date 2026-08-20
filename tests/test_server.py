@@ -143,7 +143,7 @@ class TestStrictToolArguments:
         mcp, _ = _server_with_middleware(tracker)
         with tracker() as conn:
             findings.add_finding(
-                conn, severity="medium", category="perf", file="a.py", description="d"
+                conn, severity="medium", category="perf", file="a.py", description="d", new_category=True
             )
 
         async def call():

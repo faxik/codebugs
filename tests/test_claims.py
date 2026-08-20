@@ -52,7 +52,7 @@ def _finding(conn, **kw):
         severity=kw.get("severity", "high"),
         category=kw.get("category", "test"),
         file=kw.get("file", "a.py"),
-        description=kw.get("description", f"d{_finding_seq}"),
+        description=kw.get("description", f"d{_finding_seq}"), new_category=True,
     )
 
 

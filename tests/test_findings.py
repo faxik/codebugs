@@ -78,7 +78,7 @@ class TestAddFinding:
             severity="high",
             category="n_plus_one",
             file="src/api.py",
-            description="Query in loop",
+            description="Query in loop", new_category=True,
         )
         assert result["id"] == "CB-1"
         assert result["severity"] == "high"
@@ -87,7 +87,8 @@ class TestAddFinding:
         assert result["status"] == "open"
         assert result["source"] == "human"
         assert result["tags"] == []
-        assert result["meta"] == {}
+        # The first add of a category in an empty tracker MINTS it (CB-60).
+        assert result["meta"] == {"category_minted": True}
 
     def test_add_with_meta_and_tags(self, conn):
         result = findings.add_finding(
@@ -98,7 +99,7 @@ class TestAddFinding:
             description="CC too high",
             source="ruff",
             tags=["tech-debt", "refactor"],
-            meta={"lines": "10-50", "rule_code": "C901"},
+            meta={"lines": "10-50", "rule_code": "C901"}, new_category=True,
         )
         assert result["source"] == "ruff"
         assert result["tags"] == ["tech-debt", "refactor"]
@@ -107,13 +108,13 @@ class TestAddFinding:
 
     def test_add_auto_increments_id(self, conn):
         f1 = findings.add_finding(
-            conn, severity="low", category="style", file="a.py", description="d1"
+            conn, severity="low", category="style", file="a.py", description="d1", new_category=True
         )
         f2 = findings.add_finding(
-            conn, severity="low", category="style", file="b.py", description="d2"
+            conn, severity="low", category="style", file="b.py", description="d2", new_category=True
         )
         f3 = findings.add_finding(
-            conn, severity="low", category="style", file="c.py", description="d3"
+            conn, severity="low", category="style", file="c.py", description="d3", new_category=True
         )
         assert f1["id"] == "CB-1"
         assert f2["id"] == "CB-2"
@@ -137,7 +138,7 @@ class TestAddFinding:
                 severity="extreme",
                 category="bug",
                 file="x.py",
-                description="d",
+                description="d", new_category=True,
             )
 
     def test_add_sets_timestamps(self, conn):
@@ -146,7 +147,7 @@ class TestAddFinding:
             severity="low",
             category="style",
             file="a.py",
-            description="d",
+            description="d", new_category=True,
         )
         assert result["created_at"].endswith("Z")
         assert result["updated_at"] == result["created_at"]
@@ -159,7 +160,7 @@ class TestBatchAdd:
             {"severity": "medium", "category": "style", "file": "b.py", "description": "d2"},
             {"severity": "low", "category": "perf", "file": "c.py", "description": "d3"},
         ]
-        results = findings.batch_add_findings(conn, items)
+        results = findings.batch_add_findings(conn, items, new_category=True)
         assert len(results) == 3
         ids = {r["id"] for r in results}
         assert ids == {"CB-1", "CB-2", "CB-3"}
@@ -170,7 +171,7 @@ class TestBatchAdd:
                 conn,
                 [
                     {"severity": "ultra", "category": "bug", "file": "a.py", "description": "d"},
-                ],
+                ], new_category=True,
             )
 
     def test_batch_add_with_source_and_meta(self, conn):
@@ -184,25 +185,25 @@ class TestBatchAdd:
                 "meta": {"cwe": "CWE-89"},
             },
         ]
-        results = findings.batch_add_findings(conn, items)
+        results = findings.batch_add_findings(conn, items, new_category=True)
         assert results[0]["source"] == "semgrep"
         assert results[0]["meta"]["cwe"] == "CWE-89"
 
 
 class TestUpdateFinding:
     def test_update_status(self, conn):
-        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d", new_category=True)
         result = findings.update_finding(conn, "CB-1", status="fixed")
         assert result["status"] == "fixed"
         assert result["updated_at"] >= result["created_at"]
 
     def test_update_notes(self, conn):
-        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d", new_category=True)
         result = findings.update_finding(conn, "CB-1", notes="Fixed in PR #42")
         assert result["meta"]["notes"] == "Fixed in PR #42"
 
     def test_update_tags(self, conn):
-        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d", new_category=True)
         result = findings.update_finding(conn, "CB-1", tags=["urgent", "sprint-5"])
         assert result["tags"] == ["urgent", "sprint-5"]
 
@@ -213,7 +214,7 @@ class TestUpdateFinding:
             category="bug",
             file="a.py",
             description="d",
-            meta={"lines": "10-20"},
+            meta={"lines": "10-20"}, new_category=True,
         )
         result = findings.update_finding(conn, "CB-1", meta_update={"fix_commit": "abc123"})
         assert result["meta"]["lines"] == "10-20"
@@ -269,7 +270,7 @@ class TestAppendNoteIsReachable:
         assert args.append_note == "another line"
 
     def test_append_note_extends_rather_than_replaces(self, conn):
-        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d", new_category=True)
         findings.update_finding(conn, "CB-1", notes="FIRST")
         result = findings.update_finding(conn, "CB-1", append_note="SECOND")
         assert result["meta"]["notes"] == "FIRST\nSECOND"
@@ -291,7 +292,7 @@ class TestUpdateMetaComposition:
             category="bug",
             file="a.py",
             description="d",
-            meta={"lines": "1-2"},
+            meta={"lines": "1-2"}, new_category=True,
         )
         return conn
 
@@ -345,7 +346,7 @@ class TestUpdateMetaComposition:
             category="bug",
             file="a.py",
             description="d",
-            meta={"lines": "1-2"},
+            meta={"lines": "1-2"}, new_category=True,
         )
         recording.recorded_sql.clear()
 
@@ -388,7 +389,7 @@ class TestUpdateMetaComposition:
             category="bug",
             file="a.py",
             description="d",
-            meta={"lines": "1-2"},
+            meta={"lines": "1-2"}, new_category=True,
         )
         recording.recorded_sql.clear()
 
@@ -406,47 +407,47 @@ class TestUpdateMetaComposition:
         assert updates[0].count("meta = ?") == 1, updates[0]
 
     def test_update_status_in_progress(self, conn):
-        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d", new_category=True)
         result = findings.update_finding(conn, "CB-1", status="in_progress")
         assert result["status"] == "in_progress"
 
     def test_update_status_alias_done(self, conn):
-        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d", new_category=True)
         result = findings.update_finding(conn, "CB-1", status="done")
         assert result["status"] == "fixed"
 
     def test_update_status_alias_resolved(self, conn):
-        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d", new_category=True)
         result = findings.update_finding(conn, "CB-1", status="resolved")
         assert result["status"] == "fixed"
 
     def test_update_status_alias_implemented(self, conn):
-        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d", new_category=True)
         result = findings.update_finding(conn, "CB-1", status="implemented")
         assert result["status"] == "fixed"
 
     def test_update_status_alias_wontfix(self, conn):
-        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d", new_category=True)
         result = findings.update_finding(conn, "CB-1", status="wontfix")
         assert result["status"] == "wont_fix"
 
     def test_update_status_alias_invalid(self, conn):
-        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d", new_category=True)
         result = findings.update_finding(conn, "CB-1", status="invalid")
         assert result["status"] == "not_a_bug"
 
     def test_update_status_alias_active(self, conn):
-        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d", new_category=True)
         result = findings.update_finding(conn, "CB-1", status="active")
         assert result["status"] == "in_progress"
 
     def test_update_invalid_status_raises(self, conn):
-        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d", new_category=True)
         with pytest.raises(ValueError, match="Invalid finding status"):
             findings.update_finding(conn, "CB-1", status="deleted")
 
     def test_update_noop(self, conn):
-        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d", new_category=True)
         result = findings.update_finding(conn, "CB-1")
         assert result["status"] == "open"
 
@@ -548,7 +549,7 @@ class TestConcurrentMetaUpdatesDoNotLoseEachOther:
         assert not t.is_alive()
 
     def test_a_competing_append_note_is_not_erased(self, conn, tmp_project):
-        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d", new_category=True)
         findings.update_finding(conn, "CB-1", notes="BASE")
 
         self._interleave(
@@ -572,7 +573,7 @@ class TestConcurrentMetaUpdatesDoNotLoseEachOther:
         back. Rolling the outer transaction back is the only way to observe that,
         so this test asserts on what survives the rollback.
         """
-        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d", new_category=True)
 
         with pytest.raises(RuntimeError, match="caller aborts"):
             with db.txn(conn) as opened:
@@ -593,7 +594,7 @@ class TestConcurrentMetaUpdatesDoNotLoseEachOther:
         write here silently drops another agent's structured state (an assignee, a
         claim marker) rather than a line of prose.
         """
-        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d")
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d", new_category=True)
 
         self._interleave(
             tmp_project,
@@ -623,7 +624,7 @@ class TestRetriageSeverity:
             category="perf",
             file="a.py",
             description="filed on a hunch",
-            meta={"lines": "1-2"},
+            meta={"lines": "1-2"}, new_category=True,
         )
         return conn
 
@@ -646,7 +647,7 @@ class TestRetriageSeverity:
     def test_retriage_touches_only_the_named_row(self, one):
         """A missing or wrong WHERE clause would pass every single-row test above."""
         findings.add_finding(
-            one, severity="low", category="perf", file="b.py", description="bystander"
+            one, severity="low", category="perf", file="b.py", description="bystander", new_category=True
         )
         findings.update_finding(one, "CB-1", severity="critical")
 
@@ -724,7 +725,7 @@ class TestRetriageSeverity:
             severity="medium",
             category="bug",
             file="a.py",
-            description="d",
+            description="d", new_category=True,
         )
         recording.recorded_sql.clear()
 
@@ -767,7 +768,7 @@ class TestRetriageCliContract:
 
     @pytest.fixture
     def project(self, tmp_project, conn):
-        findings.add_finding(conn, severity="medium", category="perf", file="a.py", description="d")
+        findings.add_finding(conn, severity="medium", category="perf", file="a.py", description="d", new_category=True)
         conn.close()
         return tmp_project
 
@@ -859,7 +860,7 @@ class TestQueryFindings:
             file="auth.py",
             description="SQL injection",
             source="semgrep",
-            tags=["urgent"],
+            tags=["urgent"], new_category=True,
         )
         findings.add_finding(
             conn,
@@ -867,7 +868,7 @@ class TestQueryFindings:
             category="n_plus_one",
             file="api.py",
             description="Query in loop",
-            source="claude",
+            source="claude", new_category=True,
         )
         findings.add_finding(
             conn,
@@ -875,7 +876,7 @@ class TestQueryFindings:
             category="n_plus_one",
             file="views.py",
             description="Another N+1",
-            source="claude",
+            source="claude", new_category=True,
         )
         findings.add_finding(
             conn,
@@ -883,7 +884,7 @@ class TestQueryFindings:
             category="style",
             file="utils.py",
             description="Long line",
-            source="ruff",
+            source="ruff", new_category=True,
         )
         findings.update_finding(conn, "CB-4", status="fixed")
 
@@ -1001,7 +1002,7 @@ class TestSeverityOrdering:
     @staticmethod
     def _add(conn, severity, name):
         findings.add_finding(
-            conn, severity=severity, category="c", file=f"{name}.py", description=name
+            conn, severity=severity, category="c", file=f"{name}.py", description=name, new_category=True
         )
 
     def test_full_order_follows_declared_precedence(self, conn):
@@ -1030,7 +1031,7 @@ class TestSeverityOrdering:
         for sev in ("low", "critical", "medium", "high"):
             self._add(conn, sev, sev)
         findings.add_finding(
-            conn, severity="critical", category="other", file="x.py", description="excluded"
+            conn, severity="critical", category="other", file="x.py", description="excluded", new_category=True
         )
 
         result = findings.query_findings(conn, category="c", status="open", limit=50)
@@ -1074,13 +1075,13 @@ class TestGetFinding:
             file="x.py",
             description="boom",
             tags=["a", "b"],
-            meta={"k": "v"},
+            meta={"k": "v"}, new_category=True,
         )
         result = findings.get_finding(conn, added["id"])
         assert result["id"] == added["id"]
         assert result["description"] == "boom"
         assert result["tags"] == ["a", "b"]
-        assert result["meta"] == {"k": "v"}
+        assert result["meta"] == {"k": "v", "category_minted": True}
 
     def test_get_missing_raises_keyerror(self, conn):
         with pytest.raises(KeyError, match="CB-MISSING"):
@@ -1095,9 +1096,9 @@ class TestQueryMeta:
             category="bug",
             file="a.py",
             description="d",
-            meta={"rule_code": "C901"},
+            meta={"rule_code": "C901"}, new_category=True,
         )
-        findings.add_finding(conn, severity="low", category="style", file="b.py", description="d2")
+        findings.add_finding(conn, severity="low", category="style", file="b.py", description="d2", new_category=True)
         result = findings.query_findings(conn, meta_key="rule_code")
         assert result["total"] == 1
 
@@ -1108,7 +1109,7 @@ class TestQueryMeta:
             category="bug",
             file="a.py",
             description="d",
-            meta={"rule_code": "C901"},
+            meta={"rule_code": "C901"}, new_category=True,
         )
         findings.add_finding(
             conn,
@@ -1116,7 +1117,7 @@ class TestQueryMeta:
             category="bug",
             file="b.py",
             description="d2",
-            meta={"rule_code": "E501"},
+            meta={"rule_code": "E501"}, new_category=True,
         )
         result = findings.query_findings(conn, meta_key="rule_code", meta_value="C901")
         assert result["total"] == 1
@@ -1127,14 +1128,14 @@ class TestStats:
     @pytest.fixture(autouse=True)
     def seed_data(self, conn):
         findings.add_finding(
-            conn, severity="critical", category="security", file="a.py", description="d1"
+            conn, severity="critical", category="security", file="a.py", description="d1", new_category=True
         )
         findings.add_finding(
-            conn, severity="high", category="security", file="b.py", description="d2"
+            conn, severity="high", category="security", file="b.py", description="d2", new_category=True
         )
-        findings.add_finding(conn, severity="high", category="perf", file="c.py", description="d3")
+        findings.add_finding(conn, severity="high", category="perf", file="c.py", description="d3", new_category=True)
         findings.add_finding(
-            conn, severity="medium", category="style", file="d.py", description="d4"
+            conn, severity="medium", category="style", file="d.py", description="d4", new_category=True
         )
 
     def test_stats_by_severity(self, conn):
@@ -1165,11 +1166,11 @@ class TestSummary:
 
     def test_summary_with_data(self, conn):
         findings.add_finding(
-            conn, severity="critical", category="sec", file="a.py", description="d1"
+            conn, severity="critical", category="sec", file="a.py", description="d1", new_category=True
         )
-        findings.add_finding(conn, severity="high", category="perf", file="b.py", description="d2")
+        findings.add_finding(conn, severity="high", category="perf", file="b.py", description="d2", new_category=True)
         findings.add_finding(
-            conn, severity="medium", category="perf", file="c.py", description="d3"
+            conn, severity="medium", category="perf", file="c.py", description="d3", new_category=True
         )
         findings.update_finding(conn, "CB-3", status="fixed")
 
@@ -1184,19 +1185,19 @@ class TestSummary:
 
     def test_summary_hottest_files_ranked_by_crit_high(self, conn):
         findings.add_finding(
-            conn, severity="critical", category="sec", file="danger.py", description="d1"
+            conn, severity="critical", category="sec", file="danger.py", description="d1", new_category=True
         )
         findings.add_finding(
-            conn, severity="high", category="sec", file="danger.py", description="d2"
+            conn, severity="high", category="sec", file="danger.py", description="d2", new_category=True
         )
         findings.add_finding(
-            conn, severity="low", category="style", file="safe.py", description="d3"
+            conn, severity="low", category="style", file="safe.py", description="d3", new_category=True
         )
         findings.add_finding(
-            conn, severity="low", category="style", file="safe.py", description="d4"
+            conn, severity="low", category="style", file="safe.py", description="d4", new_category=True
         )
         findings.add_finding(
-            conn, severity="low", category="style", file="safe.py", description="d5"
+            conn, severity="low", category="style", file="safe.py", description="d5", new_category=True
         )
 
         s = findings.get_summary(conn)
@@ -1209,10 +1210,10 @@ class TestCategories:
         assert findings.get_categories(conn) == []
 
     def test_categories_with_data(self, conn):
-        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d1")
-        findings.add_finding(conn, severity="high", category="bug", file="b.py", description="d2")
+        findings.add_finding(conn, severity="high", category="bug", file="a.py", description="d1", new_category=True)
+        findings.add_finding(conn, severity="high", category="bug", file="b.py", description="d2", new_category=True)
         findings.add_finding(
-            conn, severity="medium", category="style", file="c.py", description="d3"
+            conn, severity="medium", category="style", file="c.py", description="d3", new_category=True
         )
         findings.update_finding(conn, "CB-1", status="fixed")
 
@@ -1236,7 +1237,7 @@ class TestProvenance:
             severity="high",
             category="test",
             file="a.py",
-            description="no provenance",
+            description="no provenance", new_category=True,
         )
         assert result.get("reported_at_commit") is None
         assert result.get("reported_at_ref") is None
@@ -1301,7 +1302,7 @@ class TestProvenance:
     def test_migrate_provenance_idempotent(self, tmp_project):
         """Calling connect() twice on the same DB should not error."""
         conn1 = db.connect(tmp_project)
-        findings.add_finding(conn1, severity="low", category="test", file="a.py", description="d")
+        findings.add_finding(conn1, severity="low", category="test", file="a.py", description="d", new_category=True)
         conn1.close()
 
         conn2 = db.connect(tmp_project)
@@ -1317,7 +1318,7 @@ class TestProvenance:
             file="a.py",
             description="test",
             reported_at_commit="a" * 40,
-            reported_at_ref="v2.1.0",
+            reported_at_ref="v2.1.0", new_category=True,
         )
         assert result["reported_at_commit"] == "a" * 40
         assert result["reported_at_ref"] == "v2.1.0"
@@ -1328,7 +1329,7 @@ class TestProvenance:
             severity="high",
             category="bug",
             file="a.py",
-            description="test",
+            description="test", new_category=True,
         )
         assert result["reported_at_commit"] is None
         assert result["reported_at_ref"] is None
@@ -1351,7 +1352,7 @@ class TestProvenance:
                     "file": "b.py",
                     "description": "d2",
                 },
-            ],
+            ], new_category=True,
         )
         assert results[0]["reported_at_commit"] == "b" * 40
         assert results[0]["reported_at_ref"] == "v1.0"
@@ -1366,14 +1367,14 @@ class TestProvenance:
             category="bug",
             file="a.py",
             description="d",
-            reported_at_commit=sha,
+            reported_at_commit=sha, new_category=True,
         )
         findings.add_finding(
             conn,
             severity="low",
             category="style",
             file="b.py",
-            description="d2",
+            description="d2", new_category=True,
         )
         result = findings.query_findings(conn, commit="a1b2c3d4e5")
         assert result["total"] == 1
@@ -1390,7 +1391,7 @@ class TestProvenance:
             category="bug",
             file="a.py",
             description="d",
-            reported_at_ref="v2.1.0",
+            reported_at_ref="v2.1.0", new_category=True,
         )
         findings.add_finding(
             conn,
@@ -1398,7 +1399,7 @@ class TestProvenance:
             category="style",
             file="b.py",
             description="d2",
-            reported_at_ref="v3.0.0",
+            reported_at_ref="v3.0.0", new_category=True,
         )
         result = findings.query_findings(conn, ref="v2.1.0")
         assert result["total"] == 1
@@ -1410,7 +1411,7 @@ class TestProvenance:
             severity="high",
             category="bug",
             file="a.py",
-            description="d",
+            description="d", new_category=True,
         )
         updated = findings.update_finding(conn, f["id"], reported_at_ref="v2.0")
         assert updated["reported_at_ref"] == "v2.0"
@@ -1423,7 +1424,7 @@ class TestProvenance:
             category="bug",
             file="a.py",
             description="d",
-            reported_at_commit="a" * 40,
+            reported_at_commit="a" * 40, new_category=True,
         )
         with pytest.raises(TypeError):
             findings.update_finding(conn, f["id"], reported_at_commit="b" * 40)
@@ -1441,7 +1442,7 @@ class TestSeverityIsNormalizedAtEveryRoute:
 
     def test_add_finding(self, conn):
         f = findings.add_finding(
-            conn, severity="High", category="bug", file="a.py", description="d"
+            conn, severity="High", category="bug", file="a.py", description="d", new_category=True
         )
         assert conn.execute(
             "SELECT severity FROM findings WHERE id = ?", (f["id"],)
@@ -1450,7 +1451,7 @@ class TestSeverityIsNormalizedAtEveryRoute:
     def test_batch_add_findings(self, conn):
         rows = findings.batch_add_findings(
             conn,
-            [{"severity": " CRITICAL ", "category": "bug", "file": "a.py", "description": "d"}],
+            [{"severity": " CRITICAL ", "category": "bug", "file": "a.py", "description": "d"}], new_category=True,
         )
         assert conn.execute(
             "SELECT severity FROM findings WHERE id = ?", (rows[0]["id"],)
@@ -1459,13 +1460,13 @@ class TestSeverityIsNormalizedAtEveryRoute:
     def test_batch_add_defaults_still_work(self, conn):
         """The default flows through the resolver too — it must not be special-cased."""
         rows = findings.batch_add_findings(
-            conn, [{"category": "bug", "file": "a.py", "description": "d"}]
+            conn, [{"category": "bug", "file": "a.py", "description": "d"}], new_category=True
         )
         assert rows[0]["severity"] == "medium"
 
     def test_update_finding(self, conn):
         f = findings.add_finding(
-            conn, severity="low", category="bug", file="a.py", description="d"
+            conn, severity="low", category="bug", file="a.py", description="d", new_category=True
         )
         findings.update_finding(conn, f["id"], severity="MeDiUm")
         assert conn.execute(
@@ -1479,7 +1480,7 @@ class TestSeverityIsNormalizedAtEveryRoute:
         Had the write paths been normalized alone, this exact call would have written
         `high` and then matched nothing — a silent empty result, not an error."""
         findings.add_finding(
-            conn, severity="High", category="bug", file="a.py", description="d"
+            conn, severity="High", category="bug", file="a.py", description="d", new_category=True
         )
         assert findings.query_findings(conn, severity="HIGH")["total"] == 1
         assert findings.query_findings(conn, severity="high")["total"] == 1
@@ -1545,8 +1546,8 @@ class TestFalseyVocabularyFiltersDoNotDisableTheFilter:
     from a correctly filtered one, which is the silent shape CB-19 was filed against."""
 
     def _two(self, conn):
-        findings.add_finding(conn, severity="high", category="c", file="a.py", description="d")
-        findings.add_finding(conn, severity="low", category="c", file="b.py", description="d")
+        findings.add_finding(conn, severity="high", category="c", file="a.py", description="d", new_category=True)
+        findings.add_finding(conn, severity="low", category="c", file="b.py", description="d", new_category=True)
 
     @pytest.mark.parametrize("falsey", [0, False, [], {}])
     def test_falsey_severity_raises_instead_of_returning_everything(self, conn, falsey):
@@ -1581,20 +1582,20 @@ class TestMetaValueRequiresMetaKey:
     description already declared `meta_key` required."""
 
     def test_meta_value_without_meta_key_raises(self, conn):
-        findings.add_finding(conn, severity="high", category="c", file="a.py", description="d")
+        findings.add_finding(conn, severity="high", category="c", file="a.py", description="d", new_category=True)
         with pytest.raises(ValueError, match="meta_value requires meta_key"):
             findings.query_findings(conn, meta_value="anything")
 
     def test_meta_key_alone_still_means_key_exists(self, conn):
         findings.add_finding(
-            conn, severity="high", category="c", file="a.py", description="d", meta={"k": "v"}
+            conn, severity="high", category="c", file="a.py", description="d", meta={"k": "v"}, new_category=True
         )
-        findings.add_finding(conn, severity="low", category="c", file="b.py", description="d")
+        findings.add_finding(conn, severity="low", category="c", file="b.py", description="d", new_category=True)
         assert findings.query_findings(conn, meta_key="k")["total"] == 1
 
     def test_both_together_still_match_on_value(self, conn):
         findings.add_finding(
-            conn, severity="high", category="c", file="a.py", description="d", meta={"k": "v"}
+            conn, severity="high", category="c", file="a.py", description="d", meta={"k": "v"}, new_category=True
         )
         assert findings.query_findings(conn, meta_key="k", meta_value="v")["total"] == 1
         assert findings.query_findings(conn, meta_key="k", meta_value="other")["total"] == 0
@@ -1684,7 +1685,7 @@ class TestImportNeverReopensADecidedCard:
 
     def test_a_fixed_card_is_not_reopened(self, conn, tmp_path):
         f = findings.add_finding(conn, severity="high", category="bug", file="src/a.py",
-                        description="the widget explodes on load")
+                        description="the widget explodes on load", new_category=True)
         findings.update_finding(conn, f["id"], status="fixed")
         path = _write_csv(tmp_path / "x.csv", [self._foreign_row("the widget explodes on load")])
         with open(path, newline="") as fh:
@@ -1701,7 +1702,7 @@ class TestImportNeverReopensADecidedCard:
         """CONTROL — green on both sides. Another sighting of a card you already
         have IS an occurrence; the fix must not turn that into a skip."""
         f = findings.add_finding(conn, severity="high", category="bug", file="src/a.py",
-                        description="the widget explodes on load")
+                        description="the widget explodes on load", new_category=True)
         path = _write_csv(tmp_path / "x.csv", [self._foreign_row("the widget explodes on load")])
         with open(path, newline="") as fh:
             report = findings.import_findings(conn, list(csv.DictReader(fh)))
@@ -1712,7 +1713,7 @@ class TestImportNeverReopensADecidedCard:
         """CONTROL — green on both sides. `wont_fix` is a decision that stays
         decided, and CB-43's answer is a NEW linked row, not a reopen."""
         f = findings.add_finding(conn, severity="high", category="bug", file="src/a.py",
-                        description="the widget explodes on load")
+                        description="the widget explodes on load", new_category=True)
         findings.update_finding(conn, f["id"], status="wont_fix")
         path = _write_csv(tmp_path / "x.csv", [self._foreign_row("the widget explodes on load")])
         with open(path, newline="") as fh:
@@ -1731,7 +1732,7 @@ class TestAnIdIdentifiesARowOnlyWithItsContent:
         '3 already present, skipped'."""
         for i in range(3):
             findings.add_finding(conn, severity="low", category="local", file=f"src/l{i}.py",
-                        description=f"local finding number {i}")
+                        description=f"local finding number {i}", new_category=True)
         rows = [{"id": f"CB-{i}", "severity": "high", "category": "peerbug",
                  "file": f"src/p{i}.py", "description": f"unrelated peer finding {i}",
                  "source": "peer"} for i in (1, 2, 3)]
@@ -1750,8 +1751,8 @@ class TestAnIdIdentifiesARowOnlyWithItsContent:
     def test_reimporting_your_own_export_is_still_a_no_op(self, conn, tmp_path):
         """CONTROL for the guard's real purpose. Deleting the id check entirely
         would break this, which is why it was narrowed rather than removed."""
-        findings.add_finding(conn, severity="low", category="c", file="a.py", description="mine one")
-        findings.add_finding(conn, severity="low", category="c", file="b.py", description="mine two")
+        findings.add_finding(conn, severity="low", category="c", file="a.py", description="mine one", new_category=True)
+        findings.add_finding(conn, severity="low", category="c", file="b.py", description="mine two", new_category=True)
         rows = [dict(r) for r in conn.execute(
             "SELECT id, severity, category, file, description, source FROM findings")]
         path = _write_csv(tmp_path / "own.csv", rows)
@@ -1805,7 +1806,7 @@ class TestImportIsAllOrNothing:
     each committing, so a failure part-way left N rows behind it."""
 
     def test_a_failure_mid_import_lands_nothing(self, conn, tmp_path, monkeypatch):
-        findings.add_finding(conn, severity="low", category="pre", file="p.py", description="pre-existing")
+        findings.add_finding(conn, severity="low", category="pre", file="p.py", description="pre-existing", new_category=True)
         rows = [{"id": "", "severity": "low", "category": "c", "file": f"f{i}.py",
                  "description": f"row {i}", "source": "s"} for i in range(5)]
         path = _write_csv(tmp_path / "boom.csv", rows)
@@ -1849,7 +1850,7 @@ class TestImportCarriesTags:
     def test_tags_round_trip_through_import(self, tmp_project, tmp_path):
         conn = db.connect(tmp_project)
         findings.add_finding(conn, severity="low", category="c", file="a.py",
-                    description="tagged row", tags=["release", "ui"])
+                    description="tagged row", tags=["release", "ui"], new_category=True)
         conn.close()
         out = tmp_path / "e.csv"
         env = {**os.environ, "PYTHONPATH": os.path.join(os.getcwd(), "src")}
@@ -1927,17 +1928,17 @@ class TestRestoreIsVerbatim:
 
     def _seed(self, conn):
         a = findings.add_finding(conn, severity="high", category="bug", file="x.py",
-                                 description="alpha", tags=["rel"])
+                                 description="alpha", tags=["rel"], new_category=True)
         b = findings.add_finding(conn, severity="low", category="bug", file="y.py",
-                                 description="beta")
+                                 description="beta", new_category=True)
         findings.update_finding(conn, a["id"], status="fixed")
         findings.update_finding(conn, b["id"], status="wont_fix")
         for _ in range(4):
             findings.add_finding(conn, severity="medium", category="bug", file="z.py",
-                                 description="gamma repeated")
+                                 description="gamma repeated", new_category=True)
         # the recurrence twin — SAME fingerprint as the wont_fix row, and live
         findings.add_finding(conn, severity="low", category="bug", file="y.py",
-                             description="beta")
+                             description="beta", new_category=True)
 
     def _snapshot(self, conn):
         return [tuple(r) for r in conn.execute(
@@ -2052,7 +2053,7 @@ class TestRestoreIsVerbatim:
                  "description": "restored high id"}]
         findings.restore_findings(conn, rows)
         nxt = findings.add_finding(conn, severity="low", category="c", file="b.py",
-                                   description="after restore")
+                                   description="after restore", new_category=True)
         assert nxt["id"] == "CB-501", nxt["id"]
 
 
@@ -2086,7 +2087,7 @@ class TestExportIsNotCapped:
         conn = db.connect(tmp_project)
         for i in range(7):
             findings.add_finding(conn, severity="low", category="c", file=f"f{i}.py",
-                                 description=f"row number {i}")
+                                 description=f"row number {i}", new_category=True)
         conn.close()
 
         real = findings.query_findings

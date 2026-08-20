@@ -336,7 +336,7 @@ class TestAutoRouting:
              "description": "x"},
             {"severity": "critical", "category": "security:xss",
              "file": "b.py", "description": "y"},
-        ])
+        ], new_category=True)
         triage = conn.execute(
             "SELECT COUNT(*) c FROM milestone_items WHERE milestone_id='stream/triage'"
         ).fetchone()["c"]
@@ -369,7 +369,7 @@ class TestAutoRouting:
         # Hook is already registered (module-level). It must not crash.
         result = findings.add_finding(
             c, severity="high", category="bug",
-            file="x.py", description="d",
+            file="x.py", description="d", new_category=True,
         )
         assert result["id"] == "CB-1"
         c.close()

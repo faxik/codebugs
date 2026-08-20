@@ -1,6 +1,6 @@
 [
   {
-    "description": "Record a code finding observation (deduplicated by fingerprint).\n\nIf the fingerprint matches a live finding, that finding's occurrence count\nis bumped and IT is returned (`was_new: false`, `dedup_action: \"bumped\"`);\na match on a `fixed` finding reopens it as a regression (`\"reopened\"`); a\nmatch on a `wont_fix`/`not_a_bug` finding creates a new row linked via\n`meta.recurrence_of`. Check `was_new` to tell create from match. Without a\nfingerprint a conservative server-side one is derived from category, file\nand the normalized description.\n\nArgs:\n    severity: critical, high, medium, or low (case-insensitive, no aliases)\n    category: Finding category (e.g. tz_naive_datetime, n_plus_one, missing_validation).\n              Call `categories` first to reuse existing category names.\n    file: File path relative to project root\n    description: What's wrong\n    source: Who created this finding (default: claude)\n    tags: Optional tags for grouping\n    meta: Optional JSON metadata (lines, module, rule_code, etc.)\n    reported_at_commit: Git SHA when finding was created (auto-detected from HEAD if omitted)\n    reported_at_ref: Version/tag label (e.g. \"v2.1.0\"), always caller-supplied\n    fingerprint: Stable identity token for this defect, computed from the\n                 INVARIANT part of the observation (normalized error\n                 signature + failing test + anchor file \u2014 no timestamps,\n                 SHAs, run ids). Same defect \u2192 same fingerprint. The\n                 `auto:` prefix is reserved for server-derived values.\n",
+    "description": "Record a code finding observation (deduplicated by fingerprint).\n\nIf the fingerprint matches a live finding, that finding's occurrence count\nis bumped and IT is returned (`was_new: false`, `dedup_action: \"bumped\"`);\na match on a `fixed` finding reopens it as a regression (`\"reopened\"`); a\nmatch on a `wont_fix`/`not_a_bug` finding creates a new row linked via\n`meta.recurrence_of`. Check `was_new` to tell create from match. Without a\nfingerprint a conservative server-side one is derived from category, file\nand the normalized description.\n\nArgs:\n    severity: critical, high, medium, or low (case-insensitive, no aliases)\n    category: Finding category (e.g. tz_naive_datetime, n_plus_one, missing_validation).\n              Call `categories` first to reuse existing category names.\n              Spelling is normalized (casefold, hyphen/whitespace -> \"_\");\n              a category this tracker does not already hold is REFUSED\n              with a hint unless new_category=true.\n    file: File path relative to project root\n    description: What's wrong\n    source: Who created this finding (default: claude)\n    tags: Optional tags for grouping\n    meta: Optional JSON metadata (lines, module, rule_code, etc.)\n    reported_at_commit: Git SHA when finding was created (auto-detected from HEAD if omitted)\n    reported_at_ref: Version/tag label (e.g. \"v2.1.0\"), always caller-supplied\n    fingerprint: Stable identity token for this defect, computed from the\n                 INVARIANT part of the observation (normalized error\n                 signature + failing test + anchor file \u2014 no timestamps,\n                 SHAs, run ids). Same defect \u2192 same fingerprint. The\n                 `auto:` prefix is reserved for server-derived values.\n    new_category: Explicit permission to MINT a category the tracker does\n                  not hold yet (CB-60). Minting is stamped as\n                  meta.category_minted for later counting. Existing\n                  categories never need this.\n",
     "inputSchema": {
       "properties": {
         "category": {
@@ -39,6 +39,11 @@
           ],
           "default": null,
           "title": "Meta"
+        },
+        "new_category": {
+          "default": false,
+          "title": "New Category",
+          "type": "boolean"
         },
         "reported_at_commit": {
           "anyOf": [
@@ -101,7 +106,7 @@
     "name": "add"
   },
   {
-    "description": "Record multiple finding observations at once (deduplicated by fingerprint).\n\nMembers are deduplicated exactly like `add` \u2014 including against each other,\nso two members sharing a fingerprint yield one insert plus one bump. One\nresult per input, in input order; check each result's `was_new` /\n`dedup_action`. Unknown member keys are refused.\n\nArgs:\n    findings: List of finding objects, each with keys:\n        severity, category, file, description, and optionally:\n        source, tags, meta, reported_at_commit, reported_at_ref, fingerprint\n    reported_at_commit: Default commit SHA for all findings (auto-detected if omitted).\n                        Per-finding values override this.\n    reported_at_ref: Default version label for all findings.\n                     Per-finding values override this.\n",
+    "description": "Record multiple finding observations at once (deduplicated by fingerprint).\n\nMembers are deduplicated exactly like `add` \u2014 including against each other,\nso two members sharing a fingerprint yield one insert plus one bump. One\nresult per input, in input order; check each result's `was_new` /\n`dedup_action`. Unknown member keys are refused.\n\nArgs:\n    findings: List of finding objects, each with keys:\n        severity, category, file, description, and optionally:\n        source, tags, meta, reported_at_commit, reported_at_ref, fingerprint\n    reported_at_commit: Default commit SHA for all findings (auto-detected if omitted).\n                        Per-finding values override this.\n    reported_at_ref: Default version label for all findings.\n                     Per-finding values override this.\n    new_category: Batch-wide permission to MINT categories the tracker\n                  does not hold yet (CB-60); the first member introducing\n                  a category is stamped meta.category_minted.\n",
     "inputSchema": {
       "properties": {
         "findings": {
@@ -111,6 +116,11 @@
           },
           "title": "Findings",
           "type": "array"
+        },
+        "new_category": {
+          "default": false,
+          "title": "New Category",
+          "type": "boolean"
         },
         "reported_at_commit": {
           "anyOf": [

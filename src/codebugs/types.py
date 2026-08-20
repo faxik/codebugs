@@ -179,6 +179,36 @@ def resolve_severity(severity: str) -> str:
     return _resolve(severity, SEVERITIES, None, "severity")
 
 
+# Category spelling separators: hyphen and whitespace runs (in any mix) collapse
+# to one underscore. Hyphen and space are the two separators the measured twin
+# pairs actually used (CB-60: `process-improvement` vs `process_improvement`);
+# underscores already in the input are left alone — this normalizes SPELLING,
+# it does not re-tokenize the name.
+_CATEGORY_SEPARATORS = re.compile(r"[-\s]+")
+
+
+def normalize_category(category: str) -> str:
+    """Normalize a category spelling to its canonical stored form (CB-60).
+
+    Casefold, strip, and collapse hyphen/whitespace runs to a single ``_``.
+    Category is an IDENTITY input — the ``auto:v1`` fingerprint hashes it and
+    similarity groups strictly inside it — so twin spellings
+    (``process-improvement`` / ``Process Improvement`` / ``process_improvement``)
+    must map to one canonical name or they fork identity forever.
+
+    Spelling, never meaning — the same contract as the vocabulary resolvers
+    above: no aliases, no synonym folding. ``""`` passes through unchanged
+    (the legal uncategorized value; similarity's annotation pool matches it
+    exactly). Applied by ``findings`` on the OBSERVATION write path only,
+    before fingerprint derivation; an explicit ``finding_id`` add, CSV import
+    and restore store the category verbatim (CB-51: an import is not an
+    observation).
+    """
+    if not isinstance(category, str):
+        raise ValueError(f"Invalid category: {category!r}")
+    return _CATEGORY_SEPARATORS.sub("_", category.casefold().strip())
+
+
 # --- SQL identifiers ---
 
 # Unanchored on purpose — `is_sql_identifier` applies it with `fullmatch`. The
