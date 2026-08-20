@@ -1496,3 +1496,4 @@ the non-`OSError` path is preserved or fixed inside a "pure refactor".
 - **Т-3** — CB-60 fixed (fail-closed нормализация категории), мердж `fa40b3c`, принят DIR-2 2026-08-20 (7/7 §13, /acceptance-check). Открыто попутно: CB-61 разблокирована.
 - **Т-5** — CB-53 fixed (staleness читает ring), мердж `fc4f126`, принят DIR-2 2026-08-19 (пп.1,4,5 + замысел).
 - **Т-8** — CB-114+CB-115 fixed (докстринг импорта; индекс ref в _POST_MIGRATION_INDEXES — отклонение от буквы брифа, подтверждено), мердж `d3ff33f`, принят DIR-2 2026-08-20 (7/7, /acceptance-check).
+- **Т-9** — строка `tags` контракта BT-4 (минимальный union C-ALT-1, promote_tags-ратчет, снятие — открытое суб-решение), мердж `d491432`, принят DIR-2 2026-08-20 (7/7, /acceptance-check). Карт нет; CB-103 у DIR-2.

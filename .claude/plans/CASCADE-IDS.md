@@ -14,3 +14,5 @@
 - Т-8 — (DIR-2) CB-114 + CB-115: механическая пара из x2-ревью BT-4 (докстрочная ложь импорта; индекс ref на свежих базах) — 2026-08-20, DIR-2, `L3-BRIEF-DIR-2-T8-mechanical-2026-08-20.md` (механическая полоса)
 - Т-9 — (DIR-2) посадка ратифицированной строки `tags` контракта BT-4: минимальный union-merge (C-ALT-1, strict-parse, promote_tags-ратчет) — 2026-08-20, DIR-2, `L3-BRIEF-DIR-2-T9-tags-contract-2026-08-20.md`
 - BT-5 — (DIR-2) attention-блок в ответе дедупа: структурированные поля расхождения из записанных фактов, порог — только серьёзные сигналы — 2026-08-20, DIR-2, `BT-5-dedup-attention-block.md`
+- Т-10 — (DIR-2) посадка ратифицированной строки `category` контракта BT-4 (запись в occurrence-ring) + CB-113(b) — 2026-08-20, DIR-2, `L3-BRIEF-DIR-2-T10-category-ring-2026-08-20.md`
+- Т-11 — (DIR-2) посадка деклараций `source`/`reported_at_ref`/`meta` контракта BT-4 (докстринги + golden) — 2026-08-20, DIR-2, `L3-BRIEF-DIR-2-T11-declarations-2026-08-20.md`
