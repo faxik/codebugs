@@ -7,6 +7,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **Re-reporting a known defect no longer fails over a category typo, and the
+  occurrence ring now records each observation's category (CB-113).** The category
+  mint gate (CB-60) used to run before the deduplication branch was known, so an
+  observation carrying a supplied fingerprint that matched an existing live card —
+  but a near-miss or unknown category spelling and no `new_category` flag — was
+  refused outright, and the occurrence (count bump, ring evidence, regression
+  reopen) was lost over a spelling dispute about a row that already exists. The
+  gate now runs only when the observation would **create** a row: a fingerprint
+  match on a live card bumps it, and a match on a `fixed` card reopens it,
+  regardless of the observed category spelling. Genuinely new findings are gated
+  exactly as before — an unknown category is still refused with a hint unless
+  `new_category` is passed, a near-miss still names the canonical spelling, and a
+  recurrence of a `wont_fix`/`not_a_bug` card (which files a new row) is still
+  gated. Every ring entry now carries a `category` key (unconditionally — `""` is
+  a legal category), so a merge across category spellings stays reconstructable
+  from the ring alone; the stored `category` column is never rewritten by a bump.
+  Entries written before this change simply lack the key. CSV import stays
+  ungated (`gate_category=False`, its single sanctioned call site, pinned by an
+  AST ratchet) — an import is not an observation, so a peer's category lands
+  verbatim.
 - **Re-reporting a known defect with new tags now adds them to the card (BT-4).** Since
   findings gained an identity function, a second report of the same defect bumps the
   existing row — but the bump left the `tags` column frozen at the first report, so a
