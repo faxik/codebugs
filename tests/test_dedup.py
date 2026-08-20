@@ -1609,11 +1609,22 @@ class TestAddOneOutcomeContract:
         assert inspect.signature(findings._add_one).return_annotation == "AddOutcome"
 
     def test_import_would_reopen_no_longer_claims_the_outcome_shape_is_frozen(self):
+        """The docstring must RECORD the reversal, not merely lose the old claim.
+
+        The first draft of this pin asserted the old phrase was absent. That is
+        the letter, not the intent: the design requires the reversal to be cited
+        where the decision was originally declined, so the old sentence is
+        QUOTED there on purpose. The pin therefore asserts the quotation is
+        marked as withdrawn and the new outcome type is named — a docstring that
+        still asserted the frozen shape would carry neither.
+        """
         doc = findings._import_would_reopen.__doc__ or ""
-        assert "return shape stays" not in doc, (
-            "the docstring still asserts a contract this unit reversed"
-        )
         assert "AddOutcome" in doc, "the reversal must be named where it was declined"
+        assert "REVERSES" in doc, "the reversal must be stated, not implied"
+        if "return shape stays" in doc:
+            assert "used to say" in doc, (
+                "the old contract appears without being marked as withdrawn"
+            )
 
 
 class TestMcpDocstringsNameEveryAction:

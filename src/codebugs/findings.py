@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import csv
+import dataclasses
 import hashlib
 import json
 import re
 import sqlite3
 import sys
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple, TypedDict
 
 from codebugs import db, entities
 from codebugs.types import (
@@ -535,6 +536,27 @@ def _escalated_severity(stored: object, observed: str) -> str | None:
     return None
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class BumpOutcome:
+    """What a bump did, beyond the row it left behind (BT-5).
+
+    `escalated_from` / `escalated_to` are `_bump_row`'s OWN decision, lifted out
+    of the local it used to die in: `RETURNING *` hands back the POST-update row,
+    so the pre-escalation severity exists nowhere else in the response. There is
+    deliberately no second severity comparison anywhere in this module — the
+    predicate is `_escalated_severity`, called once, and point-of-use discipline
+    is the wrong enforcement layer (CB-41/CB-52).
+
+    INVARIANT: both fields are None, or both are canonical severity strings.
+    `_bump_row` is the only producer, and on the `escalate=False` path the
+    comparison does not run at all, so both stay None.
+    """
+
+    row: sqlite3.Row
+    escalated_from: str | None
+    escalated_to: str | None
+
+
 def _bump_row(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
@@ -545,7 +567,7 @@ def _bump_row(
     observed_severity: str,
     escalate: bool = True,
     promote_tags: bool = True,
-) -> sqlite3.Row:
+) -> BumpOutcome:
     """Record an occurrence on an existing finding; optionally reopen it (regression).
 
     ONE UPDATE, `meta` composed fully in Python and assigned exactly once (CB-16), the
@@ -588,6 +610,11 @@ def _bump_row(
     fails cleanly with nothing landed, which is the honest half of the CB-16
     rule. The tags strict parse MOVED the malformed-stored-tags corruption
     class from post-commit (`PostCommitCorruptionError`) to pre-write (BT-4).
+
+    Returns a `BumpOutcome`, not the bare row (BT-5): the escalation decision
+    below is the only place the PRE-update severity is in hand, and the
+    attention block in the response is built from it — inside the transaction,
+    so the post-commit conversion path acquires no new reason to fail.
     """
     meta = json.loads(row["meta"])
     # Defensive re-typing for rows written before the reserved-key guard existed
@@ -613,11 +640,18 @@ def _bump_row(
         meta["regressed"] = regressed
         sets += ", status = 'open'"
     # Assigned at most once, from one computed value (CB-16).
+    escalated_from: str | None = None
+    escalated_to: str | None = None
     if escalate:
         escalated = _escalated_severity(row["severity"], observed_severity)
         if escalated is not None:
             sets += ", severity = ?"
             params.append(escalated)
+            # THE single severity comparison. `row["severity"]` is still the
+            # pre-UPDATE value here, which is exactly what makes this the only
+            # moment `from` exists; both fields are set together (BT-5).
+            escalated_from = row["severity"]
+            escalated_to = escalated
     if promote_tags:
         # Strict parse of the stored column, PRE-write (symmetric with `meta`
         # at the top): the union cannot be computed from a value that does not
@@ -642,10 +676,14 @@ def _bump_row(
     params.append(json.dumps(meta))
     params.append(row["id"])
 
-    return conn.execute(
-        f"UPDATE findings SET {sets} WHERE id = ? RETURNING *",  # noqa: S608
-        params,
-    ).fetchone()
+    return BumpOutcome(
+        row=conn.execute(
+            f"UPDATE findings SET {sets} WHERE id = ? RETURNING *",  # noqa: S608
+            params,
+        ).fetchone(),
+        escalated_from=escalated_from,
+        escalated_to=escalated_to,
+    )
 
 
 def _live_row_by_fingerprint(
@@ -689,6 +727,88 @@ def _match_fingerprint(
     return live, closed
 
 
+#: The one attention signal today (BT-5): THIS observation raised the finding's
+#: severity. Severity is monotonic under observation (CB-52), so the record can
+#: only ever describe an escalation — there is no de-escalation to report.
+SEVERITY_ESCALATED = "severity_escalated"
+
+#: One attention record. Functional `TypedDict` syntax is MANDATORY here: `from`
+#: is a Python keyword, so the class form cannot spell the field at all. The
+#: `Literal` must repeat the constant's text — `Literal[SEVERITY_ESCALATED]` is
+#: not a legal type — so the totality test asserts the two agree rather than
+#: leaving a second spelling free to drift.
+AttentionRecord = TypedDict(
+    "AttentionRecord",
+    {"signal": Literal["severity_escalated"], "from": str, "to": str},
+)
+
+#: Which signals each dedup branch may emit. LIVE, not documentation: the builder
+#: below reads it, so a wrong cell changes the response rather than only a test.
+#:
+#: `created` and `recurrence_of_closed` are empty for a STRUCTURAL reason, not by
+#: policy — both are insert paths, so `_bump_row` never runs and this observation
+#: raises no stored row's severity. Said precisely for the second one, because a
+#: row DOES exist there: the recurrence branch deliberately leaves the dismissed
+#: twin untouched (a decision stays decided) and files a NEW row, which is also
+#: why it reports `was_new: True` — it is an insert, not a bump. A new dedup
+#: branch must therefore be classified here; the builder
+#: raises `KeyError` on an unknown action rather than returning an empty list,
+#: because "evaluated, nothing fired" is the one meaning an unclassified branch
+#: must not be able to borrow. `tests/test_dedup.py::TestAttentionSignalMatrix`
+#: derives the key set from `_add_one`'s own AST, so the table cannot fall behind.
+_ATTENTION_SIGNALS_BY_ACTION: dict[str, frozenset[str]] = {
+    "created": frozenset(),
+    "bumped": frozenset({SEVERITY_ESCALATED}),
+    "reopened": frozenset({SEVERITY_ESCALATED}),
+    "recurrence_of_closed": frozenset(),
+}
+
+
+def _attention_records(dedup_action: str, bump: BumpOutcome | None) -> tuple[AttentionRecord, ...]:
+    """The attention block for one observation — built INSIDE the transaction.
+
+    Two things must both hold for a record to appear: the branch admits the
+    signal (`_ATTENTION_SIGNALS_BY_ACTION`), and the write itself reported it
+    (`BumpOutcome`). The severity comparison is NOT repeated here — `_bump_row`
+    already made it, and one predicate is the whole point (CB-41/CB-52). On the
+    insert branches `bump` is None because `_bump_row` did not run.
+
+    Ordering is deterministic (this body appends in one fixed order) and each
+    signal type appends at most once, so the list is a stable contract rather
+    than a set that happens to serialize.
+    """
+    allowed = _ATTENTION_SIGNALS_BY_ACTION[dedup_action]  # fail-closed on a new branch
+    records: list[AttentionRecord] = []
+    if SEVERITY_ESCALATED in allowed and bump is not None and bump.escalated_from is not None:
+        records.append(
+            {
+                "signal": SEVERITY_ESCALATED,
+                "from": bump.escalated_from,
+                "to": bump.escalated_to,
+            }
+        )
+    return tuple(records)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class AddOutcome:
+    """What one observation did — `_add_one`'s typed return (BT-5).
+
+    Replaces a positional 4-tuple whose splat in `batch_add_findings` made a
+    fifth member unaddable without touching every call site. Exactly one of
+    `inserted` / `raw_row` is non-None, the same contract the tuple carried.
+
+    `attention` is a TUPLE: the outcome is frozen, and every response gets its
+    own `list()` of it, so no two members of a batch can share one mutable list.
+    """
+
+    inserted: dict[str, Any] | None
+    raw_row: sqlite3.Row | None
+    was_new: bool
+    dedup_action: str
+    attention: tuple[AttentionRecord, ...]
+
+
 def _add_one(
     conn: sqlite3.Connection,
     *,
@@ -708,14 +828,18 @@ def _add_one(
     promote_tags: bool = True,
     new_category: bool = False,
     gate_category: bool = True,
-) -> tuple[dict[str, Any] | None, sqlite3.Row | None, bool, str]:
+) -> AddOutcome:
     """One observation through the identity function, inside an OPEN transaction.
 
-    Returns (inserted_dict, matched_raw_row, was_new, dedup_action) — exactly one of
-    the first two is non-None. An inserted row is converted here (its meta is the JSON
-    this call just serialized, so conversion cannot fail) because post-add hooks need
-    the dict; a matched row is returned RAW for conversion after the caller's
-    transaction closes, since its stored meta is legacy data (CB-24 consequence 2).
+    Returns an `AddOutcome` — exactly one of `inserted` / `raw_row` is non-None. An
+    inserted row is converted here (its meta is the JSON this call just serialized,
+    so conversion cannot fail) because post-add hooks need the dict; a matched row is
+    returned RAW for conversion after the caller's transaction closes, since its
+    stored meta is legacy data (CB-24 consequence 2).
+
+    The `attention` block is assembled HERE, not in `_finalize_add` (BT-5): this is
+    the frame that holds the `BumpOutcome`, and it is inside the transaction, so the
+    post-commit conversion path stays mechanical and gains no new way to fail.
 
     `severity` and `fingerprint` arrive already validated — validation must run before
     the caller opens its transaction, so invalid input raises immediately instead of
@@ -753,7 +877,7 @@ def _add_one(
             reported_at_ref=reported_at_ref,
         )
         if live is not None:
-            raw = _bump_row(
+            bump = _bump_row(
                 conn,
                 live,
                 now=now,
@@ -762,9 +886,15 @@ def _add_one(
                 escalate=escalate,
                 promote_tags=promote_tags,
             )
-            return None, raw, False, "bumped"
+            return AddOutcome(
+                inserted=None,
+                raw_row=bump.row,
+                was_new=False,
+                dedup_action="bumped",
+                attention=_attention_records("bumped", bump),
+            )
         if closed is not None and closed["status"] in _REOPEN_STATUSES:
-            raw = _bump_row(
+            bump = _bump_row(
                 conn,
                 closed,
                 now=now,
@@ -777,7 +907,13 @@ def _add_one(
             # Fire like update_finding does: the write changed the row, inside this
             # transaction, so claims/milestone reconciliation land atomically with it.
             db.run_status_change_hooks(conn, closed["id"], closed["status"], "open")
-            return None, raw, False, "reopened"
+            return AddOutcome(
+                inserted=None,
+                raw_row=bump.row,
+                was_new=False,
+                dedup_action="reopened",
+                attention=_attention_records("reopened", bump),
+            )
         if closed is not None:
             # A wont_fix / not_a_bug closure is a DECISION, not a fix — it stays
             # closed, and the recurrence becomes a new row that keeps the link.
@@ -865,7 +1001,16 @@ def _add_one(
     )
     result = db.row_to_dict(conn.execute("SELECT * FROM findings WHERE id = ?", (fid,)).fetchone())
     db.run_post_add_hooks(conn, result)
-    return result, None, True, dedup_action
+    # The insert path: `_bump_row` never ran, so there is no escalation to report
+    # and `_attention_records` is handed no bump. It still runs, because the
+    # branch must be CLASSIFIED — an action the matrix does not know raises here.
+    return AddOutcome(
+        inserted=result,
+        raw_row=None,
+        was_new=True,
+        dedup_action=dedup_action,
+        attention=_attention_records(dedup_action, None),
+    )
 
 
 class PostCommitCorruptionError(Exception):
@@ -895,37 +1040,56 @@ class PostCommitCorruptionError(Exception):
     """
 
 
-def _finalize_add(
-    inserted: dict[str, Any] | None,
-    raw_row: sqlite3.Row | None,
-    was_new: bool,
-    dedup_action: str,
-    *,
-    committed: bool,
-) -> dict[str, Any]:
+#: Keys `_finalize_add` writes onto the response that are NOT columns of
+#: `findings`. Declared rather than left implicit so a ratchet can hold two
+#: things at once (judge W-4): that this really is what the constructor writes
+#: (AST), and that none of them can ever shadow a column — a future `attention`
+#: column would otherwise be silently overwritten in every response, the CB-16
+#: shape one layer up. Pinned by `tests/test_dedup.py::TestResponseOnlyKeysRatchet`.
+_RESPONSE_ONLY_KEYS = frozenset({"was_new", "dedup_action", "attention"})
+
+
+def _finalize_add(outcome: AddOutcome, *, committed: bool) -> dict[str, Any]:
     """Convert an _add_one outcome to the response dict, AFTER the transaction closed.
 
-    `was_new` / `dedup_action` are response-only keys (sweep.py's was_new
-    discriminator), not columns. ``committed`` is this frame's ``db.txn``
+    MECHANICAL BY CONTRACT (BT-5): conversion plus key writes, no computation and
+    no new failure mode. Every signal was decided inside the transaction, so the
+    post-commit path — the one that can already only report `PostCommitCorruptionError`
+    — never acquires a second reason to fail.
+
+    `was_new` / `dedup_action` / `attention` are response-only keys (see
+    `_RESPONSE_ONLY_KEYS`), not columns. ``committed`` is this frame's ``db.txn``
     ownership result: only a frame that actually committed may classify a
     conversion failure as post-commit — under an ambient transaction the owner
     will normally roll the unit back, so claiming "recorded" would mislead
     retry/accounting logic.
+
+    The insert path builds the response as a SHALLOW COPY of the dict the post-add
+    hooks were handed (CB-119). Copying HERE and not at the hook seam is the whole
+    point: hooks run inside `_add_one`, this frame runs after the transaction
+    closed, so a hook's mutations still reach the response — only the aliasing
+    dies. A hook that RETAINS the dict used to watch response-only keys appear on
+    it later. Shallow is deliberate and sufficient: every response-only key is
+    top-level, and the nested `meta` object is shared on purpose — this is not a
+    defensive deep copy, it is an alias cut at exactly one level.
     """
-    if inserted is not None:
-        result = inserted
+    if outcome.inserted is not None:
+        result = dict(outcome.inserted)
     else:
         try:
-            result = db.row_to_dict(raw_row)
+            result = db.row_to_dict(outcome.raw_row)
         except json.JSONDecodeError as e:
             if committed:
                 raise PostCommitCorruptionError(
-                    f"occurrence recorded on {raw_row['id']}, but its stored data "
+                    f"occurrence recorded on {outcome.raw_row['id']}, but its stored data "
                     f"could not be serialized: {e}"
                 ) from e
             raise
-    result["was_new"] = was_new
-    result["dedup_action"] = dedup_action
+    result["was_new"] = outcome.was_new
+    result["dedup_action"] = outcome.dedup_action
+    # A FRESH list per response: the outcome holds a tuple precisely so no two
+    # members of one batch can be handed the same mutable object.
+    result["attention"] = list(outcome.attention)
     return result
 
 
@@ -1003,7 +1167,7 @@ def add_finding(
         category = normalize_category(category)
 
     with db.txn(conn) as owned:
-        inserted, raw_row, was_new, dedup_action = _add_one(
+        outcome = _add_one(
             conn,
             severity=severity,
             category=category,
@@ -1019,7 +1183,7 @@ def add_finding(
             annotate=annotate,
             new_category=new_category,
         )
-    return _finalize_add(inserted, raw_row, was_new, dedup_action, committed=owned)
+    return _finalize_add(outcome, committed=owned)
 
 
 # Member keys accepted by batch_add_findings. The strict-argument middleware guards
@@ -1225,7 +1389,7 @@ def import_findings(
                     skipped_decided += 1
                     continue
 
-                _inserted, _matched, was_new, _action = _add_one(
+                outcome = _add_one(
                     conn,
                     severity=severity,
                     category=category,
@@ -1260,7 +1424,11 @@ def import_findings(
                 errors.append(ImportRowError(label, str(e)))
                 continue
 
-            if was_new:
+            # An import reads the outcome's counters and nothing else — it never
+            # calls `_finalize_add`, so the attention block has no path to a
+            # caller here and needs no opt-out flag (BT-5 section D; a flag would
+            # be dead code). Pinned by TestImportCarriesNoAttention.
+            if outcome.was_new:
                 imported += 1
             else:
                 merged += 1
@@ -1505,11 +1673,20 @@ def _import_would_reopen(
 
     RETURNS the resolved fingerprint so the caller can hand it to `_add_one`,
     which would otherwise derive it and re-run both match queries for the same
-    row — four SELECTs per row instead of two, inside the held write lock.
+    row — four SELECTs per row instead of two, inside the held write lock. That
+    COST is now the whole reason this helper exists; the other reason has been
+    withdrawn, and this paragraph is the record of it.
 
-    Asked here rather than by giving `_add_one` a new outcome: this module owns
-    both, so the derivation cannot drift, and `_add_one`'s return shape stays the
-    one every other caller and the MCP wrappers are written against.
+    This docstring used to say the question was asked here rather than by giving
+    `_add_one` a new outcome, because "`_add_one`'s return shape stays the one
+    every other caller and the MCP wrappers are written against". BT-5 REVERSES
+    that (ratified by the owner 2026-08-20; judge's mandatory fix #3):
+    `_add_one` now returns a typed `AddOutcome`. The reversal is narrower than it
+    looks, and that is why it was taken — the real content of the old decision
+    was "do not change the shape of the RESPONSE", and it is honoured. The tuple
+    that changed was module-private (three in-module callers plus one test
+    monkeypatch); the MCP response shape gains one key, additively and
+    deliberately, and the wrappers document it.
     """
     fp = fingerprint or _derive_fingerprint(category, file, description, meta)
     _live, closed = _match_fingerprint(conn, fp)
@@ -1575,7 +1752,7 @@ def batch_add_findings(
     # Each member's result is the row AS OBSERVED when that member was processed: a
     # later member bumping an earlier one does not retroactively update the earlier
     # member's returned occurrence_count. Input order is preserved by construction.
-    outcomes = []
+    outcomes: list[AddOutcome] = []
     with db.txn(conn) as owned:
         for f, (severity, fingerprint, category) in zip(findings, validated, strict=True):
             outcomes.append(
@@ -1595,7 +1772,7 @@ def batch_add_findings(
                     new_category=new_category,
                 )
             )
-    return [_finalize_add(*outcome, committed=owned) for outcome in outcomes]
+    return [_finalize_add(outcome, committed=owned) for outcome in outcomes]
 
 
 def update_finding(
@@ -2177,9 +2354,29 @@ def register_tools(mcp, conn_factory) -> None:
         is bumped and IT is returned (`was_new: false`, `dedup_action: "bumped"`);
         a match on a `fixed` finding reopens it as a regression (`"reopened"`); a
         match on a `wont_fix`/`not_a_bug` finding creates a new row linked via
-        `meta.recurrence_of`. Check `was_new` to tell create from match. Without a
-        fingerprint a conservative server-side one is derived from category, file
-        and the normalized description.
+        `meta.recurrence_of`. Without a fingerprint a conservative server-side one
+        is derived from category, file and the normalized description.
+
+        `dedup_action` has exactly four values — "created", "bumped", "reopened"
+        and "recurrence_of_closed" — and the fourth is the one to read carefully:
+        a recurrence of a DISMISSED twin files a NEW row and therefore reports
+        `was_new: true`, so a client that tells create from match by gating on
+        `was_new == false` misses the event entirely. The twin's id is always in
+        `meta.recurrence_of`, and `meta.similar_to` usually carries its status
+        alongside; on the paths where it does not — a caller-supplied fingerprint
+        whose text does not resemble the twin, or a normalized description under
+        the similarity minimum — the twin's status is NOT in this response at
+        all, and costs one `get`.
+
+        `attention` is a top-level list, ALWAYS present and often empty: an empty
+        list means "evaluated, nothing serious fired", which is a different fact
+        from an absent channel. Today it carries at most one record,
+        `{signal: severity_escalated, from, to}`, and only on the `bumped` and
+        `reopened` branches — it says THIS observation raised the finding's
+        stored severity. Severity is monotonic under observation, so there is no
+        de-escalation record to expect. The insert branches never emit one,
+        because they raise no stored row's severity: `created` had no row to
+        raise, and a recurrence deliberately leaves its dismissed twin untouched.
 
         Args:
             severity: critical, high, medium, or low (case-insensitive, no aliases)
@@ -2251,8 +2448,18 @@ def register_tools(mcp, conn_factory) -> None:
 
         Members are deduplicated exactly like `add` — including against each other,
         so two members sharing a fingerprint yield one insert plus one bump. One
-        result per input, in input order; check each result's `was_new` /
-        `dedup_action`. Unknown member keys are refused.
+        result per input, in input order. Unknown member keys are refused.
+
+        Each result carries the same discriminators `add` returns, and the same
+        four `dedup_action` values: "created", "bumped", "reopened" and
+        "recurrence_of_closed", the last of which reports `was_new: true` because
+        it files a NEW row linked to a dismissed twin via `meta.recurrence_of`.
+
+        Each result also carries its OWN `attention` list — always present, often
+        empty, never shared between members. Today the only record is
+        `{signal: severity_escalated, from, to}`, emitted on the `bumped` and
+        `reopened` branches, meaning that member's observation raised the stored
+        finding's severity.
 
         Args:
             findings: List of finding objects, each with keys:
