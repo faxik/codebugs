@@ -15,20 +15,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   different fact from "no such channel", so the key is unconditional, exactly like the
   `was_new` and `dedup_action` keys beside it.
 
-  Today it carries at most one record, `{"signal": "severity_escalated", "from": …,
-  "to": …}`, and only on the `bumped` and `reopened` branches: it says THIS observation
-  raised the card's stored severity. That fact was genuinely unrecoverable before —
-  severity is monotonic under observation (CB-52) and the insert path writes no ring
-  entry, so the pre-escalation value existed nowhere in the response. The insert
-  branches (`created`, `recurrence_of_closed`) never emit a record, for a structural
-  reason rather than a policy one: nothing was bumped, so no stored severity was
-  raised. There is no de-escalation record, because de-escalation does not exist.
+  The first record form is `{"signal": "severity_escalated", "from": …, "to": …}`, on
+  the `bumped` and `reopened` branches only: it says THIS observation raised the card's
+  stored severity. That fact was genuinely unrecoverable before — severity is monotonic
+  under observation (CB-52) and the insert path writes no ring entry, so the
+  pre-escalation value existed nowhere in the response. Neither insert branch
+  (`created`, `recurrence_of_closed`) emits it, for a structural reason rather than a
+  policy one: nothing was bumped, so no stored severity was raised. There is no
+  de-escalation record, because de-escalation does not exist.
 
   **Audience: MCP only.** The CLI prints fixed one-line summaries and does not
   serialize the response, and there is no batch verb there at all. **CSV import is
   unaffected by construction** — it reads the internal outcome directly and returns
   counters, so it never reaches the response constructor; an opt-out flag would have
   been dead code and was deliberately not added.
+
+- **A second `attention` record: `{"signal": "category_divergence", "observed": …,
+  "stored": …}` (BT-5).** It says this observation does not NAME the category of the
+  card it matched, and it appears on every branch that HAS a matched row — `bumped`,
+  `reopened`, and `recurrence_of_closed`, where the comparison is against the dismissed
+  twin rather than the row just filed. **Both sides are normalized**, so a difference of
+  spelling (`Process Improvement` vs `process-improvement`) is deliberately not a signal
+  while a difference of name is, and the reported values are the normalized ones — not
+  what the caller passed, and not what sits in the column. A stored category that is not
+  text (SQLite's dynamic typing permits it on a legacy or explicit-id row) is skipped
+  rather than raising, the same policy the category gate already applies for the same
+  reason: one odd legacy row must not brick every later observation.
 
 - **`codebugs categories-normalize` — fold the stored corpus onto canonical category
   spellings, so an old card stops forking when it is reported again (CB-61).** New

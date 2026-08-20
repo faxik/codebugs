@@ -1318,20 +1318,31 @@ class TestAttentionSignalMatrix:
 
     def test_the_signal_vocabulary_is_exactly_what_the_module_emits(self):
         declared = set().union(*findings._ATTENTION_SIGNALS_BY_ACTION.values())
-        assert declared == {findings.SEVERITY_ESCALATED}
+        assert declared == {findings.SEVERITY_ESCALATED, findings.CATEGORY_DIVERGENCE}
         assert self._emitted_signal_names() == declared, (
             "a signal literal exists in findings.py that the matrix does not admit"
         )
 
-    def test_the_record_type_pins_the_same_signal_name(self):
-        """The `Literal` in `AttentionRecord` cannot drift from the constant."""
-        hints = get_type_hints(findings.AttentionRecord)
-        assert set(get_args(hints["signal"])) == {findings.SEVERITY_ESCALATED}
+    def test_the_record_types_pin_the_same_signal_names(self):
+        """The `Literal`s in `AttentionRecord`'s members cannot drift from the constants.
+
+        `AttentionRecord` is a UNION of two `TypedDict`s since T-15, so
+        `get_type_hints` on the alias itself no longer resolves — the members are
+        walked with `get_args`. One `total=False` dict was NOT an option: it
+        admits a record missing its own required fields and collapses both
+        `Literal`s, which is exactly the pin this test exists to hold.
+        """
+        members = get_args(findings.AttentionRecord)
+        assert len(members) == 2, "one union member per record form"
+        names: set[str] = set()
+        for member in members:
+            names |= set(get_args(get_type_hints(member)["signal"]))
+        assert names == {findings.SEVERITY_ESCALATED, findings.CATEGORY_DIVERGENCE}
 
     def test_the_cell_count_lives_here_and_not_in_prose(self):
         """This repo has been wrong both times it left a count in prose."""
         assert len(findings._ATTENTION_SIGNALS_BY_ACTION) == 4
-        assert sum(len(v) for v in findings._ATTENTION_SIGNALS_BY_ACTION.values()) == 2
+        assert sum(len(v) for v in findings._ATTENTION_SIGNALS_BY_ACTION.values()) == 5
 
     def test_an_unclassified_action_fails_closed(self):
         """Fail-closed: an unknown action raises rather than yielding an empty list.
@@ -1340,14 +1351,66 @@ class TestAttentionSignalMatrix:
         unclassified branch must NOT be able to borrow.
         """
         with pytest.raises(KeyError):
-            findings._attention_records("no_such_action", None)
+            findings._attention_records(
+                "no_such_action", None, observed_category="bug", stored_category=None
+            )
 
-    def test_the_insert_branches_are_empty_for_a_structural_reason(self):
-        """`created` / `recurrence_of_closed` are insert paths: `_bump_row` never
-        runs there, so there is nothing to escalate. Stated in the docstring so a
-        reader is not left to infer it (BT-5 section B)."""
+    def test_the_helper_normalizes_the_observed_side_too(self):
+        """"Normalize BOTH sides" is the HELPER's contract, and only a direct
+        call can see half of it.
+
+        Every caller that reaches a branch admitting this signal has already
+        normalized the observed category (`add_finding`/`batch_add_findings` run
+        `normalize_category` before `_add_one`), and the one path carrying a
+        VERBATIM observed spelling — import — discards the record. So no
+        behavioural test can discriminate the observed-side normalization while
+        that holds, and this repo's rule (CB-82) is to SAY so and pin the
+        contract directly rather than claim coverage that does not exist.
+        Measured: dropping `normalize_category` from the observed side leaves
+        the whole suite green and fails only here.
+
+        Direct invocation has precedent one test below — the fail-closed check
+        calls the helper the same way. `bump=None` because the severity signal
+        is not what is under test.
+        """
+        spelled = findings._attention_records(
+            "bumped",
+            None,
+            observed_category="Process Improvement",
+            stored_category="process_improvement",
+        )
+        assert spelled == (), "same NAME, different spelling — not a signal"
+
+        named = findings._attention_records(
+            "bumped",
+            None,
+            observed_category="Race Condition",
+            stored_category="process_improvement",
+        )
+        assert named == (
+            {
+                "signal": findings.CATEGORY_DIVERGENCE,
+                "observed": "race_condition",
+                "stored": "process_improvement",
+            },
+        ), "different NAME — a signal, with BOTH sides reported normalized"
+
+    def test_created_is_the_only_empty_cell_and_the_reason_is_structural(self):
+        """The two insert branches no longer share one reason, and that is the point.
+
+        `created` is empty STRUCTURALLY: there is no matched row at all, so
+        neither signal has a second side to compare against.
+        `recurrence_of_closed` is also an insert path — `_bump_row` never runs
+        there, so it can carry no escalation — but a matched row DOES exist (the
+        dismissed twin the branch deliberately leaves closed), so the category
+        comparison is well-defined. The helper docstring has to carry both
+        reasons or a reader re-derives the wrong one.
+        """
+        table = findings._ATTENTION_SIGNALS_BY_ACTION
+        assert {action for action, signals in table.items() if not signals} == {"created"}
         doc = findings._attention_records.__doc__ or ""
-        assert "_bump_row" in doc
+        assert "_bump_row" in doc, "the escalation half's structural reason"
+        assert "twin" in doc, "the recurrence branch's matched row must be named"
 
 
 class TestAttentionBlock:
@@ -1493,6 +1556,195 @@ class TestAttentionBlock:
         _add(conn, severity="  LOW  ", desc=self.DESC)
         second = _add(conn, severity="Critical", desc=self.DESC)
         assert second["attention"] == [self.ESCALATED]
+
+
+class TestCategoryDivergenceSignal:
+    """BT-5 T-15: the second signal — this observation does not NAME the matched
+    row's category.
+
+    The record is `{signal, observed, stored}` with BOTH sides normalized, so a
+    difference of SPELLING is not a signal and a difference of NAME is. It does
+    not create a fact: since T-10 the divergence is derivable from two fields of
+    one response (the `category` column vs `meta.occurrences[-1].category`) — the
+    signal names, top-level, a fact buried three levels deep in a ring filers
+    demonstrably do not read.
+
+    Every fixture here writes its stored row with an EXPLICIT id and a SUPPLIED
+    fingerprint, because that is the only write path that stores a category
+    verbatim (CB-51/CB-60 normalize the observation path) while still carrying a
+    known hash into the INSERT. Verified by execution before these tests were
+    written — without it the divergence fixture would not exist at all.
+    """
+
+    FP = "svc:login:timeout"
+    STORED_CATEGORY = "Process Improvement"
+    #: `normalize_category` folds the stored spelling above to this.
+    STORED_NORM = "process_improvement"
+
+    def _stored(self, conn, *, category=STORED_CATEGORY, severity="low", fid="CB-900"):
+        return findings.add_finding(
+            conn,
+            severity=severity,
+            category=category,
+            file="a.py",
+            description="the row the observations will match",
+            finding_id=fid,
+            fingerprint=self.FP,
+        )
+
+    def _observe(self, conn, *, category, severity="low", **kw):
+        return findings.add_finding(
+            conn,
+            severity=severity,
+            category=category,
+            file="b.py",
+            description="an entirely different observation text",
+            fingerprint=self.FP,
+            **kw,
+        )
+
+    def test_a_bump_with_a_different_category_reports_exactly_one_record(self, conn):
+        """The mutation-probe target: red on any revert of `findings.py`."""
+        stored = self._stored(conn)
+        observed = self._observe(conn, category="race_condition")
+
+        assert observed["id"] == stored["id"], "precondition: this must be a dedup bump"
+        assert observed["dedup_action"] == "bumped"
+        assert observed["attention"] == [
+            {
+                "signal": "category_divergence",
+                "observed": "race_condition",
+                "stored": self.STORED_NORM,
+            }
+        ]
+
+    def test_a_spelling_only_difference_is_not_a_signal(self, conn):
+        """`Process Improvement` vs `process-improvement`: same NAME, and the
+        record carries normalized values precisely so this cannot fire."""
+        self._stored(conn)
+        observed = self._observe(conn, category="process-improvement")
+
+        assert observed["dedup_action"] == "bumped"
+        assert observed["attention"] == []
+
+    def test_a_non_string_stored_category_is_skipped_not_raised(self, conn):
+        """SQLite's dynamic typing lets a legacy/explicit-id row hold a BLOB here.
+
+        Same policy as `_existing_categories`, for the same reason: one legacy
+        weird row must not brick every future observation.
+        """
+        stored = self._stored(conn)
+        conn.execute(
+            "UPDATE findings SET category = ? WHERE id = ?", (b"\x00\x01", stored["id"])
+        )
+        conn.commit()
+
+        observed = self._observe(conn, category="race_condition")
+
+        assert observed["dedup_action"] == "bumped"
+        assert observed["attention"] == []
+
+    def test_both_signals_co_fire_in_a_deterministic_order(self, conn):
+        """Two signals on one bump: severity first, category second, each once."""
+        self._stored(conn, severity="low")
+        observed = self._observe(conn, category="race_condition", severity="critical")
+
+        assert [r["signal"] for r in observed["attention"]] == [
+            "severity_escalated",
+            "category_divergence",
+        ]
+        assert observed["attention"][0] == {
+            "signal": "severity_escalated",
+            "from": "low",
+            "to": "critical",
+        }
+        assert observed["attention"][1]["stored"] == self.STORED_NORM
+
+    def test_a_reopen_with_a_different_category_reports_the_record(self, conn):
+        stored = self._stored(conn)
+        findings.update_finding(conn, finding_id=stored["id"], status="fixed")
+
+        observed = self._observe(conn, category="race_condition")
+
+        assert observed["dedup_action"] == "reopened"
+        assert observed["attention"] == [
+            {
+                "signal": "category_divergence",
+                "observed": "race_condition",
+                "stored": self.STORED_NORM,
+            }
+        ]
+
+    @pytest.mark.parametrize("dismissed", ["wont_fix", "not_a_bug"])
+    def test_a_recurrence_compares_against_the_dismissed_twin(self, conn, dismissed):
+        """An insert branch that still HAS a matched row — the twin it leaves closed.
+
+        This branch falls through to the insert continuation, where the CB-60
+        mint gate does run, so the observation carries `new_category=True`.
+        """
+        stored = self._stored(conn)
+        findings.update_finding(conn, finding_id=stored["id"], status=dismissed)
+
+        observed = self._observe(conn, category="race_condition", new_category=True)
+
+        assert observed["dedup_action"] == "recurrence_of_closed"
+        assert observed["was_new"] is True, "the recurrence branch is an INSERT path"
+        assert observed["id"] != stored["id"], "a NEW row, linked to the twin"
+        assert observed["attention"] == [
+            {
+                "signal": "category_divergence",
+                "observed": "race_condition",
+                "stored": self.STORED_NORM,
+            }
+        ], "the comparison is against the TWIN, not against the row just written"
+
+    def test_a_created_row_carries_the_key_and_no_record(self, conn):
+        created = self._observe(conn, category="race_condition", new_category=True)
+        assert created["dedup_action"] == "created"
+        assert created["attention"] == []
+
+    def test_a_derived_fingerprint_cannot_reach_a_category_divergence(self, conn):
+        """The live population is supplied fingerprints, explicit-id rows and import.
+
+        Category is an input to `auto:v1`, so on the DERIVED path a different
+        category is a different hash: there is no match, the branch is `created`,
+        and the signal is unreachable by construction. Executable rather than
+        prose — this repo has been wrong both times it left such a claim in a
+        paragraph.
+        """
+        first = _add(conn, cat="bug", desc="identical text on both observations")
+        second = _add(conn, cat="race_condition", desc="identical text on both observations")
+
+        assert second["id"] != first["id"], "precondition: the categories fork identity"
+        assert second["dedup_action"] == "created"
+        assert second["attention"] == []
+
+    def test_an_import_row_with_a_foreign_category_bumps_without_raising(self, conn):
+        """Import reaches the bump branch with a VERBATIM category, so the
+        comparison is computed there and thrown away — which is exactly why it
+        must be safe. `import_findings` still returns counters only (the T-14 pin
+        `TestImportCarriesNoAttention` covers the channel's absence)."""
+        stored = self._stored(conn)
+
+        report = findings.import_findings(
+            conn,
+            [
+                {
+                    "id": "CB-9001",
+                    "severity": "low",
+                    "category": "Race Condition",
+                    "file": "b.py",
+                    "description": "a peer tracker's text for the same defect",
+                    "fingerprint": self.FP,
+                }
+            ],
+        )
+
+        assert report.merged == 1, report
+        assert report.errors == []
+        row = findings.get_finding(conn, stored["id"])
+        assert row["occurrence_count"] == 2
+        assert row["category"] == self.STORED_CATEGORY, "an import never re-spells the column"
 
 
 class TestPostAddHooksNeverSeeResponseOnlyKeys:
@@ -1651,10 +1903,18 @@ class TestMcpDocstringsNameEveryAction:
         )
 
     @pytest.mark.parametrize("tool", ["add", "batch_add"])
-    def test_the_docstring_declares_the_attention_key(self, tool):
+    def test_the_docstring_declares_every_attention_signal(self, tool):
+        """Both record forms are declared, not just the channel (T-15).
+
+        The signal names are pinned to the module's own vocabulary rather than
+        spelled a second time here, so a third signal cannot land documented as
+        the second one.
+        """
         doc = _mcp_tool_docstrings()[tool]
         assert "attention" in doc
-        assert findings.SEVERITY_ESCALATED in doc
+        declared = set().union(*findings._ATTENTION_SIGNALS_BY_ACTION.values())
+        for signal in declared:
+            assert signal in doc, f"{tool} does not declare the {signal} record"
 
     def test_the_add_docstring_names_the_recurrence_residue(self):
         """The honest remainder (judge's condition on the signal-3 letter-fix): on
