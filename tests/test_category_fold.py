@@ -359,8 +359,14 @@ class TestFoldMapValidation:
 class TestNonStringCategoryIsSkipped:
     def test_a_legacy_non_string_category_is_counted_not_raised(self, conn):
         _insert_raw(conn, fid="CB-1", category=VARIANT)
-        conn.execute("UPDATE findings SET category = 7 WHERE id = 'CB-1'")
+        # A BLOB, not an integer: the column has TEXT affinity, so SQLite converts
+        # an inserted number to text and the "non-string" case never materializes
+        # that way (measured — the first draft of this test asserted against a `7`
+        # that arrived back as `'7'`). BLOB is the storage class TEXT affinity
+        # leaves alone, and it is what `sqlite3` hands back as non-`str`.
+        conn.execute("UPDATE findings SET category = CAST(7 AS BLOB) WHERE id = 'CB-1'")
         conn.commit()
+        assert not isinstance(_snapshot(conn)[0]["category"], str)
 
         report = findings.normalize_categories(conn, apply=True)
 

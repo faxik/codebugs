@@ -305,6 +305,37 @@
     "name": "categories"
   },
   {
+    "description": "One-shot migration: fold stored category spellings to canon (CB-61).\n\nDRY RUN BY DEFAULT \u2014 without `apply=true` nothing is written and the\nreport tells you exactly what would change. New findings are already\ncanonicalized at write time; this exists for rows filed before that,\nwhose stored `auto:v1` fingerprint still carries the old spelling and\ntherefore forks identity when the same defect is reported again.\n\nEach renamed row's fingerprint is handled by kind: a `NULL` or a\ncaller-SUPPLIED fingerprint is left byte-identical, an `auto:v1` one is\nre-derived with the new category after its stored inputs are verified to\nreproduce the stored hash. A row that fails that round trip is skipped\nWHOLE and reported under `unverifiable`. The occurrence ring\n(`meta.occurrences`) is never rewritten.\n\nIf the fold would put two LIVE findings on one fingerprint, the run\nwrites NOTHING and reports the colliding pair by id \u2014 merging two cards\nis a decision, not a migration step.\n\nArgs:\n    fold_map: Optional {stored spelling: canonical target} map, as an\n              object or a JSON string. Every target must already be\n              canonical (casefold, hyphen/whitespace -> \"_\"). Omit it to\n              fold every stored spelling to its own normalized form; `{}`\n              is an explicit no-op.\n    apply: Write the changes. Default false (report only).\n",
+    "inputSchema": {
+      "properties": {
+        "apply": {
+          "default": false,
+          "title": "Apply",
+          "type": "boolean"
+        },
+        "fold_map": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fold Map"
+        }
+      },
+      "title": "categories_normalizeArguments",
+      "type": "object"
+    },
+    "name": "categories_normalize"
+  },
+  {
     "description": "Claim a finding or requirement so parallel agents do not collide.\n\nArgs:\n    entity_id: CB-N, FR-N or NFR-N\n    holder: who is claiming \u2014 a branch name, agent id, or person\n    holder_kind: branch | agent | human\n    holder_repo: absolute path of the repo owning the branch, if any\n    note: free-text reason, kept on renewal unless replaced\n    project: also move a finding to in_progress (requirements never project)\n    allow_terminal: claim even if the entity is already resolved\n\nReturns:\n    outcome: claimed | already_mine | held_by_other | entity_terminal | undetermined.\n    On held_by_other the holder fields name the INCUMBENT.\n    On undetermined, re-issue the identical call \u2014 it converges on already_mine.\n",
     "inputSchema": {
       "properties": {
