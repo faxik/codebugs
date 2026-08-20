@@ -1231,6 +1231,28 @@ class TestProvenance:
         assert "reported_at_commit" in cols
         assert "reported_at_ref" in cols
 
+    def test_fresh_db_carries_reported_at_ref_index(self):
+        """CB-115: a FRESH database must carry idx_findings_reported_at_ref.
+
+        Both historical creators of this index live on migration paths a fresh
+        database never takes — `_migrate_statuses`' conditional rebuild (SCHEMA
+        already spells `in_progress`, so it early-returns) and the provenance
+        ALTER (whose `"reported_at_ref" not in cols` guard is false because
+        SCHEMA carries the column). Freshness is therefore the discriminating
+        fixture: an in-memory DB sees only SCHEMA + _POST_MIGRATION_INDEXES,
+        which is exactly where the index must be declared.
+        """
+        c = sqlite3.connect(":memory:")
+        try:
+            findings.ensure_schema(c)
+            row = c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' "
+                "AND name = 'idx_findings_reported_at_ref'"
+            ).fetchone()
+            assert row is not None, "fresh database is missing idx_findings_reported_at_ref"
+        finally:
+            c.close()
+
     def test_provenance_columns_nullable(self, conn):
         result = findings.add_finding(
             conn,

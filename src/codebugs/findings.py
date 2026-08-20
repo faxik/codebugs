@@ -77,6 +77,13 @@ _POST_MIGRATION_INDEXES = (
     "WHERE fingerprint IS NOT NULL AND status IN ("
     + ", ".join(f"'{s}'" for s in LIVE_STATUSES)
     + ")",
+    # CB-115: both historical creators of this index live on migration paths a FRESH
+    # database never takes (_migrate_statuses early-returns because SCHEMA already
+    # spells 'in_progress'; the provenance ALTER is guarded by a column check that is
+    # false because SCHEMA carries the column), so fresh databases had no
+    # reported_at_ref index at all. Declared here — not in SCHEMA — for the reasons
+    # in the comment above; on migrated databases IF NOT EXISTS makes it a no-op.
+    "CREATE INDEX IF NOT EXISTS idx_findings_reported_at_ref ON findings(reported_at_ref)",
 )
 
 
