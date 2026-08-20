@@ -1054,13 +1054,15 @@ def import_findings(
     TWO IMPORT-SPECIFIC RULES, each closing a reproduced defect:
 
     1. **An import never reopens a decided card.** A fingerprint hit on a
-       `fixed`/`stale` row would normally REOPEN it as a regression — correct for
-       an observation, wrong for an import, which is a statement about someone
-       else's tracker. Measured before the fix: a foreign row whose id did not
-       even exist locally flipped a local `fixed` card to `open`. A hit on a LIVE
-       row still bumps (another sighting of a card you already have is a real
-       occurrence), and a `wont_fix` hit still files a linked recurrence row —
-       neither is a filed defect and neither is changed here.
+       `fixed` row — the whole of `_REOPEN_STATUSES` — would normally REOPEN it
+       as a regression — correct for an observation, wrong for an import, which
+       is a statement about someone else's tracker. (`stale` is a LIVE status:
+       a hit on it bumps, it never reopens.) Measured before the fix: a foreign
+       row whose id did not even exist locally flipped a local `fixed` card to
+       `open`. A hit on a LIVE row still bumps (another sighting of a card you
+       already have is a real occurrence), and a `wont_fix` hit still files a
+       linked recurrence row — neither is a filed defect and neither is changed
+       here.
 
     2. **An id identifies a row only together with its content.** The guard this
        replaces asked `SELECT 1 FROM findings WHERE id = ?`, which is bare-id

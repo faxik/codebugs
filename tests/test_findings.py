@@ -3,6 +3,7 @@
 import csv
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -1730,6 +1731,26 @@ class TestImportNeverReopensADecidedCard:
             report = findings.import_findings(conn, list(csv.DictReader(fh)))
         assert report.merged == 1, report
         assert findings.get_finding(conn, f["id"])["occurrence_count"] == 2
+
+    def test_docstring_reopen_claim_matches_the_executable_set(self):
+        """CB-114: the import_findings docstring must not overstate the REOPEN set.
+
+        The prose claimed a hit on a `fixed`/`stale` row "would normally REOPEN
+        it", while the executable set is `_REOPEN_STATUSES = ("fixed",)` —
+        `stale` is in LIVE_STATUSES and bumps. This pin extracts the sentences
+        that use REOPEN (the branch's own capitalization) and asserts the
+        backticked statuses they name are exactly the executable reopen set, so
+        the prose cannot silently widen or narrow again.
+        """
+        doc = findings.import_findings.__doc__
+        assert doc, "import_findings lost its docstring"
+        sentences = [s for s in re.split(r"(?<=[.!?])\s+", doc) if "REOPEN" in s]
+        assert sentences, "the docstring no longer explains the reopen rule"
+        named = set(re.findall(r"`([a-z_]+)`", " ".join(sentences)))
+        assert named & set(FINDING_STATUSES) == set(findings._REOPEN_STATUSES), (
+            f"docstring names {sorted(named & set(FINDING_STATUSES))} in its REOPEN "
+            f"sentences; the executable set is {sorted(findings._REOPEN_STATUSES)}"
+        )
 
     def test_a_wont_fix_card_still_files_a_recurrence(self, conn, tmp_path):
         """CONTROL — green on both sides. `wont_fix` is a decision that stays
