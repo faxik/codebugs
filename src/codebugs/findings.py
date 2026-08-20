@@ -527,6 +527,7 @@ def _bump_row(
     reopen: bool = False,
     observed_severity: str,
     escalate: bool = True,
+    promote_tags: bool = True,
 ) -> sqlite3.Row:
     """Record an occurrence on an existing finding; optionally reopen it (regression).
 
@@ -542,6 +543,16 @@ def _bump_row(
     this repository (CB-51) and a peer's CSV must not re-rate a local card on
     foreign evidence.
 
+    TAGS UNION UNDER OBSERVATION (BT-4): a bump merges the observation's tags
+    (`entry["tags"]`) into the `tags` column — exact string equality (no
+    casefold), first-encountered order (stored before observed), deduplicated,
+    the merged container serialized exactly once (CB-82). `promote_tags=False`
+    opts a caller out; exactly one does, `import_findings` again, and on that
+    path the column is neither read nor written — the ring still carries the
+    observation's tags. Removal is deliberately NOT built here:
+    `update_finding(tags=)` stays a full replace, so a hand-removed tag returns
+    with the next observation carrying it (sub-decision open with the owner).
+
     EVERY fragment is appended to `sets` together with its parameter, and nothing is
     spliced outside the builder — that pairing is what keeps placeholder order and
     parameter order the same thing rather than two things a reader must keep in
@@ -555,8 +566,11 @@ def _bump_row(
     and replaces four separate prose warnings; point-of-use discipline is the wrong
     enforcement layer (CB-41).
 
-    Raises json.JSONDecodeError on malformed stored meta BEFORE any write — the add
-    fails cleanly with nothing landed, which is the honest half of the CB-16 rule.
+    Raises json.JSONDecodeError on malformed stored meta — and, on the
+    `promote_tags` path, on malformed stored tags — BEFORE any write: the add
+    fails cleanly with nothing landed, which is the honest half of the CB-16
+    rule. The tags strict parse MOVED the malformed-stored-tags corruption
+    class from post-commit (`PostCommitCorruptionError`) to pre-write (BT-4).
     """
     meta = json.loads(row["meta"])
     # Defensive re-typing for rows written before the reserved-key guard existed
@@ -587,6 +601,26 @@ def _bump_row(
         if escalated is not None:
             sets += ", severity = ?"
             params.append(escalated)
+    if promote_tags:
+        # Strict parse of the stored column, PRE-write (symmetric with `meta`
+        # at the top): the union cannot be computed from a value that does not
+        # parse, so malformed stored tags fail the add with nothing landed. A
+        # valid but non-list value is DISPLACED, not merged — the ring guard's
+        # convention above, never a TypeError.
+        stored_tags = json.loads(row["tags"])
+        merged: list[Any] = []
+        base = stored_tags if isinstance(stored_tags, list) else []
+        for tag in (*base, *entry["tags"]):
+            # `not in` is exact equality over a tiny list — no casefold, no
+            # hashing (a foreign-written unhashable member must displace-safely,
+            # not raise), first-encountered wins.
+            if tag not in merged:
+                merged.append(tag)
+        if merged != stored_tags:
+            # Serialized ONCE; this exact string is the bound parameter (CB-82).
+            # Appended INSIDE the builder, paired with its parameter (CB-16).
+            sets += ", tags = ?"
+            params.append(json.dumps(merged))
     sets += ", meta = ?"
     params.append(json.dumps(meta))
     params.append(row["id"])
@@ -654,6 +688,7 @@ def _add_one(
     fingerprint: str | None,
     annotate: bool = True,
     escalate: bool = True,
+    promote_tags: bool = True,
     mint_category: bool = False,
 ) -> tuple[dict[str, Any] | None, sqlite3.Row | None, bool, str]:
     """One observation through the identity function, inside an OPEN transaction.
@@ -695,6 +730,7 @@ def _add_one(
                 entry=entry,
                 observed_severity=severity,
                 escalate=escalate,
+                promote_tags=promote_tags,
             )
             return None, raw, False, "bumped"
         if closed is not None and closed["status"] in _REOPEN_STATUSES:
@@ -706,6 +742,7 @@ def _add_one(
                 reopen=True,
                 observed_severity=severity,
                 escalate=escalate,
+                promote_tags=promote_tags,
             )
             # Fire like update_finding does: the write changed the row, inside this
             # transaction, so claims/milestone reconciliation land atomically with it.
@@ -792,7 +829,8 @@ class PostCommitCorruptionError(Exception):
     """The dedup write COMMITTED, then the matched row's stored data failed to parse.
 
     Distinct from the pre-write ``json.JSONDecodeError`` that ``_bump_row``
-    raises on malformed stored ``meta`` — there the transaction rolls back and
+    raises on malformed stored ``meta`` — and, since BT-4, on malformed stored
+    ``tags`` on the ``promote_tags`` path — there the transaction rolls back and
     nothing lands. A caller deciding "did the observation land?" must not have
     to guess between the two (Codex round-3 review). Raised ONLY when the add's
     own frame committed: under an ambient transaction nothing has committed yet
@@ -802,6 +840,15 @@ class PostCommitCorruptionError(Exception):
     raising raw ``JSONDecodeError`` on its own committed path too,
     deliberately: its CLI re-raise contract is pinned by
     ``TestRetriageCliContract``.
+
+    HONEST REACHABILITY NOTE (BT-4): for ``tags`` this class is no longer
+    reachable through the bump paths that call ``_finalize_add`` — with
+    ``promote_tags=True`` the strict parse raises pre-write, and the one
+    ``promote_tags=False`` caller (``import_findings``) never calls
+    ``_finalize_add`` at all. The class is NOT deleted: it is the defensive
+    classifier for any frame that committed and only then failed to serialize
+    (``_finalize_add`` still parses the whole returned row), and the
+    minimal-form decision is to keep that guard rather than reason it away.
     """
 
 
@@ -1145,6 +1192,10 @@ def import_findings(
                     # their repository, not evidence about this one. Same reason
                     # `annotate=False` sits one line above.
                     escalate=False,
+                    # Same class of reason (BT-4): an import is not an observation,
+                    # so a peer's tags are not promoted into the local column —
+                    # the ring records them, the column stays this tracker's own.
+                    promote_tags=False,
                 )
             except ValueError as e:
                 errors.append(ImportRowError(label, str(e)))
