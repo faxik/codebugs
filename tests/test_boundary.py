@@ -9,8 +9,10 @@ Verifies:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import pathlib
+import re
 
 import pytest
 
@@ -316,3 +318,64 @@ class TestMcpWireSchema:
         assert dedent_docstring("Summary.\n   \n    Body.\n    ") == "Summary.\n\nBody.\n"
         # The closing-quote line is shallower than the body; the body still wins.
         assert dedent_docstring("Summary.\n\n        Deep.\n    ") == "Summary.\n\nDeep.\n"
+
+
+class TestBt4FreshnessDeclarations:
+    """BT-4 (ratified 2026-08-20): `source`, top-level `meta` and
+    `reported_at_ref` are observation-frozen — a dedup bump never updates the
+    column; later observations' values live only in the occurrence ring. T-11
+    declares that freeze on the MCP readers, and these pins tie the declared
+    prose to the executable fact it describes (the CB-114 docstring-pin shape:
+    regex-extract the claim, compare with the code), so neither can silently
+    drift from the other. The behavioural side of the freeze is pinned in
+    `tests/test_dedup.py::TestObservationFrozenFields`.
+    """
+
+    @pytest.fixture(scope="class")
+    def descriptions(self):
+        providers = [p for p in db.get_tool_providers(mode="all") if p.name == "findings"]
+        assert providers, "the findings tool provider vanished from the registry"
+        return {t["name"]: t["description"] for t in collect_tool_schemas(providers)}
+
+    @staticmethod
+    def _args_entry(description: str, param: str) -> str:
+        """The Args-block entry for `param`: its own line plus continuations.
+
+        A continuation is any following line that neither starts a new
+        `name:` entry nor is blank. Joined to one string so the assertions
+        below are indifferent to where the prose wraps.
+        """
+        lines = description.splitlines()
+        starts = [i for i, ln in enumerate(lines) if re.match(rf"\s*{param}:", ln)]
+        assert starts, f"no Args entry for {param!r}"
+        entry = [lines[starts[0]]]
+        for ln in lines[starts[0] + 1 :]:
+            if not ln.strip() or re.match(r"\s*\w+:", ln):
+                break
+            entry.append(ln)
+        return " ".join(s.strip() for s in entry)
+
+    def test_add_source_declares_the_first_reporter_freeze(self, descriptions):
+        """The prose half is T-11's edit; the executable half already holds:
+        the bump SET builder never assigns the column, and the ring entry
+        carries the observation's source instead."""
+        entry = self._args_entry(descriptions["add"], "source").lower()
+        assert "first report" in entry, entry  # "first reporter" / "first report"
+        assert "ring" in entry, entry
+        assert "source = ?" not in inspect.getsource(findings._bump_row), (
+            "the bump SET builder now writes `source` — the declared freeze is a lie"
+        )
+        assert "source" in inspect.signature(findings._occurrence_entry).parameters
+
+    def test_query_ref_declares_exact_match_on_the_assigned_or_first_observed_ref(
+        self, descriptions
+    ):
+        """The prose half is T-11's edit; the executable half already holds:
+        the filter is equality on the column — never LIKE (unlike `commit`,
+        which is documented prefix), and never a ring reader."""
+        entry = self._args_entry(descriptions["query"], "ref").lower()
+        assert "exact" in entry, entry
+        assert "assigned" in entry, entry  # "...first-observed or manually assigned..."
+        src = inspect.getsource(findings.query_findings)
+        assert '"reported_at_ref = ?"' in src, "the ref filter is no longer plain equality"
+        assert "reported_at_ref LIKE" not in src, "the ref filter must not become a prefix match"
