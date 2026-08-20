@@ -731,51 +731,94 @@ def _match_fingerprint(
     return live, closed
 
 
-#: The one attention signal today (BT-5): THIS observation raised the finding's
+#: The first attention signal (BT-5): THIS observation raised the finding's
 #: severity. Severity is monotonic under observation (CB-52), so the record can
 #: only ever describe an escalation — there is no de-escalation to report.
 SEVERITY_ESCALATED = "severity_escalated"
 
-#: One attention record. Functional `TypedDict` syntax is MANDATORY here: `from`
-#: is a Python keyword, so the class form cannot spell the field at all. The
-#: `Literal` must repeat the constant's text — `Literal[SEVERITY_ESCALATED]` is
-#: not a legal type — so the totality test asserts the two agree rather than
+#: The second attention signal (BT-5, T-15): this observation does not NAME the
+#: matched row's category. It creates no fact — since T-10 the ring carries each
+#: observation's category, so the divergence is derivable from two fields of one
+#: response (the `category` column vs `meta.occurrences[-1].category`). What it
+#: buys is top-level NAMING of a fact buried three levels deep in a ring that
+#: filers demonstrably do not read; that rationale is deliberately weaker than
+#: the one above, where the pre-escalation severity exists nowhere else at all.
+CATEGORY_DIVERGENCE = "category_divergence"
+
+#: The two record forms. Functional `TypedDict` syntax is MANDATORY for the first:
+#: `from` is a Python keyword, so the class form cannot spell the field at all.
+#: Each `Literal` must repeat its constant's text — `Literal[SEVERITY_ESCALATED]`
+#: is not a legal type — so the totality test asserts they agree rather than
 #: leaving a second spelling free to drift.
-AttentionRecord = TypedDict(
-    "AttentionRecord",
+#:
+#: A UNION, never one dict with `total=False`: optional fields would admit a
+#: record carrying neither form's required keys, and collapsing the two
+#: `Literal`s would destroy the pin on the signal names themselves. The name
+#: `AttentionRecord` survives as the alias of the union, so `AddOutcome` and
+#: `_attention_records` keep their annotations.
+SeverityEscalatedRecord = TypedDict(
+    "SeverityEscalatedRecord",
     {"signal": Literal["severity_escalated"], "from": str, "to": str},
 )
+CategoryDivergenceRecord = TypedDict(
+    "CategoryDivergenceRecord",
+    {"signal": Literal["category_divergence"], "observed": str, "stored": str},
+)
+AttentionRecord = SeverityEscalatedRecord | CategoryDivergenceRecord
 
 #: Which signals each dedup branch may emit. LIVE, not documentation: the builder
 #: below reads it, so a wrong cell changes the response rather than only a test.
 #:
-#: `created` and `recurrence_of_closed` are empty for a STRUCTURAL reason, not by
-#: policy — both are insert paths, so `_bump_row` never runs and this observation
-#: raises no stored row's severity. Said precisely for the second one, because a
-#: row DOES exist there: the recurrence branch deliberately leaves the dismissed
-#: twin untouched (a decision stays decided) and files a NEW row, which is also
-#: why it reports `was_new: True` — it is an insert, not a bump. A new dedup
-#: branch must therefore be classified here; the builder
+#: The two insert branches no longer share one reason, and this paragraph used to
+#: say they did. `created` is empty STRUCTURALLY: nothing matched, so neither
+#: signal has a second side — no stored severity to raise and no stored category
+#: to disagree with. `recurrence_of_closed` is empty of the ESCALATION for the
+#: other half of that reason (it is an insert path, `_bump_row` never runs, which
+#: is also why it reports `was_new: True`) — but a matched row DOES exist there:
+#: the dismissed twin the branch deliberately leaves closed (a decision stays
+#: decided). So the category comparison is well-defined against the twin, and the
+#: cell is not empty. A new dedup branch must be classified here; the builder
 #: raises `KeyError` on an unknown action rather than returning an empty list,
 #: because "evaluated, nothing fired" is the one meaning an unclassified branch
 #: must not be able to borrow. `tests/test_dedup.py::TestAttentionSignalMatrix`
 #: derives the key set from `_add_one`'s own AST, so the table cannot fall behind.
 _ATTENTION_SIGNALS_BY_ACTION: dict[str, frozenset[str]] = {
     "created": frozenset(),
-    "bumped": frozenset({SEVERITY_ESCALATED}),
-    "reopened": frozenset({SEVERITY_ESCALATED}),
-    "recurrence_of_closed": frozenset(),
+    "bumped": frozenset({SEVERITY_ESCALATED, CATEGORY_DIVERGENCE}),
+    "reopened": frozenset({SEVERITY_ESCALATED, CATEGORY_DIVERGENCE}),
+    "recurrence_of_closed": frozenset({CATEGORY_DIVERGENCE}),
 }
 
 
-def _attention_records(dedup_action: str, bump: BumpOutcome | None) -> tuple[AttentionRecord, ...]:
+def _attention_records(
+    dedup_action: str,
+    bump: BumpOutcome | None,
+    *,
+    observed_category: str,
+    stored_category: object,
+) -> tuple[AttentionRecord, ...]:
     """The attention block for one observation — built INSIDE the transaction.
 
     Two things must both hold for a record to appear: the branch admits the
-    signal (`_ATTENTION_SIGNALS_BY_ACTION`), and the write itself reported it
-    (`BumpOutcome`). The severity comparison is NOT repeated here — `_bump_row`
-    already made it, and one predicate is the whole point (CB-41/CB-52). On the
-    insert branches `bump` is None because `_bump_row` did not run.
+    signal (`_ATTENTION_SIGNALS_BY_ACTION`), and the observation itself reported
+    it. The severity comparison is NOT repeated here — `_bump_row` already made
+    it, and one predicate is the whole point (CB-41/CB-52). On the insert
+    branches `bump` is None because `_bump_row` did not run; `stored_category` is
+    None there too, EXCEPT on the recurrence branch, where the matched row is the
+    dismissed twin the branch leaves closed.
+
+    CATEGORY: both sides are normalized, so a difference of SPELLING
+    (`Process Improvement` / `process-improvement`) is not a signal and a
+    difference of NAME is. A non-string `stored_category` is SKIPPED, not raised
+    on — the same policy as `_existing_categories`, for the same reason stated
+    there: SQLite's dynamic typing lets a legacy or explicit-id row hold one, and
+    one such row must not brick every future observation. The observed side needs
+    no guard: `add_finding`/`batch_add_findings` have already run
+    `normalize_category` on it (which refuses a non-string) and `import_findings`
+    passes a string built from the CSV row, so it is a `str` on all three
+    branches that can emit this signal. Normalizing it a second time is not a
+    duplicated computation — it is what makes the import path's VERBATIM
+    spelling (CB-51) comparable at all, and it is idempotent on its own output.
 
     Ordering is deterministic (this body appends in one fixed order) and each
     signal type appends at most once, so the list is a stable contract rather
@@ -791,6 +834,17 @@ def _attention_records(dedup_action: str, bump: BumpOutcome | None) -> tuple[Att
                 "to": bump.escalated_to,
             }
         )
+    if CATEGORY_DIVERGENCE in allowed and isinstance(stored_category, str):
+        stored_norm = normalize_category(stored_category)
+        observed_norm = normalize_category(observed_category)
+        if observed_norm != stored_norm:
+            records.append(
+                {
+                    "signal": CATEGORY_DIVERGENCE,
+                    "observed": observed_norm,
+                    "stored": stored_norm,
+                }
+            )
     return tuple(records)
 
 
@@ -863,6 +917,14 @@ def _add_one(
     now = utc_now()
     dedup_action = "created"
     recurrence_of: str | None = None
+    # The matched row's stored category, assigned at EVERY match site below and
+    # nowhere else (BT-5 T-15). One variable initialized before the branching,
+    # rather than carrying `closed` into the insert continuation: `closed` exists
+    # only inside the `finding_id is None` branch, and on the explicit-id path
+    # there is no matched row at all. Deliberately typed `object` — SQLite's
+    # dynamic typing means a stored category need not be a `str`, and the
+    # skip-don't-raise policy lives in `_attention_records`.
+    matched_category: object = None
 
     if finding_id is None:
         if fingerprint is None:
@@ -881,6 +943,7 @@ def _add_one(
             reported_at_ref=reported_at_ref,
         )
         if live is not None:
+            matched_category = live["category"]
             bump = _bump_row(
                 conn,
                 live,
@@ -895,9 +958,15 @@ def _add_one(
                 raw_row=bump.row,
                 was_new=False,
                 dedup_action="bumped",
-                attention=_attention_records("bumped", bump),
+                attention=_attention_records(
+                    "bumped",
+                    bump,
+                    observed_category=category,
+                    stored_category=matched_category,
+                ),
             )
         if closed is not None and closed["status"] in _REOPEN_STATUSES:
+            matched_category = closed["category"]
             bump = _bump_row(
                 conn,
                 closed,
@@ -916,11 +985,20 @@ def _add_one(
                 raw_row=bump.row,
                 was_new=False,
                 dedup_action="reopened",
-                attention=_attention_records("reopened", bump),
+                attention=_attention_records(
+                    "reopened",
+                    bump,
+                    observed_category=category,
+                    stored_category=matched_category,
+                ),
             )
         if closed is not None:
             # A wont_fix / not_a_bug closure is a DECISION, not a fix — it stays
             # closed, and the recurrence becomes a new row that keeps the link.
+            # The twin is the MATCHED row and it survives to the insert
+            # continuation exactly as `recurrence_of` does, which is what makes
+            # the category comparison there a comparison against the twin.
+            matched_category = closed["category"]
             recurrence_of = closed["id"]
             dedup_action = "recurrence_of_closed"
     elif fingerprint is not None:
@@ -1008,12 +1086,19 @@ def _add_one(
     # The insert path: `_bump_row` never ran, so there is no escalation to report
     # and `_attention_records` is handed no bump. It still runs, because the
     # branch must be CLASSIFIED — an action the matrix does not know raises here.
+    # `matched_category` is None on a plain `created`, and the dismissed twin's
+    # on `recurrence_of_closed` — the one insert branch that HAS a matched row.
     return AddOutcome(
         inserted=result,
         raw_row=None,
         was_new=True,
         dedup_action=dedup_action,
-        attention=_attention_records(dedup_action, None),
+        attention=_attention_records(
+            dedup_action,
+            None,
+            observed_category=category,
+            stored_category=matched_category,
+        ),
     )
 
 
@@ -2646,13 +2731,23 @@ def register_tools(mcp, conn_factory) -> None:
 
         `attention` is a top-level list, ALWAYS present and often empty: an empty
         list means "evaluated, nothing serious fired", which is a different fact
-        from an absent channel. Today it carries at most one record,
-        `{signal: severity_escalated, from, to}`, and only on the `bumped` and
-        `reopened` branches — it says THIS observation raised the finding's
-        stored severity. Severity is monotonic under observation, so there is no
-        de-escalation record to expect. The insert branches never emit one,
-        because they raise no stored row's severity: `created` had no row to
-        raise, and a recurrence deliberately leaves its dismissed twin untouched.
+        from an absent channel. Two record forms exist, and a list may carry both
+        (severity first, category second; each form at most once).
+
+        `{signal: severity_escalated, from, to}` says THIS observation raised the
+        finding's stored severity. It appears only where a stored severity was
+        raised — the `bumped` and `reopened` branches — and severity is monotonic
+        under observation, so there is no de-escalation record to expect.
+
+        `{signal: category_divergence, observed, stored}` says this observation
+        does not NAME the matched finding's category. It appears on every branch
+        that HAS a matched row: `bumped`, `reopened`, and the recurrence branch,
+        where the comparison is against the DISMISSED TWIN rather than the new
+        row. Both sides are normalized, so a difference of spelling
+        (`Process Improvement` vs `process-improvement`) is deliberately not a
+        signal while a difference of name is; a stored category that is not text
+        is skipped rather than raising. A newly created finding matched nothing,
+        so it emits neither record.
 
         Args:
             severity: critical, high, medium, or low (case-insensitive, no aliases)
@@ -2732,10 +2827,16 @@ def register_tools(mcp, conn_factory) -> None:
         it files a NEW row linked to a dismissed twin via `meta.recurrence_of`.
 
         Each result also carries its OWN `attention` list — always present, often
-        empty, never shared between members. Today the only record is
-        `{signal: severity_escalated, from, to}`, emitted on the `bumped` and
-        `reopened` branches, meaning that member's observation raised the stored
-        finding's severity.
+        empty, never shared between members. Two record forms exist, in this
+        order and at most once each:
+        `{signal: severity_escalated, from, to}` on the `bumped` and `reopened`
+        branches, meaning that member's observation raised the stored finding's
+        severity; and `{signal: category_divergence, observed, stored}` on every
+        branch with a matched row (`bumped`, `reopened`, and the recurrence
+        branch, where the comparison is against the dismissed twin), meaning that
+        member does not NAME the matched finding's category. Both category sides
+        are normalized, so a difference of spelling is not a signal; a stored
+        category that is not text is skipped rather than raising.
 
         Args:
             findings: List of finding objects, each with keys:
