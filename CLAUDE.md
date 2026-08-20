@@ -286,9 +286,40 @@ this paragraph overclaimed.**
 - **Integrate with `tools/worktree-finish.sh <slug> ['commit msg'] [--merge-msg '…']`.** It commits
   any dirty state, runs the guards, forward-merges main *into the worktree* so conflicts surface in
   safe space, runs `ruff check` and the full suite there against the combined tree, then merges onto
-  main with `--no-ff` under the lock and removes the worktree. The message follows `Merge <branch>:
-  <what changed> (CB-NN)` and is derived from the branch and last subject when not given. The merge
+  main with `--no-ff` under the lock and removes the worktree. The merge
   commit is what makes a card's whole iteration recoverable as one unit; a fast-forward scatters it.
+- **The integration message follows `Merge <branch>: <what changed> (CB-NN)`, and when it is not
+  given it is derived from `main..<branch> --no-merges` — the commits main does NOT already have
+  (CB-116). This bullet used to say "the branch and last subject", which was the defect.** The old
+  derivation read `git log -1 --no-merges` on the worktree tip, which the forward-merge two steps
+  earlier had just filled with main's commits: landing CB-111 produced a merge closing CB-111 whose
+  subject was an unrelated plan note naming CB-113/114/115. Reproduced end to end in a throwaway repo
+  before the fix and gone after it. **The defect was never topological** — `git log` orders by commit
+  date, so it only bites when main's commit is NEWER than the branch's last, which is the ordinary
+  case and which is why a fixture whose commits share one second is green against the bug. Two things
+  follow. **The FIRST commit of the range wins, not the last**, measured over main's own first-parent
+  line: of the 47 integration merges whose branch carried ≥2 commits, the first commit's subject is
+  closer to the message a human wrote in 38 and the last in 7 — five of those seven opening with the
+  extinct `wip(cb-NN): checkpoint before mutation`. Branches here end on review fixups ("close the
+  altitude findings"), which describe an iteration's tail rather than its subject. Do **not** write
+  that as `--reverse -1`: git applies the count BEFORE reversing, so it returns the NEWEST commit and
+  silently restores the behaviour this removed (measured). **A branch with no commit of its own that
+  main lacks is REFUSED rather than guessed** — reachable only when the content arrived through a
+  merge commit, since `_guard_nonempty_diff` has already proved the content is real — and the
+  derivation therefore runs at the `TESTED_MAIN`/`TESTED_HEAD` sample rather than under the lock, so
+  that refusal costs nothing instead of the whole ~70s gate run. It cannot drift from what lands:
+  both inputs are the pinned `TESTED_*` values and the in-lock re-checks refuse with exit 13 if
+  either moved. **Rejected: refusing to derive whenever main moved.** Level-(2) sessions commit plan
+  notes to main continuously, so "main moved" is the common case, and that form would have turned a
+  default into a mandatory argument on nearly every finish while the correct subject was sitting
+  right there in the range.
+- **Every re-run hint echoes back the `--merge-msg` the aborted run was given**, and that half is
+  orthogonal to the derivation — it would be needed even if the derivation were perfect. The exit-13
+  refusal fires precisely BECAUSE main moved, and it used to print the bare short form, so the
+  refusal routed the operator into the derivation that main's move had broken. That is how the
+  observed CB-111 subject was produced. One `_retry_hint` builds the line for all four refusal paths
+  (forward-merge conflict, main moved, branch moved, merge failed) and a test refuses any site that
+  prints the command itself — the site that does is the one that drops the operator's message.
   **Never delete the branch** — no merged branch has ever been deleted here, and that is the record;
   the script removes the worktree only.
 - **`ruff check` is the lint gate; `ruff format` is deliberately not**, because a large part of the
@@ -322,7 +353,13 @@ safe place to be sloppy with argv.
 
 Executing the whole script in a test is impractical (it merges onto main and runs the full suite),
 so the wiring tests are structural: they read the script and assert each guard is invoked with
-`|| exit $?`, in the right phase. Said plainly rather than left to look behavioural. Three more
+`|| exit $?`, in the right phase. **That "impractical" is narrower than it reads, and CB-116 is the
+proof**: `TestMergeSubjectDerivation` runs `worktree-finish.sh` end to end in a throwaway repo under
+`--skip-checks`, which disables ruff and pytest and *not* the safety guards, and the merge it lands
+is onto that repo's main. So a property of the SCRIPT'S OUTPUT — the subject it writes — can be
+tested behaviourally, and had to be: the CB-116 defect was invisible to every structural test here,
+because the defective code called `git log`, which is exactly what a structural test would look for.
+What stays impractical is the gate run itself, not the script. Said plainly rather than left to look behavioural. Three more
 structural tests landed with CB-57, all of the same kind: the integration merge must **not** carry
 `--no-verify`, the installer must arm the merge hook and point it at main's checkout, and the CI
 workflow must carry a baseline SHA that is a real commit in this repository. Each pins a property
