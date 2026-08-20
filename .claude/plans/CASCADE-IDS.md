@@ -17,3 +17,4 @@
 - Т-10 — (DIR-2) посадка ратифицированной строки `category` контракта BT-4 (запись в occurrence-ring) + CB-113(b) — 2026-08-20, DIR-2, `L3-BRIEF-DIR-2-T10-category-ring-2026-08-20.md`
 - Т-11 — (DIR-2) посадка деклараций `source`/`reported_at_ref`/`meta` контракта BT-4 (докстринги + golden) — 2026-08-20, DIR-2, `L3-BRIEF-DIR-2-T11-declarations-2026-08-20.md`
 - Т-12 — (DIR-2) CB-61 ретро-fold категорий + CB-113(a): свёртка хранимых написаний, ре-деривация auto:v1, коллизии report-and-stop — 2026-08-20, DIR-2, `L3-BRIEF-DIR-2-T12-retro-fold-2026-08-20.md`
+- Т-8 — (DIR-1) полоса A пакет 1: CB-108 + CB-120, три транзакционных сайта в `milestones/foundation.py` — 2026-08-20, DIR-1, `L3-BRIEF-DIR-1-T8-laneA-1-milestone-txn.md` (механическая полоса; подготовлен, диспетчеризация после Т-7)
