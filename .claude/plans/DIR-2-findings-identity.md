@@ -49,6 +49,19 @@ identity-входы, а не свободный текст; ре-наблюде�
   замороженную первозапись; попутный корректный фикс ключа кэша на effective-коммит.
   Дрейф цитаты в meta карты (`findings.py:1274` → фактически `:1342-1343`) — содержание
   в силе, зафиксировано preflight-ом (3).
+- 2026-08-19 — **Т-3 (CB-60): работа завершена (3), посадка НЕ выполнена — точка
+  восстановления.** Ветка `fix/cb-60-category-normalization` в
+  `.worktrees/fix-cb-60-category-normalization`, head `ca3faa2`; комбинированное дерево
+  провалидировано (3): 1691 passed, ruff чист; приёмка §13 пп. 1–3 закрыта (3), мутационная
+  проба руками. Finish дважды отказал на грязном main (WIP `PAIN-REGISTRY-codebugs.md`
+  уровня (1) — см. эскалацию ниже); ретрай-полл (3) умер по таймауту; SendMessage к агенту
+  заблокирован пермишнами. СЛЕДУЮЩИЙ ШАГ (любой сессией DIR-2): `git stash push --
+  .claude/plans/PAIN-REGISTRY-codebugs.md` → `tools/worktree-finish.sh
+  fix-cb-60-category-normalization --merge-msg 'Merge fix/cb-60-category-normalization:
+  category spelling normalized on the observation path, minting a new category gated
+  behind new_category with a near-miss hint and a countable stamp (CB-60)'` → `git stash
+  pop` → CB-60 в терминальный статус (§13 п.7) → приёмка (2)←(3) пп. 1, 4, 5 и факт сюда.
+  Branch-клейм на CB-60 жив до посадки — это корректно, карта реально in-flight.
 - (сюда добавляются факты приёмки: «Т-N принят на коммите X», по §13)
 
 ## Сериализация Т-3 ↔ Т-5
