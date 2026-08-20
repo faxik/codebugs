@@ -20,7 +20,6 @@ from codebugs.milestones._schema import (
 )
 from codebugs.milestones._spine import (
     _audit,
-    _get_item_by_ref,
     _get_item_row_by_ref,
     _get_milestone,
     _items_with_active_blockers,
@@ -41,21 +40,30 @@ def create_milestone(
     target_date: str | None = None,
     actor: str = "user",
 ) -> dict[str, Any]:
-    """Create a new milestone (release or stream)."""
+    """Create a new milestone (release or stream).
+
+    One transaction, opened before the duplicate check (CB-120): the decision to
+    INSERT is taken from that check, so without the write lock held across it a
+    concurrent create lands in between and the guard's own promise is broken by the
+    call that made it. The returned row comes from the INSERT's ``RETURNING`` rather
+    than a re-read after the commit (CB-30 consequence 5). Do not restore
+    ``conn.commit()``: ``db.txn`` yields False under an ambient transaction, and
+    committing then commits the caller's unrelated work.
+    """
     if kind not in MILESTONE_KINDS:
         raise ValueError(f"Invalid kind: {kind!r}. Must be one of {MILESTONE_KINDS}")
-    if _milestone_exists(conn, id):
-        raise ValueError(f"Milestone already exists: {id}")
-    now = utc_now()
-    conn.execute(
-        """INSERT INTO milestones (id, kind, state, target_date, description, created_at)
-           VALUES (?, ?, 'open', ?, ?, ?)""",
-        (id, kind, target_date, description, now),
-    )
-    _audit(conn, milestone_id=id, item_ref=None, actor=actor, action="create",
-           from_state=None, to_state="open", reason="")
-    conn.commit()
-    return _get_milestone(conn, id)
+    with db.txn(conn):
+        if _milestone_exists(conn, id):
+            raise ValueError(f"Milestone already exists: {id}")
+        now = utc_now()
+        row = conn.execute(
+            """INSERT INTO milestones (id, kind, state, target_date, description, created_at)
+               VALUES (?, ?, 'open', ?, ?, ?) RETURNING *""",
+            (id, kind, target_date, description, now),
+        ).fetchone()
+        _audit(conn, milestone_id=id, item_ref=None, actor=actor, action="create",
+               from_state=None, to_state="open", reason="")
+    return _row_to_milestone(row)
 
 
 def update_milestone(
@@ -67,30 +75,51 @@ def update_milestone(
     state: str | None = None,
     actor: str = "user",
 ) -> dict[str, Any]:
-    """Update mutable fields of a milestone. id/kind/created_at are immutable."""
-    current = _get_milestone(conn, id)
-    updates: list[str] = []
-    params: list[Any] = []
-    from_state = current["state"]
-    if description is not None:
-        updates.append("description = ?")
-        params.append(description)
-    if target_date is not None:
-        updates.append("target_date = ?")
-        params.append(target_date)
-    if state is not None:
-        if state not in MILESTONE_STATES:
-            raise ValueError(f"Invalid state: {state!r}. Must be one of {MILESTONE_STATES}")
-        updates.append("state = ?")
-        params.append(state)
-    if not updates:
-        return current
-    params.append(id)
-    conn.execute(f"UPDATE milestones SET {', '.join(updates)} WHERE id = ?", params)
-    _audit(conn, milestone_id=id, item_ref=None, actor=actor, action="update",
-           from_state=from_state, to_state=state, reason="")
-    conn.commit()
-    return _get_milestone(conn, id)
+    """Update mutable fields of a milestone. id/kind/created_at are immutable.
+
+    One transaction, opened before the read (CB-108): ``from_state`` is snapshotted
+    from that read and then PERSISTED into ``milestone_audit``, so a concurrent state
+    change between the read and the UPDATE does not merely misinform this call — it
+    writes a historical claim that the milestone made a transition it never made, in
+    the one table whose purpose is to be believed later. The returned row comes from
+    the UPDATE's ``RETURNING`` rather than a re-read after the commit (CB-30
+    consequence 5). Do not restore ``conn.commit()``.
+
+    The no-op path holds the write lock for a single SELECT. That cost is CB-24's,
+    already ratified there: deriving "will this write?" from the arguments beforehand
+    duplicates the argument list.
+    """
+    with db.txn(conn):
+        current_row = conn.execute(
+            "SELECT * FROM milestones WHERE id = ?", (id,)
+        ).fetchone()
+        if not current_row:
+            raise KeyError(f"Milestone not found: {id}")
+        updates: list[str] = []
+        params: list[Any] = []
+        from_state = current_row["state"]
+        if description is not None:
+            updates.append("description = ?")
+            params.append(description)
+        if target_date is not None:
+            updates.append("target_date = ?")
+            params.append(target_date)
+        if state is not None:
+            if state not in MILESTONE_STATES:
+                raise ValueError(f"Invalid state: {state!r}. Must be one of {MILESTONE_STATES}")
+            updates.append("state = ?")
+            params.append(state)
+        if not updates:
+            row = current_row
+        else:
+            params.append(id)
+            row = conn.execute(
+                f"UPDATE milestones SET {', '.join(updates)} WHERE id = ? RETURNING *",
+                params,
+            ).fetchone()
+            _audit(conn, milestone_id=id, item_ref=None, actor=actor, action="update",
+                   from_state=from_state, to_state=state, reason="")
+    return _row_to_milestone(row)
 
 
 def list_milestones(
@@ -240,47 +269,64 @@ def add_milestone_item(
     meta: dict[str, Any] | None = None,
     actor: str = "user",
 ) -> dict[str, Any]:
-    """Attach a (bug | requirement | external) reference to a milestone."""
-    if not _milestone_exists(conn, milestone_id):
-        raise KeyError(f"Milestone not found: {milestone_id}")
-    if size not in ITEM_SIZES:
-        raise ValueError(f"Invalid size: {size!r}. Must be one of {ITEM_SIZES}")
-    if size == "large" and not acceptance.strip():
-        raise ValueError("acceptance is required for size='large'")
-    _validate_item_ref(conn, item_kind, item_ref)
+    """Attach a (bug | requirement | external) reference to a milestone.
 
-    existing = conn.execute(
-        """SELECT id FROM milestone_items
-           WHERE milestone_id = ? AND item_kind = ? AND item_ref = ?""",
-        (milestone_id, item_kind, item_ref),
-    ).fetchone()
-    if existing:
-        raise ValueError(
-            f"{item_ref} is already attached to {milestone_id} (item_kind={item_kind})"
+    One transaction, opened before the guards (CB-120): the milestone-exists check,
+    the phantom-id check and the duplicate-attachment check all decide whether to
+    INSERT, so without the write lock held across them the ``UNIQUE(milestone_id,
+    item_kind, item_ref)`` constraint the last one exists to protect is violated by
+    the very call that checked it.
+
+    The returned row comes from the INSERT's ``RETURNING`` (CB-30 consequence 5), and
+    here that is not only a staleness fix. The old re-read went through
+    ``_get_item_row_by_ref``, which selects on ``item_ref`` ALONE and breaks the tie
+    with ``ORDER BY id DESC LIMIT 1`` — several attachments per ref are schema-legal
+    (CB-33) — so an attachment created by anyone else after the commit was returned
+    instead, an attachment to a DIFFERENT milestone with nothing in the response to
+    say so. ``RETURNING`` dissolves that lookup rather than fixing it; do NOT re-key
+    ``_get_item_row_by_ref`` on the triple, it has other callers and its selection
+    rule is CB-33's decision. Do not restore ``conn.commit()``.
+    """
+    with db.txn(conn):
+        if not _milestone_exists(conn, milestone_id):
+            raise KeyError(f"Milestone not found: {milestone_id}")
+        if size not in ITEM_SIZES:
+            raise ValueError(f"Invalid size: {size!r}. Must be one of {ITEM_SIZES}")
+        if size == "large" and not acceptance.strip():
+            raise ValueError("acceptance is required for size='large'")
+        _validate_item_ref(conn, item_kind, item_ref)
+
+        existing = conn.execute(
+            """SELECT id FROM milestone_items
+               WHERE milestone_id = ? AND item_kind = ? AND item_ref = ?""",
+            (milestone_id, item_kind, item_ref),
+        ).fetchone()
+        if existing:
+            raise ValueError(
+                f"{item_ref} is already attached to {milestone_id} (item_kind={item_kind})"
+            )
+
+        now = utc_now()
+        meta_json = json.dumps(meta or {})
+        row = conn.execute(
+            """INSERT INTO milestone_items
+               (milestone_id, item_kind, item_ref, size, priority, status,
+                acceptance, meta_json, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?) RETURNING *""",
+            (milestone_id, item_kind, item_ref, size, priority,
+             acceptance, meta_json, now, now),
+        ).fetchone()
+        _audit(
+            conn,
+            milestone_id=milestone_id,
+            item_ref=item_ref,
+            actor=actor,
+            action="create",
+            from_state=None,
+            to_state="open",
+            reason="",
         )
-
-    now = utc_now()
-    meta_json = json.dumps(meta or {})
-    conn.execute(
-        """INSERT INTO milestone_items
-           (milestone_id, item_kind, item_ref, size, priority, status,
-            acceptance, meta_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)""",
-        (milestone_id, item_kind, item_ref, size, priority,
-         acceptance, meta_json, now, now),
-    )
-    _audit(
-        conn,
-        milestone_id=milestone_id,
-        item_ref=item_ref,
-        actor=actor,
-        action="create",
-        from_state=None,
-        to_state="open",
-        reason="",
-    )
-    conn.commit()
-    return _get_item_by_ref(conn, item_ref)
+    return _row_to_item(row)
 
 
 def move_milestone_item(
