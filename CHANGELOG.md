@@ -30,6 +30,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   counters, so it never reaches the response constructor; an opt-out flag would have
   been dead code and was deliberately not added.
 
+- **`codebugs categories-normalize` — fold the stored corpus onto canonical category
+  spellings, so an old card stops forking when it is reported again (CB-61).** New
+  findings have had their category spelling canonicalized at write time since CB-60,
+  but the rows already in the tracker kept the spelling they were filed with — and a
+  finding's identity fingerprint is *stored*, not recomputed, with the category as one
+  of its inputs. So re-reporting a pre-CB-60 defect **using the very spelling the card
+  carries** derived a different fingerprint than the one on disk and filed a duplicate
+  instead of bumping the occurrence count (CB-113(a)). This command closes that: it
+  rewrites the stored categories to canon and re-derives the affected fingerprints, in
+  one pass, once.
+
+  **It reports by default and writes only with `--apply`.** A dry run prints exactly
+  which rows would be renamed, which fingerprints would be re-derived and what would
+  go wrong; it opens no write transaction at all. `--fold-map '{"Old Spelling":
+  "canonical_name"}'` folds only the spellings you name (every target must already be
+  canonical); with no map, every stored spelling folds to its own normalized form.
+  `--json` prints the raw report. The MCP tool is `categories_normalize`.
+
+  **What it deliberately does not touch.** The occurrence ring
+  (`meta.occurrences`) is never rewritten — those records are verbatim evidence of
+  what was observed, variant spelling included. A **caller-supplied** fingerprint is
+  left byte-identical (its meaning belongs to whoever supplied it) and so is a `NULL`
+  one; only derived `auto:v1` fingerprints are re-keyed, and only after the row's
+  stored inputs are verified to still reproduce its stored fingerprint. A row that
+  fails that check is skipped **whole** — its category is not rewritten either — and
+  reported under `unverifiable`, because renaming without re-keying is precisely the
+  identity desync this command exists to remove.
+
+  **If the fold would give two live findings the same identity, nothing is written
+  at all** and the report names the fingerprint, the row ids and their old/new
+  categories. Merging two cards is a decision, not a migration step. The whole
+  `--apply` run is a single transaction, so a stop — or any failure — leaves the
+  tracker exactly as it was, and the command exits 1 so a script cannot read the
+  refusal as success.
+
+  This is the one sanctioned re-key of a stored fingerprint; `update` still treats
+  `fingerprint` as immutable.
+
 ### Documentation
 - **`add` and `batch_add` now document all four `dedup_action` values (CB-118).** Both
   descriptions named at most two of them, and `batch_add`'s named none — while the one

@@ -221,6 +221,10 @@ def _next_id(conn: sqlite3.Connection) -> str:
 # annotation pool) derive from the classified sets instead of re-spelling them.
 
 _AUTO_FP_PREFIX = "auto:"  # reserved: derived fingerprints only, callers may not supply it
+# The CURRENT derivation version. One constant, two readers — `_derive_fingerprint`
+# writes it and `normalize_categories` re-derives only values carrying it: a second
+# literal is one drift away from a migration re-keying a version it cannot reproduce.
+_AUTO_V1_PREFIX = _AUTO_FP_PREFIX + "v1:"
 _FP_MAX_LEN = 256
 
 # Meta keys the identity machinery itself writes. Caller-supplied values under these
@@ -472,7 +476,7 @@ def _derive_fingerprint(
         [category, file, _normalize_for_fingerprint(description, meta)],
         ensure_ascii=False,
     )
-    return "auto:v1:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+    return _AUTO_V1_PREFIX + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
 
 
 def _occurrence_entry(
@@ -2330,6 +2334,278 @@ def get_categories(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+# --- Category retro-fold (CB-61) ---------------------------------------------
+#
+# CB-60 canonicalizes the OBSERVATION write path; the stored corpus keeps whatever
+# spellings it was filed with, and `fingerprint` is STORED, never recomputed. Since
+# category is an input of the `auto:v1` hash, a pre-gate row re-observed with its OWN
+# spelling derives a hash the row does not carry and FORKS identity instead of bumping
+# (CB-113(a)) — and the mint gate does not refuse it, because `_existing_categories`
+# normalizes stored spellings for its membership test. This is the one-shot migration
+# that folds the corpus to canon and re-keys the hashes so the fork closes.
+
+_FOLD_SELECT = (
+    "SELECT id, category, file, description, meta, fingerprint, status FROM findings ORDER BY id"
+)
+
+# Report keys for the per-row outcome. `category_only` is the SUM of the two
+# untouched-hash kinds, not a kind of its own.
+_FOLD_KIND_ACTION = {
+    "refingerprinted": "rederived",
+    "supplied_untouched": "untouched_supplied",
+    "null_untouched": "untouched_null",
+}
+
+
+def _validate_fold_map(fold_map: object) -> dict[str, str] | None:
+    """Validate a caller-supplied fold map. ``None`` means "derive the map".
+
+    ``None`` and ``{}`` are DIFFERENT (the "no filter is None and '', never
+    truthiness" doctrine applied to a write argument): ``None`` asks for the
+    mechanical fold, ``{}`` is an explicit no-op that renames nothing.
+
+    Every target must already be canonical. A fold whose target is not what
+    ``normalize_category`` returns would produce a spelling the very next
+    observation folds again — a migration that leaves its own defect behind.
+    """
+    if fold_map is None:
+        return None
+    if not isinstance(fold_map, dict):
+        raise ValueError(f"fold_map must be a mapping, got {type(fold_map).__name__}")
+    for variant, target in fold_map.items():
+        if not isinstance(variant, str) or not isinstance(target, str):
+            raise ValueError(
+                f"fold_map entries must be strings, got {variant!r} -> {target!r}"
+            )
+        canonical = normalize_category(target)
+        if canonical != target:
+            raise ValueError(
+                f"fold_map target {target!r} (for {variant!r}) is not canonical — "
+                f"normalize_category gives {canonical!r}; folding to a non-canonical "
+                f"spelling only defers the fork"
+            )
+    return dict(fold_map)
+
+
+def _fold_row_decision(
+    row: sqlite3.Row, fold_map: dict[str, str] | None
+) -> tuple[str, str | None, str | None]:
+    """Classify one stored row: ``(kind, target_category, new_fingerprint)``.
+
+    Kinds: ``unchanged``, ``skipped_non_string``, ``unverifiable``,
+    ``null_untouched``, ``supplied_untouched``, ``refingerprinted``.
+
+    The ROUND-TRIP is the honesty of this migration. A stored `auto:v1` hash is
+    re-keyed only after the stored inputs are shown to reproduce the stored value
+    — note the stored ``meta`` is NOT the meta the hash was derived from (the
+    occurrence ring, `category_minted` and `similar_to` are all added later), so
+    "these keys do not move the hash" is something to VERIFY per row, not assume.
+    When the round trip fails the row is skipped WHOLE: rewriting the category
+    without re-keying is exactly the permanent identity desync this card closes,
+    and fabricating a hash from inputs that provably do not reproduce the stored
+    one is worse than either.
+    """
+    stored = row["category"]
+    if not isinstance(stored, str):
+        # SQLite's dynamic typing lets an explicit-id add store a non-string
+        # category; `_existing_categories` skips one for the same reason. One
+        # legacy row must not abort a corpus-wide migration.
+        return ("skipped_non_string", None, None)
+    target = normalize_category(stored) if fold_map is None else fold_map.get(stored)
+    if target is None or target == stored:
+        return ("unchanged", None, None)
+    fingerprint = row["fingerprint"]
+    if fingerprint is None:
+        return ("null_untouched", target, None)
+    if not isinstance(fingerprint, str) or not fingerprint.startswith(_AUTO_V1_PREFIX):
+        # Supplied (or a future derivation version): the caller owns that token's
+        # meaning, so the migration renames the category and does not touch it.
+        return ("supplied_untouched", target, None)
+    try:
+        meta = json.loads(row["meta"])
+        if not isinstance(meta, dict):
+            raise ValueError("stored meta is not an object")
+        if _derive_fingerprint(stored, row["file"], row["description"], meta) != fingerprint:
+            raise ValueError("stored inputs do not reproduce the stored fingerprint")
+        new_fingerprint = _derive_fingerprint(target, row["file"], row["description"], meta)
+    except (ValueError, TypeError, AttributeError):
+        # ValueError covers json.JSONDecodeError; the other two cover a row whose
+        # description/file/meta hold a non-string SQLite value.
+        return ("unverifiable", target, None)
+    return ("refingerprinted", target, new_fingerprint)
+
+
+def _plan_category_fold(
+    conn: sqlite3.Connection, fold_map: dict[str, str] | None
+) -> dict[str, Any]:
+    """Read the whole population and decide. Writes nothing; the caller applies."""
+    renames: list[dict[str, Any]] = []
+    unverifiable: list[dict[str, Any]] = []
+    counts = {
+        "category_only": 0,
+        "refingerprinted": 0,
+        "supplied_untouched": 0,
+        "null_untouched": 0,
+        "unverifiable": 0,
+        "skipped_non_string": 0,
+    }
+    by_fingerprint: dict[str, list[dict[str, Any]]] = {}
+    rows_scanned = 0
+
+    for row in conn.execute(_FOLD_SELECT):
+        rows_scanned += 1
+        kind, target, new_fingerprint = _fold_row_decision(row, fold_map)
+        if kind == "skipped_non_string":
+            counts["skipped_non_string"] += 1
+        elif kind == "unverifiable":
+            counts["unverifiable"] += 1
+            unverifiable.append(
+                {
+                    "id": row["id"],
+                    "category": row["category"],
+                    "to": target,
+                    "fingerprint": row["fingerprint"],
+                }
+            )
+        elif kind in _FOLD_KIND_ACTION:
+            counts[kind] += 1
+            if kind != "refingerprinted":
+                counts["category_only"] += 1
+            renames.append(
+                {
+                    "id": row["id"],
+                    "from": row["category"],
+                    "to": target,
+                    "fingerprint_action": _FOLD_KIND_ACTION[kind],
+                    "old_fingerprint": row["fingerprint"],
+                    # For an untouched hash the POST-fold value is the stored one.
+                    "new_fingerprint": (
+                        new_fingerprint if new_fingerprint is not None else row["fingerprint"]
+                    ),
+                }
+            )
+
+        # Post-fold occupancy of the partial unique index
+        # (`ux_findings_fingerprint_live`): live rows, non-NULL hash. A row this
+        # run does NOT re-key still occupies its stored value.
+        effective = new_fingerprint if kind == "refingerprinted" else row["fingerprint"]
+        if effective is not None and row["status"] in LIVE_STATUSES:
+            by_fingerprint.setdefault(effective, []).append(
+                {
+                    "id": row["id"],
+                    "status": row["status"],
+                    "from": row["category"],
+                    "to": target if kind in _FOLD_KIND_ACTION else None,
+                }
+            )
+
+    # Two live rows cannot already share a hash — the partial unique index forbids
+    # it — so any collision here was CREATED by this fold. Ratified: name it and
+    # stop; the pairs are material for the merge policy (CB-46), not for an
+    # automatic merge this migration would have to invent a winner for.
+    collisions = [
+        {"fingerprint": fp, "rows": members}
+        for fp, members in sorted(by_fingerprint.items())
+        if len(members) > 1
+    ]
+
+    return {
+        "applied": False,
+        "stopped": bool(collisions),
+        "fold_map": {r["from"]: r["to"] for r in renames},
+        "rows_scanned": rows_scanned,
+        "renames": renames,
+        "counts": counts,
+        "collisions": collisions,
+        "unverifiable": unverifiable,
+    }
+
+
+def normalize_categories(
+    conn: sqlite3.Connection,
+    *,
+    fold_map: dict[str, str] | None = None,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Fold stored category spellings to canon and re-key their `auto:v1` hashes (CB-61).
+
+    DRY RUN BY DEFAULT: with ``apply=False`` nothing is written and no write
+    transaction is opened at all. ``apply=True`` performs the whole migration
+    inside ONE ``db.txn`` — the population is read under the write lock (CB-24),
+    the collision decision is made from that read, and either every rename lands
+    or none does.
+
+    ``fold_map`` maps a STORED spelling to its canonical target; every target must
+    already satisfy ``normalize_category(t) == t``. ``None`` (the default) derives
+    the map mechanically — each stored spelling folds to its own normalized form.
+    ``{}`` is an explicit no-op, not the default.
+
+    Fingerprint policy, per renamed row: a ``NULL`` hash and a SUPPLIED hash are
+    left byte-identical (only the category is rewritten); an ``auto:v1`` hash is
+    round-tripped against the stored inputs and re-derived with the new category
+    and the SAME normalizer version — only the category input moves (CB-54). A row
+    whose stored inputs do not reproduce its stored hash is skipped WHOLE (its
+    category is not rewritten either) and reported under ``unverifiable``; that
+    does not stop the run, but a non-zero count is a decision for the operator.
+
+    THE OCCURRENCE RING IS NOT REWRITTEN. ``meta`` never appears in an UPDATE here:
+    occurrence records are verbatim evidence of what was observed, including the
+    variant spelling this fold removes from the column.
+
+    THIS IS THE ONE SANCTIONED RE-KEY. ``update_finding`` documents ``fingerprint``
+    as immutable and stays that way — the relaxation is declared here and does not
+    generalize; this function issues its own UPDATE rather than routing through the
+    updater, so no caller acquires a re-key by argument.
+
+    Collisions are REPORTED AND STOP, never auto-merged (ratified 2026-08-20): if
+    the post-fold state would put two LIVE rows on one fingerprint, the whole run
+    writes nothing and the report names the fingerprint, the row ids and their
+    from/to categories. Known limit, fail-closed: a crafted ``fold_map`` can also
+    make an INTERMEDIATE state (mid-loop) violate the partial unique index without
+    the final state doing so — that raises ``sqlite3.IntegrityError`` and rolls the
+    whole transaction back, so nothing lands either way.
+
+    Returns the same report shape in both modes: ``applied``, ``stopped``,
+    ``fold_map`` (only the pairs that actually matched rows), ``rows_scanned``,
+    ``renames``, ``counts``, ``collisions``, ``unverifiable``.
+    """
+    validated = _validate_fold_map(fold_map)
+    if not apply:
+        return _plan_category_fold(conn, validated)
+
+    with db.txn(conn):
+        report = _plan_category_fold(conn, validated)
+        if report["stopped"]:
+            # Nothing was written, so there is nothing to roll back — the empty
+            # transaction commits and the refusal is a plain return (the
+            # `TxnAbort`-sentinel design this repo already rejected).
+            return report
+        for rename in report["renames"]:
+            if rename["fingerprint_action"] == "rederived":
+                cur = conn.execute(
+                    "UPDATE findings SET category = ?, fingerprint = ? WHERE id = ?",
+                    (rename["to"], rename["new_fingerprint"], rename["id"]),
+                )
+            else:
+                # `updated_at` is deliberately not bumped: it records an AUTHORED
+                # change, and a spelling migration authors nothing.
+                cur = conn.execute(
+                    "UPDATE findings SET category = ? WHERE id = ?",
+                    (rename["to"], rename["id"]),
+                )
+            # No RETURNING here, so rowcount is the outcome channel (the RETURNING
+            # rule). A row that vanished between the planning read and this write
+            # cannot happen under the held write lock — which is why anything but
+            # exactly one row means the plan is not describing this database.
+            if cur.rowcount != 1:
+                raise RuntimeError(
+                    f"category fold: UPDATE for {rename['id']} touched {cur.rowcount} rows, "
+                    f"expected 1 — the whole fold is rolled back"
+                )
+        report["applied"] = True
+    return report
+
+
 def register_tools(mcp, conn_factory) -> None:
     """Register finding-tracker tools on the given MCP server."""
     from codebugs import blockers
@@ -2689,6 +2965,41 @@ def register_tools(mcp, conn_factory) -> None:
         with conn_factory() as conn:
             return get_categories(conn)
 
+    @mcp.tool()
+    def categories_normalize(
+        fold_map: dict | str | None = None, apply: bool = False
+    ) -> dict[str, Any]:
+        """One-shot migration: fold stored category spellings to canon (CB-61).
+
+        DRY RUN BY DEFAULT — without `apply=true` nothing is written and the
+        report tells you exactly what would change. New findings are already
+        canonicalized at write time; this exists for rows filed before that,
+        whose stored `auto:v1` fingerprint still carries the old spelling and
+        therefore forks identity when the same defect is reported again.
+
+        Each renamed row's fingerprint is handled by kind: a `NULL` or a
+        caller-SUPPLIED fingerprint is left byte-identical, an `auto:v1` one is
+        re-derived with the new category after its stored inputs are verified to
+        reproduce the stored hash. A row that fails that round trip is skipped
+        WHOLE and reported under `unverifiable`. The occurrence ring
+        (`meta.occurrences`) is never rewritten.
+
+        If the fold would put two LIVE findings on one fingerprint, the run
+        writes NOTHING and reports the colliding pair by id — merging two cards
+        is a decision, not a migration step.
+
+        Args:
+            fold_map: Optional {stored spelling: canonical target} map, as an
+                      object or a JSON string. Every target must already be
+                      canonical (casefold, hyphen/whitespace -> "_"). Omit it to
+                      fold every stored spelling to its own normalized form; `{}`
+                      is an explicit no-op.
+            apply: Write the changes. Default false (report only).
+        """
+        parsed = json.loads(fold_map) if isinstance(fold_map, str) else fold_map
+        with conn_factory() as conn:
+            return normalize_categories(conn, fold_map=parsed, apply=apply)
+
 
 def register_cli(sub, commands) -> None:
     """Register findings CLI subcommands."""
@@ -2914,6 +3225,96 @@ def register_cli(sub, commands) -> None:
         ]
         print(format_table(data, ["category", "total", "open", "fixed"]))
 
+    def _print_fold_report(report: dict[str, Any]) -> None:
+        counts = report["counts"]
+        if report["applied"]:
+            mode = "applied"
+        elif report["stopped"]:
+            mode = "STOPPED — nothing written"
+        else:
+            mode = "dry run — nothing written"
+        print(f"Category fold ({mode})")
+        print(f"  rows scanned:        {report['rows_scanned']}")
+        print(f"  rows to rename:      {len(report['renames'])}")
+        print(f"    re-fingerprinted:  {counts['refingerprinted']}")
+        print(
+            f"    category only:     {counts['category_only']}"
+            f"  (supplied {counts['supplied_untouched']}, null {counts['null_untouched']})"
+        )
+        print(f"  unverifiable:        {counts['unverifiable']}")
+        print(f"  non-string category: {counts['skipped_non_string']}")
+
+        if report["fold_map"]:
+            per_pair: dict[str, int] = {}
+            for rename in report["renames"]:
+                per_pair[rename["from"]] = per_pair.get(rename["from"], 0) + 1
+            rows = [
+                {"from": variant, "to": target, "rows": str(per_pair.get(variant, 0))}
+                for variant, target in sorted(report["fold_map"].items())
+            ]
+            print()
+            print(format_table(rows, ["from", "to", "rows"]))
+
+        if report["unverifiable"]:
+            print()
+            print(
+                f"!! {len(report['unverifiable'])} rows SKIPPED WHOLE (category left "
+                f"unchanged): the stored inputs do not reproduce the stored auto:v1 "
+                f"fingerprint, so re-keying them would be a fabrication:"
+            )
+            for entry in report["unverifiable"]:
+                print(f"   {entry['id']}  {entry['category']!r} -> would be {entry['to']!r}")
+
+        if report["collisions"]:
+            print()
+            print(
+                f"!! {len(report['collisions'])} fingerprint collisions after the fold — "
+                f"NOTHING was written. Two live findings would share one identity; "
+                f"merging them is a decision, not a migration step:"
+            )
+            for collision in report["collisions"]:
+                print(f"   {collision['fingerprint']}")
+                for member in collision["rows"]:
+                    target = "(not renamed)" if member["to"] is None else repr(member["to"])
+                    print(
+                        f"     {member['id']} [{member['status']}]  "
+                        f"{member['from']!r} -> {target}"
+                    )
+
+    def _cmd_categories_normalize(args: argparse.Namespace) -> None:
+        # The flag is decoded BEFORE the connection opens: bad JSON on the command
+        # line is plain bad input, and refusing it costs no partial work.
+        if args.fold_map is None:
+            fold_map = None
+        else:
+            try:
+                fold_map = json.loads(args.fold_map)
+            except json.JSONDecodeError as e:
+                print(f"codebugs: --fold-map is not valid JSON: {e}", file=sys.stderr)
+                sys.exit(1)
+
+        conn = db.connect()
+        try:
+            report = normalize_categories(conn, fold_map=fold_map, apply=args.apply)
+        except json.JSONDecodeError:
+            # MUST stay ahead of the ValueError arm it subclasses (the _cmd_update
+            # ordering contract): a corrupted stored row is not bad user input.
+            raise
+        except (KeyError, ValueError) as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
+
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        else:
+            _print_fold_report(report)
+        # A dry run always exits 0 — it REPORTS a collision, it does not refuse.
+        # `--apply` that stopped wrote nothing, so it must not look like success.
+        if args.apply and report["stopped"]:
+            sys.exit(1)
+
     def _cmd_import_csv(args: argparse.Namespace) -> None:
         """Read the file, hand rows to the domain, print. No import semantics here.
 
@@ -3114,6 +3515,22 @@ def register_cli(sub, commands) -> None:
     sub.add_parser("summary", help="Dashboard overview")
     sub.add_parser("categories", help="List all categories with counts")
 
+    p = sub.add_parser(
+        "categories-normalize",
+        help="Fold stored category spellings to canon and re-key auto:v1 fingerprints (CB-61)",
+    )
+    p.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write the changes (without this the command only reports)",
+    )
+    p.add_argument(
+        "--fold-map",
+        help='JSON {"stored spelling": "canonical_target"}; omit to fold every '
+        "spelling to its own normalized form",
+    )
+    p.add_argument("--json", action="store_true", help="Print the raw report as JSON")
+
     p = sub.add_parser("import-csv", help="Import findings from CSV")
     p.add_argument("file", help="CSV file path")
 
@@ -3135,6 +3552,7 @@ def register_cli(sub, commands) -> None:
             "stats": _cmd_stats,
             "summary": _cmd_summary,
             "categories": _cmd_categories,
+            "categories-normalize": _cmd_categories_normalize,
             "import-csv": _cmd_import_csv,
             "restore-csv": _cmd_restore_csv,
             "export-csv": _cmd_export_csv,
