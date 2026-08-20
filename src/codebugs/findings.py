@@ -816,9 +816,15 @@ def _attention_records(
     no guard: `add_finding`/`batch_add_findings` have already run
     `normalize_category` on it (which refuses a non-string) and `import_findings`
     passes a string built from the CSV row, so it is a `str` on all three
-    branches that can emit this signal. Normalizing it a second time is not a
-    duplicated computation — it is what makes the import path's VERBATIM
-    spelling (CB-51) comparable at all, and it is idempotent on its own output.
+    branches that can emit this signal. It is normalized here ANYWAY, and the
+    honest reason is not that some caller needs it: NO caller can observe that
+    half today — the observation path normalizes before `_add_one`, and the
+    import path, the only one carrying a verbatim spelling (CB-51), throws the
+    record away. It is normalized because "both sides" is THIS FUNCTION's
+    contract rather than a coincidence of who happens to call it. No behavioural
+    test can discriminate it while that holds, so it is pinned by a direct call
+    in `TestAttentionSignalMatrix` and SAID here rather than claimed as covered
+    — the same rule CB-82 states for a guard its callers make unreachable.
 
     Ordering is deterministic (this body appends in one fixed order) and each
     signal type appends at most once, so the list is a stable contract rather

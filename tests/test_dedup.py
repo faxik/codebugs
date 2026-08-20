@@ -1355,6 +1355,46 @@ class TestAttentionSignalMatrix:
                 "no_such_action", None, observed_category="bug", stored_category=None
             )
 
+    def test_the_helper_normalizes_the_observed_side_too(self):
+        """"Normalize BOTH sides" is the HELPER's contract, and only a direct
+        call can see half of it.
+
+        Every caller that reaches a branch admitting this signal has already
+        normalized the observed category (`add_finding`/`batch_add_findings` run
+        `normalize_category` before `_add_one`), and the one path carrying a
+        VERBATIM observed spelling — import — discards the record. So no
+        behavioural test can discriminate the observed-side normalization while
+        that holds, and this repo's rule (CB-82) is to SAY so and pin the
+        contract directly rather than claim coverage that does not exist.
+        Measured: dropping `normalize_category` from the observed side leaves
+        the whole suite green and fails only here.
+
+        Direct invocation has precedent one test below — the fail-closed check
+        calls the helper the same way. `bump=None` because the severity signal
+        is not what is under test.
+        """
+        spelled = findings._attention_records(
+            "bumped",
+            None,
+            observed_category="Process Improvement",
+            stored_category="process_improvement",
+        )
+        assert spelled == (), "same NAME, different spelling — not a signal"
+
+        named = findings._attention_records(
+            "bumped",
+            None,
+            observed_category="Race Condition",
+            stored_category="process_improvement",
+        )
+        assert named == (
+            {
+                "signal": findings.CATEGORY_DIVERGENCE,
+                "observed": "race_condition",
+                "stored": "process_improvement",
+            },
+        ), "different NAME — a signal, with BOTH sides reported normalized"
+
     def test_created_is_the_only_empty_cell_and_the_reason_is_structural(self):
         """The two insert branches no longer share one reason, and that is the point.
 
