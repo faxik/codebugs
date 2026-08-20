@@ -13,6 +13,7 @@ guard that fired for the wrong reason.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -1499,6 +1500,79 @@ class TestHarnessIntegrity:
             "pre-commit will C-quote non-ASCII paths and refuse a legitimate plan note"
         )
 
+    def test_every_rerun_hint_goes_through_the_shared_helper(self) -> None:
+        """CB-116(d). A refusal that prints a bare re-run drops --merge-msg.
+
+        Behavioural coverage exists for the [5/7] conflict refusal, but the two
+        exit-13 refusals cannot be forced deterministically in a test — they
+        need main to move between the gates and the lock. So this counts the
+        SITES: no refusal may print the re-run command itself, because the one
+        that does is the one that silently drops the operator's message. The
+        helper is the only place that string may be built.
+        """
+        src = (REPO_ROOT / "tools" / "worktree-finish.sh").read_text()
+        bare = [
+            ln.strip()
+            for ln in src.splitlines()
+            if 'echo "      tools/worktree-finish.sh ${SLUG}"' in ln
+        ]
+        assert not bare, f"a re-run hint bypasses _retry_hint and loses --merge-msg: {bare}"
+        assert src.count("_retry_hint\n") >= 4, (
+            "the four refusal paths (forward-merge conflict, main moved, branch "
+            "moved, merge failed) must all print the helper's line"
+        )
+        # The exit-13 refusals specifically, by their own text. Both markers
+        # must be DISTINCT strings that occur in different refusals: the first
+        # draft paired "main moved while this finish was running" with
+        # "moved while this finish", whose first occurrence is INSIDE the first
+        # marker on the same line, so the loop checked one site twice and the
+        # branch-moved refusal was never located (measured).
+        for marker in (
+            "main moved while this finish was running",
+            "${BRANCH} moved while this finish was running",
+        ):
+            at = src.index(marker)
+            assert "_retry_hint" in src[at : at + 700], f"no retry hint after: {marker}"
+
+    def test_the_merge_subject_is_derived_from_what_main_lacks(self) -> None:
+        """CB-116(a)+(b), pinned structurally as well as behaviourally.
+
+        The behavioural class next door lands real merges, which is the real
+        proof. This exists for the two ways the code could regress while still
+        producing a correct-looking string on the fixtures: reading the worktree
+        TIP again (which is main's after the forward-merge), and collapsing
+        `--reverse | first line` into `--reverse -1`. That second one is a live
+        trap, not a hypothetical: git applies the count BEFORE reversing, so
+        `--reverse -1` returns the NEWEST commit and silently reinstates the
+        last-commit behaviour this card removed.
+        """
+        raw = (REPO_ROOT / "tools" / "worktree-finish.sh").read_text()
+        # CODE only. This file's own comments quote the shape being forbidden,
+        # and a ratchet that reads prose is the fsio.py mistake CLAUDE.md
+        # records: its first draft matched `open(path, "w")` inside three
+        # docstrings.
+        src = "\n".join(
+            ln for ln in raw.splitlines() if not ln.lstrip().startswith("#")
+        )
+        assert '"${TESTED_MAIN}..${TESTED_HEAD}"' in src, (
+            "the derivation must be restricted to the commits main does not have"
+        )
+        assert "log --first-parent --reverse --no-merges" in src, (
+            "without --first-parent the range's date order can put a commit "
+            "absorbed from a sibling branch first — measured, and on that shape "
+            "the range-only derivation is worse than the code it replaced"
+        )
+        assert "log -1 --no-merges" not in src, (
+            "the derivation reads the worktree tip again, which [5/7] polluted"
+        )
+        assert "--reverse -1" not in src and "-1 --reverse" not in src, (
+            "git applies -1 before --reverse, so this yields the NEWEST commit"
+        )
+        # Derived before the gates, so the empty-population refusal is free.
+        assert src.index("INTEGRATION_MSG=") < src.index("pytest tests/")
+        # And the merge lands the derived value, not the raw operator argument.
+        assert 'merge "${BRANCH}" --no-ff -m "${INTEGRATION_MSG}"' in src
+
     def test_installer_sets_merge_ff_before_anything_that_can_fail(self) -> None:
         """merge.ff=false is the one mechanism no hook can replace.
 
@@ -2333,4 +2407,300 @@ class TestClaimsWiringBehaviour:
         assert result.returncode == 3
         assert not (harness["repo"] / ".worktrees").exists(), (
             "a refused setup created the .worktrees/ container"
+        )
+
+
+class TestMergeSubjectDerivation:
+    """Run `worktree-finish.sh` for real and read the subject it lands (CB-116).
+
+    Structural reading cannot tell a derivation that is written correctly from
+    one that produces the right string, and the CB-116 defect was invisible to
+    every structural test in this file: the script called `git log`, which is
+    what a structural test would check for. So these land an actual merge in a
+    throwaway repo and assert on `git log -1 --format=%s main`.
+
+    Running the whole script is affordable ONLY because `--skip-checks` exists;
+    the guards it disables are ruff and pytest, not the safety guards, so the
+    gate wiring these tests traverse is the real one.
+
+    COMMIT DATES ARE SET EXPLICITLY, and that is load-bearing rather than
+    tidiness: the defect is `git log`'s reverse-CHRONOLOGICAL ordering picking
+    main's newer commit out of the post-forward-merge tip. With every commit
+    inside one second git falls back to topology and the defect does not
+    reproduce at all — the first draft of this fixture was green against the
+    unfixed script for exactly that reason.
+    """
+
+    BRANCH_FIRST = "fix(cb-999): THE BRANCH'S OWN WORK, first commit"
+    BRANCH_LAST = "refactor(cb-999): close the altitude findings"
+    FOREIGN = "docs(bt-9): FOREIGN plan note naming CB-777/778/779"
+
+    @staticmethod
+    def _commit(repo: Path, when: str, *args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "GIT_AUTHOR_DATE": when,
+                "GIT_COMMITTER_DATE": when,
+            },
+        )
+
+    @pytest.fixture
+    def armed(self, repo: Path, tmp_path: Path) -> dict:
+        """A throwaway repo carrying tools/, armed, with a stub `codebugs`."""
+        shutil.copytree(REPO_ROOT / "tools", repo / "tools")
+        (repo / ".claude" / "plans").mkdir(parents=True)
+        git(repo, "add", "tools")
+        git(repo, "commit", "-m", "tools")
+        subprocess.run(
+            [str(repo / "tools" / "install-hooks.sh")],
+            cwd=str(repo),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        # Shadow the developer's real `codebugs` so the release step at the end
+        # can never reach a real tracker. It is guarded and non-fatal either way,
+        # but a test must not depend on that.
+        bin_dir = tmp_path / "stubbin"
+        bin_dir.mkdir()
+        stub = bin_dir / "codebugs"
+        stub.write_text("#!/usr/bin/env bash\nexit 0\n")
+        stub.chmod(0o755)
+        assert stub.is_file()
+        return {"repo": repo, "bin": bin_dir}
+
+    def _branch(self, armed: dict, name: str = "fix/cb-999-own-work") -> Path:
+        repo = armed["repo"]
+        wt = repo / ".worktrees" / name.replace("/", "-")
+        git(repo, "worktree", "add", "-q", "-b", name, str(wt), "main")
+        (wt / "feature.txt").write_text("work\n")
+        git(wt, "add", "feature.txt")
+        self._commit(wt, "2026-08-20T10:00:00Z", "commit", "--no-verify", "-m", self.BRANCH_FIRST)
+        (wt / "feature.txt").write_text("work\nmore\n")
+        self._commit(wt, "2026-08-20T10:05:00Z", "commit", "--no-verify", "-am", self.BRANCH_LAST)
+        return wt
+
+    def _move_main(self, armed: dict) -> None:
+        """Land a foreign plan note on main, STRICTLY LATER than the branch."""
+        repo = armed["repo"]
+        (repo / ".claude" / "plans" / "OTHER.md").write_text("someone else's note\n")
+        git(repo, "add", ".claude/plans/OTHER.md")
+        self._commit(repo, "2026-08-20T11:00:00Z", "commit", "-m", self.FOREIGN)
+
+    def _finish(self, armed: dict, *extra: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                str(armed["repo"] / "tools" / "worktree-finish.sh"),
+                "fix-cb-999-own-work",
+                "--skip-checks",
+                *extra,
+            ],
+            cwd=str(armed["repo"]),
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": f"{armed['bin']}{os.pathsep}{os.environ['PATH']}"},
+        )
+
+    def test_derived_subject_describes_the_branch_not_the_moved_main(self, armed: dict) -> None:
+        """The CB-116 defect itself, end to end.
+
+        Landing CB-111 produced `Merge fix/cb-111-…: docs(bt-4): … CB-113/114/115
+        … (CB-111)` — a merge closing one card whose subject named three others,
+        because [5/7] forward-merges main into the worktree and the derivation
+        then read that polluted tip.
+        """
+        self._branch(armed)
+        self._move_main(armed)
+        result = self._finish(armed)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+
+        subject = git(armed["repo"], "log", "-1", "--format=%s", "main")
+        assert self.FOREIGN not in subject, (
+            f"the merge subject still describes main's work: {subject}"
+        )
+        assert "CB-777" not in subject, f"the merge names foreign cards: {subject}"
+        assert subject == f"Merge fix/cb-999-own-work: {self.BRANCH_FIRST} (CB-999)", subject
+
+        # And the merge really is the branch's work, not an empty ceremony.
+        assert "feature.txt" in git(armed["repo"], "show", "--stat", "--format=", "main")
+
+    def test_the_first_own_commit_wins_over_the_last(self, armed: dict) -> None:
+        """The (b) half, separated from the (a) half so a mutant is localised.
+
+        Restricting the population to `main..HEAD` already removes main's
+        commits; choosing the FIRST of what remains is a second, independent
+        decision. Measured over main's own first-parent line: of the 47
+        integration merges whose branch carried two or more commits, the first
+        commit's subject is closer to the message a human actually wrote in 38
+        and the last in 7 — and five of those seven open with the extinct
+        `wip(cb-NN): checkpoint before mutation`. Branches here END on review
+        fixups, which describe the tail of an iteration rather than its subject.
+
+        main deliberately does NOT move here, so this test isolates first-vs-last
+        from the defect the previous test covers.
+        """
+        self._branch(armed)
+        result = self._finish(armed)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+
+        subject = git(armed["repo"], "log", "-1", "--format=%s", "main")
+        assert self.BRANCH_FIRST in subject, subject
+        assert self.BRANCH_LAST not in subject, (
+            f"the derivation took the branch's LAST commit, not its first: {subject}"
+        )
+
+    def test_an_explicit_merge_msg_still_wins(self, armed: dict) -> None:
+        """Derivation is a default, never a policy."""
+        self._branch(armed)
+        self._move_main(armed)
+        result = self._finish(armed, "--merge-msg", "Merge fix/cb-999-own-work: as typed (CB-999)")
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert (
+            git(armed["repo"], "log", "-1", "--format=%s", "main")
+            == "Merge fix/cb-999-own-work: as typed (CB-999)"
+        )
+
+    def test_a_branch_with_no_commit_of_its_own_is_refused_not_guessed(self, armed: dict) -> None:
+        """The empty population: refuse, and refuse before anything is landed.
+
+        Constructed with plumbing because it cannot be reached by ordinary use:
+        `commit-tree -p main -p main^` makes a two-parent commit — two DISTINCT
+        parents, see the comment below — carrying content that is in neither
+        parent, so `_guard_nonempty_diff` passes (the content is real) while
+        `main..HEAD --no-merges` is empty. That is the honest
+        shape of the case — the content arrived through a merge commit rather
+        than through a commit of this branch — and there is no subject that
+        would be true, so the script asks for one instead of inventing it.
+        """
+        repo = armed["repo"]
+        wt = repo / ".worktrees" / "fix-cb-999-own-work"
+        git(repo, "worktree", "add", "-q", "-b", "fix/cb-999-own-work", str(wt), "main")
+        (wt / "feature.txt").write_text("content in neither parent\n")
+        git(wt, "add", "feature.txt")
+        tree = git(wt, "write-tree")
+        main_sha = git(repo, "rev-parse", "main")
+        # Two DISTINCT parents, or git collapses them and the result is not a
+        # merge at all — measured, `-p main -p main` yields a one-parent commit
+        # that `--no-merges` then includes. Both parents are reachable from
+        # main, so the range holds nothing but the merge commit itself.
+        evil = git(
+            wt, "commit-tree", tree, "-p", main_sha, "-p", f"{main_sha}^", "-m", "Merge: evil"
+        )
+        git(wt, "reset", "--hard", evil)
+        assert git(wt, "log", "--no-merges", "--format=%s", f"{main_sha}..HEAD") == ""
+
+        result = self._finish(armed)
+        assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+        assert "no commit of its own" in result.stdout, result.stdout
+        assert git(repo, "rev-parse", "main") == main_sha, "a refused finish still moved main"
+
+    def test_a_refusal_hint_carries_the_message_the_run_was_given(self, armed: dict) -> None:
+        """Form (d): the retry line must not drop `--merge-msg`.
+
+        Exercised on the [5/7] conflict refusal because that one is reachable
+        deterministically; the exit-13 refusals share the same `_retry_hint`
+        function, and `TestHarnessIntegrity` pins that they call it. Without
+        this, a refusal caused by main moving hands the operator a bare re-run —
+        and main having moved is precisely what used to break the derivation,
+        so the refusal path routed the operator into the defect. That is how the
+        observed CB-111 subject was produced.
+        """
+        repo = armed["repo"]
+        wt = self._branch(armed)
+        # A conflicting edit to the same file, on main.
+        (repo / "feature.txt").write_text("main's version\n")
+        git(repo, "add", "feature.txt")
+        self._commit(repo, "2026-08-20T11:00:00Z", "commit", "--no-verify", "-m", self.FOREIGN)
+
+        typed = "Merge fix/cb-999-own-work: it's typed (CB-999)"
+        result = self._finish(armed, "--merge-msg", typed)
+        assert result.returncode == 1, (result.stdout, result.stderr)
+        assert "Conflicts" in result.stdout, result.stdout
+        assert f"--merge-msg '{typed.replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'" in (
+            result.stdout
+        ), result.stdout
+        assert wt.exists()
+
+    def test_a_commit_absorbed_from_a_sibling_branch_does_not_win(self, armed: dict) -> None:
+        """Restricting the RANGE is not enough — `--first-parent` is what decides.
+
+        Found by two independent adversarial reviews and reproduced here: a
+        branch that merges a SIBLING branch absorbs its commits into
+        `main..HEAD`, and if the sibling's commits are OLDER (the ordinary case
+        — the sibling was cut earlier) plain date order puts the sibling first.
+        The range-only derivation then names the sibling's card in a merge that
+        closes this one: the CB-116 symptom arriving through a second door, and
+        on this shape it is WORSE than the `log -1` code it replaced, which at
+        least picked a commit of this branch.
+
+        `--first-parent` follows only the branch's own line, so every absorbed
+        lineage — the sibling here, main at [5/7] — is skipped by construction
+        rather than out-raced on timestamps.
+        """
+        repo = armed["repo"]
+
+        # A sibling branch whose commit is STRICTLY OLDER than the branch's own.
+        sib = repo / ".worktrees" / "fix-cb-800-sibling"
+        git(repo, "worktree", "add", "-q", "-b", "fix/cb-800-sibling", str(sib), "main")
+        (sib / "sibling.txt").write_text("sibling work\n")
+        git(sib, "add", "sibling.txt")
+        self._commit(
+            sib, "2026-08-20T09:10:00Z", "commit", "--no-verify", "-m", "feat(cb-800): SIBLING work"
+        )
+
+        wt = self._branch(armed)
+        self._commit(
+            wt,
+            "2026-08-20T10:10:00Z",
+            "merge",
+            "--no-ff",
+            "--no-verify",
+            "-m",
+            "Merge fix/cb-800-sibling into fix/cb-999-own-work",
+            "fix/cb-800-sibling",
+        )
+        self._move_main(armed)
+
+        result = self._finish(armed)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        subject = git(repo, "log", "-1", "--format=%s", "main")
+        assert "SIBLING" not in subject, (
+            f"a commit absorbed from a sibling branch won the derivation: {subject}"
+        )
+        assert subject == f"Merge fix/cb-999-own-work: {self.BRANCH_FIRST} (CB-999)", subject
+
+    def test_an_empty_first_subject_is_skipped_not_read_as_an_empty_population(
+        self, armed: dict
+    ) -> None:
+        """A blank subject is not evidence that the branch carries no commits.
+
+        `git commit --allow-empty-message` puts an empty line at the head of the
+        population. Testing the FIRST LINE instead of the population made the
+        refusal fire on a branch carrying several own commits, and print
+        "carries no commit of its own" plus an explanation about merge commits —
+        a false refusal that also asserts something untrue about the repository.
+        """
+        repo = armed["repo"]
+        wt = repo / ".worktrees" / "fix-cb-999-own-work"
+        git(repo, "worktree", "add", "-q", "-b", "fix/cb-999-own-work", str(wt), "main")
+        (wt / "feature.txt").write_text("work\n")
+        git(wt, "add", "feature.txt")
+        self._commit(
+            wt, "2026-08-20T10:00:00Z", "commit", "--no-verify", "--allow-empty-message", "-m", ""
+        )
+        (wt / "feature.txt").write_text("work\nmore\n")
+        self._commit(wt, "2026-08-20T10:05:00Z", "commit", "--no-verify", "-am", self.BRANCH_LAST)
+
+        result = self._finish(armed)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert "no commit of its own" not in result.stdout, result.stdout
+        assert (
+            git(repo, "log", "-1", "--format=%s", "main")
+            == f"Merge fix/cb-999-own-work: {self.BRANCH_LAST} (CB-999)"
         )
