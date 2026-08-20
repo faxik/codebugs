@@ -1488,3 +1488,11 @@ under-covered. The fixes themselves survived review each time.
 three independent transformations, a host decision (`cliio.py` rather than `cli.py`, so the MCP
 server does not import argparse), and a declared choice about whether the latent connection leak on
 the non-`OSError` path is preserved or fixed inside a "pure refactor".
+
+---
+
+## Каскад DIR-2 (записи принимающего уровня, П-В/§8.2)
+
+- **Т-3** — CB-60 fixed (fail-closed нормализация категории), мердж `fa40b3c`, принят DIR-2 2026-08-20 (7/7 §13, /acceptance-check). Открыто попутно: CB-61 разблокирована.
+- **Т-5** — CB-53 fixed (staleness читает ring), мердж `fc4f126`, принят DIR-2 2026-08-19 (пп.1,4,5 + замысел).
+- **Т-8** — CB-114+CB-115 fixed (докстринг импорта; индекс ref в _POST_MIGRATION_INDEXES — отклонение от буквы брифа, подтверждено), мердж `d3ff33f`, принят DIR-2 2026-08-20 (7/7, /acceptance-check).
