@@ -2040,3 +2040,315 @@ class TestListMilestoneItems:
     def test_unknown_milestone_raises(self, conn):
         with pytest.raises(KeyError):
             milestones.list_milestone_items(conn, milestone_id="release/none")
+
+
+# ---------------------------------------------------------------------------
+# CB-108 + CB-120: the three foundation writers that committed outside db.txn
+# and then re-read the row they had just written.
+# ---------------------------------------------------------------------------
+
+class _TxnProbeConnection(sqlite3.Connection):
+    """Records ``in_transaction`` as it stood *before* each statement ran.
+
+    This is the discriminator for "the decision is taken under the same lock as the
+    write": a guard SELECT executed outside any transaction reads ``False`` here, and
+    the same SELECT inside ``db.txn``'s ``BEGIN IMMEDIATE`` reads ``True``. Sampled
+    BEFORE the statement on purpose — pysqlite opens its implicit transaction on DML
+    only, so a sample taken after a SELECT reads ``False`` on both sides and the probe
+    would be vacuous by construction.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.seen: list[tuple[str, bool]] = []
+
+    def execute(self, sql, *args, **kwargs):
+        self.seen.append((" ".join(sql.split()), self.in_transaction))
+        return super().execute(sql, *args, **kwargs)
+
+    def in_txn_for(self, prefix: str) -> list[bool]:
+        return [flag for sql, flag in self.seen if sql.startswith(prefix)]
+
+
+class _MilestoneReadPausingConnection(sqlite3.Connection):
+    """One-shot hook fired right after the milestone row is read.
+
+    Keyed on the exact text both the old and the new ``update_milestone`` use to read
+    the row, so the seam is the same one on either side of the fix — the two-seam
+    lesson ``CommitPausingConnection`` records, applied to a read.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.after_milestone_read = None
+
+    def execute(self, sql, *args, **kwargs):
+        cur = super().execute(sql, *args, **kwargs)
+        if self.after_milestone_read and " ".join(sql.split()).startswith(
+            "SELECT * FROM milestones WHERE id = ?"
+        ):
+            hook, self.after_milestone_read = self.after_milestone_read, None
+            hook()
+        return cur
+
+
+class TestFoundationWriterTransactions:
+    """CB-108 + CB-120: ``create_milestone``, ``update_milestone`` and
+    ``add_milestone_item`` each gated a write on an unprotected read, committed on
+    their own, and then re-read the row to build the return value.
+
+    Three independent properties are pinned, because a fix that satisfies one still
+    leaves the others broken: the guard read happens under the write lock, the
+    function commits nothing of its own, and the returned row is the row this call
+    wrote rather than whatever the re-read happened to find.
+    """
+
+    def _path(self, tmp_project):
+        return os.path.join(tmp_project, ".codebugs", "findings.db")
+
+    def _open(self, tmp_project, factory=_TxnProbeConnection):
+        c = sqlite3.connect(self._path(tmp_project), factory=factory)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA busy_timeout=5000")
+        return c
+
+    def _seed(self, tmp_project, *, with_finding=True):
+        seed = db.connect(tmp_project)
+        try:
+            if with_finding:
+                _add_finding(seed, "CB-1")  # auto-routes into stream/triage
+            milestones.create_milestone(
+                seed, id="release/1.0", kind="release", description="fixture"
+            )
+        finally:
+            seed.close()
+
+    # --- the guard read happens under the write lock (check-then-act) ---
+
+    def test_create_milestone_checks_for_a_duplicate_under_the_write_lock(self, tmp_project):
+        db.connect(tmp_project).close()
+        c = self._open(tmp_project)
+        try:
+            milestones.create_milestone(
+                c, id="release/1.0", kind="release", description="x"
+            )
+            flags = c.in_txn_for("SELECT 1 FROM milestones WHERE id = ?")
+        finally:
+            c.close()
+        assert flags, "the duplicate guard must still run"
+        assert all(flags), (
+            "the guard that decides whether to INSERT ran outside the write lock, "
+            "so a concurrent create lands between the check and the insert"
+        )
+
+    def test_update_milestone_reads_the_row_under_the_write_lock(self, tmp_project):
+        self._seed(tmp_project, with_finding=False)
+        c = self._open(tmp_project)
+        try:
+            milestones.update_milestone(c, id="release/1.0", state="closing")
+            flags = c.in_txn_for("SELECT * FROM milestones WHERE id = ?")
+        finally:
+            c.close()
+        assert flags, "the row must still be read"
+        assert all(flags), (
+            "from_state is snapshotted from this read and persisted into "
+            "milestone_audit; read outside the lock it can describe a transition "
+            "that never happened"
+        )
+
+    def test_add_milestone_item_checks_for_a_duplicate_under_the_write_lock(self, tmp_project):
+        self._seed(tmp_project)
+        c = self._open(tmp_project)
+        try:
+            milestones.add_milestone_item(
+                c, milestone_id="release/1.0", item_kind="bug", item_ref="CB-1"
+            )
+            existence = c.in_txn_for("SELECT 1 FROM milestones WHERE id = ?")
+            duplicate = c.in_txn_for("SELECT id FROM milestone_items WHERE milestone_id = ?")
+        finally:
+            c.close()
+        assert existence and duplicate, "both guards must still run"
+        assert all(existence), "the milestone-exists guard ran outside the write lock"
+        assert all(duplicate), (
+            "the duplicate-attachment guard ran outside the write lock, so the "
+            "UNIQUE constraint it exists to protect can be violated by the very "
+            "call that checked it"
+        )
+
+    # --- the caller's transaction survives (no commit of their own) ---
+
+    def test_an_ambient_transaction_is_not_committed_by_the_foundation_writers(self, conn):
+        """``db.txn`` yields False under an ambient transaction, so the caller owns it.
+
+        Parameterized in one test because the assertion is identical for all three and
+        the interesting content is the LIST — a fourth foundation writer added later
+        belongs here, which a per-function test makes easy to skip.
+        """
+        _add_finding(conn, "CB-1")
+        milestones.create_milestone(
+            conn, id="release/1.0", kind="release", description="fixture"
+        )
+
+        def snapshot():
+            return (
+                conn.execute("SELECT COUNT(*) AS c FROM milestones").fetchone()["c"],
+                conn.execute("SELECT COUNT(*) AS c FROM milestone_items").fetchone()["c"],
+                conn.execute("SELECT COUNT(*) AS c FROM milestone_audit").fetchone()["c"],
+                conn.execute(
+                    "SELECT state FROM milestones WHERE id = 'release/1.0'"
+                ).fetchone()["state"],
+            )
+
+        calls = [
+            ("create_milestone", lambda: milestones.create_milestone(
+                conn, id="release/2.0", kind="release", description="y")),
+            ("update_milestone", lambda: milestones.update_milestone(
+                conn, id="release/1.0", state="closing")),
+            ("add_milestone_item", lambda: milestones.add_milestone_item(
+                conn, milestone_id="release/1.0", item_kind="bug", item_ref="CB-1")),
+        ]
+
+        for name, call in calls:
+            before = snapshot()
+            with pytest.raises(RuntimeError, match="caller aborts"):
+                with db.txn(conn) as opened:
+                    assert opened, f"the caller owns this transaction ({name})"
+                    call()
+                    raise RuntimeError("caller aborts after the nested call")
+            assert snapshot() == before, f"{name} must roll back with its caller"
+
+    # --- the returned row is the row this call wrote ---
+
+    def test_add_milestone_item_returns_the_attachment_it_created(self, tmp_project):
+        """CB-120's worse half: the re-read selected on ``item_ref`` ALONE.
+
+        ``_get_item_row_by_ref`` breaks the tie with ``ORDER BY id DESC LIMIT 1`` while
+        the INSERT is keyed on the ``(milestone_id, item_kind, item_ref)`` triple, so an
+        attachment created by anyone else in the window between the commit and the
+        re-read is returned instead — an attachment to a DIFFERENT milestone, with
+        nothing in the response to say so. The window is opened deterministically here
+        with the commit seam, which hooks both ``conn.commit()`` and ``COMMIT`` so the
+        test cannot pass vacuously on either side of the fix.
+        """
+        self._seed(tmp_project)
+        seed = db.connect(tmp_project)
+        try:
+            milestones.create_milestone(
+                seed, id="release/2.0", kind="release", description="competitor"
+            )
+        finally:
+            seed.close()
+
+        def competing_attachment():
+            b = sqlite3.connect(self._path(tmp_project))
+            b.execute("PRAGMA busy_timeout=5000")
+            try:
+                b.execute(
+                    """INSERT INTO milestone_items
+                       (milestone_id, item_kind, item_ref, size, priority, status,
+                        acceptance, meta_json, created_at, updated_at)
+                       VALUES ('release/2.0', 'bug', 'CB-1', 'small', 100, 'open',
+                               '', '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"""
+                )
+                b.commit()
+            finally:
+                b.close()
+
+        a = self._open(tmp_project, factory=CommitPausingConnection)
+        a.after_commit = competing_attachment
+        try:
+            got = milestones.add_milestone_item(
+                a, milestone_id="release/1.0", item_kind="bug", item_ref="CB-1"
+            )
+        finally:
+            a.close()
+
+        assert got["milestone_id"] == "release/1.0", (
+            "the call returned an attachment to another milestone than the one it "
+            "was asked to attach to"
+        )
+        check = db.connect(tmp_project)
+        try:
+            stored = check.execute(
+                "SELECT id FROM milestone_items WHERE milestone_id = 'release/1.0' "
+                "AND item_kind = 'bug' AND item_ref = 'CB-1'"
+            ).fetchone()
+        finally:
+            check.close()
+        assert got["id"] == stored["id"], "the returned row must be the row inserted"
+
+    def test_create_milestone_returns_the_row_it_inserted(self, tmp_project):
+        """Passes on both sides of the fix — pinned as the uncontended contract the
+        change must preserve, not as a regression oracle. Said plainly so a reader
+        can tell it from the discriminating tests above.
+        """
+        db.connect(tmp_project).close()
+        c = self._open(tmp_project, factory=sqlite3.Connection)
+        try:
+            got = milestones.create_milestone(
+                c, id="release/1.0", kind="release", description="x", target_date="2026-12-01"
+            )
+        finally:
+            c.close()
+        assert got["id"] == "release/1.0"
+        assert got["kind"] == "release"
+        assert got["state"] == "open"
+        assert got["description"] == "x"
+        assert got["target_date"] == "2026-12-01"
+        assert got["meta"] == {}
+
+    def test_update_milestone_audits_the_state_the_row_actually_held(self, tmp_project):
+        """CB-108's audit half, with a real oracle rather than a documented gap.
+
+        A competing writer is let in at the exact moment ``update_milestone`` has read
+        the row and not yet written. Unfixed, that read is outside any transaction, the
+        competitor commits ``closing``, and the audit row then claims the milestone went
+        ``open -> shipped`` — a transition that never happened, in the one table whose
+        purpose is to be believed later. Fixed, the lock is already held, so the
+        competitor is refused and the audit row's ``from_state`` is the truth.
+
+        The discriminator is WHICH WRITER IS REFUSED (CB-30 rule (a)): the audit row
+        reads ``open`` on both sides, so asserting on it alone would pass against the
+        defect. The competitor's own ``busy_timeout`` is 200ms, so the fixed path costs
+        a fifth of a second and never waits unboundedly.
+        """
+        self._seed(tmp_project, with_finding=False)
+        competitor: dict[str, Exception | None] = {}
+
+        def competing_writer():
+            b = sqlite3.connect(self._path(tmp_project))
+            b.execute("PRAGMA busy_timeout=200")
+            try:
+                b.execute("UPDATE milestones SET state = 'closing' WHERE id = 'release/1.0'")
+                b.commit()
+                competitor["refused"] = None
+            except sqlite3.OperationalError as exc:
+                competitor["refused"] = exc
+            finally:
+                b.close()
+
+        a = self._open(tmp_project, factory=_MilestoneReadPausingConnection)
+        a.after_milestone_read = competing_writer
+        try:
+            got = milestones.update_milestone(a, id="release/1.0", state="shipped")
+        finally:
+            a.close()
+
+        assert "refused" in competitor, "the competing writer never ran"
+        assert competitor["refused"] is not None, (
+            "a competing state change landed between this call's read and its write, "
+            "so the from_state it persisted into milestone_audit describes a "
+            "transition the milestone never made"
+        )
+        assert got["state"] == "shipped", "the returned row must be the row written"
+        check = db.connect(tmp_project)
+        try:
+            audit = check.execute(
+                "SELECT from_state, to_state FROM milestone_audit "
+                "WHERE milestone_id = 'release/1.0' AND action = 'update' "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            check.close()
+        assert audit["from_state"] == "open"
+        assert audit["to_state"] == "shipped"
