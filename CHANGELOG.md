@@ -7,6 +7,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`add` and `batch_add` responses now carry an `attention` block (BT-5).** Dedup was
+  silent: a serious divergence between an observation and the stored card was reported
+  only by burying it in the body of the response, so an automated filer had no
+  top-level place to look. `attention` is a list on every response — **always present,
+  frequently empty**. Empty means "evaluated, nothing serious fired", which is a
+  different fact from "no such channel", so the key is unconditional, exactly like the
+  `was_new` and `dedup_action` keys beside it.
+
+  Today it carries at most one record, `{"signal": "severity_escalated", "from": …,
+  "to": …}`, and only on the `bumped` and `reopened` branches: it says THIS observation
+  raised the card's stored severity. That fact was genuinely unrecoverable before —
+  severity is monotonic under observation (CB-52) and the insert path writes no ring
+  entry, so the pre-escalation value existed nowhere in the response. The insert
+  branches (`created`, `recurrence_of_closed`) never emit a record, for a structural
+  reason rather than a policy one: nothing was bumped, so no stored severity was
+  raised. There is no de-escalation record, because de-escalation does not exist.
+
+  **Audience: MCP only.** The CLI prints fixed one-line summaries and does not
+  serialize the response, and there is no batch verb there at all. **CSV import is
+  unaffected by construction** — it reads the internal outcome directly and returns
+  counters, so it never reaches the response constructor; an opt-out flag would have
+  been dead code and was deliberately not added.
+
 - **`codebugs categories-normalize` — fold the stored corpus onto canonical category
   spellings, so an old card stops forking when it is reported again (CB-61).** New
   findings have had their category spelling canonicalized at write time since CB-60,
@@ -46,6 +69,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `fingerprint` as immutable.
 
 ### Documentation
+- **`add` and `batch_add` now document all four `dedup_action` values (CB-118).** Both
+  descriptions named at most two of them, and `batch_add`'s named none — while the one
+  they omitted, `recurrence_of_closed`, is the value a client is most likely to
+  mishandle: a recurrence of a dismissed twin files a NEW row and reports
+  `was_new: true`, so a client that tells create from match by gating on
+  `was_new == false` misses the event entirely. The remainder is stated honestly too:
+  the dismissed twin's id is always in `meta.recurrence_of` and its status is usually
+  in `meta.similar_to`, but on a caller-supplied fingerprint whose text does not
+  resemble the twin — or a description below the similarity minimum — the status is
+  not in the response at all and costs one `get`.
 - **The dedup freeze of `source`, top-level `meta` and `reported_at_ref` is now a
   declared contract, on every reader (BT-4).** No behaviour changed. `source` stores
   the FIRST reporter — later observations' sources live only in the occurrence ring,
@@ -59,6 +92,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   domain docstrings, pinned by prose↔code and behaviour tests.
 
 ### Fixed
+- **A post-add hook that keeps the finding dict no longer watches response-only keys
+  appear on it (CB-119).** Hooks were handed the very dict the response constructor
+  then mutated, so a hook storing the reference for later would observe `was_new` and
+  `dedup_action` materialize on "its" copy after the call returned — a latent
+  cross-layer aliasing bug that `attention` would only have made easier to hit. The
+  response is now built as a shallow copy, taken AFTER the hooks have run: a hook's
+  own mutations still reach the response, only the aliasing is gone, so no hook
+  behaviour changes. A ratchet additionally asserts that no response-only key can ever
+  collide with a `findings` column.
 - **Re-reporting a known defect no longer fails over a category typo, and the
   occurrence ring now records each observation's category (CB-113).** The category
   mint gate (CB-60) used to run before the deduplication branch was known, so an

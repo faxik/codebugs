@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import os
 import tempfile
 import types
@@ -317,3 +318,83 @@ class TestInterpreterIndependentDescriptions:
         from tests import _mcp_schema
 
         assert _mcp_schema.dedent_docstring is server.dedent_docstring
+
+
+class TestAttentionOverTheWire:
+    """BT-5 section H: the ONLY real gate on the response shape.
+
+    The wire golden cannot gate it — no `outputSchema` is snapshotted and the
+    live schema carries `additionalProperties: True`, so an extension there
+    would be a gate that cannot fire, this repo's named failure shape. The key's
+    presence is therefore asserted against real `CallToolResult` objects here.
+
+    Both of `batch_add`'s wire forms are covered because both exist: the
+    structured form wraps the list in `{"result": [...]}`, while `content` is one
+    `TextContent` per member. That the part count tracks the member count is
+    MEASURED here (two members, two parts), not assumed.
+
+    The attribute is `structured_content` (snake_case) in this SDK version;
+    `structuredContent` raises `AttributeError`. `async def` would be collected
+    and never awaited, so every call goes through `asyncio.run`.
+    """
+
+    ESCALATED = {"signal": "severity_escalated", "from": "low", "to": "critical"}
+    DESC = "admin route skips the token check"
+
+    def _call(self, mcp, name, arguments):
+        async def go():
+            return await mcp.call_tool(name, arguments)
+
+        return asyncio.run(go())
+
+    def _member(self, severity, description):
+        return {
+            "severity": severity,
+            "category": "bug",
+            "file": "a.py",
+            "description": description,
+        }
+
+    def test_add_carries_attention_in_both_wire_forms(self, tracker):
+        mcp, _ = _server_with_middleware(tracker)
+        res = self._call(mcp, "add", {**self._member("low", self.DESC), "new_category": True})
+
+        assert res.structured_content["attention"] == []
+        assert len(res.content) == 1
+        assert json.loads(res.content[0].text)["attention"] == []
+
+    def test_batch_add_carries_attention_in_both_wire_forms(self, tracker):
+        mcp, _ = _server_with_middleware(tracker)
+        res = self._call(
+            mcp,
+            "batch_add",
+            {
+                "findings": [
+                    self._member("low", "first defect text"),
+                    self._member("low", "second defect text"),
+                ],
+                "new_category": True,
+            },
+        )
+
+        members = res.structured_content["result"]
+        assert len(members) == 2
+        assert len(res.content) == 2, "one TextContent part per member — measured, not assumed"
+        for i in range(2):
+            assert members[i]["attention"] == []
+            assert json.loads(res.content[i].text)["attention"] == []
+
+    def test_an_escalation_is_visible_over_the_wire(self, tracker):
+        """End to end: filed `low` through `add`, re-observed `critical` through
+        `batch_add`, and the escalation reaches the client on both forms."""
+        mcp, _ = _server_with_middleware(tracker)
+        self._call(mcp, "add", {**self._member("low", self.DESC), "new_category": True})
+
+        res = self._call(
+            mcp, "batch_add", {"findings": [self._member("critical", self.DESC)]}
+        )
+
+        member = res.structured_content["result"][0]
+        assert member["dedup_action"] == "bumped", "precondition: this must be a dedup bump"
+        assert member["attention"] == [self.ESCALATED]
+        assert json.loads(res.content[0].text)["attention"] == [self.ESCALATED]

@@ -15,8 +15,10 @@ import inspect
 import json
 import os
 import pathlib
+import re
 import sqlite3
 import threading
+from typing import get_args, get_type_hints
 
 import pytest
 
@@ -1217,3 +1219,451 @@ class TestPromoteTagsOptOutRatchet:
         in-package import path can. Mirrors the escalate asymmetry (CB-52)."""
         assert "promote_tags" not in inspect.signature(findings.add_finding).parameters
         assert "promote_tags" not in inspect.signature(findings.batch_add_findings).parameters
+
+
+def _mcp_tool_docstrings() -> dict[str, str]:
+    """Docstrings of the findings MCP wrappers, keyed by tool name.
+
+    Registration through a stub registrar rather than the real SDK: this pin is
+    about the prose the wrappers carry, and building an `MCPServer` would couple
+    a documentation ratchet to a provisional third-party API for no gain.
+    """
+    docs: dict[str, str] = {}
+
+    class _StubRegistrar:
+        def tool(self, *args, **kwargs):
+            def decorate(fn):
+                docs[fn.__name__] = fn.__doc__ or ""
+                return fn
+
+            return decorate
+
+    findings.register_tools(_StubRegistrar(), lambda: None)
+    return docs
+
+
+def _findings_ast() -> ast.Module:
+    return ast.parse(pathlib.Path(findings.__file__).read_text())
+
+
+def _function_node(name: str) -> ast.FunctionDef:
+    for node in ast.walk(_findings_ast()):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"{name} not found in findings.py")
+
+
+class TestAttentionSignalMatrix:
+    """The signal x branch matrix is DERIVED from the branch table, not enumerated
+    in prose (BT-5, judge fix #6; shape borrowed from `TestBranchTotality` above).
+
+    `_ATTENTION_SIGNALS_BY_ACTION` is LIVE — the helper that builds the response
+    list reads it, so a wrong cell changes behaviour rather than only a test. A
+    new dedup branch must therefore fail HERE (and fail closed at runtime with a
+    `KeyError`) instead of silently producing an empty list.
+    """
+
+    def _dedup_action_literals(self) -> set[str]:
+        """Every `dedup_action` string `_add_one` can actually return, from its AST.
+
+        Two spellings reach the caller: a constant assigned to the name
+        `dedup_action`, and a constant handed straight to the `AddOutcome`
+        constructor on the bump/reopen returns.
+        """
+        fn = _function_node("_add_one")
+        literals: set[str] = set()
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == "dedup_action":
+                        literals.add(node.value.value)
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "AddOutcome"
+            ):
+                for kw in node.keywords:
+                    if kw.arg == "dedup_action" and isinstance(kw.value, ast.Constant):
+                        literals.add(kw.value.value)
+                if len(node.args) > 3 and isinstance(node.args[3], ast.Constant):
+                    literals.add(node.args[3].value)
+        return literals
+
+    def _emitted_signal_names(self) -> set[str]:
+        """Every signal name a record literal in findings.py can carry.
+
+        Reads dict literals with a `"signal"` key. A `Name` value is resolved
+        through the module, so the record built from the `SEVERITY_ESCALATED`
+        constant counts and a hand-written second literal would too. The
+        `TypedDict` type map is skipped by construction: its value resolves to a
+        type, not to a string.
+        """
+        names: set[str] = set()
+        for node in ast.walk(_findings_ast()):
+            if not isinstance(node, ast.Dict):
+                continue
+            for key, value in zip(node.keys, node.values, strict=True):
+                if not (isinstance(key, ast.Constant) and key.value == "signal"):
+                    continue
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    names.add(value.value)
+                elif isinstance(value, ast.Name):
+                    resolved = getattr(findings, value.id, None)
+                    if isinstance(resolved, str):
+                        names.add(resolved)
+        return names
+
+    def test_the_table_covers_exactly_the_actions_add_one_can_return(self):
+        assert set(findings._ATTENTION_SIGNALS_BY_ACTION) == self._dedup_action_literals()
+
+    def test_the_signal_vocabulary_is_exactly_what_the_module_emits(self):
+        declared = set().union(*findings._ATTENTION_SIGNALS_BY_ACTION.values())
+        assert declared == {findings.SEVERITY_ESCALATED}
+        assert self._emitted_signal_names() == declared, (
+            "a signal literal exists in findings.py that the matrix does not admit"
+        )
+
+    def test_the_record_type_pins_the_same_signal_name(self):
+        """The `Literal` in `AttentionRecord` cannot drift from the constant."""
+        hints = get_type_hints(findings.AttentionRecord)
+        assert set(get_args(hints["signal"])) == {findings.SEVERITY_ESCALATED}
+
+    def test_the_cell_count_lives_here_and_not_in_prose(self):
+        """This repo has been wrong both times it left a count in prose."""
+        assert len(findings._ATTENTION_SIGNALS_BY_ACTION) == 4
+        assert sum(len(v) for v in findings._ATTENTION_SIGNALS_BY_ACTION.values()) == 2
+
+    def test_an_unclassified_action_fails_closed(self):
+        """Fail-closed: an unknown action raises rather than yielding an empty list.
+
+        An empty list means "evaluated, nothing fired" — the one meaning a new,
+        unclassified branch must NOT be able to borrow.
+        """
+        with pytest.raises(KeyError):
+            findings._attention_records("no_such_action", None)
+
+    def test_the_insert_branches_are_empty_for_a_structural_reason(self):
+        """`created` / `recurrence_of_closed` are insert paths: `_bump_row` never
+        runs there, so there is nothing to escalate. Stated in the docstring so a
+        reader is not left to infer it (BT-5 section B)."""
+        doc = findings._attention_records.__doc__ or ""
+        assert "_bump_row" in doc
+
+
+class TestAttentionBlock:
+    """BT-5 core: `attention` is always present, and carries the one ratified signal.
+
+    The list of cases below is the judge's Recommended-Fixes list (negatives and
+    stacking from the Codex attacker) carried into the unit verbatim.
+    """
+
+    ESCALATED = {"signal": "severity_escalated", "from": "low", "to": "critical"}
+    DESC = "admin route skips the token check"
+
+    def test_a_bump_with_escalation_reports_exactly_one_record(self, conn):
+        """C.1 — the mutation-probe target: red on any revert of the transport."""
+        first = _add(conn, severity="low", desc=self.DESC)
+        second = _add(conn, severity="critical", desc=self.DESC)
+
+        assert second["id"] == first["id"], "precondition: this must be a dedup bump"
+        assert second["dedup_action"] == "bumped"
+        assert second["attention"] == [self.ESCALATED]
+
+    def test_a_bump_without_escalation_reports_nothing(self, conn):
+        _add(conn, severity="medium", desc=self.DESC)
+        second = _add(conn, severity="medium", desc=self.DESC)
+        assert second["dedup_action"] == "bumped"
+        assert second["attention"] == []
+
+    def test_a_less_severe_observation_reports_nothing(self, conn):
+        """De-escalation does not exist (CB-52), so it cannot be signalled."""
+        _add(conn, severity="critical", desc=self.DESC)
+        second = _add(conn, severity="low", desc=self.DESC)
+        assert second["dedup_action"] == "bumped"
+        assert second["attention"] == []
+
+    def test_a_created_row_carries_an_empty_block(self, conn):
+        created = _add(conn, severity="low", desc=self.DESC)
+        assert created["dedup_action"] == "created"
+        assert created["attention"] == []
+
+    @pytest.mark.parametrize("dismissed", ["wont_fix", "not_a_bug"])
+    def test_a_recurrence_of_a_dismissed_twin_carries_an_empty_block(self, conn, dismissed):
+        f = _add(conn, severity="low", desc=self.DESC)
+        findings.update_finding(conn, finding_id=f["id"], status=dismissed)
+
+        recurrence = _add(conn, severity="critical", desc=self.DESC)
+
+        assert recurrence["dedup_action"] == "recurrence_of_closed"
+        assert recurrence["was_new"] is True, "the recurrence branch is an INSERT path"
+        assert recurrence["attention"] == []
+
+    def test_a_reopen_with_escalation_reports_one_record(self, conn):
+        f = _add(conn, severity="low", desc=self.DESC)
+        findings.update_finding(conn, finding_id=f["id"], status="fixed")
+
+        reopened = _add(conn, severity="critical", desc=self.DESC)
+
+        assert reopened["dedup_action"] == "reopened"
+        assert reopened["attention"] == [self.ESCALATED]
+
+    def test_a_reopen_without_escalation_reports_nothing(self, conn):
+        f = _add(conn, severity="high", desc=self.DESC)
+        findings.update_finding(conn, finding_id=f["id"], status="fixed")
+
+        reopened = _add(conn, severity="high", desc=self.DESC)
+
+        assert reopened["dedup_action"] == "reopened"
+        assert reopened["attention"] == []
+
+    @pytest.mark.parametrize(
+        "prepare",
+        [None, "bump", "fixed", "wont_fix"],
+        ids=["created", "bumped", "reopened", "recurrence_of_closed"],
+    )
+    def test_the_key_is_present_on_every_branch(self, conn, prepare):
+        """An absent key would collapse "evaluated, nothing fired" into "no channel"."""
+        if prepare is not None:
+            f = _add(conn, severity="low", desc=self.DESC)
+            if prepare != "bump":
+                findings.update_finding(conn, finding_id=f["id"], status=prepare)
+        result = _add(conn, severity="low", desc=self.DESC)
+        assert "attention" in result
+
+    def test_batch_members_carry_their_own_blocks(self, conn):
+        results = findings.batch_add_findings(
+            conn,
+            [
+                {
+                    "severity": "low",
+                    "category": "bug",
+                    "file": "a.py",
+                    "description": self.DESC,
+                },
+                {
+                    "severity": "critical",
+                    "category": "bug",
+                    "file": "a.py",
+                    "description": self.DESC,
+                },
+            ],
+            new_category=True,
+        )
+        assert [r["dedup_action"] for r in results] == ["created", "bumped"]
+        assert results[0]["attention"] == []
+        assert results[1]["attention"] == [self.ESCALATED]
+        assert results[0]["attention"] is not results[1]["attention"], (
+            "each response owns its own list — no shared mutable object across a batch"
+        )
+
+    def test_batch_members_deduplicated_by_the_derived_fingerprint_escalate(self, conn):
+        """Twins by NORMALIZATION, not by identical text: the two descriptions
+        differ only in an ISO timestamp, which `auto:v1` strips."""
+        results = findings.batch_add_findings(
+            conn,
+            [
+                {
+                    "severity": "low",
+                    "category": "bug",
+                    "file": "a.py",
+                    "description": "queue drained at 2026-01-01T00:00:00Z after retry",
+                },
+                {
+                    "severity": "critical",
+                    "category": "bug",
+                    "file": "a.py",
+                    "description": "queue drained at 2026-02-02T11:11:11Z after retry",
+                },
+            ],
+            new_category=True,
+        )
+        assert results[1]["id"] == results[0]["id"], "precondition: normalization twins"
+        assert results[1]["attention"] == [self.ESCALATED]
+
+    def test_a_supplied_fingerprint_bump_escalates_the_same_way(self, conn):
+        """The signal does not depend on where the fingerprint came from."""
+        _add(conn, severity="low", desc="first text", fingerprint="svc:login:timeout")
+        second = _add(conn, severity="critical", desc="wholly other text",
+                      fingerprint="svc:login:timeout")
+        assert second["dedup_action"] == "bumped"
+        assert second["attention"] == [self.ESCALATED]
+
+    def test_the_reported_values_are_canonical_not_as_supplied(self, conn):
+        """Legacy spelling on the wire (case, whitespace) must not reach the record."""
+        _add(conn, severity="  LOW  ", desc=self.DESC)
+        second = _add(conn, severity="Critical", desc=self.DESC)
+        assert second["attention"] == [self.ESCALATED]
+
+
+class TestPostAddHooksNeverSeeResponseOnlyKeys:
+    """CB-119: hooks receive the row dict; the response must not alias it.
+
+    Half (a) — no response-only key exists at hook time — already held. Half (b)
+    — a hook that KEEPS the reference must never watch those keys appear on it
+    later — is the defect: `_finalize_add` used to mutate the very dict the hooks
+    were handed.
+    """
+
+    def test_a_hook_that_keeps_the_dict_never_sees_response_only_keys(self, conn):
+        saved = list(db._post_add_hooks)
+        held: list[dict] = []
+        at_call_time: list[set] = []
+
+        def _pin_hook(_conn, finding):
+            at_call_time.append(set(finding))
+            held.append(finding)
+
+        db.register_post_add_hook("test.cb119_pin", _pin_hook)
+        try:
+            result = _add(conn, desc="a hook keeps this dict")
+        finally:
+            db._post_add_hooks[:] = saved
+
+        assert at_call_time, "the pin hook never ran"
+        assert not (at_call_time[0] & findings._RESPONSE_ONLY_KEYS), (
+            "a response-only key was already on the dict when the hook ran"
+        )
+        assert not (set(held[0]) & findings._RESPONSE_ONLY_KEYS), (
+            "the hook's retained reference acquired response-only keys after the "
+            "call returned — the response is aliasing the hook's dict (CB-119)"
+        )
+        assert held[0] is not result, "the response must be a distinct object"
+        assert result["id"] == held[0]["id"], "…of the same finding"
+
+
+class TestResponseOnlyKeysRatchet:
+    """Response-only keys must never collide with a `findings` column (judge W-4).
+
+    Two halves, both required: the constant has to match what `_finalize_add`
+    actually writes (otherwise it is decorative), and it has to be disjoint from
+    the table (otherwise a future column is silently overwritten in the response
+    — the CB-16 shape). Retroactively covers `was_new`/`dedup_action`, which is
+    why the judge chose a ratchet over renaming the key.
+    """
+
+    def test_the_constant_matches_what_finalize_add_writes(self):
+        fn = _function_node("_finalize_add")
+        written = {
+            node.targets[0].slice.value
+            for node in ast.walk(fn)
+            if isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Subscript)
+            and isinstance(node.targets[0].slice, ast.Constant)
+        }
+        assert written == set(findings._RESPONSE_ONLY_KEYS)
+
+    def test_no_response_only_key_is_a_findings_column(self, conn):
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(findings)")}
+        assert findings._RESPONSE_ONLY_KEYS & columns == set()
+
+
+class TestImportCarriesNoAttention:
+    """BT-5 section D: import needs no opt-out flag, BY CONSTRUCTION.
+
+    A flag would be dead code — `import_findings` unpacks `_add_one` itself and
+    returns counters, so it never reaches the response constructor. Pinned three
+    ways rather than built.
+
+    ALL THREE ARE GREEN ON BOTH SIDES, deliberately, and that is what a pin is:
+    they hold a property this unit had to PRESERVE (import carries no attention
+    channel) rather than one it created. They fail the day someone routes import
+    through `_finalize_add` or adds the flag the brief refused.
+    """
+
+    def test_import_findings_never_calls_finalize_add(self):
+        fn = _function_node("import_findings")
+        called = {
+            node.func.id
+            for node in ast.walk(fn)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert "_finalize_add" not in called
+
+    def test_import_findings_grew_no_attention_parameter(self):
+        params = inspect.signature(findings.import_findings).parameters
+        assert not [p for p in params if "attention" in p]
+
+    def test_an_imported_live_hit_returns_counters_only(self, conn):
+        local = _add(conn, severity="low", desc="admin route skips the token check")
+        report = findings.import_findings(
+            conn,
+            [
+                {
+                    "id": "CB-9001",
+                    "severity": "critical",
+                    "category": "bug",
+                    "file": "a.py",
+                    "description": "admin route skips the token check",
+                }
+            ],
+        )
+        assert report.merged == 1, report
+        assert not hasattr(report, "attention")
+        assert "attention" not in findings.get_finding(conn, local["id"])
+
+
+class TestAddOneOutcomeContract:
+    """BT-5 section G: the once-declined outcome change is now taken, on the record."""
+
+    def test_add_one_returns_the_typed_outcome(self):
+        assert inspect.signature(findings._add_one).return_annotation == "AddOutcome"
+
+    def test_import_would_reopen_no_longer_claims_the_outcome_shape_is_frozen(self):
+        """The docstring must RECORD the reversal, not merely lose the old claim.
+
+        The first draft of this pin asserted the old phrase was absent. That is
+        the letter, not the intent: the design requires the reversal to be cited
+        where the decision was originally declined, so the old sentence is
+        QUOTED there on purpose. The pin therefore asserts the quotation is
+        marked as withdrawn and the new outcome type is named — a docstring that
+        still asserted the frozen shape would carry neither.
+        """
+        doc = findings._import_would_reopen.__doc__ or ""
+        assert "AddOutcome" in doc, "the reversal must be named where it was declined"
+        assert "REVERSES" in doc, "the reversal must be stated, not implied"
+        if "return shape stays" in doc:
+            assert "used to say" in doc, (
+                "the old contract appears without being marked as withdrawn"
+            )
+
+
+class TestMcpDocstringsNameEveryAction:
+    """CB-118: the documented action vocabulary is pinned to the branch table.
+
+    Shape borrowed from `test_docstring_reopen_claim_matches_the_executable_set`
+    (T-8): pull the sentences that talk about `dedup_action` and compare the
+    literals they name against the executable set. Convention the extraction
+    rests on, and it is deliberate: an ACTION value is written in double quotes,
+    everything else in the docstrings is backticked. A client gating on the
+    documented vocabulary misclassifies the exact event BT-5 targets, so the
+    omission is a defect and not a nicety.
+    """
+
+    @pytest.mark.parametrize("tool", ["add", "batch_add"])
+    def test_the_docstring_names_every_action(self, tool):
+        doc = _mcp_tool_docstrings()[tool]
+        sentences = [s for s in re.split(r"(?<=[.!?])\s+", doc) if "dedup_action" in s]
+        assert sentences, f"{tool}'s docstring no longer explains dedup_action"
+        named = set(re.findall(r'"([a-z][a-z_]*)"', " ".join(sentences)))
+        assert named == set(findings._ATTENTION_SIGNALS_BY_ACTION), (
+            f"{tool} documents {sorted(named)}; the branch table admits "
+            f"{sorted(findings._ATTENTION_SIGNALS_BY_ACTION)}"
+        )
+
+    @pytest.mark.parametrize("tool", ["add", "batch_add"])
+    def test_the_docstring_declares_the_attention_key(self, tool):
+        doc = _mcp_tool_docstrings()[tool]
+        assert "attention" in doc
+        assert findings.SEVERITY_ESCALATED in doc
+
+    def test_the_add_docstring_names_the_recurrence_residue(self):
+        """The honest remainder (judge's condition on the signal-3 letter-fix): on
+        the non-similarity recurrence paths the twin's status is not in the
+        response at all — it is one `get` away via `meta.recurrence_of`.
+
+        GREEN ON BOTH SIDES: the docstring already named `meta.recurrence_of`
+        before this unit. It is pinned so a future edit cannot drop the pointer
+        that makes the deleted third signal's residue recoverable at all.
+        """
+        doc = _mcp_tool_docstrings()["add"]
+        assert "meta.recurrence_of" in doc
