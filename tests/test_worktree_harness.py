@@ -1152,6 +1152,7 @@ class TestHarnessIntegrity:
             "tools/install-hooks.sh",
             "tools/pre-commit-hook.sh",
             "tools/pre-merge-commit-hook.sh",
+            "tools/commit-msg-hook.sh",
         ],
     )
     def test_script_parses(self, script: str) -> None:
@@ -1170,6 +1171,7 @@ class TestHarnessIntegrity:
             "tools/install-hooks.sh",
             "tools/pre-commit-hook.sh",
             "tools/pre-merge-commit-hook.sh",
+            "tools/commit-msg-hook.sh",
         ],
     )
     def test_script_is_executable(self, script: str) -> None:
@@ -1274,17 +1276,25 @@ class TestHarnessIntegrity:
                     f"{rel} resolves hooks without --git-path, so core.hooksPath is ignored: {ln}"
                 )
 
-    def test_both_readers_disable_path_quoting(self) -> None:
+    def test_every_staged_path_reader_disables_path_quoting(self) -> None:
         """The CI half of the C-quoting fix was unpinned while the hook's was not.
 
         `test_ci_and_hook_both_defeat_rename_detection` covers `--no-renames` in
         both readers, but `core.quotePath=false` was asserted only for the hook —
         the elements-vs-composition asymmetry inside a test whose own name says
         "both". Round 3 caught it.
+
+        The name no longer says "both", because it is now three: the commit-msg
+        naming gate reads the same staged set and derives a BASENAME from it, so
+        a C-quoted path there produces a basename nobody can ever name and a
+        permanent false refusal of every non-ASCII plan note. A count in a name
+        is a count that goes stale — this repo has been wrong about "three
+        copies" and "four sites" already.
         """
         for rel in (
             ".github/workflows/main-invariants.yml",
             "tools/pre-commit-hook.sh",
+            "tools/commit-msg-hook.sh",
         ):
             # Comment lines excluded, or the prose that EXPLAINS the flag keeps
             # the test green after the flag itself is deleted. Verified: removing
@@ -1374,6 +1384,43 @@ class TestHarnessIntegrity:
         assert '"${_SCRIPT_DIR}/pre-merge-commit-hook.sh"' not in src, (
             "installer points the merge hook at the invoking checkout; it will dangle"
         )
+
+    def test_installer_arms_the_commit_msg_hook_too(self) -> None:
+        """A third hook, and the installer is the ONLY thing that arms it.
+
+        `_guard_enforcement_armed` deliberately does not yet demand this one —
+        see the scope note in CLAUDE.md — so if the installer skipped it the
+        gate would exist in the tree and in no clone, which is precisely the
+        "described better than it behaves" failure the Workflow section is
+        written around.
+        """
+        src = (REPO_ROOT / "tools" / "install-hooks.sh").read_text()
+        assert 'MSG_HOOK_SRC="${REPO_ROOT}/tools/commit-msg-hook.sh"' in src
+        assert 'ln -sfn "${MSG_HOOK_SRC}" "${HOOK_DIR}/commit-msg"' in src
+        assert '"${_SCRIPT_DIR}/commit-msg-hook.sh"' not in src, (
+            "installer points the commit-msg hook at the invoking checkout; it will dangle"
+        )
+
+    def test_the_hooks_do_not_depend_on_the_tools_directory(self) -> None:
+        """Each hook runs from `.git/hooks/` and must work when `tools/` is not
+        in the checked-out tree — a `git checkout` of an older commit is enough.
+        Sourcing `_guards.sh` would make every hook fail open on that tree,
+        because git skips a hook that cannot run... after it has already exited
+        non-zero, which is worse: it refuses everything instead.
+        """
+        for rel in (
+            "tools/pre-commit-hook.sh",
+            "tools/pre-merge-commit-hook.sh",
+            "tools/commit-msg-hook.sh",
+        ):
+            code = [
+                ln
+                for ln in (REPO_ROOT / rel).read_text().splitlines()
+                if not ln.lstrip().startswith("#")
+            ]
+            assert not any("_guards.sh" in ln for ln in code), (
+                f"{rel} reaches for the guard library; it will break without tools/"
+            )
 
     def test_ci_workflow_asserts_the_first_parent_invariant(self) -> None:
         """CB-59's server-side half must exist and must carry a real baseline.
@@ -2433,7 +2480,12 @@ class TestMergeSubjectDerivation:
 
     BRANCH_FIRST = "fix(cb-999): THE BRANCH'S OWN WORK, first commit"
     BRANCH_LAST = "refactor(cb-999): close the altitude findings"
-    FOREIGN = "docs(bt-9): FOREIGN plan note naming CB-777/778/779"
+    # Names OTHER.md because the commit-msg naming gate requires it — this
+    # fixture models an ORDINARY, legitimate plan-note landing on main while a
+    # branch is open, and an ordinary one now names its note. Reaching for
+    # --no-verify here instead would have made the fixture model a state the
+    # harness no longer permits, and quietly weakened a CB-116 regression test.
+    FOREIGN = "docs(bt-9): FOREIGN plan note OTHER.md naming CB-777/778/779"
 
     @staticmethod
     def _commit(repo: Path, when: str, *args: str) -> None:
@@ -2703,4 +2755,437 @@ class TestMergeSubjectDerivation:
         assert (
             git(repo, "log", "-1", "--format=%s", "main")
             == f"Merge fix/cb-999-own-work: {self.BRANCH_LAST} (CB-999)"
+        )
+
+
+class TestCommitMsgNamingGate:
+    """K-3 mechanised: a plan note landing on main must be NAMED in the message.
+
+    THE INCIDENT. `.claude/plans/` is the one directory parallel sessions may
+    commit to on main, and they do it constantly. One session ran `git add
+    .claude/plans/` and swept in an UNTRACKED note belonging to another
+    direction, which landed inside a commit whose message described unrelated
+    work. The bytes survived; the PROVENANCE did not — an artefact of one
+    direction now reads as part of another's iteration. The convention "add
+    files by name, never by directory" was adopted and then broken again.
+
+    THE MECHANISM. An author committing their own note names it without
+    effort; an author who swept in a stranger's file cannot name it, because
+    they do not know it is there. So the message is the discriminator.
+
+    WHY commit-msg AND NOT pre-commit. Measured on git 2.53: at pre-commit
+    time `COMMIT_EDITMSG` holds the PREVIOUS commit's message, and on the
+    first commit of a clone it does not exist at all. A pre-commit
+    implementation would therefore validate the wrong input — worse than
+    absent, because it would look like a gate. `commit-msg` receives the final
+    message as `$1`, after `-m`, `-F` and the editor have all had their say.
+    `test_premise_*` below pin the two git behaviours this rests on.
+    """
+
+    # ---- fixtures -------------------------------------------------------
+
+    @staticmethod
+    def _hooks_dir(repo: Path) -> Path:
+        d = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")) / "hooks"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _install(self, repo: Path, *, also_pre_commit: bool = False) -> None:
+        """Install commit-msg alone, so a failure names this hook and not its neighbour."""
+        hooks = self._hooks_dir(repo)
+        shutil.copy(REPO_ROOT / "tools" / "commit-msg-hook.sh", hooks / "commit-msg")
+        (hooks / "commit-msg").chmod(0o755)
+        if also_pre_commit:
+            shutil.copy(REPO_ROOT / "tools" / "pre-commit-hook.sh", hooks / "pre-commit")
+            (hooks / "pre-commit").chmod(0o755)
+
+    @staticmethod
+    def _plan(repo: Path, name: str, body: str = "note\n") -> str:
+        d = repo / ".claude" / "plans"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / name).write_text(body, encoding="utf-8")
+        return f".claude/plans/{name}"
+
+    @staticmethod
+    def _commit(
+        repo: Path, *args: str, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        full = dict(os.environ)
+        if env:
+            full.update(env)
+        return subprocess.run(
+            ["git", "-C", str(repo), "commit", *args],
+            capture_output=True,
+            text=True,
+            env=full,
+        )
+
+    def _add_and_commit(
+        self, repo: Path, message: str, *paths: str
+    ) -> subprocess.CompletedProcess[str]:
+        subprocess.run(["git", "-C", str(repo), "add", "--", *paths], check=True)
+        return self._commit(repo, "-m", message)
+
+    @staticmethod
+    def _editor(tmp_path: Path, subject: str) -> str:
+        """An editor that PREPENDS a subject and keeps git's template below it.
+
+        Overwriting the file would delete the very template these tests exist
+        to prove the hook ignores.
+        """
+        script = tmp_path / "fake-editor.sh"
+        script.write_text(
+            "#!/bin/sh\n"
+            f'{{ printf "%s\\n" {subject!r}; cat "$1"; }} > "$1.new" && mv "$1.new" "$1"\n'
+        )
+        script.chmod(0o755)
+        return str(script)
+
+    # ---- the rule, both sides -------------------------------------------
+
+    def test_a_named_plan_note_lands(self, repo: Path) -> None:
+        self._install(repo)
+        p = self._plan(repo, "T20-brief.md")
+        r = self._add_and_commit(repo, "docs(dir-1): handoff in T20-brief.md", p)
+        assert r.returncode == 0, r.stderr
+
+    def test_an_unnamed_plan_note_is_refused(self, repo: Path) -> None:
+        self._install(repo)
+        p = self._plan(repo, "T20-brief.md")
+        r = self._add_and_commit(repo, "docs(dir-1): handoff", p)
+        assert r.returncode != 0
+        assert "T20-brief.md" in r.stderr
+
+    def test_the_incident_shape_two_notes_only_one_named(self, repo: Path) -> None:
+        """The literal failure this unit mechanises.
+
+        A session commits its own note and `git add .claude/plans/` drags a
+        stranger's along. The message names the one the author knows about.
+        """
+        self._install(repo)
+        mine = self._plan(repo, "DIR-1-handoff.md")
+        theirs = self._plan(repo, "DIR-2-BT4-review.md")
+        r = self._add_and_commit(repo, "docs(dir-1): DIR-1-handoff.md", mine, theirs)
+        assert r.returncode != 0
+        assert "DIR-2-BT4-review.md" in r.stderr
+        assert "DIR-1-handoff.md" not in r.stderr.split("Deliberate exception")[0].replace(
+            "DIR-2-BT4-review.md", ""
+        )
+
+    def test_the_full_path_counts_as_naming_it(self, repo: Path) -> None:
+        self._install(repo)
+        p = self._plan(repo, "T20-brief.md")
+        r = self._add_and_commit(repo, "docs: update .claude/plans/T20-brief.md", p)
+        assert r.returncode == 0, r.stderr
+
+    def test_naming_the_DIRECTORY_is_not_naming_the_file(self, repo: Path) -> None:
+        """Trap 1: the naive substring check passes the very message it must catch.
+
+        `docs: правки в .claude/plans/` mentions the path prefix and nothing
+        else — it is exactly what a sweeping commit looks like.
+        """
+        self._install(repo)
+        p = self._plan(repo, "T20-brief.md")
+        r = self._add_and_commit(repo, "docs: правки в .claude/plans/", p)
+        assert r.returncode != 0
+        assert "T20-brief.md" in r.stderr
+
+    def test_a_longer_named_file_does_not_launder_a_shorter_one(self, repo: Path) -> None:
+        """The real substring trap: `plan.md` is a substring of `my-plan.md`.
+
+        A plain `case $msg in *$base*` passes here, and the swept-in file is
+        precisely the one nobody wrote down.
+        """
+        self._install(repo)
+        swept = self._plan(repo, "plan.md")
+        mine = self._plan(repo, "my-plan.md")
+        r = self._add_and_commit(repo, "docs: my-plan.md updated", mine, swept)
+        assert r.returncode != 0
+        assert "plan.md" in r.stderr
+
+    def test_a_non_ascii_name_that_IS_named_is_allowed(self, repo: Path) -> None:
+        """A false refusal here is as bad as a miss, and this repo has shipped
+        the C-quoting bug twice: once refusing a legitimate note, once silently
+        ACCEPTING a conflict marker. `core.quotePath=false` is the fix.
+        """
+        self._install(repo)
+        p = self._plan(repo, "Т-20-заметка.md")
+        r = self._add_and_commit(repo, "docs(dir-1): обновил Т-20-заметка.md по итогам", p)
+        assert r.returncode == 0, r.stderr
+
+    def test_a_non_ascii_name_that_is_NOT_named_is_refused(self, repo: Path) -> None:
+        """The other side of the pair: quoting must not disable the rule either."""
+        self._install(repo)
+        p = self._plan(repo, "Т-20-заметка.md")
+        r = self._add_and_commit(repo, "docs(dir-1): правки по итогам", p)
+        assert r.returncode != 0
+
+    def test_a_deleted_plan_note_must_also_be_named(self, repo: Path) -> None:
+        """`git add <dir>` stages deletions too, so removal carries the same
+        provenance risk as addition."""
+        self._install(repo)
+        p = self._plan(repo, "T20-brief.md")
+        self._add_and_commit(repo, "docs: add T20-brief.md", p)
+        (repo / p).unlink()
+        r = self._add_and_commit(repo, "docs: tidy up", p)
+        assert r.returncode != 0
+        assert "T20-brief.md" in r.stderr
+
+    def test_a_newline_in_a_path_cannot_be_split_into_two(self, repo: Path) -> None:
+        """Both hooks read the staged set LINE BY LINE, so a path carrying a
+        newline would be a way to present one file as two innocent ones. It is
+        not, and the reason is a git behaviour rather than anything here:
+        `core.quotePath=false` stops git quoting non-ASCII BYTES but never
+        control characters, so such a path arrives as ONE quoted line and the
+        anchored filter rejects it. Pinned because the hooks depend on it.
+        """
+        self._install(repo, also_pre_commit=True)
+        d = repo / ".claude" / "plans" / "x.md\n.claude" / "plans"
+        d.mkdir(parents=True)
+        (repo / ".claude" / "plans" / "x.md\n.claude" / "plans" / "y.md").write_text("p\n")
+        subprocess.run(["git", "-C", str(repo), "add", "--", ".claude"], check=True)
+        reported = git(repo, "-c", "core.quotePath=false", "diff", "--cached", "--name-only")
+        assert len(reported.splitlines()) == 1, (
+            f"git split a newline-bearing path across lines: {reported!r}"
+        )
+        assert reported.startswith('"'), reported
+        assert self._commit(repo, "-m", "docs: x.md and y.md").returncode != 0
+
+    def test_a_separator_in_the_name_cannot_launder_a_shorter_note(self, repo: Path) -> None:
+        """A REPRODUCED bypass, found by cross-model review and closed here.
+
+        `_is_boundary` treats an ASCII space as a separator, so with `a b.md`
+        and `b.md` both staged and only `a b.md` named, the occurrence of
+        `b.md` INSIDE `a b.md` is flanked by a space and the token end — two
+        boundaries — and the stranger's note landed unnamed. Measured before
+        the fix: rc=0, both files committed.
+        """
+        self._install(repo)
+        mine = self._plan(repo, "a b.md")
+        theirs = self._plan(repo, "b.md")
+        r = self._add_and_commit(repo, "docs: my note a b.md", mine, theirs)
+        assert r.returncode != 0
+
+    def test_a_name_the_matcher_cannot_judge_is_refused_not_guessed(self, repo: Path) -> None:
+        """The closure is BY CONSTRUCTION: the matcher and the admissible-name
+        rule are one predicate, so a name containing a separator is refused
+        outright rather than judged by a rule that cannot see it. Costs
+        nothing today — 0 of the repo's 94 plan notes carry such a character.
+        """
+        self._install(repo)
+        p = self._plan(repo, "a b.md")
+        r = self._add_and_commit(repo, "docs: naming a b.md exactly", p)
+        assert r.returncode != 0
+        assert "cannot judge" in r.stderr
+
+    def test_a_non_ascii_name_is_still_judgeable(self, repo: Path) -> None:
+        """The pair for the test above: a non-ASCII BYTE is a NAME byte, so the
+        new refusal must not catch the Cyrillic note names this repo uses.
+        """
+        self._install(repo)
+        p = self._plan(repo, "Т-20-заметка.md")
+        r = self._add_and_commit(repo, "docs: Т-20-заметка.md", p)
+        assert r.returncode == 0, r.stderr
+
+    # ---- fail closed: the hook must refuse when it cannot look ----------
+
+    def test_an_empty_message_is_refused(self, repo: Path) -> None:
+        """`--allow-empty-message` really does land a commit (measured), so an
+        empty message is a reachable state and not a theoretical one."""
+        self._install(repo)
+        p = self._plan(repo, "T20-brief.md")
+        subprocess.run(["git", "-C", str(repo), "add", "--", p], check=True)
+        r = self._commit(repo, "--allow-empty-message", "-m", "")
+        assert r.returncode != 0
+
+    def test_the_editor_TEMPLATE_does_not_satisfy_the_gate(self, repo: Path, tmp_path: Path) -> None:
+        """Trap 9, and it is the one that would make this a gate that cannot fire.
+
+        git's default template lists the staged paths as comment lines —
+        `#\tnew file:   .claude/plans/T20-brief.md`. A hook that scans the raw
+        message file therefore passes EVERY editor commit vacuously.
+        """
+        self._install(repo)
+        p = self._plan(repo, "T20-brief.md")
+        subprocess.run(["git", "-C", str(repo), "add", "--", p], check=True)
+        r = self._commit(repo, env={"GIT_EDITOR": self._editor(tmp_path, "docs: plan notes")})
+        assert r.returncode != 0
+        assert "T20-brief.md" in r.stderr
+
+    def test_the_verbose_DIFF_does_not_satisfy_the_gate(self, repo: Path, tmp_path: Path) -> None:
+        """Trap 10. `git commit -v` appends the diff below the scissors line,
+        and every hunk header names the file. `git stripspace --strip-comments`
+        does NOT remove it — the diff is not commented out — so the message
+        must be truncated at the scissors before it is read.
+        """
+        self._install(repo)
+        p = self._plan(repo, "T20-brief.md")
+        subprocess.run(["git", "-C", str(repo), "add", "--", p], check=True)
+        r = self._commit(
+            repo, "-v", env={"GIT_EDITOR": self._editor(tmp_path, "docs: plan notes")}
+        )
+        assert r.returncode != 0
+        assert "T20-brief.md" in r.stderr
+
+    def test_a_message_supplied_by_FILE_is_read(self, repo: Path, tmp_path: Path) -> None:
+        """`-F` never touches an editor; the hook must still see the text."""
+        self._install(repo)
+        p = self._plan(repo, "T20-brief.md")
+        msg = tmp_path / "msg.txt"
+        msg.write_text("docs: rewrote T20-brief.md end to end\n")
+        subprocess.run(["git", "-C", str(repo), "add", "--", p], check=True)
+        r = self._commit(repo, "-F", str(msg))
+        assert r.returncode == 0, r.stderr
+
+    def test_an_empty_MERGE_HEAD_is_refused(self, repo: Path) -> None:
+        """The exemption must not become the hole — the shape CB-57 closed in
+        pre-commit, arriving through the new hook's own door."""
+        self._install(repo)
+        p = self._plan(repo, "T20-brief.md")
+        git_dir = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-dir"))
+        (git_dir / "MERGE_HEAD").write_text("")
+        r = self._add_and_commit(repo, "docs: whatever", p)
+        assert r.returncode != 0
+
+    # ---- scope: main only, plan notes only, merges exempt ---------------
+
+    def test_a_branch_is_not_governed(self, repo: Path) -> None:
+        """Trap 4: on a branch there are no foreign untracked notes to sweep,
+        so the rule would be pure friction."""
+        self._install(repo)
+        git(repo, "checkout", "-q", "-b", "fix/cb-1-work")
+        p = self._plan(repo, "T20-brief.md")
+        assert self._add_and_commit(repo, "wip", p).returncode == 0
+
+    def test_a_commit_with_no_plan_note_is_not_governed(self, repo: Path) -> None:
+        """pre-commit owns the allowlist; this hook must not double-refuse, and
+        must not invent a rule for files it has no opinion about."""
+        self._install(repo)
+        (repo / "seed.txt").write_text("changed\n")
+        assert self._add_and_commit(repo, "whatever", "seed.txt").returncode == 0
+
+    def test_a_clean_merge_bringing_plan_notes_is_exempt(self, repo: Path) -> None:
+        """The integration path. `worktree-finish.sh` writes its own merge
+        subject, and a branch routinely carries plan notes; demanding they be
+        named would refuse every finish that touched one.
+        """
+        self._install(repo)
+        git(repo, "checkout", "-q", "-b", "fix/cb-1-work")
+        p = self._plan(repo, "branch-note.md")
+        self._add_and_commit(repo, "wip: branch-note.md", p)
+        git(repo, "checkout", "-q", "main")
+        r = subprocess.run(
+            ["git", "-C", str(repo), "merge", "--no-ff", "-m", "Merge fix/cb-1-work: work", "fix/cb-1-work"],
+            capture_output=True,
+            text=True,
+        )
+        assert r.returncode == 0, r.stderr
+
+    def test_a_conflicted_merge_is_exempt(self, repo: Path) -> None:
+        self._install(repo)
+        p = self._plan(repo, "shared.md", "seed\n")
+        self._add_and_commit(repo, "docs: shared.md", p)
+        git(repo, "checkout", "-q", "-b", "fix/cb-1-work")
+        self._plan(repo, "shared.md", "branch side\n")
+        self._add_and_commit(repo, "wip: shared.md", p)
+        git(repo, "checkout", "-q", "main")
+        self._plan(repo, "shared.md", "main side\n")
+        self._add_and_commit(repo, "docs: shared.md again", p)
+        subprocess.run(
+            ["git", "-C", str(repo), "merge", "--no-ff", "--no-edit", "fix/cb-1-work"],
+            capture_output=True,
+        )
+        self._plan(repo, "shared.md", "resolved\n")
+        subprocess.run(["git", "-C", str(repo), "add", "--", p], check=True)
+        r = self._commit(repo, "--no-edit")
+        assert r.returncode == 0, r.stderr
+
+    def test_no_verify_is_the_documented_escape(self, repo: Path) -> None:
+        """CLAUDE.md: the hook stops the accident; a typed flag states an intent."""
+        self._install(repo)
+        p = self._plan(repo, "T20-brief.md")
+        subprocess.run(["git", "-C", str(repo), "add", "--", p], check=True)
+        assert self._commit(repo, "--no-verify", "-m", "docs: unnamed").returncode == 0
+
+    def test_the_two_hooks_compose(self, repo: Path) -> None:
+        """Installed together, the pair must still admit the ordinary flow and
+        still refuse the sweep — a check that validates elements cannot
+        validate their composition.
+        """
+        self._install(repo, also_pre_commit=True)
+        mine = self._plan(repo, "DIR-1-handoff.md")
+        assert self._add_and_commit(repo, "docs: DIR-1-handoff.md", mine).returncode == 0
+        theirs = self._plan(repo, "DIR-2-review.md")
+        assert self._add_and_commit(repo, "docs: more notes", theirs).returncode != 0
+
+    # ---- premises this design rests on, pinned so a git upgrade turns red ----
+
+    def test_premise_pre_commit_cannot_see_the_message(self, repo: Path) -> None:
+        """Why the hypothesis's phase had to move.
+
+        At pre-commit time COMMIT_EDITMSG holds the PREVIOUS commit's message
+        (and on the very first commit of a clone it does not exist at all), so
+        a pre-commit naming check reads an input unrelated to the commit being
+        made. That is not a gate that fails open — it is a gate wired to the
+        wrong signal, which can also REFUSE a correct commit. Worse than
+        absent, because it looks like enforcement.
+        """
+        hooks = self._hooks_dir(repo)
+        probe = hooks / "pre-commit"
+        probe.write_text(
+            "#!/usr/bin/env bash\n"
+            'gd=$(git rev-parse --git-dir)\n'
+            'printf "%s" "$(cat "$gd/COMMIT_EDITMSG" 2>/dev/null)" > "$gd/PROBE"\n'
+            "exit 0\n"
+        )
+        probe.chmod(0o755)
+        git_dir = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-dir"))
+
+        (repo / "a.txt").write_text("a\n")
+        self._add_and_commit(repo, "FIRST MESSAGE", "a.txt")
+        assert (git_dir / "PROBE").read_text().strip() == "seed", (
+            "pre-commit saw something other than the PREVIOUS message"
+        )
+
+        (repo / "b.txt").write_text("b\n")
+        self._add_and_commit(repo, "SECOND MESSAGE", "b.txt")
+        probed = (git_dir / "PROBE").read_text().strip()
+        assert probed == "FIRST MESSAGE", probed
+        assert "SECOND MESSAGE" not in probed, (
+            "pre-commit can now see the message being written — re-read the phase argument"
+        )
+
+    def test_premise_merge_head_is_PRESENT_at_commit_msg_time(self, repo: Path) -> None:
+        """The exemption's discriminator, and it differs from pre-merge-commit's.
+
+        CLAUDE.md records that a CLEAN merge writes no MERGE_HEAD — true at
+        `pre-merge-commit` time, which runs earlier. By `commit-msg` time git
+        has written it, for clean and conflicted merges alike. That is what
+        lets one condition exempt both.
+        """
+        hooks = self._hooks_dir(repo)
+        probe = hooks / "commit-msg"
+        probe.write_text(
+            "#!/usr/bin/env bash\n"
+            'gd=$(git rev-parse --git-dir)\n'
+            '[[ -e "$gd/MERGE_HEAD" ]] && echo present > "$gd/PROBE" || echo absent > "$gd/PROBE"\n'
+            "exit 0\n"
+        )
+        probe.chmod(0o755)
+        git_dir = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-dir"))
+
+        git(repo, "checkout", "-q", "-b", "fix/cb-1-work")
+        (repo / "w.txt").write_text("w\n")
+        self._add_and_commit(repo, "work", "w.txt")
+        assert (git_dir / "PROBE").read_text().strip() == "absent"
+
+        git(repo, "checkout", "-q", "main")
+        subprocess.run(
+            ["git", "-C", str(repo), "merge", "--no-ff", "-m", "Merge fix/cb-1-work: w", "fix/cb-1-work"],
+            capture_output=True,
+            check=True,
+        )
+        assert (git_dir / "PROBE").read_text().strip() == "present", (
+            "a clean merge no longer writes MERGE_HEAD by commit-msg time — the "
+            "exemption's discriminator is gone and every finish will be refused"
         )
