@@ -2454,6 +2454,7 @@ class TestRecentMeasuresTheLastTouchNotTheClosure:
         findings.add_finding(
             conn, severity="low", category="c", file="a.py",
             description="a repeating gate failure", fingerprint="fp-live",
+            new_category=True,  # the CB-60 mint gate; explicit-id fixtures bypass it
         )
         _file_a_finding(conn, "CB-2", status="fixed")
         conn.execute("UPDATE findings SET updated_at = '2026-01-01T00:00:00Z'")

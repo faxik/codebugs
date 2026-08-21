@@ -7,6 +7,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`recent` — "what closed since &lt;date&gt;" in ONE call, on both surfaces (CB-123).**
+  MCP tool `recent`, CLI verb `codebugs recent --since DATE [--status ...]`, domain
+  function `findings.recent_findings`. The answer used to be assembled by hand out of a
+  ledger file and git history; three consumers needed it, and the net-delta count of
+  open cards could not be computed at all without it.
+
+  **The tool says out loud what it actually measures, and that half matters more than
+  the first.** It reads `updated_at` — the time of the LAST WRITE to the row — and
+  there is no close timestamp anywhere in the schema. A status change moves it, and so
+  do a re-tag, a meta patch, a severity re-triage, an `append_note`, and a
+  **deduplicated observation**: a repeat report bumps the occurrence count and stamps
+  `updated_at` while the status stays exactly where it was. So
+  `recent(since=…, status="fixed")` means *cards that are fixed NOW and were touched
+  since that date*, **not** *cards closed since that date*. The error is **one-sided** —
+  false positives are possible, misses are not, because closing a card always writes
+  `updated_at`. That caveat is in the MCP description and in `codebugs recent --help`,
+  not only in the card, and two tests pin it as behaviour rather than as prose.
+
+  `since` is **required and inclusive** (`>=`), accepted as `YYYY-MM-DD` or
+  `YYYY-MM-DDTHH:MM:SSZ`, and anything else — `""`, `0`, `[]`, `None`, `2026-02-31` —
+  is refused with a `ValueError` before a single row is read, rather than defaulted:
+  the query-side "empty means no filter" convention is exactly wrong for a mandatory
+  window, where a silent widening answers a question nobody asked. `status` keeps the
+  ordinary convention (`None`/`""` = every status, aliases resolved); `query`'s
+  `deferred` pseudo-status is **not** accepted here and is refused rather than ignored.
+
+  Rows come back newest touch first, with `rowid` breaking the whole-second ties
+  `utc_now()` guarantees — the same tiebreaker `_match_fingerprint` already uses, so a
+  paged walk is stable. **`query` is untouched, deliberately**: a separate verb rather
+  than a `since`/`order_by` parameter, so `query`'s load-bearing parameter-order hazard
+  is never entered and no caller-supplied column can reach an `ORDER BY`.
+
 - **`add` and `batch_add` responses now carry an `attention` block (BT-5).** Dedup was
   silent: a serious divergence between an observation and the stored card was reported
   only by burying it in the body of the response, so an automated filer had no

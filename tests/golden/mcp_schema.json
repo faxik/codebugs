@@ -1995,6 +1995,45 @@
     "name": "query"
   },
   {
+    "description": "Findings TOUCHED at or after a date \u2014 the one call for \"what closed since\".\n\nWHAT THIS MEASURES: `updated_at`, the time of the LAST WRITE to the row,\nand not the moment the finding was closed. There is no close timestamp\nanywhere in the schema. A status change moves `updated_at`, and so do a\nre-tag, a meta patch, a severity re-triage, an `append_note`, and a\nDEDUPLICATED OBSERVATION \u2014 a repeat report bumps the occurrence count and\nstamps `updated_at` while the status stays exactly where it was.\n\nSo `recent(since=..., status=\"fixed\")` means \"cards that are fixed NOW and\nwere touched since that date\", NOT \"cards closed since that date\". The\nerror is ONE-SIDED: false positives are possible, misses are not, because\nclosing a card always writes `updated_at`.\n\nRows come back newest touch first, with `rowid` breaking the whole-second\nties `updated_at` produces, so a paged walk is stable.\n\nArgs:\n    since: Lower bound on `updated_at`, INCLUSIVE. 'YYYY-MM-DD' or\n           'YYYY-MM-DDTHH:MM:SSZ'. REQUIRED \u2014 an unparseable value is\n           refused rather than defaulted, because a silently widened\n           window answers a question nobody asked.\n    status: Filter by status (open, in_progress, fixed, not_a_bug,\n            wont_fix, stale). Aliases accepted. Omit for every status.\n            The `deferred` pseudo-status of `query` is NOT accepted here\n            and is refused rather than ignored \u2014 use `query` for it.\n    limit: Max results (default 100)\n    offset: Pagination offset\n",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "default": 100,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "title": "Offset",
+          "type": "integer"
+        },
+        "since": {
+          "title": "Since",
+          "type": "string"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        }
+      },
+      "required": [
+        "since"
+      ],
+      "title": "recentArguments",
+      "type": "object"
+    },
+    "name": "recent"
+  },
+  {
     "description": "List relations touching a finding, in both directions.\n\nArgs:\n    entity_id: Finding to look up (e.g. \"CB-5\"). Omit to list all.\n    rel: Filter by relation. `rel=\"distinct_from\"` alone lists every\n         live suppression, which is worth reviewing periodically.\n    include_retracted: Include tombstoned edges (default: false)\n",
     "inputSchema": {
       "properties": {
