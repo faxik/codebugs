@@ -130,6 +130,14 @@ fi
 # ever type — a PERMANENT false refusal of every non-ASCII plan note, which in
 # this repo means most of them. C-quoting has bitten here twice already, once as
 # a false refusal and once as a silent ACCEPT in _guard_conflict_markers.
+#
+# The line-oriented read is safe, and that rests on a git behaviour worth naming
+# because it is not obvious: `core.quotePath=false` stops git quoting non-ASCII
+# BYTES, but git still quotes CONTROL characters unconditionally. A path
+# containing a newline therefore arrives as one quoted line starting with `"`,
+# not as two lines — so it cannot be split into two innocent-looking plan paths.
+# It then fails the anchored filter below and pre-commit refuses it outright.
+# Measured; pinned by test_a_newline_in_a_path_cannot_be_split_into_two.
 staged=$(git -c core.quotePath=false diff --cached --no-renames --name-only)
 [[ -z "${staged}" ]] && exit 0
 
@@ -161,7 +169,15 @@ plans=$(echo "${staged}" | grep -E '^\.claude/plans/[^/]+\.md$' || true)
 # a repo configured with `;` keep its diff. Over-truncating a hand-written line
 # that contains both tokens costs a loud refusal; under-truncating costs the
 # gate. Comment stripping is delegated to `git stripspace`, which reads the same
-# `core.commentChar` git itself will use, so the two cannot disagree.
+# `core.commentChar` git itself will use, so the two cannot disagree — verified
+# for an explicit `core.commentChar=';'` and for `core.commentString='//'`,
+# where stripspace strips exactly the character git's template used.
+#
+# `core.commentChar=auto` was probed as the one config that could desynchronise
+# them, and it does NOT on git 2.53: the template still used `#` even for a
+# message carrying a `#`-initial line, so the gate fired correctly. git also
+# prints a deprecation warning for it and removes it in 3.0. Recorded as a
+# NEGATIVE result so the next reader does not re-derive it.
 if [[ ! -f "${MSG_FILE}" ]]; then
     echo "ERROR: commit-msg hook received no readable message file." >&2
     echo "  Refusing rather than assuming the message names anything." >&2

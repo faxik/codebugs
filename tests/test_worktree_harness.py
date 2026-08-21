@@ -2931,6 +2931,26 @@ class TestCommitMsgNamingGate:
         assert r.returncode != 0
         assert "T20-brief.md" in r.stderr
 
+    def test_a_newline_in_a_path_cannot_be_split_into_two(self, repo: Path) -> None:
+        """Both hooks read the staged set LINE BY LINE, so a path carrying a
+        newline would be a way to present one file as two innocent ones. It is
+        not, and the reason is a git behaviour rather than anything here:
+        `core.quotePath=false` stops git quoting non-ASCII BYTES but never
+        control characters, so such a path arrives as ONE quoted line and the
+        anchored filter rejects it. Pinned because the hooks depend on it.
+        """
+        self._install(repo, also_pre_commit=True)
+        d = repo / ".claude" / "plans" / "x.md\n.claude" / "plans"
+        d.mkdir(parents=True)
+        (repo / ".claude" / "plans" / "x.md\n.claude" / "plans" / "y.md").write_text("p\n")
+        subprocess.run(["git", "-C", str(repo), "add", "--", ".claude"], check=True)
+        reported = git(repo, "-c", "core.quotePath=false", "diff", "--cached", "--name-only")
+        assert len(reported.splitlines()) == 1, (
+            f"git split a newline-bearing path across lines: {reported!r}"
+        )
+        assert reported.startswith('"'), reported
+        assert self._commit(repo, "-m", "docs: x.md and y.md").returncode != 0
+
     def test_a_separator_in_the_name_cannot_launder_a_shorter_note(self, repo: Path) -> None:
         """A REPRODUCED bypass, found by cross-model review and closed here.
 
