@@ -9,6 +9,7 @@ import json
 import re
 import sqlite3
 import sys
+from datetime import datetime
 from typing import Any, Literal, NamedTuple, TypedDict
 
 from codebugs import db, entities
@@ -2333,6 +2334,137 @@ def query_findings(
     }
 
 
+# --- The `recent` window (CB-123) ---------------------------------------------
+#
+# A SECOND reading path over `findings`, deliberately, rather than a `since`
+# parameter on `query_findings`. The cost is named rather than hidden: two SELECT
+# builders now read this table. What it buys is that neither of the two hazards
+# `query_findings` carries is entered at all. Its comment above warns that the
+# severity-rank CASE placeholders sit textually between the WHERE fragment and
+# LIMIT/OFFSET, so a new condition spliced in there corrupts *filtered* queries
+# only — this query has no CASE, so the hazard does not exist here rather than
+# being covered by a test. And with no `order_by` argument, no caller-supplied
+# column ever reaches `ORDER BY`, so CB-20 (a vocabulary column sorted
+# alphabetically) and CB-22 (an interpolated identifier) cannot be reopened by an
+# argument that does not exist. Module ownership is unaffected: `findings.py`
+# owns this table.
+_SINCE_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_SINCE_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z?")
+
+
+def _validate_since(since: object) -> str:
+    """Refuse anything that is not a whole date or a whole ISO second.
+
+    ``since`` is a MANDATORY filter, so the query-side convention — ``None`` and
+    ``""`` mean "no filter" (CB-25) — is exactly wrong here: there is no honest
+    "everything" to fall back to, and a silently widened window answers a
+    question nobody asked. This is the WRITE-side rule (CB-82) applied to a
+    required argument: validate before anything is parsed or queried, so a
+    refusal costs no work, and raise the ``ValueError`` the module contract
+    promises rather than leaking whatever SQLite would have done.
+
+    Decided by TYPE first, for ``is_vocabulary_filter_active``'s reason: never
+    run ``==`` or ``len()`` on the value, because ``unittest.mock.ANY`` compares
+    equal to any string and a ``str`` subclass can override either. Truthiness is
+    the specific trap — ``since=0`` would bind into ``updated_at >= 0``, which
+    matches every row, handing the caller the whole table dressed as a window.
+    """
+    if not isinstance(since, str):
+        raise ValueError(
+            "since must be a date 'YYYY-MM-DD' or an ISO timestamp "
+            f"'YYYY-MM-DDTHH:MM:SSZ', got: {since!r}"
+        )
+    # Stripped for the same reason the fingerprint filter is: the write side
+    # stores trimmed timestamps, so an untrimmed bound must not read as garbage.
+    text = str.strip(since)
+    if _SINCE_DATE_RE.fullmatch(text):
+        fmt = "%Y-%m-%d"
+    elif _SINCE_TIMESTAMP_RE.fullmatch(text):
+        fmt = "%Y-%m-%dT%H:%M:%SZ" if text.endswith("Z") else "%Y-%m-%dT%H:%M:%S"
+    else:
+        raise ValueError(
+            "since must be a date 'YYYY-MM-DD' or an ISO timestamp "
+            f"'YYYY-MM-DDTHH:MM:SSZ', got: {since!r}"
+        )
+    # Shape is not meaning: `2026-02-31` and `2026-13-01` both match the pattern
+    # and are not dates. A bound that is not a real instant would order
+    # lexicographically against the column anyway and quietly return the wrong set.
+    try:
+        datetime.strptime(text, fmt)
+    except ValueError as exc:
+        raise ValueError(f"since is not a real date or time: {since!r} ({exc})") from exc
+    return text
+
+
+def recent_findings(
+    conn: sqlite3.Connection,
+    *,
+    since: str,
+    status: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Findings whose LAST TOUCH (``updated_at``) is at or after ``since``.
+
+    WHAT THIS MEASURES. ``updated_at`` is the time of the last WRITE to the row,
+    not the moment the finding was closed — there is no close timestamp anywhere
+    in the schema. A status change moves it, and so do a re-tag, a meta patch, a
+    severity re-triage, an ``append_note``, and a DEDUPLICATED OBSERVATION (a
+    repeat report bumps the occurrence count and stamps ``updated_at`` while the
+    status stays exactly where it was).
+
+    So ``recent_findings(since=…, status="fixed")`` means *cards that are fixed
+    NOW and were touched since that date*, not *cards closed since that date*.
+    The error is ONE-SIDED: false positives are possible, misses are not, because
+    closing a card always writes ``updated_at``.
+
+    ``since`` is inclusive (``>=``). With a date-granular bound the exclusive
+    form would silently drop the whole first day, and a net-delta count built on
+    it would be quietly wrong.
+
+    Rows come back newest touch first. ``rowid DESC`` is not decoration:
+    ``utc_now()`` is whole-second, so ties are the ordinary case, and without a
+    tiebreaker the page boundary under ``LIMIT`` is arbitrary. Same form as
+    ``_match_fingerprint``'s closed-row lookup, deliberately — no new precedent.
+
+    Raises ``ValueError`` on a ``since`` that is not a date, and on a ``status``
+    outside the finding vocabulary. ``status=None``/``""`` means every status.
+    """
+    since_value = _validate_since(since)
+
+    conditions = ["updated_at >= ?"]
+    params: list[Any] = [since_value]
+    status_value: str | None = None
+    if is_vocabulary_filter_active(status):
+        # Resolved on the query side as well as the write side (CB-19): a filter
+        # spelled `done` must find the row stored as `fixed`, or the caller
+        # writes a value and cannot read it back by the same spelling.
+        status_value = resolve_finding_status(status)
+        conditions.append("status = ?")
+        params.append(status_value)
+
+    where = f"WHERE {' AND '.join(conditions)}"
+    count = conn.execute(f"SELECT COUNT(*) AS c FROM findings {where}", params).fetchone()["c"]
+
+    # Every fragment is appended with its own parameter, in textual order, and the
+    # page bounds are spliced at the end where their placeholders sit. Written as
+    # one expression rather than a sequence of `extend`s so that no statement can
+    # ever be inserted between a fragment and its value (CB-41's lesson:
+    # point-of-use discipline is the wrong enforcement layer).
+    rows = conn.execute(
+        f"SELECT * FROM findings {where} ORDER BY updated_at DESC, rowid DESC LIMIT ? OFFSET ?",
+        [*params, limit, offset],
+    ).fetchall()
+    return {
+        "total": count,
+        "limit": limit,
+        "offset": offset,
+        "since": since_value,
+        "status": status_value,
+        "findings": [db.row_to_dict(r) for r in rows],
+    }
+
+
 def get_stats(
     conn: sqlite3.Connection,
     *,
@@ -3052,6 +3184,47 @@ def register_tools(mcp, conn_factory) -> None:
             return result
 
     @mcp.tool()
+    def recent(
+        since: str,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Findings TOUCHED at or after a date — the one call for "what closed since".
+
+        WHAT THIS MEASURES: `updated_at`, the time of the LAST WRITE to the row,
+        and not the moment the finding was closed. There is no close timestamp
+        anywhere in the schema. A status change moves `updated_at`, and so do a
+        re-tag, a meta patch, a severity re-triage, an `append_note`, and a
+        DEDUPLICATED OBSERVATION — a repeat report bumps the occurrence count and
+        stamps `updated_at` while the status stays exactly where it was.
+
+        So `recent(since=..., status="fixed")` means "cards that are fixed NOW and
+        were touched since that date", NOT "cards closed since that date". The
+        error is ONE-SIDED: false positives are possible, misses are not, because
+        closing a card always writes `updated_at`.
+
+        Rows come back newest touch first, with `rowid` breaking the whole-second
+        ties `updated_at` produces, so a paged walk is stable.
+
+        Args:
+            since: Lower bound on `updated_at`, INCLUSIVE. 'YYYY-MM-DD' or
+                   'YYYY-MM-DDTHH:MM:SSZ'. REQUIRED — an unparseable value is
+                   refused rather than defaulted, because a silently widened
+                   window answers a question nobody asked.
+            status: Filter by status (open, in_progress, fixed, not_a_bug,
+                    wont_fix, stale). Aliases accepted. Omit for every status.
+                    The `deferred` pseudo-status of `query` is NOT accepted here
+                    and is refused rather than ignored — use `query` for it.
+            limit: Max results (default 100)
+            offset: Pagination offset
+        """
+        with conn_factory() as conn:
+            return recent_findings(
+                conn, since=since, status=status, limit=limit, offset=offset
+            )
+
+    @mcp.tool()
     def get(finding_id: str) -> dict[str, Any]:
         """Fetch a single finding by ID with full body (description, severity,
         status, tags, meta, timestamps, commit refs).
@@ -3271,6 +3444,54 @@ def register_cli(sub, commands) -> None:
                 )
             )
             print(f"\n{result['total']} finding(s) total.")
+
+    def _cmd_recent(args: argparse.Namespace) -> None:
+        conn = db.connect()
+        try:
+            result = recent_findings(
+                conn,
+                since=args.since,
+                status=args.status,
+                limit=args.limit or 100,
+            )
+        except json.JSONDecodeError:
+            # MUST stay ahead of the ValueError arm, which it subclasses — the
+            # `_cmd_update` ordering contract. This one reaches here through
+            # `db.row_to_dict` on a row with corrupt stored meta/tags: a
+            # data-integrity problem, not bad user input, and flattening it into
+            # a tidy one-line usage error would hide it.
+            raise
+        except ValueError as e:
+            # A `--since` that is not a date, or an unknown `--status`, names
+            # itself and exits 1 instead of printing a traceback.
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
+
+        rows = result["findings"]
+        if not rows:
+            print(f"(no findings touched since {result['since']})")
+            return
+        data = [
+            {
+                "id": f["id"],
+                "sev": f["severity"],
+                "status": f["status"],
+                "touched": f["updated_at"],
+                "category": f["category"],
+                "description": f["description"],
+            }
+            for f in rows
+        ]
+        print(
+            format_table(
+                data,
+                ["id", "sev", "status", "touched", "category", "description"],
+                max_widths={"description": 50, "category": 22},
+            )
+        )
+        print(f"\n{result['total']} finding(s) touched since {result['since']}.")
 
     def _cmd_get(args: argparse.Namespace) -> None:
         conn = db.connect()
@@ -3634,6 +3855,37 @@ def register_cli(sub, commands) -> None:
     p.add_argument("--group-by", help="Group by: file|category|severity|status|source")
     p.add_argument("--limit", type=int, help="Max results")
 
+    p = sub.add_parser(
+        "recent",
+        help="Findings TOUCHED (updated_at) at or after a date — not a close-time query",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Findings touched at or after a date — the one call for \"what closed since\".\n"
+            "\n"
+            "WHAT THIS MEASURES: updated_at, the time of the LAST WRITE to the row, and\n"
+            "not the moment the finding was closed. There is no close timestamp anywhere\n"
+            "in the schema. A status change moves updated_at, and so do a re-tag, a meta\n"
+            "patch, a severity re-triage, an append_note, and a DEDUPLICATED OBSERVATION\n"
+            "— a repeat report bumps the occurrence count and stamps updated_at while the\n"
+            "status stays exactly where it was.\n"
+            "\n"
+            "So `recent --since DATE --status fixed` means \"cards that are fixed NOW and\n"
+            "were touched since that date\", NOT \"cards closed since that date\". The error\n"
+            "is ONE-SIDED: false positives are possible, misses are not, because closing a\n"
+            "card always writes updated_at.\n"
+            "\n"
+            "Rows print newest touch first; whole-second ties break by rowid, so a paged\n"
+            "walk is stable."
+        ),
+    )
+    p.add_argument(
+        "--since",
+        required=True,
+        help="Lower bound on updated_at, INCLUSIVE: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ",
+    )
+    p.add_argument("--status", help="Filter by status (aliases accepted); omit for every status")
+    p.add_argument("--limit", type=int, help="Max results (default 100)")
+
     p = sub.add_parser("get", help="Fetch a single finding by ID")
     p.add_argument("id", help="Finding ID (e.g. CB-1383)")
 
@@ -3676,6 +3928,7 @@ def register_cli(sub, commands) -> None:
             "add": _cmd_add,
             "update": _cmd_update,
             "query": _cmd_query,
+            "recent": _cmd_recent,
             "get": _cmd_get,
             "stats": _cmd_stats,
             "summary": _cmd_summary,

@@ -2202,3 +2202,346 @@ class TestRestoreScalesPastTheSqlVariableLimit:
         with pytest.raises(ValueError, match="CB-33333"):
             findings.restore_findings(conn, rows)
         assert conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# CB-123 — the `recent` verb: "what closed since <date>" in ONE call, while
+# saying out loud that what it actually measures is the LAST TOUCH.
+# ---------------------------------------------------------------------------
+
+
+def _touch(conn, finding_id: str, stamp: str) -> None:
+    """Force a row's `updated_at` to an exact whole-second value.
+
+    Every write path stamps `utc_now()`, which no test can pin, and the ordering
+    property under test is specifically about TIES in that whole-second column.
+    Setting the column directly is the only way to construct a tie deliberately
+    rather than by timing luck.
+    """
+    conn.execute("UPDATE findings SET updated_at = ? WHERE id = ?", (stamp, finding_id))
+    conn.commit()
+
+
+def _file_a_finding(conn, finding_id: str, *, status: str = "open", description: str = "") -> None:
+    """An explicit id bypasses identity derivation and matching (CB-43 rule 3), so
+    fixtures built from near-identical tuples stay distinct rows."""
+    findings.add_finding(
+        conn,
+        severity="low",
+        category="c",
+        file="a.py",
+        description=description or f"finding {finding_id}",
+        finding_id=finding_id,
+    )
+    if status != "open":
+        findings.update_finding(conn, finding_id, status=status)
+
+
+def _findings_mcp_tools(conn):
+    """The findings MCP wrappers, bound to a live connection, keyed by tool name."""
+    import contextlib
+
+    captured: dict[str, object] = {}
+
+    class FakeMCP:
+        def tool(self):
+            def deco(fn):
+                captured[fn.__name__] = fn
+                return fn
+
+            return deco
+
+    @contextlib.contextmanager
+    def conn_factory():
+        yield conn
+
+    findings.register_tools(FakeMCP(), conn_factory)
+    return captured
+
+
+def _findings_cli_parsers():
+    """The findings subparsers, by verb, without building the whole CLI."""
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    findings.register_cli(sub, {})
+    return sub.choices
+
+
+class TestRecentIsOneCallOnBothSurfaces:
+    """Acceptance 1. The whole point of the card is that the answer arrives in ONE
+    call on each surface — today it is assembled by hand from a ledger file and git
+    history. Provider presence proves nothing (CB-28): these CALL the tools."""
+
+    def test_the_mcp_tool_answers_in_one_call(self, conn):
+        _file_a_finding(conn, "CB-1", status="fixed")
+        _touch(conn, "CB-1", "2026-08-20T12:00:00Z")
+        _file_a_finding(conn, "CB-2", status="fixed")
+        _touch(conn, "CB-2", "2026-01-05T12:00:00Z")
+
+        tools = _findings_mcp_tools(conn)
+        out = tools["recent"](since="2026-08-01", status="fixed")
+
+        assert [f["id"] for f in out["findings"]] == ["CB-1"]
+        assert out["total"] == 1
+        assert out["since"] == "2026-08-01"
+        assert out["status"] == "fixed"
+
+    def test_the_cli_verb_answers_in_one_call(self, tmp_project, monkeypatch, capsys):
+        conn = db.connect(tmp_project)
+        _file_a_finding(conn, "CB-1", status="fixed")
+        _touch(conn, "CB-1", "2026-08-20T12:00:00Z")
+        _file_a_finding(conn, "CB-2", status="fixed")
+        _touch(conn, "CB-2", "2026-01-05T12:00:00Z")
+        conn.close()
+
+        from codebugs import cli
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["codebugs", "--tracker-root", tmp_project,
+             "recent", "--since", "2026-08-01", "--status", "fixed"],
+        )
+        cli.main()
+        out = capsys.readouterr().out
+        assert "CB-1" in out
+        assert "CB-2" not in out
+
+
+class TestRecentOrderIsDeterministic:
+    """Acceptance 2. `utc_now()` is whole-second, so ties in `updated_at` are the
+    ORDINARY case, not an edge one — and an arbitrary order under a LIMIT silently
+    drops rows from the page. `rowid DESC` is the tiebreaker, the same form
+    `_match_fingerprint` already uses for the same reason.
+
+    This test is the mutant gate: delete `, rowid DESC` and SQLite falls back to
+    scan order (rowid ASCENDING), which is the exact reverse of what is asserted.
+    """
+
+    def test_a_whole_second_tie_resolves_newest_row_first(self, conn):
+        for i in range(1, 6):
+            _file_a_finding(conn, f"CB-{i}")
+            _touch(conn, f"CB-{i}", "2026-08-20T12:00:00Z")
+
+        first = findings.recent_findings(conn, since="2026-08-20")
+        second = findings.recent_findings(conn, since="2026-08-20")
+
+        assert [f["id"] for f in first["findings"]] == ["CB-5", "CB-4", "CB-3", "CB-2", "CB-1"]
+        assert [f["id"] for f in second["findings"]] == [f["id"] for f in first["findings"]]
+
+    def test_the_tie_break_survives_paging(self, conn):
+        """A LIMIT is where an arbitrary tie order stops being cosmetic: without a
+        tiebreaker the two pages can overlap or skip a row entirely."""
+        for i in range(1, 6):
+            _file_a_finding(conn, f"CB-{i}")
+            _touch(conn, f"CB-{i}", "2026-08-20T12:00:00Z")
+
+        page1 = findings.recent_findings(conn, since="2026-08-20", limit=2, offset=0)
+        page2 = findings.recent_findings(conn, since="2026-08-20", limit=2, offset=2)
+        assert [f["id"] for f in page1["findings"]] == ["CB-5", "CB-4"]
+        assert [f["id"] for f in page2["findings"]] == ["CB-3", "CB-2"]
+
+    def test_the_order_by_is_a_literal_in_the_sql_template(self, recording):
+        """Asserted against the TEMPLATE, not the executed statement — the repo rule.
+        The literal also records the OTHER half of the chosen form: no caller-supplied
+        column reaches `ORDER BY`, so CB-20/CB-22 cannot be reopened by an argument."""
+        findings.recent_findings(recording, since="2026-08-20", status="fixed")
+        selects = [s for s in recording.recorded_sql if s.startswith("SELECT * FROM findings")]
+        assert len(selects) == 1, recording.recorded_sql
+        assert "ORDER BY updated_at DESC, rowid DESC" in selects[0]
+
+
+class TestQueryFindingsIsUntouchedByRecent:
+    """Acceptance 3. The chosen form (a separate verb, no `order_by` parameter) makes
+    this a property of the DIFF: `query_findings` is not changed at all, so the
+    severity-rank-then-`created_at` order under LIMIT (CB-20) cannot have moved.
+    These pin it so a later 'unification' cannot quietly undo the decision.
+    `TestSeverityOrdering` above is the behavioural half and stays untouched.
+    """
+
+    def test_query_still_orders_by_severity_rank_then_created_at(self, recording):
+        findings.query_findings(recording, status="open", severity="high")
+        selects = [s for s in recording.recorded_sql if s.startswith("SELECT * FROM findings")]
+        assert len(selects) == 1, recording.recorded_sql
+        sql = selects[0]
+        assert "created_at DESC LIMIT ? OFFSET ?" in sql
+        assert "updated_at" not in sql
+        assert "rowid" not in sql
+
+    def test_query_gained_no_new_parameter(self):
+        """The form was chosen so that the load-bearing parameter-order hazard inside
+        `query_findings` is not entered at all. A `since`/`order_by` parameter
+        appearing here would mean it was."""
+        import inspect
+
+        params = inspect.signature(findings.query_findings).parameters
+        assert "since" not in params
+        assert "order_by" not in params
+        assert "updated_at" not in params
+
+
+class TestRecentWithAStatusFilter:
+    """Acceptance 4. The FILTERED case is mandatory: a swapped parameter order in a
+    built query corrupts only filtered calls, while unfiltered ones keep passing —
+    which is precisely the hazard `query_findings`' comment warns about, and the
+    reason this new query must be exercised WITH its second bind."""
+
+    def test_only_rows_matching_both_the_window_and_the_status_come_back(self, conn):
+        _file_a_finding(conn, "CB-1", status="fixed")
+        _touch(conn, "CB-1", "2026-08-20T12:00:00Z")
+        _file_a_finding(conn, "CB-2")  # open, inside the window
+        _touch(conn, "CB-2", "2026-08-20T12:00:00Z")
+        _file_a_finding(conn, "CB-3", status="fixed")  # fixed, outside the window
+        _touch(conn, "CB-3", "2026-08-01T12:00:00Z")
+
+        out = findings.recent_findings(conn, since="2026-08-15", status="fixed")
+        assert [f["id"] for f in out["findings"]] == ["CB-1"]
+        assert out["total"] == 1
+
+    def test_the_window_bound_is_inclusive(self, conn):
+        """A row touched at exactly `since` is INSIDE the window. `>=`, never `>` —
+        with a date-granular `since` the exclusive form silently drops the whole
+        first day, and a net-delta indicator built on it would be quietly wrong."""
+        _file_a_finding(conn, "CB-1", status="fixed")
+        _touch(conn, "CB-1", "2026-08-20T12:00:00Z")
+
+        assert [
+            f["id"] for f in findings.recent_findings(
+                conn, since="2026-08-20T12:00:00Z", status="fixed"
+            )["findings"]
+        ] == ["CB-1"]
+        assert findings.recent_findings(conn, since="2026-08-20")["total"] == 1
+
+    def test_the_status_filter_resolves_aliases_on_the_query_side(self, conn):
+        """Both sides of the vocabulary, CB-19: `done` is stored as `fixed`, so a
+        filter spelled `done` must find it rather than return an empty page."""
+        _file_a_finding(conn, "CB-1", status="fixed")
+        _touch(conn, "CB-1", "2026-08-20T12:00:00Z")
+        out = findings.recent_findings(conn, since="2026-08-01", status="done")
+        assert [f["id"] for f in out["findings"]] == ["CB-1"]
+        assert out["status"] == "fixed"
+
+    def test_an_empty_status_is_no_filter_and_a_wrong_typed_one_raises(self, conn):
+        """CB-25, on the OPTIONAL half of this surface: `None`/`''` mean 'no filter',
+        and everything else must reach the resolver rather than be skipped by
+        truthiness — `status=0` returning the whole table is the defect."""
+        _file_a_finding(conn, "CB-1", status="fixed")
+        _touch(conn, "CB-1", "2026-08-20T12:00:00Z")
+        _file_a_finding(conn, "CB-2")
+        _touch(conn, "CB-2", "2026-08-20T12:00:00Z")
+
+        assert findings.recent_findings(conn, since="2026-08-01", status="")["total"] == 2
+        assert findings.recent_findings(conn, since="2026-08-01", status=None)["total"] == 2
+        with pytest.raises(ValueError):
+            findings.recent_findings(conn, since="2026-08-01", status=0)
+
+
+class TestRecentMeasuresTheLastTouchNotTheClosure:
+    """Acceptance 5. The caveat, pinned as BEHAVIOUR rather than as prose.
+
+    `updated_at` is the time of the last WRITE to the row. There is no close
+    timestamp anywhere in the schema, so `recent(status="fixed")` answers "cards
+    that are fixed NOW and were touched since that date" — the error is one-sided:
+    false positives are possible, misses are not.
+    """
+
+    def test_a_deduplicated_re_observation_does_not_make_a_live_card_look_closed(self, conn):
+        """The bump moves `updated_at` without moving `status`. The card must stay
+        out of a `status="fixed"` window — and the window is non-empty, so the
+        assertion discriminates instead of passing vacuously on an empty page."""
+        findings.add_finding(
+            conn, severity="low", category="c", file="a.py",
+            description="a repeating gate failure", fingerprint="fp-live",
+            new_category=True,  # the CB-60 mint gate; explicit-id fixtures bypass it
+        )
+        _file_a_finding(conn, "CB-2", status="fixed")
+        conn.execute("UPDATE findings SET updated_at = '2026-01-01T00:00:00Z'")
+        conn.commit()
+
+        again = findings.add_finding(
+            conn, severity="low", category="c", file="a.py",
+            description="a repeating gate failure", fingerprint="fp-live",
+        )
+        assert again["dedup_action"] == "bumped"
+        assert again["status"] == "open"
+        _touch(conn, "CB-2", "2026-08-20T12:00:00Z")
+
+        out = findings.recent_findings(conn, since="2026-08-01", status="fixed")
+        assert [f["id"] for f in out["findings"]] == ["CB-2"]
+
+    def test_a_note_appended_today_resurfaces_a_card_closed_long_ago(self, conn):
+        """THE executable form of "last touch is not the moment of closure": CB-1 was
+        closed in January and only annotated today, yet a `since=today` window
+        reports it. That is the documented false positive, and this test exists so a
+        reader cannot mistake the tool for a close-time query."""
+        from codebugs.types import utc_now
+
+        _file_a_finding(conn, "CB-1", status="fixed")
+        _touch(conn, "CB-1", "2026-01-05T12:00:00Z")
+
+        findings.update_finding(conn, "CB-1", append_note="new evidence arrived")
+
+        today = utc_now()[:10]
+        out = findings.recent_findings(conn, since=today, status="fixed")
+        assert [f["id"] for f in out["findings"]] == ["CB-1"]
+
+
+class TestRecentDeclaresWhatItMeasures:
+    """Acceptance 5, the declaration half: the caveat has to reach the CALLER, so it
+    lives in the tool description on both surfaces — not only in the card. A tool
+    that hands `updated_at` over as a close time is a success-shaped lie."""
+
+    def test_the_mcp_description_names_the_column_and_denies_the_close_reading(self, conn):
+        doc = _findings_mcp_tools(conn)["recent"].__doc__ or ""
+        assert "updated_at" in doc
+        assert "not the moment the finding was closed" in doc
+        assert "append_note" in doc
+        assert "one-sided" in doc.lower()
+
+    def test_the_cli_help_carries_the_same_caveat(self):
+        text = _findings_cli_parsers()["recent"].format_help()
+        assert "updated_at" in text
+        assert "not the moment the finding was closed" in text
+        assert "append_note" in text
+
+
+class TestRecentRefusesABadSince:
+    """Acceptance 6. `since` is a MANDATORY filter, so the query-side convention
+    ('' and None mean 'no filter') is exactly wrong here — there is no honest
+    'everything' to fall back to. Wrong input must raise, and it must be refused by
+    TYPE before anything is measured or compared: guarding with truthiness lets `0`
+    reach SQLite, where `updated_at >= 0` matches every row and the caller reads an
+    unfiltered table as a filtered one (CB-25/CB-82)."""
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["", "yesterday", 0, [], None, "2026-13-01", "2026-02-31", "26-08-20", "2026-08-20 12:00:00"],
+        ids=["empty", "prose", "zero", "list", "none", "month13", "feb31", "shortyear", "spacesep"],
+    )
+    def test_a_since_that_is_not_a_date_raises(self, conn, bad):
+        with pytest.raises(ValueError):
+            findings.recent_findings(conn, since=bad)
+
+    def test_a_refusal_writes_nothing_and_reads_nothing(self, recording):
+        """Validated BEFORE anything is queried (CB-82), so a refusal costs no work."""
+        with pytest.raises(ValueError):
+            findings.recent_findings(recording, since="yesterday")
+        assert not [s for s in recording.recorded_sql if "findings" in s]
+
+    def test_the_cli_prints_one_line_and_exits_1(self, tmp_project, monkeypatch, capsys):
+        from codebugs import cli
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["codebugs", "--tracker-root", tmp_project, "recent", "--since", "yesterday"],
+        )
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "Traceback" not in err
+        assert len(err.strip().splitlines()) == 1
+        assert "since" in err
