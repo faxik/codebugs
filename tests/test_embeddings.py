@@ -121,3 +121,82 @@ class TestFalseyStatusFilterDoesNotDisableTheFilter:
         embeddings.store_embedding(conn, "FR-1", [0.1, 0.2, 0.3])
         got = embeddings.search_similar(conn, query_embedding=[0.1, 0.2, 0.3], status=empty)
         assert len(got) == 1
+
+
+class InjectingConnection(sqlite3.Connection):
+    """Runs a competing writer on ANOTHER connection just before a chosen statement.
+
+    Single-threaded on purpose: the hook fires inside the call under test, before
+    the statement it names is handed to SQLite, so the competing write lands in
+    exactly the window between the read that decides and the write that acts.
+
+    ``outcome`` records which writer won that window — the discriminator required
+    by CLAUDE.md, Testing (a), because after the fix the stored state is the same
+    state the unfixed code reaches on a quiet database. The competing connection
+    carries a short ``busy_timeout`` because after the fix it can never acquire the
+    lock, and waiting for it unboundedly is Testing (b).
+
+    This project deliberately has no shared ``conftest.py`` for fixtures, so this
+    class is duplicated in the test files that need it.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.inject_before: str | None = None
+        self.injection = None
+        self.outcome: str | None = None
+
+    def execute(self, sql, *args, **kwargs):
+        if self.inject_before is not None and self.inject_before in sql:
+            self.inject_before = None  # one-shot
+            try:
+                self.injection()
+                self.outcome = "landed"
+            except sqlite3.OperationalError as e:
+                self.outcome = f"refused: {e}"
+        return super().execute(sql, *args, **kwargs)
+
+
+def _file_conn(path, *, factory=sqlite3.Connection, busy_ms=5000):
+    c = sqlite3.connect(path, factory=factory)
+    c.row_factory = sqlite3.Row
+    c.execute(f"PRAGMA busy_timeout={busy_ms}")
+    return c
+
+
+class TestStoreEmbeddingIsOneTransaction:
+    """CB-125 / CB-24: ``"stored": True`` must be the write's receipt, not an assertion.
+
+    The existence read and the UPDATE were two steps with no transaction spanning
+    them, and the response said ``stored`` unconditionally. A requirement deleted
+    in that window left the UPDATE matching zero rows while the caller was told the
+    vector had been stored — a success-shaped lie about a write that never happened.
+    """
+
+    def test_a_requirement_deleted_in_the_window_cannot_be_reported_as_stored(self, tmp_path):
+        path = str(tmp_path / "reqs.db")
+        main = _file_conn(path, factory=InjectingConnection)
+        reqs.ensure_schema(main)
+        reqs.add_requirement(main, req_id="FR-1", description="a")
+
+        other = _file_conn(path, busy_ms=150)
+
+        def competing_delete():
+            other.execute("DELETE FROM requirements WHERE id = 'FR-1'")
+            other.commit()
+
+        main.injection = competing_delete
+        main.inject_before = "UPDATE requirements SET embedding"
+        try:
+            result = embeddings.store_embedding(main, "FR-1", [0.1, 0.2, 0.3])
+        finally:
+            other.close()
+
+        assert main.outcome is not None, "the injection point was never reached"
+        assert main.outcome.startswith("refused"), main.outcome
+        assert result["stored"] is True
+        row = main.execute("SELECT embedding FROM requirements WHERE id = 'FR-1'").fetchone()
+        assert row is not None and row["embedding"] is not None, (
+            "reported stored over a row that carries no vector"
+        )
+        main.close()

@@ -755,25 +755,41 @@ def delete_run(
     conn: sqlite3.Connection,
     run_id: str,
 ) -> dict[str, Any]:
-    """Delete a run and all its results."""
-    row = conn.execute(
-        "SELECT run_id, benchmark FROM codebench_runs WHERE run_id = ?", (run_id,)
-    ).fetchone()
-    if not row:
-        raise KeyError(f"Run not found: {run_id}")
+    """Delete a run and all its results.
 
-    result_count = conn.execute(
-        "SELECT COUNT(*) as c FROM codebench_results WHERE run_id = ?", (run_id,)
-    ).fetchone()["c"]
+    ONE transaction over the read that decides and the DELETEs that act (CB-24,
+    CB-87). ``db.txn`` takes the write lock BEFORE the existence read, so nothing
+    can be inserted into the window between them; ``busy_timeout`` cannot supply
+    this, because it serializes the writes and never touches the read that
+    preceded them.
 
-    conn.execute("DELETE FROM codebench_results WHERE run_id = ?", (run_id,))
-    conn.execute("DELETE FROM codebench_runs WHERE run_id = ?", (run_id,))
-    conn.commit()
+    ``results_removed`` is the DELETE's own ``rowcount``, not a COUNT taken
+    beforehand: the number reported is then what the write did rather than what a
+    read predicted. Unfixed, a result row inserted after that COUNT was deleted
+    and never counted, so the call under-reported what it destroyed. No
+    ``RETURNING`` on these statements, so ``rowcount`` is the sanctioned reader.
+
+    No ``conn.commit()`` here, deliberately: ``db.txn`` owns the commit, and
+    yields False under an ambient transaction so a caller that owns one keeps
+    owning it. Committing here would land the caller's unrelated work (CB-24).
+    """
+    with db.txn(conn):
+        row = conn.execute(
+            "SELECT run_id, benchmark FROM codebench_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if not row:
+            raise KeyError(f"Run not found: {run_id}")
+        benchmark = row["benchmark"]
+
+        results_removed = conn.execute(
+            "DELETE FROM codebench_results WHERE run_id = ?", (run_id,)
+        ).rowcount
+        conn.execute("DELETE FROM codebench_runs WHERE run_id = ?", (run_id,))
 
     return {
         "deleted": run_id,
-        "benchmark": row["benchmark"],
-        "results_removed": result_count,
+        "benchmark": benchmark,
+        "results_removed": results_removed,
     }
 
 
@@ -781,32 +797,48 @@ def delete_benchmark(
     conn: sqlite3.Connection,
     benchmark: str,
 ) -> dict[str, Any]:
-    """Delete all runs for a benchmark."""
-    run_ids = [
-        r["run_id"]
-        for r in conn.execute(
-            "SELECT run_id FROM codebench_runs WHERE benchmark = ?", (benchmark,)
-        ).fetchall()
-    ]
-    if not run_ids:
-        raise KeyError(f"Benchmark not found: {benchmark}")
+    """Delete all runs for a benchmark.
 
-    placeholders = ",".join("?" for _ in run_ids)
-    result_count = conn.execute(
-        f"SELECT COUNT(*) as c FROM codebench_results WHERE run_id IN ({placeholders})",
-        run_ids,
-    ).fetchone()["c"]
+    ONE transaction, and here the window costs DATA rather than an inaccurate
+    report (CB-24, CB-87). The two DELETEs are addressed differently on purpose:
+    results go by the SNAPSHOTTED ``run_ids`` list, the runs themselves go
+    unconditionally by ``benchmark``. A run imported between the snapshot and the
+    first DELETE is therefore absent from the ``IN`` list — its results survive —
+    while the second DELETE removes its ``codebench_runs`` row anyway, leaving
+    orphaned results referencing a run that no longer exists. ``db.txn`` takes the
+    write lock before the snapshot is taken, which is the only thing that closes
+    that window; reconciling the two addressings would not, since the snapshot
+    would still be stale.
 
-    conn.execute(
-        f"DELETE FROM codebench_results WHERE run_id IN ({placeholders})", run_ids
-    )
-    conn.execute("DELETE FROM codebench_runs WHERE benchmark = ?", (benchmark,))
-    conn.commit()
+    Both counts are the DELETEs' own ``rowcount`` rather than a prior COUNT and
+    ``len(run_ids)``: what is reported is what the writes did. No ``RETURNING`` on
+    these statements, so ``rowcount`` is the sanctioned reader.
+
+    No ``conn.commit()``: ``db.txn`` owns the commit and yields False under an
+    ambient transaction, where committing would land the caller's work (CB-24).
+    """
+    with db.txn(conn):
+        run_ids = [
+            r["run_id"]
+            for r in conn.execute(
+                "SELECT run_id FROM codebench_runs WHERE benchmark = ?", (benchmark,)
+            ).fetchall()
+        ]
+        if not run_ids:
+            raise KeyError(f"Benchmark not found: {benchmark}")
+
+        placeholders = ",".join("?" for _ in run_ids)
+        results_removed = conn.execute(
+            f"DELETE FROM codebench_results WHERE run_id IN ({placeholders})", run_ids
+        ).rowcount
+        runs_removed = conn.execute(
+            "DELETE FROM codebench_runs WHERE benchmark = ?", (benchmark,)
+        ).rowcount
 
     return {
         "deleted_benchmark": benchmark,
-        "runs_removed": len(run_ids),
-        "results_removed": result_count,
+        "runs_removed": runs_removed,
+        "results_removed": results_removed,
     }
 
 
