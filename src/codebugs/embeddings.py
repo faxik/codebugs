@@ -49,17 +49,36 @@ def store_embedding(
 
     The caller is responsible for generating the embedding (e.g. via an
     embedding API). This function just stores and retrieves.
-    """
-    row = conn.execute("SELECT * FROM requirements WHERE id = ?", (req_id,)).fetchone()
-    if not row:
-        raise KeyError(f"Requirement not found: {req_id}")
 
+    ``"stored": True`` is the WRITE'S RECEIPT, not an assertion (CB-24, CB-125).
+    The existence SELECT that used to precede the UPDATE decided nothing the
+    UPDATE cannot decide itself, and the two were separate statements with no
+    transaction spanning them: a requirement deleted in that window left the
+    UPDATE matching zero rows while the caller was told the vector had been
+    stored. The UPDATE now carries ``RETURNING`` and a row that is not there
+    raises the same ``KeyError`` — so the response cannot outrun the write. Never
+    read ``rowcount`` on a ``RETURNING`` statement: it is 0 until the cursor is
+    exhausted, which would report nothing-happened over a landed write.
+
+    ``db.txn`` earns its place even on a single-statement write: it owns the
+    commit, so this can be called inside a caller's transaction without
+    committing the caller's unrelated work (CB-24 consequence 1). The vector is
+    packed BEFORE the block, so a malformed one is refused without taking the
+    write lock.
+
+    Raises:
+        KeyError: no requirement with this id. CHANGED by CB-125: a requirement
+            deleted concurrently now reaches this arm instead of being reported
+            as a successful store.
+    """
     blob = _pack_vector(embedding)
-    conn.execute(
-        "UPDATE requirements SET embedding = ?, updated_at = ? WHERE id = ?",
-        (blob, utc_now(), req_id),
-    )
-    conn.commit()
+    with db.txn(conn):
+        row = conn.execute(
+            "UPDATE requirements SET embedding = ?, updated_at = ? WHERE id = ? RETURNING id",
+            (blob, utc_now(), req_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Requirement not found: {req_id}")
     return {"id": req_id, "dimensions": len(embedding), "stored": True}
 
 

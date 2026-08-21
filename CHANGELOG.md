@@ -136,6 +136,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   domain docstrings, pinned by prose↔code and behaviour tests.
 
 ### Fixed
+- **Four public entry points no longer report success about a write that may not have
+  happened (CB-87, CB-125, CB-126).** `bench.delete_run`, `bench.delete_benchmark`,
+  `embeddings.store_embedding` and `sweep.archive_sweep` each read first — an existence
+  check, a COUNT, a `run_id` snapshot, a `_resolve_sweep` lookup — and wrote after, with
+  no transaction spanning the pair and a return value that asserted the outcome rather
+  than reading it. A concurrent writer fits in that window; `busy_timeout` cannot help,
+  because it serializes the writes and never touches the read that preceded them. Each
+  body now runs inside `db.txn` (which takes the write lock BEFORE the read) and each
+  return value is derived from what the statement actually did — a DELETE's `rowcount`,
+  an UPDATE's `RETURNING`. Their own `conn.commit()` calls are gone, so calling any of
+  them inside a caller's transaction no longer commits the caller's unrelated work.
+
+  **`bench.delete_benchmark`'s window cost data, not just an inaccurate report.** Results
+  are deleted by a snapshotted `run_ids` list while the runs are deleted unconditionally
+  by `benchmark`, so a run imported into the window kept its results and lost its
+  `codebench_runs` row — orphaned rows referencing a run that no longer exists.
+  Reproduced in a test before the fix.
+
+  **One observable contract change, in `embeddings.store_embedding`.** A requirement
+  deleted concurrently used to come back as `{"stored": True}` over an UPDATE that
+  matched zero rows; it now raises `KeyError`, the same exception (and message) a
+  missing requirement has always produced. Nothing changes for a requirement that
+  exists. The counts reported by `bench.delete_run` / `delete_benchmark` are likewise
+  now the number of rows the DELETEs removed rather than a number read beforehand; on a
+  quiet database these are the same value.
 - **A post-add hook that keeps the finding dict no longer watches response-only keys
   appear on it (CB-119).** Hooks were handed the very dict the response constructor
   then mutated, so a hook storing the reference for later would observe `was_new` and
