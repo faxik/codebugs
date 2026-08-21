@@ -23,6 +23,7 @@ Prose cannot enforce prose. That is CB-50, and the harness below is its fix.
 |---|---|---|
 | Branch carries `fix/`\|`feature/`\|`refactor/`\|`docs/` | `_guard_branch_type` (7) + pre-commit hook (1) | exit 7 / 1 |
 | Nothing but `.claude/plans/*.md` is committed on main | pre-commit hook | exit 1 |
+| A plan note committed on main is NAMED in the commit message | commit-msg hook | exit 1 |
 | A merge onto main comes from a typed local branch, or from main's own upstream `main` | pre-merge-commit hook (clean merge) + pre-commit hook (conflicted merge) | exit 1 |
 | An in-progress cherry-pick/revert marker no longer exempts a commit | pre-commit hook | exit 1 |
 | Integration never fast-forwards | `--no-ff` + `git config merge.ff false` | — |
@@ -162,7 +163,80 @@ error path. It now fails closed on the error, which is the third distinct door o
 **A non-ASCII plan note could not land on main** — a false refusal, and the mirror image of a bug
 this repo already had. `git diff --cached --name-only` C-quotes such a path by default, the allowlist
 regex misses it, and the commit is refused; the same default once made `_guard_conflict_markers`
-silently *accept* a conflict marker. Both readers now pass `-c core.quotePath=false`.
+silently *accept* a conflict marker. Both readers now pass `-c core.quotePath=false`. **A third
+reader has since joined them** — the commit-msg gate below derives a BASENAME from that same staged
+set, so a C-quoted path there yields a basename no human could ever type, which is a *permanent*
+false refusal of every non-ASCII plan note rather than a one-off. The test that pins this no longer
+says "both readers", because a count in a name is a count that goes stale.
+
+**A plan note landing on main must be NAMED in the commit message, and the mechanism is a
+`commit-msg` hook — NOT the pre-commit hook the card proposed.** The rule this mechanises is that
+parallel sessions add files to main **by name, never by directory**: `.claude/plans/` is the one
+place they may all write, and `git add .claude/plans/` swept an UNTRACKED note belonging to another
+direction into a commit describing unrelated work. The bytes survived; the **provenance** did not.
+The convention was then adopted and broken again — a convention broken four times after adoption is
+this section's own opening lesson, so it had to stop being prose. Naming is the discriminator
+because git records nothing about *how* a path was staged: the index cannot be asked whether
+`git add` was given a file or a directory. What separates the two cases is the author — you cannot
+name a file you did not know was there.
+
+**The phase moved on a measurement, and the measurement is the whole argument.** On git 2.53, at
+`pre-commit` time the message being written does not exist anywhere: `$GIT_DIR/COMMIT_EDITMSG` holds
+the **PREVIOUS** commit's message, and on a clone's first commit it does not exist at all. A
+pre-commit naming check is therefore not a gate that fails open — it is a gate wired to someone
+else's input, which passes a sweeping commit whose predecessor happened to name the file and refuses
+a correct one whose predecessor did not. That is worse than absent, because it looks like
+enforcement. `commit-msg` receives the final message as `$1`, after `-m`, `-F` and the editor have
+all had their say. `test_premise_pre_commit_cannot_see_the_message` pins it, so a git that changes
+the behaviour turns the suite red instead of silently justifying a move back.
+
+**Two auto-generated sources inside the message file would each have made this a gate that cannot
+fire, and neither was on the card.** git's default template lists the staged paths as comment lines
+(`#	new file:   .claude/plans/foo.md`), so every editor-based commit would have passed vacuously;
+and `git commit -v` appends the whole diff below the scissors line, where every hunk header names
+its file — and `git stripspace --strip-comments` does **not** remove that, because a diff is not a
+comment. So the message is truncated at the scissors **first**, then comment-stripped. The scissors
+test is `>8` and `---` on one line rather than git's exact string, because the comment character is
+configurable and anchoring on `#` would let a repo with `core.commentChar=;` keep its diff;
+over-truncating costs a loud refusal, under-truncating costs the gate. Comment stripping is
+delegated to `git stripspace`, which reads the same `core.commentChar` git itself will use, so the
+two cannot disagree.
+
+**Matching is by TOKEN, and a word boundary is the wrong tool.** A substring test passes on an
+ordinary case, not a contrived one: `plan.md` is a substring of `my-plan.md`, so a sweeping commit
+naming its own note launders the stranger's note sitting beside it — and the swept file is by
+construction the one nobody wrote down. A regex `\b` does not fix it either, because `-` and `.` are
+non-word characters, so `\bplan\.md\b` matches *inside* `my-plan.md`. The match must be flanked by
+a boundary: the string edge, or an ASCII byte that cannot occur in the name. Every **non-ASCII** byte
+counts as part of a name, so an ambiguous neighbour refuses rather than matches; the stated cost is
+that a filename hugged by typographic quotes or dashes (`«plan.md»`) is not recognised and needs a
+space or an ASCII quote around it. `LC_ALL=C` pins byte semantics so the verdict cannot depend on the
+committer's locale — **honest scope: that line is determinism insurance and no test discriminates
+it**, since under a UTF-8 locale codepoint-wise classification happens to agree on every case here.
+
+**Scope, and what it deliberately does not touch.** Only `main`, and only `.claude/plans/*.md` —
+on a branch there are no foreign untracked notes to sweep, so the rule there would be pure friction
+on every `wip` commit, and everything else on main is pre-commit's to refuse (duplicating that
+judgement would give one state two refusals that could drift). **Deletions are in scope**, because
+`git add <dir>` stages a removal too and deleting a stranger's note damages the same provenance.
+**A merge is exempt**, and the discriminator differs from `pre-merge-commit`'s in a way that would
+have inverted the rule if assumed: this section records that a clean merge writes no `MERGE_HEAD` —
+true at `pre-merge-commit` time, which runs earlier and resolves the merge in memory, but by
+`commit-msg` time git **has** written it, for clean and conflicted merges alike (measured, and
+pinned, because if a future git stops doing it every integration would be refused). It is read
+fail-closed with a count, exactly like pre-commit's arm: an empty `MERGE_HEAD` must not read as an
+exempt one.
+
+**What it does NOT close, stated rather than left to be discovered.** `_guard_enforcement_armed`
+does **not** yet demand this hook, so a clone armed before it landed keeps its other two hooks and
+silently lacks this one until `tools/install-hooks.sh` is re-run. That is deliberate and it is the
+bootstrap wall for the third time: the guard reads `REPO_ROOT/tools/<hook>` from the PRIMARY
+checkout and gates on whether the path has history, so adding the clause in the same change that
+introduces the source makes that change unlandable by the harness it extends — and `install-hooks.sh`
+cannot pre-arm it either, because it symlinks into main's `tools/`, where the file does not exist
+yet. Closing it is a one-line follow-up once the source is on main, and the structural test
+`test_installer_arms_the_commit_msg_hook_too` is what holds the line meanwhile. The gate is also invisible to the CI alarm,
+which reads paths and not messages.
 
 **Two hooks, disjoint halves, neither redundant — and they must not disagree.** A CONFLICTED merge
 never reaches `pre-merge-commit`, and neither does a merge this hook has already refused: both are
@@ -176,14 +250,20 @@ own merge: leaving it would have made the harness the single caller exempt from 
 **What this does NOT do, stated plainly because the honest scope is the point.** The local half is
 CLIENT-SIDE and PER-CLONE: hooks and git config cannot be committed. A fresh clone has none of it
 until `tools/install-hooks.sh` is run — which is why `_guard_enforcement_armed` refuses to integrate
-from an unarmed clone, the one moment being unarmed can cost anything. **It now checks both hooks**,
-and a clone armed before CB-57 will be refused until `install-hooks.sh` is re-run. Even armed, all of
+from an unarmed clone, the one moment being unarmed can cost anything. **It checks the pre-commit and
+pre-merge-commit hooks — two of the three**, and a clone armed before CB-57 will be refused until
+`install-hooks.sh` is re-run; the commit-msg naming gate is armed by the installer alone, for the
+bootstrap reason given above. Even armed, all of
 these move or publish `main` without passing any hook: `git rebase`, `git am`, `git reset --hard`,
 `git push`, `core.hooksPath`, **`git subtree add`** (which commits via `commit-tree` plumbing — added
 to this list because round-4 review landed content on main with it and the list did not mention it),
 and **a CLEAN `git cherry-pick` or `git revert`**, where git's sequencer commits directly. Note the
 case split on those last two, because an earlier version of this list was half-wrong: *clean* skips
-the hook entirely, while the *conflicted* form is finished with `git commit` and **is** gated. A typed
+the hook entirely, while the *conflicted* form is finished with `git commit` and **is** gated. One
+refinement measured while building the commit-msg gate, and it is narrow: a clean cherry-pick or
+revert **does** run `commit-msg`, so the plan-note NAMING rule fires on it. `pre-commit` is still
+skipped, so the allowlist and branch-type rules are not — the sentence above stands for everything
+except naming. A typed
 branch committed in the *primary* checkout also satisfies `pre-commit` while ignoring the worktree rule
 entirely. **Most of these are what the CI job is for** — they flatten a non-merge commit onto main's
 first-parent line, which is what `.github/workflows/main-invariants.yml` asserts against.
@@ -371,8 +451,12 @@ this paragraph overclaimed.**
 - **Session end:** `git status` clean in main *and* in every worktree, then `git worktree remove
   <path>`. Never `--force`: a removal that refuses is telling you work is uncommitted there.
 - **The only thing that may land on main directly** is a `.claude/plans/*.md` note — one level, not
-  a subtree, and the pre-commit hook holds that line. `git commit --no-verify` remains the escape
-  hatch: the hook exists to stop the accident, and an operator typing the flag has stated an intent.
+  a subtree, and the pre-commit hook holds that line. **Name the note in the commit message, and add
+  it to the index by name**: `git add -- .claude/plans/<note>.md`, never `git add .claude/plans/`.
+  The commit-msg hook refuses a plan note the message does not name, which is the mechanised form of
+  that rule (see the Workflow paragraphs above for why naming is the discriminator). `git commit
+  --no-verify` remains the escape hatch for both hooks: they exist to stop the accident, and an
+  operator typing the flag has stated an intent.
 
 **How the harness itself is tested, and where that stops.**
 `tests/test_worktree_harness.py` covers every guard on both sides — the state it must refuse and the

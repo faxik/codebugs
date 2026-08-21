@@ -48,12 +48,20 @@
 
 set -euo pipefail
 
-# BYTE semantics, deliberately, and it is load-bearing for the boundary test
-# below. bash's substring operators are character-aware in a UTF-8 locale and
-# byte-aware in C, so without this the hook would behave differently depending
-# on the LANG of whoever ran git. Pinning C also makes every byte >= 0x80 a NAME
-# byte rather than a separator, which means an ambiguous neighbour PREVENTS a
-# match instead of allowing one — the fail-closed direction.
+# BYTE semantics, deliberately. bash's substring operators are character-aware
+# in a UTF-8 locale and byte-aware in C, and the boundary test below classifies
+# whatever sits on each side of a match — so without this the hook's answer
+# could depend on the LANG of whoever ran git. Pinning C also makes every byte
+# >= 0x80 a NAME byte rather than a separator, so an ambiguous neighbour
+# PREVENTS a match instead of allowing one: the fail-closed direction.
+#
+# HONEST SCOPE: this is DETERMINISM INSURANCE, not a behaviour the suite pins.
+# A mutation probe removing this line leaves all tests green, because under the
+# en_US.UTF-8 the suite runs in, character-wise classification happens to give
+# the same verdict for every case here (a non-ASCII CODEPOINT is >= 128 just as
+# its first BYTE is). What it buys is that the verdict cannot change under a
+# locale nobody tested — including one whose collation makes the `[A-Za-z0-9._-]`
+# range mean something other than those 65 characters.
 export LC_ALL=C
 
 MSG_FILE="${1:-}"
@@ -214,11 +222,22 @@ _is_named() {
     return 1
 }
 
-# COUNT WHAT WAS EXAMINED. `plans` is non-empty by the time we get here, so a
-# loop that ran zero times means the reader and the loop disagree about the
-# staged set — and reporting "nothing to check" on that is the exact shape the
-# MERGE_HEAD arm above refuses. Cheap to assert, and it cannot report clean
-# because it could not look.
+# COUNT WHAT WAS EXAMINED — and say plainly what this does and does not buy,
+# because a guard described as live when it is not is the failure this file
+# exists to prevent.
+#
+# UNREACHABLE BY CONSTRUCTION TODAY, measured rather than assumed: `plans` is
+# non-empty here, and the `grep -E` that produced it is ANCHORED, so it cannot
+# emit a blank line — a non-empty `plans` therefore always yields
+# `_examined >= 1`. A mutation probe confirms it: replacing the condition with
+# `false` leaves the whole suite green. NO TEST CAN DISCRIMINATE IT while the
+# reader above keeps its shape, so do not read the suite as covering it.
+#
+# It is kept anyway, as the same defence the MERGE_HEAD arm above needs for
+# real: the day someone changes how the staged set is read — a `-z` reader, a
+# different filter, a helper — "the loop saw nothing" must refuse rather than
+# report clean. Reporting clean because it could not look is the one outcome
+# this hook may never produce.
 _examined=0
 _unnamed=""
 while read -r _path || [[ -n "${_path}" ]]; do
