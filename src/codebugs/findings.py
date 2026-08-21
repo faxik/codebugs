@@ -1912,6 +1912,27 @@ def update_finding(
     Do not restore a ``conn.commit()`` here: ``db.txn`` yields ``False`` under an
     ambient transaction, and committing then would commit the *caller's* work
     (``milestones.triage_dismiss`` is such a caller).
+
+    **What this function deliberately CANNOT reach, and why (CB-21).**
+    ``description``, ``category`` and ``file`` are the three INPUTS to the
+    derived ``auto:v1`` fingerprint (CB-43), and ``category`` is since CB-60 a
+    normalized and mint-gated input besides. An argument for any of them would
+    make this function a RE-KEY of identity — and re-keying is a separate
+    negotiated contract, not something a caller acquires by argument: CB-61
+    negotiated exactly one such operation, ``normalize_categories``, which
+    issues its own UPDATE for precisely that reason. ``source`` is
+    first-reporter provenance, frozen by design (BT-4; ratified by the owner
+    2026-08-20) — later observations' sources live only in the occurrence ring.
+    ``reported_at_commit`` stays immutable after insert, as above.
+
+    Read those as the CURRENT contract with its reason, not as a verdict that
+    they can never become mutable: CB-21 asks whether ``description`` and
+    ``file`` should be, and that question is open. What is closed is leaving
+    the answer unsaid. ``tests/test_update_parity.py`` is the gate — every
+    column of both entities must be declared mutable (naming the parameters
+    that write it) or immutable (with a reason), so a new column, a new
+    parameter, or a new surface argument fails a test instead of being
+    rediscovered by a fourth inspection of this function.
     """
     # Argument-only validation runs BEFORE the transaction. These resolvers are pure
     # functions of their input and need no row, and `BEGIN IMMEDIATE` first would mean
