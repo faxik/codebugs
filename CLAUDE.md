@@ -283,11 +283,18 @@ these move or publish `main` without passing any hook: `git rebase`, `git am`, `
 to this list because round-4 review landed content on main with it and the list did not mention it),
 and **a CLEAN `git cherry-pick` or `git revert`**, where git's sequencer commits directly. Note the
 case split on those last two, because an earlier version of this list was half-wrong: *clean* skips
-the hook entirely, while the *conflicted* form is finished with `git commit` and **is** gated. One
-refinement measured while building the commit-msg gate, and it is narrow: a clean cherry-pick or
-revert **does** run `commit-msg`, so the plan-note NAMING rule fires on it. `pre-commit` is still
-skipped, so the allowlist and branch-type rules are not — the sentence above stands for everything
-except naming. A typed
+the hook entirely, while the *conflicted* form is finished with `git commit` and **is** gated.
+
+**That case split covers `commit-msg` too, and the first draft of this paragraph said the opposite.**
+It claimed a clean cherry-pick or revert *does* run `commit-msg`, so the plan-note naming rule fires
+on it. Measured on git 2.53: it does **not**. The sequencer commits directly and reaches **neither**
+hook, so a clean `git cherry-pick` or `git revert` lands an unnamed plan note at exit 0; only the
+*conflicted* form, finished with `git commit`, is gated. The claim was written into the very
+paragraph that exists to list what the harness does NOT do, and it survived a green suite because
+nothing pinned it — a gate described better than it behaves, in the section whose subject is exactly
+that. `tests/test_worktree_harness.py::TestGitSequencerPremises` now pins both directions, so a git
+version that starts running the hook turns the suite red instead of quietly making this paragraph
+true. A typed
 branch committed in the *primary* checkout also satisfies `pre-commit` while ignoring the worktree rule
 entirely. **Most of these are what the CI job is for** — they flatten a non-merge commit onto main's
 first-parent line, which is what `.github/workflows/main-invariants.yml` asserts against.

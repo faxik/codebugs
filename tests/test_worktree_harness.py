@@ -2758,6 +2758,92 @@ class TestMergeSubjectDerivation:
         )
 
 
+class TestGitSequencerPremises:
+    """PIN THE PREMISE: git's sequencer reaches NEITHER hook on a CLEAN replay.
+
+    WHY THIS EXISTS. The paragraph in CLAUDE.md that lists what the harness does
+    NOT do acquired a sentence claiming that a clean `git cherry-pick` or
+    `git revert` **does** run `commit-msg`, and that the plan-note naming rule
+    therefore fires on it. It does not. Measured on git 2.53: the sequencer
+    commits directly and skips `pre-commit` AND `commit-msg` alike, so a clean
+    replay lands an unnamed plan note at exit 0. Only the CONFLICTED form, which
+    the operator finishes with `git commit`, is gated.
+
+    The claim was false, it sat in the section whose entire subject is "a gate
+    described better than it behaves", and the suite stayed green because
+    nothing pinned it. That is the failure mode this repository keeps paying
+    for: a documented guarantee with no executable witness. These two tests are
+    the witness. If a future git starts running the hook, they turn RED and the
+    paragraph gets rewritten deliberately, instead of quietly becoming true.
+
+    Note the direction of the assertion. It pins the LIMIT, not the feature —
+    asserting that the gate does NOT fire. A test that only ever confirmed the
+    happy path could not have caught this.
+    """
+
+    @staticmethod
+    def _tracer(repo: Path, name: str) -> Path:
+        """A hook that records its own invocation, so absence is provable."""
+        common = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+        hooks = common / "hooks"
+        hooks.mkdir(parents=True, exist_ok=True)
+        marker = repo / f"{name}.fired"
+        hook = hooks / name
+        hook.write_text(
+            "#!/usr/bin/env bash\n" + f'echo fired >> "{marker}"\n', encoding="utf-8"
+        )
+        hook.chmod(0o755)
+        return marker
+
+    def test_premise_a_clean_cherry_pick_runs_neither_hook(self, repo: Path) -> None:
+        msg_fired = self._tracer(repo, "commit-msg")
+        pre_fired = self._tracer(repo, "pre-commit")
+
+        git(repo, "checkout", "-b", "side")
+        (repo / "x.txt").write_text("x\n")
+        git(repo, "add", "x.txt")
+        git(repo, "commit", "-m", "side work")
+        git(repo, "checkout", "main")
+
+        # Control FIRST: prove the tracers work at all, or the assertions below
+        # are vacuous -- "the hook did not fire" and "the hook was never
+        # installed" are indistinguishable without this.
+        (repo / "control.txt").write_text("c\n")
+        git(repo, "add", "control.txt")
+        git(repo, "commit", "-m", "control")
+        assert msg_fired.exists(), "commit-msg tracer never fired on an ordinary commit"
+        assert pre_fired.exists(), "pre-commit tracer never fired on an ordinary commit"
+        msg_fired.unlink()
+        pre_fired.unlink()
+
+        git(repo, "cherry-pick", "side")
+
+        assert not msg_fired.exists(), (
+            "git 2.53 ran commit-msg on a CLEAN cherry-pick. CLAUDE.md's list of what "
+            "the harness does not do says the sequencer reaches neither hook; rewrite "
+            "that paragraph deliberately rather than leaving it stale."
+        )
+        assert not pre_fired.exists(), "clean cherry-pick unexpectedly ran pre-commit"
+
+    def test_premise_a_clean_revert_runs_neither_hook(self, repo: Path) -> None:
+        msg_fired = self._tracer(repo, "commit-msg")
+        pre_fired = self._tracer(repo, "pre-commit")
+
+        (repo / "y.txt").write_text("y\n")
+        git(repo, "add", "y.txt")
+        git(repo, "commit", "-m", "to be reverted")
+        assert msg_fired.exists() and pre_fired.exists(), "tracers not working"
+        msg_fired.unlink()
+        pre_fired.unlink()
+
+        git(repo, "revert", "--no-edit", "HEAD")
+
+        assert not msg_fired.exists(), (
+            "git 2.53 ran commit-msg on a CLEAN revert -- see the sibling test."
+        )
+        assert not pre_fired.exists(), "clean revert unexpectedly ran pre-commit"
+
+
 class TestCommitMsgNamingGate:
     """K-3 mechanised: a plan note landing on main must be NAMED in the message.
 
