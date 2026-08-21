@@ -583,14 +583,36 @@ def archive_sweep(
     conn: sqlite3.Connection,
     sweep_ref: str,
 ) -> dict[str, Any]:
-    """Archive an entire sweep (sweep-level archive — distinct from archive_items)."""
-    sweep_id = _resolve_sweep(conn, sweep_ref)
-    conn.execute(
-        "UPDATE codesweep_sweeps SET status = 'archived', updated_at = ? WHERE sweep_id = ?",
-        (utc_now(), sweep_id),
-    )
-    conn.commit()
-    return {"sweep_id": sweep_id, "status": "archived"}
+    """Archive an entire sweep (sweep-level archive — distinct from archive_items).
+
+    ONE transaction over ``_resolve_sweep`` and the UPDATE it feeds (CB-24,
+    CB-126). The read that decides is HIDDEN BEHIND THE HELPER, which is why a
+    grep for ``SELECT`` does not show this function as a read-modify-write; the
+    shape is the same one, and ``mark_items`` above wraps the same helper for the
+    same reason. A sweep deleted between resolve and UPDATE left the UPDATE
+    matching zero rows while the response still reported it archived.
+
+    The response is READ BACK from the UPDATE's ``RETURNING`` rather than
+    asserted, so ``status`` is the value the row now carries. Never read
+    ``rowcount`` on a ``RETURNING`` statement — it is 0 until the cursor is
+    exhausted, which reports nothing-happened over a landed write.
+
+    Do not restore a ``conn.commit()`` here: ``db.txn`` owns the commit, and
+    yields False under an ambient transaction so that committing would land the
+    caller's work.
+    """
+    with db.txn(conn):
+        sweep_id = _resolve_sweep(conn, sweep_ref)
+        row = conn.execute(
+            "UPDATE codesweep_sweeps SET status = 'archived', updated_at = ? "
+            "WHERE sweep_id = ? RETURNING sweep_id, status",
+            (utc_now(), sweep_id),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Sweep not found: {sweep_ref}")
+        archived_id, archived_status = row["sweep_id"], row["status"]
+
+    return {"sweep_id": archived_id, "status": archived_status}
 
 
 _DURATION_UNITS = {"d": 1, "w": 7, "m": 30, "y": 365}

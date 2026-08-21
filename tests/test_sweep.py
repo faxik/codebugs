@@ -1039,3 +1039,87 @@ class TestAddAndArchiveAreOneTransaction:
             "SELECT archived_at FROM codesweep_items WHERE item = 'x.py'"
         ).fetchone()["archived_at"]
         assert archived is None, "the nested call must roll back with its caller"
+
+
+class InjectingConnection(sqlite3.Connection):
+    """Runs a competing writer on ANOTHER connection just before a chosen statement.
+
+    Single-threaded on purpose: the hook fires inside the call under test, before
+    the statement it names is handed to SQLite, so the competing write lands in
+    exactly the window between the read that decides and the write that acts.
+
+    ``outcome`` records which writer won that window — the discriminator required
+    by CLAUDE.md, Testing (a), because after the fix the stored state is the same
+    state the unfixed code reaches on a quiet database. The competing connection
+    carries a short ``busy_timeout`` because after the fix it can never acquire the
+    lock, and waiting for it unboundedly is Testing (b).
+
+    This project deliberately has no shared ``conftest.py`` for fixtures, so this
+    class is duplicated in the test files that need it.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.inject_before: str | None = None
+        self.injection = None
+        self.outcome: str | None = None
+
+    def execute(self, sql, *args, **kwargs):
+        if self.inject_before is not None and self.inject_before in sql:
+            self.inject_before = None  # one-shot
+            try:
+                self.injection()
+                self.outcome = "landed"
+            except sqlite3.OperationalError as e:
+                self.outcome = f"refused: {e}"
+        return super().execute(sql, *args, **kwargs)
+
+
+def _file_conn(path, *, factory=sqlite3.Connection, busy_ms=5000):
+    c = sqlite3.connect(path, factory=factory)
+    c.row_factory = sqlite3.Row
+    c.execute(f"PRAGMA busy_timeout={busy_ms}")
+    return c
+
+
+class TestArchiveSweepIsOneTransaction:
+    """CB-126 / CB-24: ``"status": "archived"`` must be the write's receipt.
+
+    The read that decides is hidden behind ``_resolve_sweep``, which is why a grep
+    for ``SELECT`` does not show this function as a read-modify-write — the shape
+    is the same one. With no transaction spanning resolve and UPDATE, a sweep
+    deleted in the window left the UPDATE matching zero rows while the response
+    still reported the sweep archived.
+    """
+
+    def test_a_sweep_deleted_in_the_window_cannot_be_reported_as_archived(self, tmp_path):
+        path = str(tmp_path / "sweep.db")
+        main = _file_conn(path, factory=InjectingConnection)
+        sweep.ensure_schema(main)
+        sw = sweep.create_sweep(main, name="s")
+
+        other = _file_conn(path, busy_ms=150)
+
+        def competing_delete():
+            other.execute(
+                "DELETE FROM codesweep_sweeps WHERE sweep_id = ?", (sw["sweep_id"],)
+            )
+            other.commit()
+
+        main.injection = competing_delete
+        main.inject_before = "UPDATE codesweep_sweeps SET status = 'archived'"
+        try:
+            result = sweep.archive_sweep(main, sw["sweep_id"])
+        finally:
+            other.close()
+
+        assert main.outcome is not None, "the injection point was never reached"
+        assert main.outcome.startswith("refused"), main.outcome
+        assert result["status"] == "archived"
+        row = main.execute(
+            "SELECT status FROM codesweep_sweeps WHERE sweep_id = ?", (sw["sweep_id"],)
+        ).fetchone()
+        assert row is not None and row["status"] == "archived", (
+            "reported archived over a sweep row that is not archived"
+        )
+        main.close()
