@@ -1188,3 +1188,137 @@ class TestImportCliContract:
         c = sqlite3.connect(str(tmp_path / ".codebugs" / "findings.db"))
         assert c.execute("SELECT count(*) FROM codebench_runs").fetchone()[0] == 0
         c.close()
+
+
+class InjectingConnection(sqlite3.Connection):
+    """Runs a competing writer on ANOTHER connection just before a chosen statement.
+
+    Single-threaded on purpose: the hook fires inside the call under test, before
+    the statement it names is handed to SQLite, so the competing write lands in
+    exactly the window between the read that decides and the write that acts. No
+    thread scheduling, so nothing here can pass by timing luck.
+
+    ``outcome`` records which writer won that window, and that is the
+    discriminator the tests assert on (CLAUDE.md, Testing (a)): after the fix the
+    final state is identical to the state the unfixed code reaches on a quiet
+    database, so *which writer is refused* is the only thing that differs. The
+    competing connection carries a short ``busy_timeout`` because after the fix it
+    can never acquire the lock — waiting for it unboundedly is Testing (b).
+
+    This project deliberately has no shared ``conftest.py`` for fixtures, so this
+    class is duplicated in the test files that need it.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.inject_before: str | None = None
+        self.injection = None
+        self.outcome: str | None = None
+
+    def execute(self, sql, *args, **kwargs):
+        if self.inject_before is not None and self.inject_before in sql:
+            self.inject_before = None  # one-shot
+            try:
+                self.injection()
+                self.outcome = "landed"
+            except sqlite3.OperationalError as e:
+                self.outcome = f"refused: {e}"
+        return super().execute(sql, *args, **kwargs)
+
+
+def _bench_conn(path, *, factory=sqlite3.Connection, busy_ms=5000):
+    c = sqlite3.connect(path, factory=factory)
+    c.row_factory = sqlite3.Row
+    c.execute(f"PRAGMA busy_timeout={busy_ms}")
+    return c
+
+
+ONE_RESULT_CSV = "method,P@5\nbm25,0.72\n"
+
+
+class TestDeleteIsOneTransaction:
+    """CB-87 / CB-24: the reads that decide and the DELETEs that act are one unit.
+
+    Both functions read first and write after, with no transaction spanning the
+    pair, so a competing writer fits in the window. ``busy_timeout`` cannot help:
+    it serializes the writes and never touches the read that preceded them.
+    """
+
+    def test_a_result_inserted_in_the_window_cannot_falsify_results_removed(self, tmp_path):
+        """``results_removed`` must be what the DELETE removed, not what a COUNT predicted.
+
+        Unfixed, the COUNT runs before the DELETE outside any transaction: a result
+        row inserted between them is deleted and never counted, so the call reports
+        having removed fewer rows than it destroyed — a success-shaped report about
+        a write the caller cannot audit.
+        """
+        path = str(tmp_path / "bench.db")
+        main = _bench_conn(path, factory=InjectingConnection)
+        bench.ensure_schema(main)
+        bench.import_csv(main, benchmark="a", csv_data=ONE_RESULT_CSV, run_id="BE-1")
+        assert main.execute("SELECT COUNT(*) AS c FROM codebench_results").fetchone()["c"] == 1
+
+        other = _bench_conn(path, busy_ms=150)
+
+        def competing_result():
+            other.execute(
+                "INSERT INTO codebench_results (run_id, row_label, metric, value) "
+                "VALUES ('BE-1', 'dense', 'P@5', 0.9)"
+            )
+            other.commit()
+
+        main.injection = competing_result
+        main.inject_before = "DELETE FROM codebench_results WHERE run_id"
+        try:
+            result = bench.delete_run(main, "BE-1")
+        finally:
+            other.close()
+
+        assert main.outcome is not None, "the injection point was never reached"
+        removed_for_real = 2 if main.outcome == "landed" else 1
+        assert result["results_removed"] == removed_for_real
+        assert main.outcome.startswith("refused"), main.outcome
+        main.close()
+
+    def test_a_run_inserted_in_the_window_does_not_leave_orphaned_results(self, tmp_path):
+        """Data corruption, not a stale report: results go by a SNAPSHOT of run_ids
+        while the runs themselves go unconditionally by ``benchmark``.
+
+        A run imported into that window is absent from the snapshot, so its results
+        survive the first DELETE — and then the second DELETE removes its
+        ``codebench_runs`` row anyway, leaving results referencing a run that no
+        longer exists.
+        """
+        path = str(tmp_path / "bench.db")
+        main = _bench_conn(path, factory=InjectingConnection)
+        bench.ensure_schema(main)
+        bench.import_csv(main, benchmark="a", csv_data=ONE_RESULT_CSV, run_id="BE-1")
+
+        other = _bench_conn(path, busy_ms=150)
+
+        def competing_run():
+            other.execute(
+                "INSERT INTO codebench_runs (run_id, benchmark, date, created_at) "
+                "VALUES ('BE-2', 'a', '2026-08-21', '2026-08-21T00:00:00Z')"
+            )
+            other.execute(
+                "INSERT INTO codebench_results (run_id, row_label, metric, value) "
+                "VALUES ('BE-2', 'dense', 'P@5', 0.9)"
+            )
+            other.commit()
+
+        main.injection = competing_run
+        main.inject_before = "DELETE FROM codebench_results WHERE run_id IN"
+        try:
+            bench.delete_benchmark(main, "a")
+        finally:
+            other.close()
+
+        assert main.outcome is not None, "the injection point was never reached"
+        orphans = main.execute(
+            "SELECT COUNT(*) AS c FROM codebench_results "
+            "WHERE run_id NOT IN (SELECT run_id FROM codebench_runs)"
+        ).fetchone()["c"]
+        assert orphans == 0, "results left behind by a run deleted out from under them"
+        assert main.outcome.startswith("refused"), main.outcome
+        main.close()
