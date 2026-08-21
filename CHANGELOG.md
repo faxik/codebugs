@@ -158,9 +158,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   deleted concurrently used to come back as `{"stored": True}` over an UPDATE that
   matched zero rows; it now raises `KeyError`, the same exception (and message) a
   missing requirement has always produced. Nothing changes for a requirement that
-  exists. The counts reported by `bench.delete_run` / `delete_benchmark` are likewise
-  now the number of rows the DELETEs removed rather than a number read beforehand; on a
-  quiet database these are the same value.
+  exists. A second, narrower shift is declared rather than left to be discovered: with
+  existence now decided BY the UPDATE, a call that is wrong in BOTH ways — unknown id
+  AND an unpackable vector — raises `struct.error` from the pack where it used to raise
+  `KeyError`; either argument alone is unaffected.
+
+  The counts reported by `bench.delete_run` / `delete_benchmark` are likewise now the
+  number of rows the DELETEs removed rather than a number read beforehand. **On a quiet
+  database these are the same value, so no test can discriminate that half of the change
+  while the transaction holds** — it is defence-in-depth against the read and the write
+  disagreeing, and saying so is better than claiming it is covered. What the tests do
+  pin is the transaction: each of the four carries a probe that drives a competing writer
+  into the window and fails without it.
 - **A post-add hook that keeps the finding dict no longer watches response-only keys
   appear on it (CB-119).** Hooks were handed the very dict the response constructor
   then mutated, so a hook storing the reference for later would observe `was_new` and

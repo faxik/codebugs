@@ -66,6 +66,14 @@ def store_embedding(
     packed BEFORE the block, so a malformed one is refused without taking the
     write lock.
 
+    One more precedence shift falls out of that and is declared rather than
+    papered over (Codex diff review): with existence now decided BY the UPDATE
+    there is no earlier point at which a missing id can be detected, so a call
+    that is wrong in BOTH ways — unknown ``req_id`` AND an unpackable vector —
+    now raises ``struct.error`` from the pack where it used to raise ``KeyError``
+    from the existence read. Either argument alone is unaffected. Restoring the
+    old order would mean re-adding the very read this removed.
+
     Raises:
         KeyError: no requirement with this id. CHANGED by CB-125: a requirement
             deleted concurrently now reaches this arm instead of being reported
