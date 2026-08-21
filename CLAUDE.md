@@ -110,8 +110,12 @@ or simply an upstream whose `main` holds untyped work all land content here. Rep
 local discriminator, and refusing remote refs instead would break `git pull` — the worse failure.
 Same shape as the `--separate-git-dir` misbinding: **when a rule cannot be decided from local
 evidence, supply external metadata rather than deepening the guess.** The external metadata is
-CB-59's server-side protection, and `TestKnownLimits` pins that the bypass still reproduces so the day
-it stops being true someone re-reads this instead of trusting a stale claim.
+CB-59's server-side protection — **but only the half of it that was actually enabled.** The ratified
+scope (CI limits, item 4) refuses a force-push and a deletion of `origin/main`, so upstream's history
+cannot be rewritten under you; an upstream `main` that simply *holds untyped work* — the failure mode
+named two sentences above — is untouched, because require-PR is deliberately off. That half of the
+limit therefore stays open, and `TestKnownLimits` pins that the bypass still reproduces so the day it
+stops being true someone re-reads this instead of trusting a stale claim.
 
 Note the scope was narrowed twice under review. It first trusted **any** `<remote>/main`, then any
 **configured** remote's — at which point `git remote add junk <anything>` plus a fetch was still a
@@ -213,11 +217,31 @@ this paragraph overclaimed.**
    allowlisted path and deleted source from main. Both this job and the pre-commit hook had the
    defect; both are fixed and both are pinned.
 4. **A workflow cannot refuse a push by itself** — it reports afterwards. So this job is an **alarm**;
-   the **gate** is branch protection on `origin/main`: require pull requests, forbid direct and force
-   pushes, mark `ci.yml`'s `tests` job required, and **disable squash- and rebase-merging** so only
-   merge commits can land. That is repository configuration, not committed state. Enabling it is the
-   one step in this section that cannot be done from inside the repository, and **CB-59 is not closed
-   until it is.**
+   the **gate** is branch protection on `origin/main`, and since 2026-08-21 it is ON — at a
+   deliberately narrower scope than this list originally demanded. **Enabled: force pushes refused,
+   branch deletion refused. NOT enabled: require-pull-request**, and with it the two settings that
+   only mean anything behind a PR — marking `ci.yml`'s `tests` job required, and disabling squash-
+   and rebase-merging. That narrower scope was **ratified by the owner as sufficient for CB-59**, on
+   this reasoning: force-push and deletion are the class **nothing local can catch**, because they
+   rewrite or destroy history every local hook has already approved, whereas require-PR and a
+   required check constrain *how work arrives* — which `merge.ff=false`, the two hooks and
+   `_guard_enforcement_armed` already govern **for a clone that has run `tools/install-hooks.sh`**.
+   CB-59 is closed at that scope, not at this paragraph's original four items. It remains repository
+   configuration, not committed state, so nothing in this tree can verify or restore it.
+
+   **Two residuals, measured rather than assumed, because a gate described better than it behaves is
+   precisely what this list exists to prevent.** First: an **unarmed** clone can still push a
+   non-merge commit straight to `main`, since require-PR is off — `main-invariants.yml` stays the
+   alarm for that, not a gate. Second, and *not* recorded when the protection was enabled:
+   **`enforce_admins` is `false`**, so every rule above binds non-admin actors only, while the sole
+   account that pushes here is an admin. Measured, not inferred — `gh api
+   repos/faxik/codebugs/branches/main/protection` returns `"allow_force_pushes":{"enabled":false}`
+   and `"allow_deletions":{"enabled":false}` beside `"enforce_admins":{"enabled":false}`; `gh api
+   repos/faxik/codebugs --jq .permissions.admin` returns `true`; and `gh api
+   repos/faxik/codebugs/rulesets` returns `[]`, so no ruleset supplies what the branch rule leaves
+   out. Against a leaked token or a future collaborator the protection is real; against the owner's
+   own credentials it is advisory. Turning `enforce_admins` on is the owner's call and is **not**
+   assumed here.
 5. **`main-invariants.yml` deliberately does not subscribe to `pull_request`.** It used to, guarded
    by `if: github.event_name != 'pull_request'` — and a job skipped by an `if:` is reported as
    **passing** for required-status-check purposes, so marking it required would have produced a check
