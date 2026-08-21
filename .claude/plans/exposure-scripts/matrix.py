@@ -359,7 +359,7 @@ def signature_loc(fn: ast.FunctionDef) -> int:
     parameter declarations -- which is precisely what a declaration format REPLACES, so
     omitting them biased the answer against generation.
     """
-    span = end_of(fn) - fn.lineno + 1
+    span = end_of(fn) - def_start(fn) + 1
     d, c, _ = body_shape(fn)
     return span - d - c
 
@@ -394,6 +394,21 @@ def collect_method_capabilities(root: str) -> list[tuple[str, int, str, list[str
                     if "conn" in args[:2]:
                         out.append((f"{mod}.{cls.name}.{fn.name}", fn.lineno, path, args))
     return out
+
+
+def def_start(fn: ast.FunctionDef) -> int:
+    """First line of the definition INCLUDING its decorators.
+
+    `ast.FunctionDef.lineno` points at the `def`, not at `@mcp.tool()` above it, so
+    `end_lineno - lineno + 1` silently drops one line per decorated tool -- 74 lines
+    across the MCP layer. The partition then "checked out" (860 + 426 + 388 = 1674)
+    while 1674 itself was short, which is the worst kind of arithmetic: internally
+    consistent and wrong at the boundary. Found by cross-model review after the
+    partition had already been "fixed" once.
+    """
+    if fn.decorator_list:
+        return min(d.lineno for d in fn.decorator_list)
+    return fn.lineno
 
 
 def param_names(fn: ast.FunctionDef) -> list[str]:
@@ -450,6 +465,7 @@ def collect(root: str):
     by_short: dict[str, list[str]] = {}
     surfaces: list[Surface] = []
     handlers: dict[tuple[str, str], ast.FunctionDef] = {}
+    all_funcs: dict[tuple[str, str], ast.FunctionDef] = {}
     imports: dict[str, dict[str, str]] = {}
     trees: dict[str, ast.Module] = {}
     files = 0
@@ -471,11 +487,25 @@ def collect(root: str):
             # the CLI column read as empty for the majority -- caught by checking
             # the run against blockers.py, whose handlers ARE module-level and did
             # resolve. Walk the whole tree.
+            # Collect EVERY function, then resolve handlers from the `commands`
+            # wiring below. Keying on the name prefix `_cmd_` was the last name-based
+            # enumeration in this script, and it leaked: `findings._print_fold_report`,
+            # `sweep._parse_csv` and `sweep._parse_tags` are nested inside `register_cli`,
+            # are not named `_cmd_*`, and were therefore charged to "parser declaration"
+            # -- 59 LOC of per-verb rendering logic counted as boilerplate. The wiring
+            # NAMES the handler, so the wiring is the primitive; the prefix was a guess
+            # that happened to be right 62 times out of 65.
             for anynode in ast.walk(tree):
-                if isinstance(anynode, ast.FunctionDef) and anynode.name.startswith("_cmd_"):
-                    handlers[(mod, anynode.name)] = anynode
+                if isinstance(anynode, ast.FunctionDef):
+                    all_funcs[(mod, anynode.name)] = anynode
 
-            for node in tree.body:
+            # Walk the WHOLE tree, not `tree.body`. Module-level-only scanning was
+            # the second surviving name/scope enumeration: a registrar defined inside
+            # a class or a factory would be invisible, and the CLI measurement used
+            # ast.walk on one half and tree.body on the other -- two scopes for one
+            # question. Review caught the claim "a fifth form of this class cannot
+            # exist" being false while it was printed in the document.
+            for node in ast.walk(tree):
                 if not isinstance(node, ast.FunctionDef):
                     continue
                 # --- domain capability ---
@@ -494,22 +524,19 @@ def collect(root: str):
                         by_short.setdefault(c.name, []).append(c.qual)
                 # --- MCP registrar ---
                 # Keyed on the DECORATOR, not on an enclosing function named
-                # `register_tools`. Scoping to a registrar NAME is an enumeration of
-                # registrar names, and this script has already been wrong four times by
-                # enumerating a form and believing the list complete. The primitive
-                # cannot be missed the way a name can.
-                if True:
-                    for inner in ast.walk(node):
-                        if not isinstance(inner, ast.FunctionDef):
-                            continue
-                        if not any(decorator_is_mcp_tool(d) for d in inner.decorator_list):
-                            continue
+                # `register_tools`, and matched on THIS node only. Scanning
+                # `ast.walk(node)` from inside a loop that is itself `ast.walk(tree)`
+                # collected every tool TWICE -- once via its registrar and once via
+                # itself -- which silently doubled the MCP layer. Caught by the numbers
+                # jumping implausibly, not by the tests: the script has none.
+                if any(decorator_is_mcp_tool(d) for d in node.decorator_list):
+                    for inner in (node,):
                         surfaces.append(
                             Surface(
                                 kind="mcp",
                                 module=mod,
                                 name=mcp_tool_name(inner),
-                                lineno=inner.lineno,
+                                lineno=def_start(inner),
                                 endline=end_of(inner),
                                 params=param_names(inner),
                                 has_doc=ast.get_docstring(inner) is not None,
@@ -575,6 +602,13 @@ def collect(root: str):
                                 handler=wired.get(verb),
                             )
                         )
+
+    # Resolve handlers from the wiring: a handler is whatever `commands[...]` maps to.
+    for s_ in surfaces:
+        if s_.kind == "cli" and s_.handler:
+            fn = all_funcs.get((s_.module, s_.handler))
+            if fn is not None:
+                handlers[(s_.module, s_.handler)] = fn
 
     return caps, by_short, surfaces, handlers, imports, trees, files
 
@@ -753,6 +787,29 @@ def main() -> int:
         print("  UNDECLARED remainder of 'neither' -- genuinely unexposed, NOT excused:")
         for q in sorted(undeclared_neither):
             print(f"      {q}   ({caps[q].loc} LOC)")
+        src_callers: dict[str, int] = {}
+        for q in undeclared_neither:
+            short = q.rsplit(".", 1)[1]
+            n = 0
+            for _m2, t2 in _trees.items():
+                for node2 in ast.walk(t2):
+                    if isinstance(node2, ast.Call):
+                        _q2, nm2 = call_name(node2)
+                        if nm2 == short:
+                            n += 1
+            src_callers[q] = n
+        unreachable = [q for q in undeclared_neither if src_callers[q] == 0]
+        unreachable_loc = sum(caps[q].loc for q in unreachable)
+        print()
+        print("  BUILT BUT UNREACHABLE -- no surface AND no in-package caller:")
+        for q in sorted(unreachable):
+            print(f"      {q}   ({caps[q].loc} LOC)")
+        print(f"    total: {unreachable_loc} LOC across {len(unreachable)} functions")
+        print()
+        print("    COMPUTED, not hand-picked. The document's option (E) quoted 424 LOC over")
+        print("    FOUR functions chosen by eye from this same list, silently leaving out")
+        print("    two others in the identical state -- enumeration-vs-population, in the")
+        print("    one row the document recommended. Review caught it.")
         print()
         print("  Anything not in NON_CAPABILITIES stays counted. An exclusion needs a")
         print("  written reason to exist, so the denominator cannot be quietly trimmed")
@@ -846,14 +903,14 @@ def main() -> int:
             sh = cli_handler_shape(fn)
             for k in agg:
                 agg[k] += 1 if sh[k] else 0
-        pspan = sum(s_.endline - s_.lineno + 1 for s_ in cli_verbs)
-        print()
-        print("  CLI LAYER -- parser and handler counted SEPARATELY and each exactly once:")
-        print(f"    parser declarations             : {pspan:>5} LOC over {len(cli_verbs)} verbs")
-        print(f"    distinct handlers               : {hspan:>5} LOC over {len(seen_handlers)} handlers")
-        print(f"    CLI layer total                 : {pspan + hspan:>5} LOC")
-        print("    (the first version overwrote the parser span with the handler span and")
-        print("     printed the handler figure under the label 'parser + handler')")
+        # The block that stood here printed a THIRD parser figure (the sum of
+        # `add_parser` CALL spans, 106) and a fourth total (3357) beside the
+        # registrar-span figure (647) and its total (3898) computed below. One run,
+        # two answers to "how many LOC is the parser layer", both labelled exact.
+        # Found by cross-model review. This is the THIRD time in one session I added a
+        # corrected measurement and left the superseded one standing -- the same shape
+        # as the stale summary block removed earlier and the stale "CLI verbs: 60" left
+        # in the document. Superseding a number means DELETING the old one.
         print()
         print(f"      open a connection themselves    : {agg['connects']:>3}"
               "   (db.connect() + close, copied per handler)")
@@ -862,8 +919,12 @@ def main() -> int:
         print(f"      carry the JSONDecodeError arm   : {agg['has_jsondecode_arm']:>3}"
               "   <-- CB-55's copy-maintained ordering")
         print(f"      call sys.exit                   : {agg['exits']:>3}")
+        # The "SURFACE LAYER TOTAL (corrected)" line that stood here was itself
+        # superseded: it summed the `add_parser` CALL spans (106) rather than the
+        # registrar spans minus nested handlers (647), giving 3357 against the 3898
+        # printed below. Two totals in one run, each labelled corrected. Deleted, not
+        # relabelled -- the surviving total is computed in the block below.
         print()
-        print(f"  SURFACE LAYER TOTAL (corrected) : {mcp_loc + pspan + hspan} LOC")
         print(f"  domain capability bodies        : {cap_loc} LOC over {len(caps)} functions")
         print()
         print("  The surface/domain RATIO is deliberately NOT printed. Review showed the")
@@ -889,33 +950,81 @@ def main() -> int:
                     if nm == "connect":
                         cli_boiler += end_of(n) - n.lineno + 1
 
+        # MEASURED DIRECTLY: the spans of the `add_parser`/`add_argument` statements
+        # themselves. The previous version computed `registrar spans - nested handlers`,
+        # a SET-DIFFERENCE RESIDUE, and labelled the result "pure parser declaration".
+        # Review decomposed the 647 it produced: only 333 was parser statements; the
+        # rest was 119 blank lines, 94 LOC of `commands` wiring, 59 LOC of non-handler
+        # helper functions, 25 imports, 12 def lines and 5 comments. A residue is not a
+        # measurement, and this one inflated the ceiling by ~2x.
+        parser_decl = 0
         reg_span = 0
         for _mod, tree in _trees.items():
             for fn in ast.walk(tree):
-                if isinstance(fn, ast.FunctionDef) and _calls_add_parser(fn):
-                    reg_span += end_of(fn) - fn.lineno + 1
-        nested = 0
-        for (hmod, _hname), hfn in handlers.items():
-            tree = _trees.get(hmod)
-            if tree is None:
+                if not (isinstance(fn, ast.FunctionDef) and _calls_add_parser(fn)):
+                    continue
+                reg_span += end_of(fn) - fn.lineno + 1
+                nested_h = [
+                    h for (hm, _hn), h in handlers.items()
+                    if hm == _mod and h.lineno > fn.lineno and end_of(h) <= end_of(fn)
+                ]
+                for n in ast.walk(fn):
+                    if not isinstance(n, ast.Call):
+                        continue
+                    if any(h.lineno <= n.lineno <= end_of(h) for h in nested_h):
+                        continue
+                    _q, nm = call_name(n)
+                    if nm in ("add_parser", "add_argument"):
+                        parser_decl += end_of(n) - n.lineno + 1
+
+        help_loc = 0
+        for _mod, tree in _trees.items():
+            for fn in ast.walk(tree):
+                if not (isinstance(fn, ast.FunctionDef) and _calls_add_parser(fn)):
+                    continue
+                nested_h = [
+                    h for (hm, _hn), h in handlers.items()
+                    if hm == _mod and h.lineno > fn.lineno and end_of(h) <= end_of(fn)
+                ]
+                for n in ast.walk(fn):
+                    if not isinstance(n, ast.Call):
+                        continue
+                    if any(h.lineno <= n.lineno <= end_of(h) for h in nested_h):
+                        continue
+                    _q, nm = call_name(n)
+                    if nm not in ("add_parser", "add_argument"):
+                        continue
+                    for kw in n.keywords:
+                        if kw.arg == "help":
+                            help_loc += end_of(kw.value) - kw.value.lineno + 1
+
+        jde_loc = 0
+        for key in seen_handlers:
+            fn = handlers.get(key)
+            if fn is None:
                 continue
-            for outer in ast.walk(tree):
-                if (
-                    isinstance(outer, ast.FunctionDef)
-                    and _calls_add_parser(outer)
-                    and outer.lineno < hfn.lineno
-                    and end_of(hfn) <= end_of(outer)
-                ):
-                    nested += end_of(hfn) - hfn.lineno + 1
-                    break
-        parser_decl = reg_span - nested
+            for n in ast.walk(fn):
+                if isinstance(n, ast.ExceptHandler) and n.type is not None:
+                    if "JSONDecodeError" in ast.dump(n.type):
+                        jde_loc += end_of(n) - n.lineno + 1
 
         print()
         print("  CLI SIDE, REMOVABLE -- measured in LOC, not in site counts:")
         print(f"    connect + try/finally/except boilerplate : {cli_boiler:>5} LOC"
               f"  across {len(seen_handlers)} handlers")
+        print(f"      of which the JSONDecodeError arms      : {jde_loc:>5} LOC"
+              "  <-- NOT freely removable")
+        print("        CB-55's arms, whose ORDERING CLAUDE.md makes load-bearing and whose")
+        print("        centralisation CB-86 considered and REFUSED (a central arm cannot")
+        print("        tell a post-commit failure from an input error). Option (B) is")
+        print("        required to preserve them -- so they cannot also be counted as")
+        print("        guaranteed-removable for option (A). Review caught the document")
+        print("        naming this risk for (B) while spending the same lines on (A).")
         print(f"    pure parser declaration                  : {parser_decl:>5} LOC"
               "  (add_parser/add_argument, outside handlers)")
+        print(f"      of which `help=` TEXT                  : {help_loc:>5} LOC"
+              "  <-- RELOCATES, like a docstring")
+        print(f"      structural remainder                   : {parser_decl - help_loc:>5} LOC")
         print()
         print("    The first version reported this side as SITE COUNTS only (50 / 52 / 35)")
         print("    and never in LOC, while option (A) generates BOTH surfaces. Comparing a")
@@ -927,9 +1036,26 @@ def main() -> int:
         mid = floor + tsig["T1"] + tsig["T2"] + tbody["T2"]
         ceil_ = mid + parser_decl
         surf_total = mcp_loc + hspan + parser_decl
-        print(f"    FLOOR  (MCP T1 body + CLI boilerplate)      : {floor:>5} LOC")
+        print(f"    LOW    (MCP T1 body + CLI boilerplate)      : {floor:>5} LOC")
+        print(f"    LOW minus the CB-86-protected arms          : {floor - jde_loc:>5} LOC"
+              "  <-- the defensible low end")
         print(f"    MID    (+ T1/T2 signatures and T2 bodies)   : {mid:>5} LOC")
-        print(f"    CEILING(+ parser declaration)               : {ceil_:>5} LOC")
+        print(f"    HIGH   (+ parser declaration)               : {ceil_:>5} LOC")
+        print(f"    HIGH minus relocating `help=` text          : {ceil_ - help_loc:>5} LOC"
+              "  <-- the comparable upper bound")
+        print()
+        print("    The last line exists because the earlier HIGH was accounted")
+        print("    INCONSISTENTLY: 860 LOC of MCP docstrings were EXCLUDED on the grounds")
+        print("    that they relocate rather than vanish, while the same-natured `help=`")
+        print("    text inside the parser figure was INCLUDED. Two objects of one kind,")
+        print("    counted two ways -- caught by cross-model review.")
+        print()
+        print("    'LOW' is an ESTIMATE, not a proven floor, and the label was corrected")
+        print("    under review. The CLI boilerplate figure counts whole `except` handler")
+        print("    spans, which include user-visible diagnostics and `sys.exit` calls --")
+        print("    behaviour a generator would have to REPRODUCE, not delete. It is a")
+        print("    syntactic bucket. Calling it a floor claimed a guarantee the measurement")
+        print("    does not make.")
         print(f"    corrected surface layer total               : {surf_total:>5} LOC")
         print(f"    => removable is {100.0 * floor / surf_total:.0f}%-{100.0 * ceil_ / surf_total:.0f}%"
               " of the surface layer, NOT the 14% first reported.")
