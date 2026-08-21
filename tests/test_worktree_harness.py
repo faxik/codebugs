@@ -2480,7 +2480,12 @@ class TestMergeSubjectDerivation:
 
     BRANCH_FIRST = "fix(cb-999): THE BRANCH'S OWN WORK, first commit"
     BRANCH_LAST = "refactor(cb-999): close the altitude findings"
-    FOREIGN = "docs(bt-9): FOREIGN plan note naming CB-777/778/779"
+    # Names OTHER.md because the commit-msg naming gate requires it — this
+    # fixture models an ORDINARY, legitimate plan-note landing on main while a
+    # branch is open, and an ordinary one now names its note. Reaching for
+    # --no-verify here instead would have made the fixture model a state the
+    # harness no longer permits, and quietly weakened a CB-116 regression test.
+    FOREIGN = "docs(bt-9): FOREIGN plan note OTHER.md naming CB-777/778/779"
 
     @staticmethod
     def _commit(repo: Path, when: str, *args: str) -> None:
