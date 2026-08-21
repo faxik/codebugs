@@ -2931,6 +2931,42 @@ class TestCommitMsgNamingGate:
         assert r.returncode != 0
         assert "T20-brief.md" in r.stderr
 
+    def test_a_separator_in_the_name_cannot_launder_a_shorter_note(self, repo: Path) -> None:
+        """A REPRODUCED bypass, found by cross-model review and closed here.
+
+        `_is_boundary` treats an ASCII space as a separator, so with `a b.md`
+        and `b.md` both staged and only `a b.md` named, the occurrence of
+        `b.md` INSIDE `a b.md` is flanked by a space and the token end — two
+        boundaries — and the stranger's note landed unnamed. Measured before
+        the fix: rc=0, both files committed.
+        """
+        self._install(repo)
+        mine = self._plan(repo, "a b.md")
+        theirs = self._plan(repo, "b.md")
+        r = self._add_and_commit(repo, "docs: my note a b.md", mine, theirs)
+        assert r.returncode != 0
+
+    def test_a_name_the_matcher_cannot_judge_is_refused_not_guessed(self, repo: Path) -> None:
+        """The closure is BY CONSTRUCTION: the matcher and the admissible-name
+        rule are one predicate, so a name containing a separator is refused
+        outright rather than judged by a rule that cannot see it. Costs
+        nothing today — 0 of the repo's 94 plan notes carry such a character.
+        """
+        self._install(repo)
+        p = self._plan(repo, "a b.md")
+        r = self._add_and_commit(repo, "docs: naming a b.md exactly", p)
+        assert r.returncode != 0
+        assert "cannot judge" in r.stderr
+
+    def test_a_non_ascii_name_is_still_judgeable(self, repo: Path) -> None:
+        """The pair for the test above: a non-ASCII BYTE is a NAME byte, so the
+        new refusal must not catch the Cyrillic note names this repo uses.
+        """
+        self._install(repo)
+        p = self._plan(repo, "Т-20-заметка.md")
+        r = self._add_and_commit(repo, "docs: Т-20-заметка.md", p)
+        assert r.returncode == 0, r.stderr
+
     # ---- fail closed: the hook must refuse when it cannot look ----------
 
     def test_an_empty_message_is_refused(self, repo: Path) -> None:

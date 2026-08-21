@@ -170,7 +170,7 @@ false refusal of every non-ASCII plan note rather than a one-off. The test that 
 says "both readers", because a count in a name is a count that goes stale.
 
 **A plan note landing on main must be NAMED in the commit message, and the mechanism is a
-`commit-msg` hook — NOT the pre-commit hook the card proposed.** The rule this mechanises is that
+`commit-msg` hook — NOT the pre-commit hook originally specified.** The rule this mechanises is that
 parallel sessions add files to main **by name, never by directory**: `.claude/plans/` is the one
 place they may all write, and `git add .claude/plans/` swept an UNTRACKED note belonging to another
 direction into a commit describing unrelated work. The bytes survived; the **provenance** did not.
@@ -191,7 +191,7 @@ all had their say. `test_premise_pre_commit_cannot_see_the_message` pins it, so 
 the behaviour turns the suite red instead of silently justifying a move back.
 
 **Two auto-generated sources inside the message file would each have made this a gate that cannot
-fire, and neither was on the card.** git's default template lists the staged paths as comment lines
+fire, and neither was foreseen when the rule was specified.** git's default template lists the staged paths as comment lines
 (`#	new file:   .claude/plans/foo.md`), so every editor-based commit would have passed vacuously;
 and `git commit -v` appends the whole diff below the scissors line, where every hunk header names
 its file — and `git stripspace --strip-comments` does **not** remove that, because a diff is not a
@@ -214,6 +214,20 @@ space or an ASCII quote around it. `LC_ALL=C` pins byte semantics so the verdict
 committer's locale — **honest scope: that line is determinism insurance and no test discriminates
 it**, since under a UTF-8 locale codepoint-wise classification happens to agree on every case here.
 
+**And the matcher decides which names it will judge, which is the same predicate and not a second
+one — cross-model review reproduced the hole that made this necessary.** A space is a boundary, so
+with `a b.md` and `b.md` both staged and only `a b.md` named, the occurrence of `b.md` INSIDE it is
+flanked by a space and the token end — two boundaries — and the stranger's note landed unnamed
+(measured: rc=0, both files committed). So a staged basename containing a space or ASCII punctuation
+outside `[A-Za-z0-9._-]` is **refused outright** rather than judged by a rule that cannot see it.
+That closes the class BY CONSTRUCTION, and the proof is two lines: if every staged basename is made
+only of name bytes, an occurrence of one strictly inside a longer one always has a name byte on at
+least one side, so it can never be flanked by two boundaries. The cost was measured before it was
+accepted — **0 of this repo's 94 plan notes carry such a character**, the convention is already ASCII
+slugs, and non-ASCII names are untouched because a non-ASCII byte is a NAME byte. The general shape
+is one this document keeps restating: a check that validates elements cannot validate their
+composition, and here the composition is *the matcher plus the set of names it is asked to match*.
+
 **Scope, and what it deliberately does not touch.** Only `main`, and only `.claude/plans/*.md` —
 on a branch there are no foreign untracked notes to sweep, so the rule there would be pure friction
 on every `wip` commit, and everything else on main is pre-commit's to refuse (duplicating that
@@ -235,10 +249,15 @@ checkout and gates on whether the path has history, so adding the clause in the 
 introduces the source makes that change unlandable by the harness it extends — and `install-hooks.sh`
 cannot pre-arm it either, because it symlinks into main's `tools/`, where the file does not exist
 yet. Closing it is a one-line follow-up once the source is on main, and the structural test
-`test_installer_arms_the_commit_msg_hook_too` is what holds the line meanwhile. The gate is also invisible to the CI alarm,
-which reads paths and not messages.
+`test_installer_arms_the_commit_msg_hook_too` is what holds the line meanwhile. The gate is also
+invisible to the CI alarm, which reads paths and not messages, and to `--amend`: an amend that
+changes only the message stages nothing against HEAD, so a note already landed under a naming
+message can have that message rewritten. Both are authored acts rather than accidents, which is
+what this hook is for.
 
-**Two hooks, disjoint halves, neither redundant — and they must not disagree.** A CONFLICTED merge
+**Two of the three hooks share a predicate — disjoint halves, neither redundant, and they must not
+disagree.** (The third, commit-msg, shares nothing with them: it reads the message, they read refs,
+and the paragraphs above are its whole story.) A CONFLICTED merge
 never reaches `pre-merge-commit`, and neither does a merge this hook has already refused: both are
 finished with `git commit`, which fires `pre-commit`. So the predicate is duplicated **byte-identically**
 into `pre-commit-hook.sh` between `# ---8<--- SHARED MERGE-GATE PREDICATE` markers, and a test

@@ -207,6 +207,35 @@ _is_boundary() {
     (( n >= 0 && n < 128 ))                       # other ASCII separates; >=0x80 does not
 }
 
+# A basename this matcher can JUDGE at all: every byte is a name byte.
+#
+# THIS IS NOT COSMETIC — without it the token rule has a laundering hole, and it
+# was reproduced before it was closed. `_is_boundary` treats an ASCII space as a
+# separator, so with `a b.md` and `b.md` both staged and only `a b.md` named, the
+# occurrence of `b.md` INSIDE `a b.md` is flanked by a space and the end of the
+# token — two boundaries — and the stranger's `b.md` lands unnamed. Measured:
+# rc=0, both files committed, message naming one.
+#
+# Refusing such a name closes the class BY CONSTRUCTION rather than by a special
+# case, and the proof is short: if every staged basename is made only of name
+# bytes, then an occurrence of B strictly inside a longer B2 always has a name
+# byte on at least one side, so it can never be flanked by two boundaries. The
+# matcher and the admissible-name rule are ONE predicate, which is why they
+# cannot drift apart.
+#
+# The cost is measured, not guessed: 0 of this repo's 94 plan notes contain any
+# such character — the convention is already ASCII slugs — and non-ASCII names
+# are unaffected, because a non-ASCII byte is a NAME byte. So this refuses a
+# name nobody writes, loudly, with a rename as the fix.
+_has_separator() {
+    local s="$1" i c
+    for (( i = 0; i < ${#s}; i++ )); do
+        c="${s:i:1}"
+        _is_boundary "${c}" && return 0
+    done
+    return 1
+}
+
 _is_named() {
     local hay="$1" base="$2" pre rest before after
     rest="${hay}"
@@ -240,12 +269,37 @@ _is_named() {
 # this hook may never produce.
 _examined=0
 _unnamed=""
+_unmatchable=""
 while read -r _path || [[ -n "${_path}" ]]; do
     [[ -z "${_path}" ]] && continue
     _examined=$((_examined + 1))
     _base="${_path##*/}"
+    if _has_separator "${_base}"; then
+        _unmatchable="${_unmatchable}    ${_path}"$'\n'
+        continue
+    fi
     _is_named "${body}" "${_base}" || _unnamed="${_unnamed}    ${_path}"$'\n'
 done <<< "${plans}"
+
+if [[ -n "${_unmatchable}" ]]; then
+    echo "ERROR: refusing a plan note whose name this hook cannot judge." >&2
+    echo "" >&2
+    echo "  Contains a space or ASCII punctuation outside [A-Za-z0-9._-]:" >&2
+    printf '%s' "${_unmatchable}" >&2
+    echo "" >&2
+    echo "  The naming rule matches a basename as a TOKEN, using those same" >&2
+    echo "  characters to decide where a name begins and ends. A note whose own" >&2
+    echo "  name contains one of them breaks that: with '.claude/plans/a b.md'" >&2
+    echo "  and '.claude/plans/b.md' both staged, naming only the first would" >&2
+    echo "  silently satisfy the rule for the second — the laundering this hook" >&2
+    echo "  exists to stop. Refusing the name is the fix; guessing is not." >&2
+    echo "" >&2
+    echo "  Rename it (0 of this repo's plan notes need such a character):" >&2
+    echo "    git mv -- '<the file above>' .claude/plans/<slug>.md" >&2
+    echo "" >&2
+    echo "  Deliberate exception: git commit --no-verify" >&2
+    exit 1
+fi
 
 if [[ "${_examined}" -eq 0 ]]; then
     echo "ERROR: staged plan notes were found but none could be examined." >&2
