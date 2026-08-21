@@ -239,7 +239,12 @@ true at `pre-merge-commit` time, which runs earlier and resolves the merge in me
 `commit-msg` time git **has** written it, for clean and conflicted merges alike (measured, and
 pinned, because if a future git stops doing it every integration would be refused). It is read
 fail-closed with a count, exactly like pre-commit's arm: an empty `MERGE_HEAD` must not read as an
-exempt one.
+exempt one. **What the exemption therefore costs, said plainly:** a *deliberate* operator can put the
+repo into a merge state (`git merge --no-commit`, or any conflicted merge), stage an unnamed note,
+and commit — the naming rule is skipped. That is not a hole this gate opened; `pre-commit`'s merge
+exemption already waves the whole staged set through on that path, which is the same evil-merge blind
+spot the CI-limits list records for `main-invariants.yml`. The gate is an accident-stopper, and a
+merge state is not something one enters by accident.
 
 **What it does NOT close, stated rather than left to be discovered.** `_guard_enforcement_armed`
 does **not** yet demand this hook, so a clone armed before it landed keeps its other two hooks and
