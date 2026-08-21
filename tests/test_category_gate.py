@@ -202,13 +202,39 @@ class TestLegacyWeirdRows:
     def test_a_non_string_stored_category_does_not_brick_the_gate(self, conn):
         """SQLite's dynamic typing lets a raw or explicit-id write store a
         non-string category; the canon read must skip it, not raise on every
-        future observation add."""
+        future observation add. Pins the `isinstance(row["category"], str)`
+        policy in `_existing_categories` — remove it and this test fails,
+        because `normalize_category` refuses a non-string at input.
+
+        **CB-122: this test used to insert the integer `5`, and the case it
+        declared was unreachable.** `category` is `TEXT NOT NULL`, so TEXT
+        affinity converts an inserted number and the row comes back as `'5'` —
+        a `str`, which the policy accepts, so the test passed identically with
+        the policy present and absent. BLOB is the one storage class TEXT
+        affinity leaves alone, which is why the fixture casts.
+
+        **The general rule this cost us twice: a fixture a test builds itself
+        must ASSERT that it is what it claims to be.** The other instance was
+        `TestKnownLimits` passing `"--git-path hooks"` to `git rev-parse` as one
+        argv token (CLAUDE.md) — `rev-parse` echoed it back, exit 0, no hook was
+        ever installed, and the assertion could not fail. Both are the same
+        shape: a setup step that silently did something else, and nothing
+        looking. The form here is copied from
+        `tests/test_category_fold.py::TestNonStringCategoryIsSkipped`, including
+        that assertion.
+        """
         conn.execute(
             "INSERT INTO findings (id, severity, category, file, description,"
-            " created_at, updated_at) VALUES ('CB-666', 'low', 5, 'f.py', 'weird',"
-            " '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+            " created_at, updated_at) VALUES ('CB-666', 'low', CAST(5 AS BLOB),"
+            " 'f.py', 'weird', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
         )
         conn.commit()
+        stored = conn.execute("SELECT category FROM findings WHERE id = 'CB-666'").fetchone()
+        assert not isinstance(stored["category"], str), (
+            "fixture did not build the declared case: the stored category is a str, "
+            "so the skip policy is never exercised"
+        )
+
         result = _add(conn, cat="normal_cat", new_category=True)
         assert result["category"] == "normal_cat"
 
