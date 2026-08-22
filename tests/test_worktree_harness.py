@@ -3815,8 +3815,9 @@ class TestInterpreterMatchesMain:
         `_interpreter_version_is_sane` into `return 0` still leaves that test
         green, and left the whole 248-test suite green with it (CB-140).
 
-        The state neither check catches alone is a NON-version that
-        PREFIX-MATCHES the pin. A bare pin of "3" accepts anything spelled
+        The state the pin check ALONE cannot catch — where only the shape
+        check stands between this and CB-135 recurring — is a NON-version
+        that PREFIX-MATCHES the pin. A bare pin of "3" accepts anything spelled
         "3." + more as if it were a legitimate patch release, so "3.0" clears
         the pin-outranking check by looking like one — while still failing
         the strict `X.Y.Z` shape `_interpreter_version_is_sane` demands, since
