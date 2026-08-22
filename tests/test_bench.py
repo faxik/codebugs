@@ -748,16 +748,35 @@ class TestFileIOErrorContract:
         it rejects, so none of them can fail when the rule is broken. This one
         can.
 
-        Mechanism, measured rather than assumed: closing the `sys.stdout` OBJECT
-        makes `print` raise `ValueError: I/O operation on closed file.`, which is
-        exactly what the pre-existing arm catches. (Closing fd 1 instead raises
-        OSError, which that arm never caught, and under block buffering the
-        failure surfaces at interpreter shutdown outside every handler — that
-        wider family is CB-78.)
+        Mechanism, measured rather than assumed: the post-commit success `print`
+        must raise `ValueError: I/O operation on closed file.` — precisely the
+        type the pre-existing input-validation arm catches — so that a handler
+        which still spans that print launders a landed write into a tidy exit 1.
+        The ValueError is therefore the non-vacuity, not an implementation
+        detail: any other exception type would sail past that arm and the test
+        would pass against the defect.
 
         Against the unfixed tree this run printed the single line "I/O operation
         on closed file." with exit 1 while the BE run was committed and visible
         in bench-list. Verified red on bc3f67e before the fix landed.
+
+        HOW THE STATE IS BUILT, AND WHY IT CHANGED (CB-134). This test used to
+        call `sys.stdout.close()` before `main()`, and that stopped creating the
+        state it asserts. Closing the OBJECT makes stdout unusable from the very
+        first touch, and on Python 3.14 `argparse` touches it while the parser is
+        being BUILT (`add_argument` -> `_get_validation_formatter` ->
+        `_colorize.can_colorize` -> `os.isatty(file.fileno())`), so the process
+        died before `bench-import` ran at all: `landed == 0`, the premise assert
+        fired, and the suite was red on main. On 3.13 the identical script landed
+        the row. Same source, two meanings — which is the bug the premise assert
+        was doing its job by refusing to paper over.
+
+        A version `skip` would have been a gate that cannot fire. What this uses
+        instead is a stdout that is HEALTHY WHILE ARGUMENTS ARE PARSED and fails
+        only on WRITE, which is a truer rendering of "the output failed AFTER the
+        commit" than a closed object ever was, and which no longer depends on
+        where inside the stdlib the first touch of the descriptor happens. The
+        premise is now true BY CONSTRUCTION on every interpreter.
         """
         db.init_project(str(tmp_path))
         (tmp_path / "good.csv").write_text("label,metric\na,1\n")
@@ -765,7 +784,22 @@ class TestFileIOErrorContract:
             "import sys\n"
             "sys.argv = ['codebugs', 'bench-import', 'good.csv', '-b', 'LANDED']\n"
             "from codebugs.cli import main\n"
-            "sys.stdout.close()\n"
+            # Healthy for every probe argparse makes (fileno/isatty/closed), and
+            # fatal on the first write — so parsing and the import both succeed
+            # and the failure lands exactly on the post-commit success print.
+            # The message is byte-identical to a closed TextIOWrapper's so the
+            # final assertion below still discriminates the laundered one-liner.
+            "class WriteFails:\n"
+            "    closed = False\n"
+            "    def __init__(self, real): self._real = real\n"
+            "    def fileno(self): return self._real.fileno()\n"
+            "    def isatty(self): return self._real.isatty()\n"
+            "    def writable(self): return True\n"
+            "    def flush(self): pass\n"
+            "    def close(self): pass\n"
+            "    def write(self, s):\n"
+            "        raise ValueError('I/O operation on closed file.')\n"
+            "sys.stdout = WriteFails(sys.stdout)\n"
             "main()\n"
         )
         r = subprocess.run(
