@@ -3621,11 +3621,29 @@ class TestInterpreterMatchesMain:
         """The whole design rests on `.python-version` being the single source.
 
         If a uv upgrade ever stops honouring it, the pin becomes decoration and
-        the guard below degrades into a coin toss between two trees that each
-        chose for themselves. Pinned as a premise so that turns the suite red
-        instead of leaving this file's docstrings quietly wrong.
+        the guard degrades into a coin toss between two trees that each chose
+        for themselves. Pinned as a premise so that turns the suite red instead
+        of leaving this file's docstrings quietly wrong.
+
+        `UV_PYTHON` is removed for THIS measurement and deliberately left alone
+        everywhere else in this class. It outranks the pin file — documented in
+        CLAUDE.md, and the guard MUST honour it, since a developer who exports
+        it is choosing the interpreter [6/7] will really use. But this test is
+        about the pin, and reading it through an override measures the
+        override. Found the hard way: an end-to-end probe that injected a
+        divergence with `UV_PYTHON=3.13.3` turned this test red, which was the
+        test being wrong about its own subject rather than the pin failing.
         """
-        assert trees["version"] == trees["pin"]
+        env = {k: v for k, v in os.environ.items() if k != "UV_PYTHON"}
+        got = subprocess.run(
+            ["uv", "run", "--extra", "dev", "python", "-c", _PROBE],
+            cwd=str(trees["wt"]),
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        ).stdout.strip()
+        assert got == trees["pin"]
 
     def test_agreeing_interpreters_pass(self, trees: dict) -> None:
         _fake_main_interpreter(trees["main"], trees["version"])
