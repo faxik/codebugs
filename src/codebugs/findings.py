@@ -3358,30 +3358,89 @@ def register_cli(sub, commands) -> None:
         # This runs BEFORE db.connect(): a refusal must cost no partial work and no open
         # connection (CB-82). It exits directly rather than raising ValueError, so it
         # cannot disturb the json.JSONDecodeError-before-ValueError arm ordering below.
+        # CB-133. A CLI flag is a WRITE path, so `None` is the ONLY "not supplied"
+        # (CB-82); the query-side rule that `""` ALSO means absent (CB-25) is
+        # deliberately the opposite one and must not be borrowed here. Under the
+        # previous `if value:` an explicitly typed `-l ""` landed nowhere, counted as
+        # no conflict, and reported success — CB-129's own success-shaped discard,
+        # surviving on the empty string. Refusing rather than storing `""` is what
+        # `bench._require_text` already does for exactly this state: a stored value
+        # that is absent means *invent one*, and nobody meant an empty line range.
         flag_meta = {}
-        for dest, key, _spelling in _ADD_META_FLAGS:
+        for dest, key, spelling in _ADD_META_FLAGS:
             value = getattr(args, dest, None)
-            if value:
-                flag_meta[key] = value
+            if value is None:
+                continue
+            if not value:
+                print(
+                    f"codebugs add: {spelling} was given an empty value. On a write "
+                    f"path an empty string is not the same as an omitted argument, and "
+                    f"there is no {key!r} anyone could have meant by it.\n"
+                    f"Omit {spelling}, or give it a value.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            flag_meta[key] = value
 
-        json_meta = json.loads(args.meta) if args.meta else {}
-        # A non-dict payload is left exactly as it behaved before — `dict.update` below
-        # raises on it. Testing `key in json_meta` on a str would be a SUBSTRING test,
-        # which is a wrong answer rather than an error.
-        if isinstance(json_meta, dict):
-            for _dest, key, spelling in _ADD_META_FLAGS:
-                if key in flag_meta and key in json_meta and json_meta[key] != flag_meta[key]:
-                    print(
-                        f"codebugs add: {spelling} and the {key!r} key in --meta name the "
-                        f"same field with different values, and only one of them can be "
-                        f"stored.\n"
-                        f"  {spelling} gives {flag_meta[key]!r}\n"
-                        f"  --meta gives {json_meta[key]!r}"
-                        f"  <- this one would have won, silently discarding {spelling}.\n"
-                        f"Pass only one of the two spellings, or make them equal.",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
+        # CB-132. `json.loads` had NO arm over it, so `--meta 'not json'` left the CLI
+        # as a raw `json.JSONDecodeError` traceback and `--meta '[1,2]'` as
+        # `TypeError: cannot convert dictionary update sequence element #0` out of the
+        # `meta.update` below. A handler that catches NOTHING breaks the Error-handling
+        # rule exactly as surely as one catching in the wrong order (the CB-19/CB-79
+        # lesson). `--meta ""` is CB-133's shape on the same argument: a SUPPLIED empty
+        # document, not an absent one — the split `bench.py` draws between
+        # `csv_data=None` and `csv_data=""`.
+        #
+        # The arm wraps THIS PARSE ALONE, deliberately. The `json.JSONDecodeError`
+        # raised further down by `add_finding` is `_bump_row`'s pre-write parse of a
+        # MATCHED row's stored meta — corruption, not bad input — and it must keep
+        # escaping loudly; one broad `try` would print a tidy usage error for a state
+        # no caller typed, which is the CB-15/CB-16 lie. Both arms exit directly
+        # rather than raising, so neither can disturb the
+        # json.JSONDecodeError-before-ValueError ordering contract below.
+        json_meta: Any = {}
+        if args.meta is not None:
+            if not args.meta:
+                print(
+                    "codebugs add: --meta was given an empty value. Omit it, or pass a "
+                    "JSON object.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            try:
+                json_meta = json.loads(args.meta)
+            except json.JSONDecodeError as e:
+                print(
+                    f"codebugs add: --meta must be a JSON object, and this is not valid "
+                    f"JSON: {args.meta!r}\n  {e}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if not isinstance(json_meta, dict):
+                # Well-formed JSON of the wrong SHAPE — the case the decode arm cannot
+                # see, and the one that used to die inside `dict.update`. Refusing also
+                # keeps the conflict check below honest: testing `key in json_meta` on a
+                # str would be a SUBSTRING test, a wrong answer rather than an error.
+                print(
+                    f"codebugs add: --meta must be a JSON object (a mapping), not "
+                    f"{type(json_meta).__name__}: {args.meta!r}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+        for _dest, key, spelling in _ADD_META_FLAGS:
+            if key in flag_meta and key in json_meta and json_meta[key] != flag_meta[key]:
+                print(
+                    f"codebugs add: {spelling} and the {key!r} key in --meta name the "
+                    f"same field with different values, and only one of them can be "
+                    f"stored.\n"
+                    f"  {spelling} gives {flag_meta[key]!r}\n"
+                    f"  --meta gives {json_meta[key]!r}"
+                    f"  <- this one would have won, silently discarding {spelling}.\n"
+                    f"Pass only one of the two spellings, or make them equal.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
         meta = dict(flag_meta)
         meta.update(json_meta)
