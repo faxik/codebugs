@@ -27,6 +27,15 @@ jobs:
         with:
           enable-cache: true
 
+      # CI is the THIRD tree this repo builds, and until CB-135 it was the one
+      # nothing pinned: setup-uv named no python at all, so this job ran under
+      # whatever the runner image happened to ship. `.python-version` binds it
+      # to the same interpreter as main and every worktree, and this step exists
+      # to make an unobtainable pin fail HERE, loudly, instead of surfacing as a
+      # confusing failure inside pytest.
+      - name: Interpreter (from .python-version)
+        run: uv python install && uv run python -V
+
       - name: Lint
         # Pinned: CLAUDE.md records that ruff 0.16.x flags the whole repo, so an
         # unpinned CI lint would go red on a release nobody here made.
@@ -36,3 +45,48 @@ jobs:
 
       - name: Tests
         run: uv run --extra dev python -m pytest tests/ -q
+
+  # ---------------------------------------------------------------------------
+  # The pin above closes one hole and opens another, and this job is the answer
+  # to it (CB-135, escalated by the CB-134 implementer).
+  #
+  # `requires-python = ">=3.11"` is a claim about a RANGE, and several of this
+  # repo's documented contracts are stated over that whole range — the closed-
+  # stdout exit code 141 above all. Nothing tests it there: every subprocess in
+  # tests/test_cli_signals.py is spawned with `sys.executable`, so the suite
+  # only ever measures the ONE interpreter it happens to be running under.
+  # Before the pin that was survivable because different people ran different
+  # versions by accident. After it, nobody ever would again, and the range
+  # claim would have quietly become a claim about 3.14.4 while still being
+  # written as a claim about 3.11+.
+  #
+  # That was a real risk, not a theoretical one: one of CB-134's mutants
+  # SURVIVES on 3.14 and is killed only on 3.13.
+  #
+  # The alternative was to narrow the claim in CLAUDE.md to the pinned version.
+  # This is cheaper than that is honest: 38 tests, ~1.7s per version, measured.
+  # Deliberately NOT the whole suite — that is the pinned interpreter's job, and
+  # paying ~110s four more times would buy coverage nobody asked for.
+  #
+  # HONEST SCOPE: this verifies 3.11-3.14. `requires-python` also admits 3.15
+  # and every later release; those are unverified until added here.
+  contracts:
+    name: cross-version contracts (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # `--python` outranks `.python-version` (measured), which is what lets one
+      # repo carry a pin AND a matrix without the two contradicting each other.
+      - name: Contract tests
+        run: >-
+          uv run --python ${{ matrix.python }} --extra dev
+          python -m pytest tests/test_cli_signals.py tests/test_fsio.py -q
