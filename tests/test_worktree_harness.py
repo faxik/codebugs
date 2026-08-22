@@ -4059,6 +4059,21 @@ if [[ "$*" == *'main^{commit}'* ]]; then
 fi
 """
 
+# Break the last cleanup statement ONLY. Used to pin the other half of the
+# trap's contract: with nothing to say it must leave the run's own status
+# alone, or a failing cleanup would silently become a success.
+_SHIM_BREAK_CLEANUP = r"""
+if [[ "$1" == "-C" && "$2" == "$REPO" ]]; then
+    for _a in "$@"; do
+        if [[ "$_a" == "--oneline" ]]; then
+            : > "$MARKER"
+            echo "fatal: simulated cleanup failure" >&2
+            exit 1
+        fi
+    done
+fi
+"""
+
 # Move main in the window AND break the last cleanup statement, which is a
 # `git -C REPO log --oneline -1 | sed` pipeline. Under `set -euo pipefail` that
 # kills the script — so this is the case that proves the alarm is delivered by
@@ -4364,6 +4379,34 @@ class TestPostMergeAlarm:
         assert "may not have completed" in r.stdout, r.stdout[-4000:]
 
 
+    def test_a_silent_alarm_leaves_the_runs_own_status_alone(self, armed: dict) -> None:
+        """The other half of the trap's contract, and it discriminates.
+
+        An EXIT trap runs on every exit, including the ones that are nobody's
+        business, so a trap that ends a run itself would turn a failing cleanup
+        into a reported success — a success-shaped lie introduced by the very
+        mechanism added to prevent one. Here the cleanup dies and main was NOT
+        moved, so the alarm must stay silent and the non-zero status survive.
+
+        The discriminating mutant is `exit 0` in the silent branch, NOT
+        `return 0`: measured on bash 5.3, an EXIT trap's return value is
+        discarded and the triggering status is what the shell exits with. Said
+        here because the code carries `return "${rc}"`, which reads like the
+        mechanism and is only the intent.
+        """
+        marker = self._shim(armed, _SHIM_BREAK_CLEANUP)
+        self._branch(armed)
+
+        r = self._finish(armed)
+
+        assert marker.exists(), "the shim never fired — this test proved nothing"
+        assert r.returncode != 0, "a failing cleanup was reported as success"
+        assert r.returncode != 15, (
+            "a failing cleanup was reported as a post-merge alarm"
+        )
+        assert "POST-MERGE ALARM" not in r.stdout, r.stdout[-3000:]
+
+
 class TestPostMergeAlarmIsNotAGate:
     """The CATEGORY of the alarm, pinned in the source and in CLAUDE.md (CB-121).
 
@@ -4440,9 +4483,25 @@ class TestPostMergeAlarmIsNotAGate:
         assert src.count("trap ") == 1, "a second trap could replace this one silently"
         body = self._speak_body()
         assert "exit 15" in body, "the alarm no longer exits with its own code"
-        # And it must leave an ordinary run's status alone.
-        assert 'return "${rc}"' in body, (
-            "the trap does not preserve the exit status when it has nothing to say"
+        # An EXIT trap runs on EVERY exit, so the silent branch must not carry
+        # an `exit` of its own: measured on bash 5.3, a trap's RETURN value is
+        # discarded and the triggering status survives, while an `exit` in the
+        # trap replaces it. So this asserts the absence, which is the actual
+        # mechanism, rather than the presence of `return "${rc}"`, which only
+        # states the intent. The behavioural half is
+        # TestPostMergeAlarm::test_a_silent_alarm_leaves_the_runs_own_status_alone.
+        #
+        # Sliced by LINE and over code only. The first draft of this cut the
+        # body at the next occurrence of the substring "fi" — which is inside
+        # the word "finish", two lines into the branch's own comment — so the
+        # slice ended before any code and the assertion could not fail.
+        lines = [ln for ln in body.splitlines() if not ln.lstrip().startswith("#")]
+        start = next(i for i, ln in enumerate(lines) if 'if [[ -z "${_ALARM_WHY}" ]]' in ln)
+        end = next(i for i, ln in enumerate(lines[start:], start) if ln.strip() == "fi")
+        silent = lines[start : end + 1]
+        assert len(silent) >= 2, silent
+        assert not [ln for ln in silent if "exit" in ln], (
+            f"the silent branch exits, so every ordinary finish takes its code: {silent}"
         )
 
     def test_the_alarm_never_offers_a_re_run(self) -> None:

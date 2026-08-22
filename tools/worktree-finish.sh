@@ -451,7 +451,17 @@ _alarm_speak() {
     local rc=$?
     if [[ -z "${_ALARM_WHY}" ]]; then
         # Nothing to say. Leave the run's own status exactly as it was — an
-        # ordinary finish must still exit 0, and a refusal must keep its code.
+        # ordinary finish must still exit 0, and a cleanup that failed must
+        # still report failure.
+        #
+        # What actually preserves it is NOT this `return`: measured on bash
+        # 5.3, an EXIT trap's return value is discarded and the shell exits
+        # with the status that triggered the trap. Only an explicit `exit` in
+        # the trap changes it. So the mechanism is the ABSENCE of an `exit` on
+        # this branch, and `return "${rc}"` states the intent — said plainly
+        # rather than credited with work it does not do, because the mutant
+        # that this line appears to stop (`return 0`) does not reproduce, and
+        # the one that does (`exit 0`) is not this line at all.
         return "${rc}"
     fi
     echo ""
