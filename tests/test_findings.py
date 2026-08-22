@@ -2545,3 +2545,142 @@ class TestRecentRefusesABadSince:
         assert "Traceback" not in err
         assert len(err.strip().splitlines()) == 1
         assert "since" in err
+
+
+class TestAddLinesMetaConflict:
+    """CB-129. `codebugs add -l "10-20" --meta '{"lines": [10, 20]}'` used to store
+    ONLY the `--meta` value and report success: the handler seeded `meta["lines"]`
+    from `-l` and then let `meta.update(json.loads(args.meta))` overwrite it. Two
+    spellings of one fact, one silently chosen — the CB-15 class of success-shaped
+    discard, reached through composition rather than through validation.
+
+    The measured consequence was not hypothetical: the arch-health filing script
+    passes BOTH `-l "a-b"` (a string) and `--meta '{"lines": [a, b], ...}'` (a list)
+    on every one of its fifteen invocations, so its `-l` never landed once.
+
+    The fix REFUSES the conflict rather than picking a winner, because both
+    spellings target the same field and no "honour both" path exists (CB-28's rule:
+    forward when a path exists, refuse only when none could). Applying `-l` last
+    was rejected: it would silently INVERT the stored type (list -> string) for
+    every existing caller, replacing one quiet data shift with another.
+
+    These tests call `cli.main()` IN PROCESS on purpose. The defect lives in the
+    seam between the parser and the handler; a unit test of a helper cannot see it.
+    """
+
+    def _run(self, tmp_project, monkeypatch, extra):
+        from codebugs import cli
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "codebugs", "--tracker-root", tmp_project, "add",
+                "-s", "low", "-c", "c", "-f", "f.py", "-d", "something is wrong",
+                "--new-category",
+            ] + extra,
+        )
+        cli.main()
+
+    def _stored_meta(self, tmp_project):
+        conn = db.connect(tmp_project)
+        try:
+            rows = findings.query_findings(conn)["findings"]
+            assert len(rows) == 1, rows
+            return rows[0]["meta"] or {}
+        finally:
+            conn.close()
+
+    def test_conflicting_spellings_are_refused_and_nothing_is_stored(
+        self, tmp_project, monkeypatch, capsys
+    ):
+        from codebugs import cli
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "codebugs", "--tracker-root", tmp_project, "add",
+                "-s", "low", "-c", "c", "-f", "f.py", "-d", "something is wrong",
+                "--new-category",
+                "-l", "10-20", "--meta", '{"lines": [10, 20]}',
+            ],
+        )
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+
+        err = capsys.readouterr().err
+        # No traceback: this is a refusal, not a crash.
+        assert "Traceback" not in err
+        # It must name BOTH spellings and the value each one carries, or the caller
+        # cannot tell which of its two lines to delete.
+        assert "--lines" in err
+        assert "--meta" in err
+        assert "10-20" in err
+        assert "[10, 20]" in err
+
+        # A refusal costs no partial work (CB-82): the row must not exist.
+        conn = db.connect(tmp_project)
+        try:
+            assert findings.query_findings(conn)["findings"] == []
+        finally:
+            conn.close()
+
+    def test_equal_values_are_not_a_conflict(self, tmp_project, monkeypatch, capsys):
+        self._run(
+            tmp_project, monkeypatch,
+            ["-l", "10-20", "--meta", '{"lines": "10-20", "module": "m"}'],
+        )
+        assert "Added" in capsys.readouterr().out
+        meta = self._stored_meta(tmp_project)
+        assert meta["lines"] == "10-20"
+        assert meta["module"] == "m"
+
+    def test_lines_alone_lands(self, tmp_project, monkeypatch, capsys):
+        """The direction that was DEAD in the live corpus. Without this the suite
+        would pass on a fix that simply dropped `-l` on the floor."""
+        self._run(tmp_project, monkeypatch, ["-l", "10-20"])
+        assert "Added" in capsys.readouterr().out
+        assert self._stored_meta(tmp_project)["lines"] == "10-20"
+
+    def test_meta_lines_alone_lands(self, tmp_project, monkeypatch, capsys):
+        """The other direction. Together with the previous test this is what makes
+        the pair non-vacuous: a refusal that fired on either spelling ALONE would
+        be caught here rather than mistaken for the fix."""
+        self._run(tmp_project, monkeypatch, ["--meta", '{"lines": [10, 20]}'])
+        assert "Added" in capsys.readouterr().out
+        assert self._stored_meta(tmp_project)["lines"] == [10, 20]
+
+    def test_meta_keys_that_no_flag_writes_are_untouched(
+        self, tmp_project, monkeypatch, capsys
+    ):
+        """The check is scoped to keys a flag actually writes. A `--meta` payload
+        that shares no key with any flag is not a conflict and must still merge."""
+        self._run(
+            tmp_project, monkeypatch,
+            ["-l", "10-20", "--meta", '{"module": "m", "confidence": "high"}'],
+        )
+        assert "Added" in capsys.readouterr().out
+        meta = self._stored_meta(tmp_project)
+        assert meta["lines"] == "10-20"
+        assert meta["module"] == "m"
+        assert meta["confidence"] == "high"
+
+    def test_every_declared_flag_is_a_real_argparse_dest_of_add(self):
+        """The declaration and the parser must not drift. `_ADD_META_FLAGS` is what
+        both the seeding and the conflict check read, so an entry naming a dest the
+        `add` parser does not have would make the check silently unreachable — the
+        'gate that cannot fire' shape this repo keeps rediscovering."""
+        import argparse
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="command")
+        findings.register_cli(sub, {})
+        add_parser = sub.choices["add"]
+
+        dests = {a.dest for a in add_parser._actions}
+        assert findings._ADD_META_FLAGS, "the declaration must not be empty"
+        for dest, _meta_key, spelling in findings._ADD_META_FLAGS:
+            assert dest in dests, f"{dest!r} ({spelling}) is not an argument of `add`"
+        assert "meta" in dests, "`--meta` itself must exist for the check to matter"
