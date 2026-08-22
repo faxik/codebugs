@@ -196,8 +196,14 @@ def measure(src: str, *, lo: int = 1, hi: int | None = None,
     PROSE = newline-separated segments inside string tokens (a 6-line
             docstring = 6; the same 6 lines as a field value = 6; as an
             assignment = 6), attributed to the token's START line so a
-            multi-line string is counted once.  Representation-independent by
-            construction: `ruff format` never reflows string CONTENT.  Empty
+            multi-line string is counted once.  Invariant ONLY for a verbatim
+            triple-quoted literal moved between those forms (measured 7/7/7).
+            NOT invariant under implicit concatenation (`ruff format` MERGES
+            adjacent literals: 6 -> 1), escaped `\\n` in a one-line string
+            (counts real newlines only: 6 -> 1), or f-strings (skipped on
+            3.12+: 6 -> 0). Fifth review pass measured all three. A declaration
+            grammar that forbids those three forms is the precondition for the
+            number to mean anything; that is a DECISION, not an instrument fix.  Empty
             segments (blank lines inside a string) count — the author wrote them.
     Fourth review pass measured the previous NBNC counter at 8 vs 6 (Opus) and
     2/5/1 (Codex) for byte-identical prose in three forms; this split is the
@@ -327,6 +333,8 @@ def surface_report(path: str, exclude: list[str]) -> None:
     reg: dict[str, tuple[int, int]] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name in ("register_tools", "register_cli"):
+            if node.name in reg:
+                raise SystemExit(f"duplicate {node.name} in {path}: refusing")
             reg[node.name] = (M.def_start(node), M.end_of(node))
     if not reg:
         raise SystemExit(f"no register_tools/register_cli in {path}")
@@ -359,10 +367,17 @@ def main() -> int:
         print("SLOC = code + prose (one counter, before == after; ruff-formatted copy)")
         sloc_report(args.sloc, expect_absent=set(args.absent))
         return 0
-    if args.handlers or args.declarations or args.surface:
+    if args.handlers is not None or args.declarations or args.surface:
         if not args.in_file:
             ap.error("--handlers/--declarations/--surface need --in FILE")
+        print(f"  interpreter {sys.version.split()[0]} — the count is version-sensitive "
+              f"(f-string tokens; measured 42-line skew 3.11 vs 3.14); pin it on both sides")
         names = [n.strip() for n in (args.handlers or "").split(",") if n.strip()]
+        if args.handlers is not None and not names:
+            # An empty list from a shell variable that expanded to nothing once
+            # printed the TIER TABLE at rc 0 and, with --surface, a 2x-wrong
+            # figure (230 for 110). Fifth review pass. Refuse.
+            raise SystemExit("--handlers given but empty: refusing (would silently un-exclude)")
         if args.declarations:
             names += declared_manual_handlers(args.declarations)
         if args.surface:
