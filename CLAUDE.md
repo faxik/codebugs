@@ -499,19 +499,25 @@ judging. It also answers the exact question the incident asked — what main ACT
 would acquire next time somebody ran something there. `pyvenv.cfg` is not read: it describes an
 environment rather than being one.
 
-**Fail-closed, in the form of `_guard_enforcement_armed`.** No `.venv` in main, no `uv` on `PATH`, a
-non-zero rc, an empty answer, an unparseable answer — every one refuses with **exit 14**. The
-version-shape check was meant to earn its keep in exactly one state — both probes failing with `""`
-on each side, which `"" == ""` would otherwise wave through as agreement — and
-`test_two_undeterminable_sides_refuse_rather_than_agree` was written to pin it. **That test stopped
-discriminating the mutant the day the UV_PYTHON-outranks-the-pin check (below) landed ABOVE the shape
-check (CB-140).** An empty `wt_ver` is also unequal to the pin and does not extend it with a dot, so
-the pin check now refuses that state on its own, before the shape check ever runs — measured, a
-mutant turning `_interpreter_version_is_sane` into `return 0` left that test, and the entire
-248-test harness suite, green. The state neither check catches alone is a NON-version that
-PREFIX-MATCHES the pin: a bare pin like `"3"` accepts anything spelled `"3."` + more as if it were a
-legitimate patch release, so a stub `"3.0"` on both sides clears the pin check by looking like one
-while still failing the strict `X.Y.Z` shape the sanity check demands.
+**Fail-closed, in the form of `_guard_interpreter_matches_main` itself.** No `.venv` in main, no `uv`
+on `PATH`, a non-zero rc, an empty answer, an unparseable answer — every one refuses with **exit
+14**. The version-shape check (`_interpreter_version_is_sane`) was meant to earn its keep in exactly
+one state — both probes failing with `""` on each side, which `"" == ""` would otherwise wave through
+as agreement — and `test_two_undeterminable_sides_refuse_rather_than_agree` was written to pin it.
+**That test stopped discriminating the mutant once the UV_PYTHON-outranks-the-pin check (above,
+`.python-version` bumping section) existed alongside it, and the reason is NOT that the checks got
+reordered (CB-140).** The shape check on `wt_ver` still runs first in the function, exactly where it
+always did; the pin check sits further down and is unchanged in position. What changed is that the
+pin check ALSO refuses an empty `wt_ver` on its own — `""` is unequal to the pin and does not extend
+it with a dot — so with the shape check neutered by a mutant, execution simply falls through to the
+still-present pin check, which independently produces the same **exit 14**. The test asserts only the
+return code, so it cannot tell which of the two refused: measured, a mutant turning
+`_interpreter_version_is_sane` into `return 0` left that test, and the entire 248-test harness suite,
+green. The state neither check can catch on its own is a NON-version that PREFIX-MATCHES the pin: a
+bare pin like `"3"` accepts anything spelled `"3."` + more as if it were a legitimate patch release,
+so a stub `"3.0"` on both sides clears the pin check by looking like one while still failing the
+strict `X.Y.Z` shape the sanity check demands — there the shape check is the only backstop, and
+removing it is the only way to reach the final `wt_ver == main_ver` comparison and get exit 0.
 `test_two_prefix_matching_non_versions_refuse_rather_than_agree` is what actually holds the
 version-shape check now; the older test is kept as a premise fixture (both probes genuinely absent)
 but is no longer sufficient on its own.
