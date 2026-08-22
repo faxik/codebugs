@@ -149,6 +149,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   domain docstrings, pinned by prose↔code and behaviour tests.
 
 ### Fixed
+- **`query(commit=)` now sees the occurrence ring, not only the first report (CB-128).**
+  The `reported_at_commit` column is frozen at first report by design (CB-53); every
+  re-observation of a deduplicated card records its commit only in
+  `meta.occurrences[*].reported_at_commit` (CB-43). The filter read the column alone, so
+  "what was observed on commit X" silently missed every card first reported elsewhere and
+  re-observed on X — a success-shaped empty answer. The filter is now a disjunction: the
+  column OR any ring entry, same prefix match, same hex validation, one row per card even
+  when both branches match. Two guards keep garbage on an UNRELATED row from aborting the
+  whole query (measured, SQLite 3.47): `json_valid(meta)` evaluated inside a `CASE` (whose
+  branches are documented-lazy, unlike `AND`), and `json_each.type = 'object'` against a
+  ring element that is not an observation record — so this branch is strictly more robust
+  than the existing `meta_key` filter, which still raises on malformed meta. Semantics are
+  deliberately **any observation**; `staleness_check` keeps reading the **newest** ring
+  entry because it answers a different question (how stale is the card), and both
+  docstrings name the divergence. Not closed here: the CLI `query` verb has no `--commit`
+  flag at all, so this reaches MCP and library callers only (the CB-6 surface gap).
 - **Four public entry points no longer report success about a write that may not have
   happened (CB-87, CB-125, CB-126).** `bench.delete_run`, `bench.delete_benchmark`,
   `embeddings.store_embedding` and `sweep.archive_sweep` each read first — an existence

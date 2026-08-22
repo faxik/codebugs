@@ -2226,6 +2226,8 @@ def query_findings(
     """Query findings with filters. Returns results or grouped counts.
 
     `id` / `ids` are AND-combined with other filters; missing IDs are silently absent.
+    `commit` matches the frozen first-report column OR any occurrence-ring entry
+    (CB-128) — any observation, not the newest (that is `provenance._effective_commit`).
     """
     conditions: list[str] = []
     params: list[Any] = []
@@ -2289,8 +2291,31 @@ def query_findings(
     if commit:
         if not re.fullmatch(r"[0-9a-fA-F]+", commit):
             raise ValueError(f"commit filter must be hex, got: {commit!r}")
-        conditions.append("reported_at_commit LIKE ? || '%'")
-        params.append(commit.lower())
+        # Column OR occurrence ring (CB-128). The column is frozen at first report
+        # (CB-53); re-observations live in meta.occurrences[*].reported_at_commit.
+        # Semantics: ANY observation on the commit matches — deliberately unlike
+        # provenance._effective_commit, which wants the NEWEST observation
+        # because it answers a different question (how stale is the card).
+        #
+        # Two guards, both measured (SQLite 3.47): `json_valid(meta)` inside a
+        # CASE — CASE branches are documented-lazy, AND short-circuit is not —
+        # keeps a malformed meta on an UNRELATED row from aborting the whole
+        # query; `json_each.type = 'object'` keeps a non-object ring element
+        # (a bare string) from doing the same via json_extract on the value,
+        # which json_valid(meta) cannot see. `json_type = 'array'` mirrors the
+        # reader's `isinstance(ring, list)`: a dict ring must not match by value.
+        # Both placeholders are bound here, paired with the condition.
+        conditions.append(
+            "(reported_at_commit LIKE ? || '%'"
+            " OR CASE WHEN json_valid(meta) THEN"
+            "      json_type(meta, '$.occurrences') = 'array'"
+            "      AND EXISTS (SELECT 1 FROM json_each(meta, '$.occurrences')"
+            "                  WHERE json_each.type = 'object'"
+            "                    AND json_extract(json_each.value, '$.reported_at_commit')"
+            "                        LIKE ? || '%')"
+            "    END)"
+        )
+        params.extend([commit.lower(), commit.lower()])
     if ref:
         conditions.append("reported_at_ref = ?")
         params.append(ref)
@@ -3122,7 +3147,10 @@ def register_tools(mcp, conn_factory) -> None:
             meta_value: Filter by metadata value (requires meta_key; same
                         authored top-level meta as meta_key — ring meta is not
                         consulted)
-            commit: Filter by reported_at_commit (prefix match, hex validated)
+            commit: Matches the first-report column OR any occurrence in the
+                    ring (prefix match, hex validated) — "what was observed on
+                    this commit" (CB-128). `staleness_check` uses the NEWEST
+                    ring entry instead: a different question.
             ref: Filter by reported_at_ref (exact match, never prefix) — matches
                  the first-observed or manually assigned release ref (BT-4);
                  per-occurrence refs in the ring are not consulted.
