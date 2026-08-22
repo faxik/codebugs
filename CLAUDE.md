@@ -28,7 +28,7 @@ Prose cannot enforce prose. That is CB-50, and the harness below is its fix.
 | An in-progress cherry-pick/revert marker no longer exempts a commit | pre-commit hook | exit 1 |
 | Integration never fast-forwards | `--no-ff` + `git config merge.ff false` | — |
 | One integration at a time | `flock` on `.worktrees/.integrate.lock` | exit 1 |
-| The tested state is the landed state | in-lock SHA re-check | exit 13 |
+| The tested state still matched when the lock was taken | in-lock SHA re-check | exit 13 |
 | The suite ran under the interpreter main has | `_guard_interpreter_matches_main` | exit 14 |
 | This clone is actually armed | `_guard_enforcement_armed` | exit 12 |
 | Main has main checked out, and is clean | `_guard_workspace_on_main`, `_guard_main_clean` | exit 8, 11 |
@@ -41,6 +41,35 @@ table's own title. It asserts that main's first-parent line carries nothing but 
 mechanically enforced"* with a *"refuses with"* column was a category error inside the very table
 meant to be precise (round-3 review). It is an **alarm**. The gate is branch protection on
 `origin/main`; see the CI limits below.
+
+**The re-check row was NARROWED, and what closes the remaining gap is a second alarm — not a gate
+(CB-121).** That row used to read *"The tested state is the landed state"*, and it overclaimed: the
+in-lock re-check is a **check-then-act**. It proves main and the branch were still the tested ones
+**at the moment of the check**; two statements later `git merge "${BRANCH}"` resolves both refs
+again, by NAME, for itself. Nothing carries a verified SHA into the merge and porcelain git has no
+`--expect-old-oid`, so a window sits between them. The flock serializes **finishes against each
+other** and nothing else, and the traffic that walks into that window is **ordinary sanctioned
+work**: level-(2) sessions commit plan notes to main continuously, and since 2026-08-22
+`tools/cascade-mint.sh` does it automatically while holding a *different* lock. The narrowed row is
+still a checkable claim — the state matched under the lock, and a mismatch there really does refuse
+with exit 13 before anything lands. It simply no longer promises the interval it cannot cover.
+
+The gap is covered by a **post-merge alarm**, and it is an alarm for the same reason
+`main-invariants.yml` is: by the time it can look, **the merge has landed**, so it cannot refuse
+anything and it gets no row in the table above. Immediately after the integration merge and
+**before** `flock -u 9` — after the unlock another finish could move main, and the alarm would start
+lying in the way it exists to catch — `worktree-finish.sh` reads main's tip and both of its parents
+in one `git rev-parse` and compares them with `TESTED_MAIN` and `TESTED_HEAD`. Both parents, because
+what landed is a merge and checking one of them while asserting the premise is this section's own
+recurring defect. Then it finishes **all** of its cleanup (worktree removal, claim release) and only
+at the very end prints a loud block and exits **15**. `exit 15` is a new code and means *landed,
+premise unconfirmed*; it is deliberately not `exit 13`, which means *nothing landed, re-run*, and the block says in
+words not to re-run — a second finish after a landed merge is a worse outcome than the defect being
+reported. A `git rev-parse` that fails, answers short, or answers with something that is not an
+object name is read as **could not look**, never as clean. Rejected forms, with their reasons: making
+the merge name the pinned `TESTED_HEAD` closes only the branch half and pays a false refusal, since
+`pre-merge-commit` refuses a head with no ref; and a real CAS needs `git update-ref` over
+`commit-tree`, which this repo's own CI alarm treats as a hook-bypassing shape.
 
 `merge.ff=false` is the one no hook could replace: **git fires no hook on a fast-forward at all**,
 because no commit is created, so nothing can catch it after the fact. Verified by replaying the
