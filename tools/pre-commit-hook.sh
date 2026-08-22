@@ -391,13 +391,16 @@ _cascade_scan() {
     #   all   — every id of the family anywhere in the text, the population the
     #           tool reads.
     #   alloc — only ids that OPEN a bullet line, i.e. lines that ALLOCATE a
-    #           number rather than mention one.
+    #           number rather than mention one. Indentation and a '*' bullet
+    #           are accepted: anchoring on a bare '- ' made one leading space a
+    #           bypass, and a line that OPENS with an id is an allocation
+    #           whatever its bullet.
     # Echoes each id's number, normalised (leading zeros stripped), one per
     # line, duplicates included — multiplicity is load-bearing for "alloc".
     #   0 = read (possibly zero ids)   2 = grep failed   3 = number too large
     local _alt="$1" _text="$2" _mode="$3" _re _raw="" _rc=0 _tok _n _stripped
     if [[ "${_mode}" == "alloc" ]]; then
-        _re="^-[[:space:]]*(${_alt})-[0-9]+"
+        _re="^[[:space:]]*[-*][[:space:]]*(${_alt})-[0-9]+"
     else
         _re="(^|[^A-Za-z0-9-])(${_alt})-[0-9]+"
     fi
@@ -437,7 +440,7 @@ _cascade_count() {
 
 _cascade_mint_gate() {
     local _staged="" _head="" _rc=0
-    local _alt _label _sall _salloc _halloc _hall
+    local _alt _label _salloc _halloc _hall
     local _n _m _seen _cs _ch _newcount _newid _max _display
 
     if ! git rev-parse --verify -q HEAD >/dev/null 2>&1; then
@@ -482,11 +485,18 @@ _cascade_mint_gate() {
         fi
 
         _rc=0; _halloc=$(_cascade_scan "${_alt}" "${_head}" alloc) || _rc=$?
-        if (( _rc != 0 )); then
+        if (( _rc == 2 )); then
             _cascade_refuse \
-                "HEAD's registry could not be scanned for '${_label}-' ids." \
-                "Refusing rather than treating an unreadable baseline as one" \
-                "with no ids, which would make every line look new."
+                "HEAD's registry could not be scanned for '${_label}-' ids" \
+                "(grep failed). Refusing rather than treating an unreadable" \
+                "baseline as one with no ids, which would make every line look" \
+                "new."
+        fi
+        if (( _rc == 3 )); then
+            _cascade_refuse \
+                "HEAD's registry carries a '${_label}-' id with more than nine" \
+                "digits. The shell's arithmetic wraps on it silently, and the" \
+                "allocator refuses it too. Fix the registry line."
         fi
 
         # MULTISET difference: an id already in the registry that acquires a
@@ -522,11 +532,16 @@ _cascade_mint_gate() {
         fi
 
         _rc=0; _hall=$(_cascade_scan "${_alt}" "${_head}" all) || _rc=$?
-        if (( _rc != 0 )); then
+        if (( _rc == 2 )); then
             _cascade_refuse \
-                "HEAD's registry could not be scanned for '${_label}-' ids." \
-                "Refusing rather than treating an unreadable baseline as one" \
-                "with no ids."
+                "HEAD's registry could not be scanned for '${_label}-' ids" \
+                "(grep failed). Refusing rather than treating an unreadable" \
+                "baseline as one with no ids."
+        fi
+        if (( _rc == 3 )); then
+            _cascade_refuse \
+                "HEAD's registry carries a '${_label}-' id with more than nine" \
+                "digits, which the allocator refuses to mint against."
         fi
 
         _max=-1

@@ -2718,6 +2718,20 @@ class TestCascadeMintGate:
         assert result.returncode != 0, result.stdout
         assert "mints ONE id per run" in result.stderr, result.stderr
 
+    def test_an_indented_or_starred_bullet_is_still_an_allocation(self, repo: Path) -> None:
+        """Anchoring on a bare '- ' made ONE LEADING SPACE a bypass.
+
+        A line that OPENS with an id allocates that id whatever its bullet, so
+        the shapes a hand-writer reaches for by accident are covered too. The
+        registry's collision notes are unaffected: they open with a word.
+        """
+        self._arm(repo, "# reg\n- \u0422-4 \u2014 a\n")
+        for line in ("  - \u0422-9 \u2014 indented\n", "* \u0422-9 \u2014 starred\n"):
+            self._append(repo, line)
+            result = self._commit(repo)
+            assert result.returncode != 0, (line, result.stdout)
+            git(repo, "reset", "--hard")
+
     def test_a_registry_absent_from_head_is_refused(self, repo: Path) -> None:
         """Every id is new; there is no allocator state to check against."""
         TestPreCommitHook._install(repo)
