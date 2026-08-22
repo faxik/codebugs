@@ -1506,7 +1506,7 @@ class TestHarnessIntegrity:
         """
         src = GUARDS.read_text()
         body = src.split("_guard_enforcement_armed() {", 1)[1].split("\n}\n", 1)[0]
-        calls = re.findall(r"_hook_source_known\s+\"\$\{repo_root\}\"\s+(\S+)", body)
+        calls = re.findall(r"_hook_source_known\s+\"\$\{repo_root\}\"\s+([^\s;]+)", body)
         assert calls == ["tools/pre-merge-commit-hook.sh", "tools/commit-msg-hook.sh"], calls
         assert "tools/pre-commit-hook.sh" not in calls, "pre-commit must not be bootstrap-gated"
         assert src.count("_hook_source_known() {") == 1

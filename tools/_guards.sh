@@ -426,6 +426,53 @@ _hook_problems() {
     fi
 }
 
+# Is a hook's SOURCE known to this repo — so that the hook must be armed?
+# Returns 0 (demand the hook) or 1 (bootstrap window: not yet demanded).
+#
+# THE CONDITION IS MONOTONIC ON PURPOSE, and the obvious version was a real
+# defect: gating on "does the file exist" meant a single `rm
+# tools/pre-merge-commit-hook.sh` both dangled the installed hook (git skips
+# a dangling hook silently) AND made the guard skip the check and return 0
+# — a permanent, flagless disarm, reproduced end to end in adversarial
+# review. Gating on whether the PATH HAS HISTORY cannot be undone by
+# deleting the file: history only grows, so once the hook has landed the check
+# is permanent, and a missing source then reports as "cannot verify the hook
+# identity" instead of vanishing.
+#
+# `--all`, NOT the literal ref `main`. Reading `main` looked monotonic and was
+# not: in any clone WITHOUT A LOCAL branch named main — `git clone
+# --single-branch --branch fix/…` is enough, and origin/main being present
+# does not help — `git log -1 main -- <path>` fatals, the variable empties,
+# and the condition collapses back to `-e <src>`. That is precisely the
+# flagless disarm this gate was rewritten to close: review reproduced
+# install-hooks → rm the source → guard rc=0 → an untyped branch merged onto
+# main. `--all` consults every ref, so no checkout shape can make the history
+# invisible.
+# AND the failure of that command is NOT "no history". `2>/dev/null || true`
+# made the two indistinguishable, so any error re-opened the whole disarm:
+# review reproduced it with a `--filter=tree:0` clone whose promisor remote
+# had gone away, where `git log --all -- <path>` exits 128, the value empties,
+# the condition collapses to `-e <src>`, and `rm` + a merge of the literal
+# 2026-08-16 offender landed on main. Distinguish the two and FAIL CLOSED on
+# an error: "cannot tell" must demand the hook, not excuse it.
+#
+# The `-e <src>` arm is the BOOTSTRAP: a source present in the tree but not
+# yet in any ref (the worktree that introduces it) is demanded too, and it is
+# also why the harness's own test fixtures — which have no history of any
+# hook — can exercise the demanding branch at all.
+#
+# args: <repo_root> <source path relative to repo root>
+_hook_source_known() {
+    local repo_root="$1" rel="$2"
+    local known log_ok=""
+    if known=$(git -C "${repo_root}" log -1 --format=%H --all -- "${rel}" 2>/dev/null); then
+        log_ok=1
+    else
+        known=""
+    fi
+    [[ -z "${log_ok}" || -n "${known}" || -e "${repo_root}/${rel}" ]]
+}
+
 _guard_enforcement_armed() {
     local repo_root="$1"
     local problems=""
@@ -477,48 +524,29 @@ _guard_enforcement_armed() {
         "${hook_dir}/pre-commit" "${repo_root}/tools/pre-commit-hook.sh" "pre-commit")"
     [[ -n "${_p}" ]] && problems="${problems}${_p}"$'\n'
 
-    # pre-merge-commit needs a bootstrap, because this guard runs BEFORE the
-    # merge that first brings tools/pre-merge-commit-hook.sh onto main —
+    # pre-merge-commit and commit-msg each need a bootstrap, because this guard
+    # runs BEFORE the merge that first brings the hook's source onto main —
     # demanding the hook unconditionally would make the commit introducing it
-    # unlandable by the very harness it extends (CB-57, same shape as CB-50).
+    # unlandable by the very harness it extends (CB-57, same shape as CB-50;
+    # the commit-msg hook hit the identical wall and was left out of this guard
+    # until its source had history — T-21 closes that follow-up).
     #
-    # THE CONDITION IS MONOTONIC ON PURPOSE, and the obvious version was a real
-    # defect: gating on "does the file exist" meant a single `rm
-    # tools/pre-merge-commit-hook.sh` both dangled the installed hook (git skips
-    # a dangling hook silently) AND made this guard skip the check and return 0
-    # — a permanent, flagless disarm, reproduced end to end in adversarial
-    # review. Gating on whether the PATH HAS HISTORY on main cannot be undone by
-    # deleting the file: history only grows, so once CB-57 has landed the check
-    # is permanent, and a missing source then reports as "cannot verify the hook
-    # identity" instead of vanishing.
+    # The condition lives in ONE function, _hook_source_known, and is called
+    # once per gated hook. Two copies of a four-review-round condition would be
+    # two rules one edit apart — the `entities._SAFE_IDENT` vs `types._IDENT`
+    # shape this repo already paid for. pre-commit above is deliberately NOT
+    # gated: it predates the harness and is demanded unconditionally.
     local merge_hook_src="${repo_root}/tools/pre-merge-commit-hook.sh"
-    local merge_hook_known
-    # `--all`, NOT the literal ref `main`. Reading `main` looked monotonic and was
-    # not: in any clone WITHOUT A LOCAL branch named main — `git clone
-    # --single-branch --branch fix/…` is enough, and origin/main being present
-    # does not help — `git log -1 main -- <path>` fatals, the variable empties,
-    # and the condition collapses back to `-e <src>`. That is precisely the
-    # flagless disarm this gate was rewritten to close: review reproduced
-    # install-hooks → rm the source → guard rc=0 → an untyped branch merged onto
-    # main. `--all` consults every ref, so no checkout shape can make the history
-    # invisible.
-    # AND the failure of that command is NOT "no history". `2>/dev/null || true`
-    # made the two indistinguishable, so any error re-opened the whole disarm:
-    # review reproduced it with a `--filter=tree:0` clone whose promisor remote
-    # had gone away, where `git log --all -- <path>` exits 128, the value empties,
-    # the condition collapses to `-e <src>`, and `rm` + a merge of the literal
-    # 2026-08-16 offender landed on main. Distinguish the two and FAIL CLOSED on
-    # an error: "cannot tell" must demand the hook, not excuse it.
-    local merge_hook_log_ok=""
-    if merge_hook_known=$(git -C "${repo_root}" log -1 --format=%H --all \
-            -- tools/pre-merge-commit-hook.sh 2>/dev/null); then
-        merge_hook_log_ok=1
-    else
-        merge_hook_known=""
-    fi
-    if [[ -z "${merge_hook_log_ok}" || -n "${merge_hook_known}" || -e "${merge_hook_src}" ]]; then
+    if _hook_source_known "${repo_root}" tools/pre-merge-commit-hook.sh; then
         _p="$(_hook_problems \
             "${hook_dir}/pre-merge-commit" "${merge_hook_src}" "pre-merge-commit")"
+        [[ -n "${_p}" ]] && problems="${problems}${_p}"$'\n'
+    fi
+
+    local msg_hook_src="${repo_root}/tools/commit-msg-hook.sh"
+    if _hook_source_known "${repo_root}" tools/commit-msg-hook.sh; then
+        _p="$(_hook_problems \
+            "${hook_dir}/commit-msg" "${msg_hook_src}" "commit-msg")"
         [[ -n "${_p}" ]] && problems="${problems}${_p}"$'\n'
     fi
 

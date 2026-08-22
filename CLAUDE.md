@@ -246,19 +246,22 @@ exemption already waves the whole staged set through on that path, which is the 
 spot the CI-limits list records for `main-invariants.yml`. The gate is an accident-stopper, and a
 merge state is not something one enters by accident.
 
-**What it does NOT close, stated rather than left to be discovered.** `_guard_enforcement_armed`
-does **not** yet demand this hook, so a clone armed before it landed keeps its other two hooks and
-silently lacks this one until `tools/install-hooks.sh` is re-run. That is deliberate and it is the
-bootstrap wall for the third time: the guard reads `REPO_ROOT/tools/<hook>` from the PRIMARY
-checkout and gates on whether the path has history, so adding the clause in the same change that
-introduces the source makes that change unlandable by the harness it extends — and `install-hooks.sh`
-cannot pre-arm it either, because it symlinks into main's `tools/`, where the file does not exist
-yet. Closing it is a one-line follow-up once the source is on main, and the structural test
-`test_installer_arms_the_commit_msg_hook_too` is what holds the line meanwhile. The gate is also
-invisible to the CI alarm, which reads paths and not messages, and to `--amend`: an amend that
-changes only the message stages nothing against HEAD, so a note already landed under a naming
-message can have that message rewritten. Both are authored acts rather than accidents, which is
-what this hook is for.
+**`_guard_enforcement_armed` demands this hook too, since T-21 — and the paragraph this replaces
+said the opposite, for a reason that was true at the time.** The guard reads `REPO_ROOT/tools/<hook>`
+from the PRIMARY checkout and gates on whether the path has history, so adding the clause in the same
+change that introduced the source would have made that change unlandable by the harness it extends —
+the bootstrap wall for the third time — and `install-hooks.sh` could not pre-arm it either, because it
+symlinks into main's `tools/`, where the file did not exist yet. So the hook landed first, armed by the
+installer alone, and the guard followed once `tools/commit-msg-hook.sh` had history on main. The
+condition is the SAME monotonic one `pre-merge-commit` uses — extracted into `_hook_source_known` and
+called once per gated hook rather than copied, because a four-review-round condition in two places is
+two rules one edit apart; `test_bootstrap_condition_is_one_function_called_per_gated_hook` counts the
+call sites. A clone armed before T-21 is therefore refused at its next finish until
+`tools/install-hooks.sh` is re-run, which is correct: it really is missing a third of its enforcement.
+**What stays open:** the gate is invisible to the CI alarm, which reads paths and not messages, and
+to `--amend`: an amend that changes only the message stages nothing against HEAD, so a note already
+landed under a naming message can have that message rewritten. Both are authored acts rather than
+accidents, which is what this hook is for.
 
 **Two of the three hooks share a predicate — disjoint halves, neither redundant, and they must not
 disagree.** (The third, commit-msg, shares nothing with them: it reads the message, they read refs,
@@ -274,10 +277,9 @@ own merge: leaving it would have made the harness the single caller exempt from 
 **What this does NOT do, stated plainly because the honest scope is the point.** The local half is
 CLIENT-SIDE and PER-CLONE: hooks and git config cannot be committed. A fresh clone has none of it
 until `tools/install-hooks.sh` is run — which is why `_guard_enforcement_armed` refuses to integrate
-from an unarmed clone, the one moment being unarmed can cost anything. **It checks the pre-commit and
-pre-merge-commit hooks — two of the three**, and a clone armed before CB-57 will be refused until
-`install-hooks.sh` is re-run; the commit-msg naming gate is armed by the installer alone, for the
-bootstrap reason given above. Even armed, all of
+from an unarmed clone, the one moment being unarmed can cost anything. **It checks all three hooks**
+— pre-commit unconditionally, pre-merge-commit and commit-msg once their source has history — so a
+clone armed before CB-57 or before T-21 is refused until `install-hooks.sh` is re-run. Even armed, all of
 these move or publish `main` without passing any hook: `git rebase`, `git am`, `git reset --hard`,
 `git push`, `core.hooksPath`, **`git subtree add`** (which commits via `commit-tree` plumbing — added
 to this list because round-4 review landed content on main with it and the list did not mention it),
