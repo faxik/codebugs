@@ -593,6 +593,121 @@ class TestEnforcementArmed:
         assert result.returncode == 12
         assert "pre-merge-commit" in result.stderr
 
+    # -- the commit-msg third (T-23) ---------------------------------------
+    #
+    # The fixture repo has NO history of tools/commit-msg-hook.sh, so a gate
+    # keyed on history alone would never fire here and every test below would
+    # be green by construction. The condition is a disjunction with `-e <src>`,
+    # so each refusing test PUTS THE SOURCE IN PLACE (or lands it in history)
+    # before asserting — otherwise it tests the bootstrap branch, not the gate.
+
+    def _arm_commit_msg_hook(self, repo: Path) -> Path:
+        """Add the third hook, the way install-hooks.sh step [4/4] does."""
+        canonical = repo / "tools" / "commit-msg-hook.sh"
+        shutil.copy(REPO_ROOT / "tools" / "commit-msg-hook.sh", canonical)
+        canonical.chmod(0o755)
+        hook = self._hook_path(repo).with_name("commit-msg")
+        if hook.exists() or hook.is_symlink():
+            hook.unlink()
+        hook.symlink_to(canonical)
+        return hook
+
+    def test_all_three_hooks_armed_passes(self, repo: Path) -> None:
+        """Pins behaviour the change PRESERVES: a fully armed clone is rc 0.
+
+        Green on both sides of T-23 by design — it exists so the refusing tests
+        below cannot be satisfied by a gate that refuses everything.
+        """
+        self._arm(repo)
+        self._arm_merge_hook(repo)
+        self._arm_commit_msg_hook(repo)
+        assert run_guard("_guard_enforcement_armed", str(repo)).returncode == 0
+
+    def test_commit_msg_hook_missing_is_refused_once_its_source_exists(self, repo: Path) -> None:
+        """The case a clone armed before T-23 is actually in.
+
+        pre-commit and pre-merge-commit installed, merge.ff set — and the
+        naming gate is simply absent. CLAUDE.md used to record this as a
+        deliberate gap ("a clone armed before it landed … silently lacks this
+        one"); once the source is on main it is a missing third and must refuse.
+        """
+        self._arm(repo)
+        self._arm_merge_hook(repo)
+        canonical = repo / "tools" / "commit-msg-hook.sh"
+        shutil.copy(REPO_ROOT / "tools" / "commit-msg-hook.sh", canonical)
+        result = run_guard("_guard_enforcement_armed", str(repo))
+        assert result.returncode == 12
+        assert "commit-msg" in result.stderr
+
+    def test_dangling_commit_msg_symlink_refused(self, repo: Path) -> None:
+        """A dangling commit-msg link is reported as DANGLING, like the other two."""
+        self._arm(repo)
+        self._arm_merge_hook(repo)
+        hook = self._arm_commit_msg_hook(repo)
+        hook.unlink()
+        hook.symlink_to(repo / "nonexistent" / "commit-msg-hook.sh")
+        result = run_guard("_guard_enforcement_armed", str(repo))
+        assert result.returncode == 12
+        assert "DANGLING" in result.stderr
+        assert "commit-msg" in result.stderr
+
+    def test_deleting_the_commit_msg_source_does_not_disarm_the_check(self, repo: Path) -> None:
+        """The third hook gets the SAME monotonic condition as the second.
+
+        Once the path has history, `rm tools/commit-msg-hook.sh` must report
+        "cannot verify the hook identity" rather than make the check vanish —
+        the round-2 disarm CB-57 closed for pre-merge-commit, applied here.
+        """
+        self._arm(repo)
+        self._arm_merge_hook(repo)
+        self._arm_commit_msg_hook(repo)
+        git(repo, "add", "-A")
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "--no-verify", "-m", "land all three hooks"],
+            check=True,
+            capture_output=True,
+        )
+        assert run_guard("_guard_enforcement_armed", str(repo)).returncode == 0
+
+        (repo / "tools" / "commit-msg-hook.sh").unlink()
+        result = run_guard("_guard_enforcement_armed", str(repo))
+        assert result.returncode == 12, "deleting the commit-msg source silently disarmed the check"
+        assert "commit-msg" in result.stderr
+
+    def test_hook_source_known_fails_closed_when_git_cannot_answer(self, tmp_path: Path) -> None:
+        """The third door: a history probe that ERRORS must DEMAND the hook.
+
+        `2>/dev/null || true` once made "git failed" identical to "no history",
+        and review reproduced a full disarm through a `--filter=tree:0` clone
+        whose promisor remote had gone away (`git log --all` exits 128). No
+        test pinned that arm: a mutant deleting `-z "${log_ok}" ||` passed the
+        whole suite (Opus review of T-23). A directory that is not a repository
+        is the cheapest state in which `git log` fails, so it is used here.
+        """
+        not_a_repo = tmp_path / "plain"
+        not_a_repo.mkdir()
+        assert not (not_a_repo / "tools" / "commit-msg-hook.sh").exists()
+        result = run_guard("_hook_source_known", str(not_a_repo), "tools/commit-msg-hook.sh")
+        assert result.returncode == 0, "a failed history probe excused the hook instead of demanding it"
+
+    def test_hook_source_known_is_false_with_no_history_and_no_file(self, repo: Path) -> None:
+        """The bootstrap window, at the helper: fresh repo, no file → 1."""
+        result = run_guard("_hook_source_known", str(repo), "tools/commit-msg-hook.sh")
+        assert result.returncode == 1
+
+    def test_commit_msg_hook_not_demanded_before_its_source_lands(self, repo: Path) -> None:
+        """The bootstrap branch, kept: no history, no file → not demanded.
+
+        Two hooks armed and no `tools/commit-msg-hook.sh` anywhere is rc 0, the
+        same shape `test_merge_hook_not_demanded_before_its_source_lands` pins
+        for the second hook. A repo that never had the source is not a repo
+        that lost it.
+        """
+        self._arm(repo)
+        self._arm_merge_hook(repo)
+        assert not (repo / "tools" / "commit-msg-hook.sh").exists()
+        assert run_guard("_guard_enforcement_armed", str(repo)).returncode == 0
+
     def test_both_hooks_broken_are_reported_separately(self, repo: Path) -> None:
         """Two faults must read as two lines, not one run-together blob.
 
@@ -1386,13 +1501,13 @@ class TestHarnessIntegrity:
         )
 
     def test_installer_arms_the_commit_msg_hook_too(self) -> None:
-        """A third hook, and the installer is the ONLY thing that arms it.
+        """A third hook, and the installer is the only thing that INSTALLS it.
 
-        `_guard_enforcement_armed` deliberately does not yet demand this one —
-        see the scope note in CLAUDE.md — so if the installer skipped it the
-        gate would exist in the tree and in no clone, which is precisely the
-        "described better than it behaves" failure the Workflow section is
-        written around.
+        `_guard_enforcement_armed` now demands it too (T-23), but the guard only
+        refuses — it never installs. If the installer skipped this step every
+        finish would be refused with no way to arm, which is the mirror image
+        of the "described better than it behaves" failure this test was written
+        for while the guard did not yet know about the hook.
         """
         src = (REPO_ROOT / "tools" / "install-hooks.sh").read_text()
         assert 'MSG_HOOK_SRC="${REPO_ROOT}/tools/commit-msg-hook.sh"' in src
@@ -1400,6 +1515,31 @@ class TestHarnessIntegrity:
         assert '"${_SCRIPT_DIR}/commit-msg-hook.sh"' not in src, (
             "installer points the commit-msg hook at the invoking checkout; it will dangle"
         )
+
+    def test_bootstrap_condition_is_one_function_called_per_gated_hook(self) -> None:
+        """The monotonic "source is known" condition is shared, not copied.
+
+        Two hooks are gated on it (pre-merge-commit and commit-msg); pre-commit
+        is demanded unconditionally. A copy of the condition per hook is one
+        drift from two different rules — the `entities._SAFE_IDENT` vs
+        `types._IDENT` shape — so the guard must CALL one helper, once per
+        gated hook. Counted per call site, the way the branch predicate is.
+        """
+        src = GUARDS.read_text()
+        body = src.split("_guard_enforcement_armed() {", 1)[1].split("\n}\n", 1)[0]
+        # Executable lines only — a commented-out call must not count as a site.
+        code = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
+        # Tolerate `"${repo_root}"` / `"$repo_root"` and a quoted or bare second
+        # argument; what is pinned is WHICH sources are gated and in what order.
+        calls = re.findall(
+            r'_hook_source_known[\s\\]+"?\$\{?repo_root\}?"?[\s\\]+"?([^\s;"]+)"?', code
+        )
+        assert calls == ["tools/pre-merge-commit-hook.sh", "tools/commit-msg-hook.sh"], calls
+        assert "tools/pre-commit-hook.sh" not in calls, "pre-commit must not be bootstrap-gated"
+        assert src.count("_hook_source_known() {") == 1
+        # The condition must not ALSO be re-spelled inline beside the calls: the
+        # history probe belongs to the helper and nowhere else in the guard.
+        assert "log -1 --format=%H --all" not in code, "monotonic condition duplicated inline"
 
     def test_the_hooks_do_not_depend_on_the_tools_directory(self) -> None:
         """Each hook runs from `.git/hooks/` and must work when `tools/` is not
