@@ -3967,69 +3967,113 @@ class TestInterpreterGuardEndToEnd:
 # hooks) run passes through it.
 # ---------------------------------------------------------------------------
 
-# The integration merge is the ONLY `git` invocation in the whole finish that
-# carries `--no-ff` (the [5/7] forward-merge is `merge <sha> --no-edit`), so it
-# is identifiable without counting invocations. Landing a plan note on main
-# right before it reproduces CB-121 exactly: main moved between the in-lock
-# re-check and the merge, through the sanctioned level-(2) traffic that makes
-# the window reachable in the first place. It goes through the hooks like any
-# other plan note — the message NAMES the file, because K-3's commit-msg gate
-# is armed in this fixture.
+# The integration merge is the only `git merge` in the finish that carries
+# `--no-ff` (the [5/7] forward-merge is `merge <sha> --no-edit`), so it is
+# identifiable without counting invocations. Both tokens are required, because
+# `--no-ff` alone would also match a merge a future hook or helper ran.
+#
+# Landing a plan note on main right before it reproduces CB-121 exactly: main
+# moved between the in-lock re-check and the merge, through the sanctioned
+# level-(2) traffic that makes the window reachable in the first place. It goes
+# through the hooks like any other plan note — the message NAMES the file,
+# because K-3's commit-msg gate is armed in this fixture.
 _SHIM_MOVE_MAIN = r"""
+_is_merge=0; _is_noff=0
 for _a in "$@"; do
-    if [[ "$_a" == "--no-ff" && ! -e "$MARKER" ]]; then
-        : > "$MARKER"
-        printf 'landed in the window\n' > "$REPO/.claude/plans/INJECTED.md"
-        "$REAL" -C "$REPO" add -- .claude/plans/INJECTED.md
-        "$REAL" -C "$REPO" commit -q -m 'docs: INJECTED.md landing in the window'
-        break
-    fi
+    [[ "$_a" == "merge" ]] && _is_merge=1
+    [[ "$_a" == "--no-ff" ]] && _is_noff=1
 done
+if (( _is_merge && _is_noff )) && [[ ! -e "$MARKER" ]]; then
+    : > "$MARKER"
+    printf 'landed in the window\n' > "$REPO/.claude/plans/INJECTED.md"
+    "$REAL" -C "$REPO" add -- .claude/plans/INJECTED.md
+    "$REAL" -C "$REPO" commit -q -m 'docs: INJECTED.md landing in the window'
+fi
 """
 
 # The branch-side half of the same window: the session that owns the worktree
 # commits while the finish is running, so `git merge "${BRANCH}"` resolves the
 # NAME to a head that was never tested.
 _SHIM_MOVE_BRANCH = r"""
+_is_merge=0; _is_noff=0
 for _a in "$@"; do
-    if [[ "$_a" == "--no-ff" && ! -e "$MARKER" ]]; then
-        : > "$MARKER"
-        printf 'in the window\n' >> "$WT/feature.txt"
-        "$REAL" -C "$WT" commit -q --no-verify -am 'fix(cb-121): committed in the window'
-        break
-    fi
+    [[ "$_a" == "merge" ]] && _is_merge=1
+    [[ "$_a" == "--no-ff" ]] && _is_noff=1
 done
+if (( _is_merge && _is_noff )) && [[ ! -e "$MARKER" ]]; then
+    : > "$MARKER"
+    printf 'in the window\n' >> "$WT/feature.txt"
+    "$REAL" -C "$WT" commit -q --no-verify -am 'fix(cb-121): committed in the window'
+fi
 """
 
-# "Could not look" must not read as "clean". The alarm is the only site in the
-# harness that asks git for `^1^{commit}`, so failing exactly that invocation
+# Cross-model review, round 1: main can also move AFTER the merge returns and
+# BEFORE the alarm names the tip. Reading before `flock -u 9` stops another
+# FINISH, and nothing else — plan-note writers hold a different lock or none.
+# The tip is then a stranger's commit, and forcing it through the parent
+# comparison would print a confident, wrong diagnosis.
+_SHIM_MOVE_MAIN_AFTER_MERGE = r"""
+if [[ "$*" == *'main^{commit}'* && ! -e "$MARKER" ]]; then
+    : > "$MARKER"
+    printf 'landed after the merge\n' > "$REPO/.claude/plans/AFTER.md"
+    "$REAL" -C "$REPO" add -- .claude/plans/AFTER.md
+    "$REAL" -C "$REPO" commit -q -m 'docs: AFTER.md landing after the merge'
+fi
+"""
+
+# "Could not look" must not read as "clean". The parent read is the only site
+# in the harness that asks git for `^@`, so failing exactly that invocation
 # breaks the alarm's own read and nothing else. The spelling is load-bearing:
-# if the script's rev spelling changes, this test goes red rather than silently
-# stopping to exercise the fail-closed path.
+# if the script's rev spelling changes, the marker assertion goes red rather
+# than the test silently stopping to exercise the fail-closed path.
+_SHIM_BREAK_PARENT_READ = r"""
+if [[ "$*" == *'^@'* ]]; then
+    : > "$MARKER"
+    echo "fatal: simulated - git cannot answer" >&2
+    exit 128
+fi
+"""
+
+# The quietest form of "could not look": exit 0 with an answer that is not an
+# object name. `git rev-parse` really does echo an argument it does not
+# recognise back at you and exit 0, which is how a test in this very file once
+# built its fixture into a directory named after a mistyped argv token.
+_SHIM_GARBAGE_TIP = r"""
+if [[ "$*" == *'main^{commit}'* ]]; then
+    : > "$MARKER"
+    echo "banana"
+    exit 0
+fi
+"""
+
 # A git that is merely NOISY on stderr must not raise an alarm. Folding stderr
-# into the captured output would put every `warning:` line into the parsed line
-# count, and the alarm would fire on an ordinary finish — a check failing
+# into the captured answer would turn every `warning:` line into a parse
+# failure, and the alarm would fire on an ordinary finish — a check failing
 # because it could not parse is the mirror image of one reporting clean because
 # it could not look, and it is the worse of the two here, because an alarm
 # nobody believes is an alarm nobody reads.
 _SHIM_NOISY_STDERR = r"""
-for _a in "$@"; do
-    if [[ "$_a" == *'^1^{commit}'* ]]; then
-        : > "$MARKER"
-        echo "warning: simulated noisy git on stderr" >&2
-        break
-    fi
-done
+if [[ "$*" == *'main^{commit}'* ]]; then
+    : > "$MARKER"
+    echo "warning: simulated noisy git on stderr" >&2
+fi
 """
 
-_SHIM_BREAK_REV_PARSE = r"""
-for _a in "$@"; do
-    if [[ "$_a" == *'^1^{commit}'* ]]; then
-        : > "$MARKER"
-        echo "fatal: simulated - git cannot answer" >&2
-        exit 128
-    fi
-done
+# Move main in the window AND break the last cleanup statement, which is a
+# `git -C REPO log --oneline -1 | sed` pipeline. Under `set -euo pipefail` that
+# kills the script — so this is the case that proves the alarm is delivered by
+# an EXIT trap and not by a statement the cleanup can preempt. Scoped to the
+# REPO invocation: `[2/7] Latest commit` runs the same subcommand in the
+# WORKTREE, and breaking that one would abort the run long before any merge.
+_SHIM_MOVE_MAIN_AND_BREAK_CLEANUP = _SHIM_MOVE_MAIN + r"""
+if [[ "$1" == "-C" && "$2" == "$REPO" ]]; then
+    for _a in "$@"; do
+        if [[ "$_a" == "--oneline" ]]; then
+            echo "fatal: simulated cleanup failure" >&2
+            exit 1
+        fi
+    done
+fi
 """
 
 
@@ -4042,25 +4086,26 @@ class TestPostMergeAlarm:
     merge and porcelain git has no `--expect-old-oid`, so main can move between
     the check and the merge. The flock serializes finishes against each other
     and nothing else, while this repo's ratified convention has level-(2)
-    sessions committing plan notes to main continuously (and since T-29,
+    sessions committing plan notes to main continuously (and since 2026-08-22,
     `tools/cascade-mint.sh` does it automatically under a DIFFERENT lock). So
     CLAUDE.md's "The tested state is the landed state | exit 13" was a window
     described as an invariant.
 
-    WHAT THIS IS NOT. It is not a gate. The merge has ALREADY landed by the time
-    the alarm can look, so its outcome must never read as "the finish failed,
-    re-run" — re-running after a landed merge is worse than the defect. Hence:
-    all cleanup completes first, the block is loud, the exit code is a NEW one
-    (15) meaning *landed, premise unconfirmed*, and the text forbids a re-run.
+    WHAT THIS IS NOT. It is not a gate. The merge step has already run by the
+    time the alarm can look, so its outcome must never read as "the finish
+    failed, re-run" — re-running after a landed merge is worse than the defect.
+    Hence: all cleanup completes first, the block is loud, the exit code is a
+    NEW one (15) meaning *landed, premise unconfirmed*, and the text forbids a
+    re-run.
 
     HOW THESE TESTS INJECT. `TestMergeSubjectDerivation` proved that running the
     whole script end to end in a throwaway repo under `--skip-checks` is
     affordable and that the guards it traverses are the real ones, so this class
     reuses that shape rather than inventing new machinery. The only addition is
     a transparent `git` wrapper placed ahead of the real git on the PATH the
-    fixture already prepends, which acts on the integration merge and then execs
-    the real thing. That is the honest reproduction: the state really does change
-    inside the real window, in the real script.
+    fixture already prepends, which acts on one identified invocation and then
+    execs the real thing. That is the honest reproduction: the state really does
+    change inside the real window, in the real script.
     """
 
     SLUG = "fix-cb-121-probe"
@@ -4117,7 +4162,7 @@ class TestPostMergeAlarm:
             env={**os.environ, "PATH": f"{armed['bin']}{os.pathsep}{os.environ['PATH']}"},
         )
 
-    # ---- behaviour ------------------------------------------------------
+    # ---- the two directions that make everything else discriminate ------
 
     def test_an_undisturbed_finish_is_silent_and_lands(self, armed: dict) -> None:
         """The control, and it is what makes every case below discriminate.
@@ -4125,7 +4170,7 @@ class TestPostMergeAlarm:
         Without it a 15 elsewhere could equally come from a fixture that cannot
         finish at all — which is how a refusal test passes for the wrong reason.
         It also pins the other half of the acceptance contract: an alarm that
-        fires on an ordinary finish would be worse than none, because the exit
+        fired on an ordinary finish would be worse than none, because the exit
         code is non-zero and every caller would learn to ignore it.
         """
         wt = self._branch(armed)
@@ -4195,27 +4240,37 @@ class TestPostMergeAlarm:
         assert landed_p2 != tested_head, "the injection did not move the branch"
         assert tested_head in r.stdout, r.stdout[-4000:]
         assert landed_p2 in r.stdout, r.stdout[-4000:]
+        assert "SECOND PARENT" in r.stdout, r.stdout[-4000:]
         assert "DO NOT RE-RUN" in r.stdout
 
-    def test_a_noisy_git_does_not_raise_a_false_alarm(self, armed: dict) -> None:
-        """The alarm reads stdout only, and this is why.
+    # ---- the ways the alarm itself could lie ----------------------------
 
-        `git rev-parse` can print `warning:` lines on stderr for reasons that
-        have nothing to do with the merge — an unreadable global config, a
-        deprecation. Capturing them alongside the answer puts them into the
-        parsed line count, and an ordinary finish then exits 15. An alarm that
-        fires on clean runs is worse than none, because every caller learns to
-        ignore it; this is the one direction the fail-closed rule must NOT be
-        applied to, and the rc is what still separates error from empty.
+    def test_main_moving_after_the_merge_is_diagnosed_honestly(self, armed: dict) -> None:
+        """Cross-model review round 1, HIGH: reading before the unlock is not enough.
+
+        The unlock only holds off another FINISH. A plan-note writer holds a
+        different lock or none, so main can move in the moment between the merge
+        returning and the alarm naming the tip. The tip is then a stranger's
+        one-parent commit. Forcing that through the parent comparison would
+        print "something landed between the re-check and the merge" — a
+        confident diagnosis of the wrong event. It gets its own verdict instead,
+        and the verdict says what is actually known.
         """
         wt = self._branch(armed)
-        marker = self._shim(armed, _SHIM_NOISY_STDERR)
+        marker = self._shim(armed, _SHIM_MOVE_MAIN_AFTER_MERGE)
+        tested_main = git(armed["repo"], "rev-parse", "main")
 
         r = self._finish(armed)
 
         assert marker.exists(), "the shim never fired — this test proved nothing"
-        assert r.returncode == 0, (r.returncode, r.stdout[-4000:], r.stderr[-4000:])
-        assert "POST-MERGE ALARM" not in r.stdout, r.stdout[-4000:]
+        assert r.returncode == 15, (r.returncode, r.stdout[-4000:], r.stderr[-4000:])
+        # The merge itself was PERFECT — that is what makes the wrong diagnosis
+        # a real cost rather than a nicety.
+        assert git(armed["repo"], "rev-parse", "main^1^1") == tested_main
+        assert "not a two-parent merge" in r.stdout, r.stdout[-4000:]
+        assert "between the in-lock" not in r.stdout, (
+            "the alarm blamed the pre-merge window for a post-merge commit"
+        )
         assert not wt.exists()
 
     def test_a_git_that_cannot_answer_is_not_read_as_clean(self, armed: dict) -> None:
@@ -4227,19 +4282,86 @@ class TestPostMergeAlarm:
         it could not look.
         """
         wt = self._branch(armed)
-        marker = self._shim(armed, _SHIM_BREAK_REV_PARSE)
+        marker = self._shim(armed, _SHIM_BREAK_PARENT_READ)
 
         r = self._finish(armed)
 
         assert marker.exists(), "the shim never fired — this test proved nothing"
         assert r.returncode == 15, (r.returncode, r.stdout[-4000:], r.stderr[-4000:])
-        assert "could not" in r.stdout.lower(), r.stdout[-4000:]
+        assert "could not look" in r.stdout.lower(), r.stdout[-4000:]
         assert "DO NOT RE-RUN" in r.stdout
         # Still not a gate: the merge landed and the cleanup completed.
         assert git(armed["repo"], "rev-parse", "main^2") == git(
             armed["repo"], "rev-parse", self.BRANCH
         )
         assert not wt.exists()
+
+    def test_a_zero_status_non_sha_answer_is_not_read_as_clean(self, armed: dict) -> None:
+        """rc 0 with garbage is the quietest "could not look" of the three.
+
+        Without the shape check the exit code alone would accept it, and
+        `banana != TESTED_MAIN` would then fire the FIRST-PARENT arm — an alarm
+        with a specific, wrong story rather than an honest "I could not read
+        this".
+        """
+        marker = self._shim(armed, _SHIM_GARBAGE_TIP)
+        self._branch(armed)
+
+        r = self._finish(armed)
+
+        assert marker.exists(), "the shim never fired — this test proved nothing"
+        assert r.returncode == 15, (r.returncode, r.stdout[-4000:], r.stderr[-4000:])
+        assert "could not look" in r.stdout.lower(), r.stdout[-4000:]
+        assert "FIRST PARENT" not in r.stdout, (
+            "garbage was compared as if it were an object name"
+        )
+
+    def test_a_noisy_git_does_not_raise_a_false_alarm(self, armed: dict) -> None:
+        """The alarm reads stdout only, and this is why.
+
+        `git rev-parse` can print `warning:` lines on stderr for reasons that
+        have nothing to do with the merge — an unreadable global config, a
+        deprecation. Capturing them alongside the answer makes the answer
+        unparseable, and an ordinary finish then exits 15. An alarm that fires
+        on clean runs is worse than none, because every caller learns to ignore
+        it; this is the one direction the fail-closed rule must NOT be applied
+        to, and the rc is what still separates error from empty.
+        """
+        wt = self._branch(armed)
+        marker = self._shim(armed, _SHIM_NOISY_STDERR)
+
+        r = self._finish(armed)
+
+        assert marker.exists(), "the shim never fired — this test proved nothing"
+        assert r.returncode == 0, (r.returncode, r.stdout[-4000:], r.stderr[-4000:])
+        assert "POST-MERGE ALARM" not in r.stdout, r.stdout[-4000:]
+        assert not wt.exists()
+
+    def test_a_cleanup_failure_cannot_swallow_the_alarm(self, armed: dict) -> None:
+        """Cross-model review round 1, HIGH: `set -e` could silence a detected alarm.
+
+        The verdict is computed under the lock and spoken at the end. With the
+        block written as a trailing `if`, any failure in between — the cleanup's
+        final `git log … | sed` pipeline, or any statement a future edit inserts
+        — kills the script under `set -euo pipefail`, and the operator gets a
+        landed merge reported as an ordinary failure with no code, no diagnosis
+        and no "do not re-run". Delivering it from an EXIT trap makes that
+        unrepresentable, which is the CB-41 answer rather than another rule
+        someone has to remember at every insertion point.
+        """
+        marker = self._shim(armed, _SHIM_MOVE_MAIN_AND_BREAK_CLEANUP)
+        self._branch(armed)
+        tested_main = git(armed["repo"], "rev-parse", "main")
+
+        r = self._finish(armed)
+
+        assert marker.exists(), "the shim never fired — this test proved nothing"
+        assert r.returncode == 15, (r.returncode, r.stdout[-4000:], r.stderr[-4000:])
+        assert "POST-MERGE ALARM" in r.stdout, r.stdout[-4000:]
+        assert tested_main in r.stdout
+        # And it says the run was already dying, rather than implying the
+        # cleanup completed.
+        assert "may not have completed" in r.stdout, r.stdout[-4000:]
 
 
 class TestPostMergeAlarmIsNotAGate:
@@ -4257,7 +4379,22 @@ class TestPostMergeAlarmIsNotAGate:
     FINISH = REPO_ROOT / "tools" / "worktree-finish.sh"
     CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
 
-    def test_the_alarm_reads_the_parents_after_the_merge_and_before_the_unlock(self) -> None:
+    @classmethod
+    def _speak_body(cls) -> str:
+        """The text of `_alarm_speak`, so assertions about the BLOCK are scoped.
+
+        Reading the whole file instead would make "no re-run hint after the
+        alarm" trivially false: the function is defined near the top, and the
+        real refusals that legitimately print the hint come after it.
+        """
+        src = cls.FINISH.read_text()
+        start = src.index("_alarm_speak() {")
+        end = src.index("\n}\n", start)
+        body = src[start:end]
+        assert "POST-MERGE ALARM" in body, "the function no longer prints the block"
+        return body
+
+    def test_the_alarm_reads_the_tip_then_its_parents_before_the_unlock(self) -> None:
         """Phase, both bounds — and each one alone would be wrong.
 
         Before the merge there is nothing landed to look at. After `flock -u 9`
@@ -4266,27 +4403,47 @@ class TestPostMergeAlarmIsNotAGate:
         """
         src = code_only(self.FINISH.read_text())
         merge_at = src.index('git -C "${REPO_ROOT}" merge "${BRANCH}" --no-ff')
-        read_at = src.index("_ALARM_RAW=$(git")
+        tip_at = src.index('_ALARM_TIP=$(git')
+        arm_at = src.index("trap _alarm_speak EXIT")
         # The LAST unlock: the three before it are refusal paths, and anchoring
         # on the first one after the merge finds the merge-failed branch, where
         # nothing has landed and there is nothing for an alarm to read.
         unlock_at = src.rindex("flock -u 9\n")
-        assert merge_at < read_at < unlock_at, (
-            "the alarm must read main's parents after the merge and before the unlock"
+        assert merge_at < tip_at < arm_at < unlock_at, (
+            "the alarm must read main's tip after the merge and arm before the unlock"
         )
 
-    def test_the_alarm_exits_only_after_every_cleanup_step(self) -> None:
-        """An alarm that skipped the cleanup would be a gate wearing a hat.
+    def test_the_parents_are_read_from_the_named_tip_not_from_main(self) -> None:
+        """Cross-model review round 1, HIGH: three `main`-relative revs are not a snapshot.
 
-        The merge has landed; leaving the worktree in place and the claim held
-        would make the operator's recovery harder than the defect it reports.
+        `rev-parse main^{commit} main^1^{commit} main^2^{commit}` resolves the
+        ref three times inside one process — a tip from one commit can be
+        reported beside parents from another. Naming the tip first fixes an
+        OBJECT, and an object's parents are immutable.
         """
-        src = self.FINISH.read_text()
-        assert "exit 15" in src, "the alarm no longer exits with its own code"
-        exit_at = src.index("exit 15")
-        assert src.index("worktree remove") < exit_at
-        assert src.index("codebugs release") < exit_at
-        assert src.index("=== Integration complete ===") < exit_at
+        src = code_only(self.FINISH.read_text())
+        assert '"${_ALARM_TIP}^@"' in src, "the parents are not read from the named tip"
+        assert "main^1" not in src and "main^2" not in src, (
+            "a main-relative parent revision is back; that read cannot be coherent"
+        )
+
+    def test_the_alarm_is_delivered_by_an_exit_trap(self) -> None:
+        """A trailing `if` is preemptable by `set -e`; a trap is not.
+
+        The cleanup ends with a `git log … | sed` pipeline, and any statement a
+        future edit inserts is another way to die between detection and speech.
+        The behavioural half is
+        TestPostMergeAlarm::test_a_cleanup_failure_cannot_swallow_the_alarm.
+        """
+        src = code_only(self.FINISH.read_text())
+        assert "trap _alarm_speak EXIT" in src, "the alarm is not armed as an exit trap"
+        assert src.count("trap ") == 1, "a second trap could replace this one silently"
+        body = self._speak_body()
+        assert "exit 15" in body, "the alarm no longer exits with its own code"
+        # And it must leave an ordinary run's status alone.
+        assert 'return "${rc}"' in body, (
+            "the trap does not preserve the exit status when it has nothing to say"
+        )
 
     def test_the_alarm_never_offers_a_re_run(self) -> None:
         """13 means nothing landed and asks for a re-run; 15 means the opposite.
@@ -4295,13 +4452,8 @@ class TestPostMergeAlarmIsNotAGate:
         reach it — and the count of its call sites must stay at the four
         refusals CB-116 enumerated, so this cannot drift into a fifth.
         """
-        # CODE only: the comment beside the alarm explains that it must not
-        # print the helper, and a ratchet that reads prose would refuse the
-        # documentation keeping its own rule understood.
-        src = code_only(self.FINISH.read_text())
-        alarm_at = src.index("POST-MERGE ALARM")
-        assert "_retry_hint" not in src[alarm_at:], "the alarm offers a re-run"
-        assert src.count("_retry_hint\n") == 4
+        assert "_retry_hint" not in self._speak_body(), "the alarm offers a re-run"
+        assert code_only(self.FINISH.read_text()).count("_retry_hint\n") == 4
 
     def test_the_exit_code_is_new_and_documented_where_the_codes_live(self) -> None:
         """15 must not be an existing guard code wearing a new meaning."""
@@ -4330,7 +4482,10 @@ class TestPostMergeAlarmIsNotAGate:
         The old row claimed "The tested state is the landed state", which is a
         window described as an invariant. The new one must still make a
         CHECKABLE claim (the state matched when the check ran) rather than
-        retreating into something unfalsifiable.
+        retreating into something unfalsifiable — and it must not claim more
+        than the moment of the check either: the lock does not bind the
+        plan-note writers, so "when the lock was taken" would be a second,
+        smaller overclaim (cross-model review, round 1).
         """
         md = self.CLAUDE_MD.read_text()
         rows = [ln for ln in md.splitlines() if ln.startswith("| ")]
@@ -4340,16 +4495,17 @@ class TestPostMergeAlarmIsNotAGate:
         assert "The tested state is the landed state" not in row, (
             "the unqualified claim CB-121 refuted is still in the table"
         )
-        assert "exit 13" in row, "the row lost the code it actually refuses with"
-        assert "re-check" in row
+        assert "re-check" in row and "exit 13" in row
+        assert "when the lock was taken" not in row, (
+            "the lock does not bind the writers that open this window"
+        )
 
     def test_claude_md_names_the_window_and_calls_the_alarm_an_alarm(self) -> None:
         """Prose under the table, per the same treatment `main-invariants.yml` got."""
         md = self.CLAUDE_MD.read_text()
         assert "CB-121" in md
         assert "exit 15" in md
-        # It must be named an ALARM in the same breath as the window it covers.
         at = md.index("CB-121")
-        window = md[at - 2000 : at + 3000]
+        window = md[at - 2000 : at + 4000]
         assert "alarm" in window.lower(), "CB-121 is mentioned but the alarm is not named"
         assert "check-then-act" in window.lower()

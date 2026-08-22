@@ -28,7 +28,7 @@ Prose cannot enforce prose. That is CB-50, and the harness below is its fix.
 | An in-progress cherry-pick/revert marker no longer exempts a commit | pre-commit hook | exit 1 |
 | Integration never fast-forwards | `--no-ff` + `git config merge.ff false` | — |
 | One integration at a time | `flock` on `.worktrees/.integrate.lock` | exit 1 |
-| The tested state still matched when the lock was taken | in-lock SHA re-check | exit 13 |
+| The tested state still matched at the moment it was re-checked | in-lock SHA re-check | exit 13 |
 | The suite ran under the interpreter main has | `_guard_interpreter_matches_main` | exit 14 |
 | This clone is actually armed | `_guard_enforcement_armed` | exit 12 |
 | Main has main checked out, and is clean | `_guard_workspace_on_main`, `_guard_main_clean` | exit 8, 11 |
@@ -55,21 +55,39 @@ still a checkable claim — the state matched under the lock, and a mismatch the
 with exit 13 before anything lands. It simply no longer promises the interval it cannot cover.
 
 The gap is covered by a **post-merge alarm**, and it is an alarm for the same reason
-`main-invariants.yml` is: by the time it can look, **the merge has landed**, so it cannot refuse
-anything and it gets no row in the table above. Immediately after the integration merge and
+`main-invariants.yml` is: by the time it can look, **the merge step has already run**, so it cannot
+refuse anything and it gets no row in the table above. Immediately after the integration merge and
 **before** `flock -u 9` — after the unlock another finish could move main, and the alarm would start
-lying in the way it exists to catch — `worktree-finish.sh` reads main's tip and both of its parents
-in one `git rev-parse` and compares them with `TESTED_MAIN` and `TESTED_HEAD`. Both parents, because
-what landed is a merge and checking one of them while asserting the premise is this section's own
-recurring defect. Then it finishes **all** of its cleanup (worktree removal, claim release) and only
-at the very end prints a loud block and exits **15**. `exit 15` is a new code and means *landed,
-premise unconfirmed*; it is deliberately not `exit 13`, which means *nothing landed, re-run*, and the block says in
-words not to re-run — a second finish after a landed merge is a worse outcome than the defect being
-reported. A `git rev-parse` that fails, answers short, or answers with something that is not an
-object name is read as **could not look**, never as clean. Rejected forms, with their reasons: making
-the merge name the pinned `TESTED_HEAD` closes only the branch half and pays a false refusal, since
-`pre-merge-commit` refuses a head with no ref; and a real CAS needs `git update-ref` over
-`commit-tree`, which this repo's own CI alarm treats as a hook-bypassing shape.
+lying in the way it exists to catch — `worktree-finish.sh` **names main's tip once and then reads
+that object's parents**, comparing them with `TESTED_MAIN` and `TESTED_HEAD`. Both parents, because
+what lands is a merge and checking one of them while asserting the premise is this section's own
+recurring defect. Then it finishes **all** of its cleanup (worktree removal, claim release) and
+speaks only at the very end, with a loud block and `exit 15`. That code is new and means *landed,
+premise unconfirmed*; it is deliberately not `exit 13`, which means *nothing landed, re-run*, and
+the block says in words not to re-run — a second finish after a landed merge is a worse outcome than
+the defect being reported.
+
+Four details of it are load-bearing, and three of them are cross-model review findings rather than
+foresight. **The tip is named before its parents are read**: passing three `main`-relative revisions
+to one `rev-parse` resolves the ref three times, so a tip from one commit could be reported beside
+parents from another — the code claimed a coherence it did not have. **A tip that is not a
+two-parent merge gets its own verdict** rather than being forced through the comparison, because
+reading before the unlock holds off another *finish* and nothing else: a plan note landing in the
+moment after `git merge` returns makes the tip a stranger's commit, and the wrong story confidently
+told is worse than "I cannot confirm this". (The same verdict catches a `git merge` that reported
+*Already up to date*.) **The block is delivered from an `EXIT` trap**, not a trailing `if`: under
+`set -euo pipefail` any failure in the cleanup — its own final `git log … | sed`, or any statement a
+later edit inserts — would otherwise kill the script between detecting the condition and reporting
+it, presenting a landed merge as an ordinary failure. That is CB-41's rule again: make the bad state
+unrepresentable instead of re-establishing discipline at each insertion point. And **the read is
+stdout-only**, the one place fail-closed is deliberately not applied — folding stderr in would make
+any `warning:` git emitted unparseable and fire the alarm on an honest finish, and an alarm that
+cries wolf is one nobody reads; the rc still separates an error from an empty answer.
+
+Rejected forms, with their reasons: making the merge name the pinned `TESTED_HEAD` closes only the
+branch half and pays a false refusal, since `pre-merge-commit` refuses a head with no ref; and a real
+CAS needs `git update-ref` over `commit-tree`, which this repo's own CI alarm treats as a
+hook-bypassing shape.
 
 `merge.ff=false` is the one no hook could replace: **git fires no hook on a fast-forward at all**,
 because no commit is created, so nothing can catch it after the fact. Verified by replaying the

@@ -442,13 +442,90 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# THE ALARM'S VOICE (CB-121). Called from the EXIT trap armed after the merge,
+# so it speaks whether the run ends normally or `set -e` cuts it short during
+# cleanup. It never refuses anything and it never offers a re-run: by the time
+# it can be reached the merge step has already run. See the long comment on the
+# read itself, below, for why this is an alarm and not a gate.
+_alarm_speak() {
+    local rc=$?
+    if [[ -z "${_ALARM_WHY}" ]]; then
+        # Nothing to say. Leave the run's own status exactly as it was — an
+        # ordinary finish must still exit 0, and a refusal must keep its code.
+        return "${rc}"
+    fi
+    echo ""
+    echo "================================================================"
+    echo "  !!  POST-MERGE ALARM  —  THE MERGE STEP ALREADY RAN  !!"
+    echo "================================================================"
+    case "${_ALARM_WHY}" in
+        unreadable)
+            echo "  Could not read main's tip or its parents after the merge, so"
+            echo "  this run CANNOT say the tested state is the landed state."
+            echo "  That is 'could not look', not 'clean'."
+            echo "      rc=${_ALARM_RC}, tip read as: '${_ALARM_TIP}'"
+            echo "      run it yourself to see git's own words:"
+            echo "      ${_ALARM_CMD}"
+            ;;
+        tip-not-a-merge)
+            echo "  main's tip is not a two-parent merge (${_ALARM_NPARENTS} parent(s)), so it is"
+            echo "  not the merge this run made, and this run cannot confirm its"
+            echo "  own merge's parents. Two things produce this, both rare:"
+            echo "  a commit landed on main in the moment after the merge, or"
+            echo "  'git merge' had nothing to do because main already carried"
+            echo "  the branch. Read the log before assuming which."
+            echo "      main's tip:                   ${_ALARM_TIP}"
+            echo "      tested against (TESTED_MAIN): ${TESTED_MAIN}"
+            echo "      tested branch (TESTED_HEAD):  ${TESTED_HEAD}"
+            ;;
+        first-parent)
+            echo "  main's FIRST PARENT is not the main this branch was tested"
+            echo "  against. Something landed on main between the in-lock"
+            echo "  re-check and the merge — a plan note, a cascade mint, a hand"
+            echo "  commit — so the merge was computed against a main this run"
+            echo "  never ran the gates on."
+            echo "      tested against (TESTED_MAIN): ${TESTED_MAIN}"
+            echo "      landed first parent:          ${_ALARM_P1}"
+            echo "      landed merge commit:          ${_ALARM_TIP}"
+            ;;
+        second-parent)
+            echo "  The merge's SECOND PARENT is not the branch head that was"
+            echo "  tested: the branch moved while this finish was running, and"
+            echo "  the merge resolved the NAME, not the tested SHA. Branch work"
+            echo "  that no gate here ever saw is now on main."
+            echo "      tested (TESTED_HEAD):  ${TESTED_HEAD}"
+            echo "      landed second parent:  ${_ALARM_P2}"
+            echo "      landed merge commit:   ${_ALARM_TIP}"
+            ;;
+    esac
+    echo ""
+    echo "  DO NOT RE-RUN tools/worktree-finish.sh. Exit 15 means the merge step"
+    echo "  ALREADY RAN and the premise is UNCONFIRMED; it is not exit 13, which"
+    echo "  means nothing landed and asks for a re-run. This run is over."
+    echo "  What this run actually tested: ${TESTED_HEAD:0:9} against ${TESTED_MAIN:0:9}."
+    echo "  Whatever differs from that on main was never tested here — do not"
+    echo "  read the merge as vouched for. Inspect and decide by hand:"
+    echo "      git -C ${REPO_ROOT} log --graph --oneline -6 main"
+    echo "      git -C ${REPO_ROOT} show --stat ${_ALARM_TIP:-main}"
+    echo "  Fix it forward on a NEW branch. Do not rewrite main."
+    if (( rc != 0 )); then
+        echo ""
+        echo "  NOTE: this run was already exiting with status ${rc} when the"
+        echo "  alarm fired, so a cleanup step above may not have completed."
+        echo "  Check the worktree and the claim by hand."
+    fi
+    echo "================================================================"
+    exit 15
+}
+
+# ---------------------------------------------------------------------------
 # THE POST-MERGE ALARM (CB-121). AN ALARM, NOT A GATE — and the difference is
 # the whole design, not a caveat.
 #
 # THE DEFECT IT COVERS. The two re-checks above are a CHECK-THEN-ACT. They prove
-# main and the branch were still the tested ones AT THE MOMENT OF THE CHECK;
-# the merge two statements later resolves BOTH refs again, by NAME, for itself.
-# Nothing carries a verified SHA into it and porcelain git has no
+# main and the branch were still the tested ones AT THE MOMENT THEY WERE
+# CHECKED; the merge two statements later resolves BOTH refs again, by NAME,
+# for itself. Nothing carries a verified SHA into it and porcelain git has no
 # `--expect-old-oid`, so the window is real. The flock serializes FINISHES
 # against each other and nothing else, while this repo's ratified cascade
 # convention has level-(2) sessions committing plan notes to main continuously
@@ -457,80 +534,110 @@ fi
 # sanctioned work, not a hypothetical adversary.
 #
 # WHY IT IS NOT A GATE, AND MAY NEVER BECOME ONE. By the time anything here can
-# look, THE MERGE HAS LANDED. Re-running the finish after a landed merge is a
+# look, THE MERGE STEP HAS ALREADY RUN. Re-running the finish afterwards is a
 # worse outcome than the defect being reported — the same asymmetry the claims
 # adaptation records, where a refusal at setup is free and a refusal after the
 # merge is not. So the script completes ALL of its cleanup (worktree removal,
-# claim release), and only at the very end prints the block and exits 15.
-# 15 means "LANDED, and the premise could not be confirmed". 13 means the exact
-# opposite — "nothing landed, re-run" — and reusing it would put a new lie in
-# place of the old one. For the same reason the block below never prints
-# `_retry_hint`.
+# claim release) and speaks only at the very end, with exit 15: "LANDED, and
+# the premise could not be confirmed". 13 means the exact opposite — "nothing
+# landed, re-run" — and reusing it would put a new lie in place of the old one.
+# For the same reason nothing below prints `_retry_hint`.
 #
 # READ BEFORE `flock -u 9`, deliberately. After the unlock another finish can
 # take the lock and move main, and the alarm would then be lying about main in
 # precisely the way it exists to catch.
 #
-# BOTH PARENTS, not just the first. The premise being checked is "the tested
-# state is the landed state", and what landed is a MERGE: TESTED_MAIN is its
-# first parent, TESTED_HEAD its second. CB-121 names both halves (the branch
-# side is narrower — it needs the owning session to commit mid-finish — but it
-# is the identical check-then-act). Reading one and asserting the premise would
-# be the "described better than it behaves" shape this whole harness records.
+# THE TIP IS NAMED ONCE, THEN ITS PARENTS ARE READ FROM THAT NAME. Passing three
+# `main`-relative revisions to one `rev-parse` is NOT an atomic snapshot — each
+# expression resolves the ref independently, so a tip from one commit could be
+# reported beside parents from another (cross-model review found this in round
+# 1, where the comment claimed a coherence the code did not have). Naming the
+# tip first fixes the object, and an object's parents are immutable, so the
+# second read cannot race anything.
 #
-# ONE `git rev-parse`, and the parents are read from the TIP THIS RUN OBSERVED:
-# once a commit is named, its parents are immutable, so no second window opens
-# inside the alarm itself.
+# WHAT NAMING THE TIP CANNOT FIX, stated rather than papered over: main's tip is
+# this run's best identification of the merge it just made, and a commit landing
+# on main in the microseconds after `git merge` returns would make the tip
+# somebody else's commit. That is why a tip whose parent count is not two is a
+# verdict of its OWN — `tip-not-a-merge` — instead of being forced through the
+# parent comparison, which would print a confident and wrong diagnosis. The same
+# verdict catches the other shape with no merge commit: a `git merge` that
+# reported "Already up to date" because main had meanwhile acquired the branch.
 #
-# FAIL-CLOSED. A non-zero rc, a missing line, or a value that is not an object
-# name means "could not look" — never "clean". An ERROR and an EMPTY answer are
-# distinguished, because collapsing those is the defect this repository has now
-# paid for at the bootstrap gate, at `MERGE_HEAD` and at
-# `_guard_conflict_markers`.
+# BOTH PARENTS, not just the first. The premise is "the tested state is the
+# landed state", and what lands is a MERGE: TESTED_MAIN is its first parent,
+# TESTED_HEAD its second. CB-121 names both halves (the branch side is narrower
+# — it needs the owning session to commit mid-finish — but it is the identical
+# check-then-act). Reading one and asserting the premise would be the
+# "described better than it behaves" shape this whole harness records.
 #
-# STDOUT ONLY. Folding stderr in would put any `warning:` git felt like emitting
-# into the line count and turn an ordinary finish into a false alarm — a gate
-# firing because it could not parse is the mirror of one reporting clean
-# because it could not look. The rc still distinguishes error from empty, and
-# the block prints the command so the operator can see git's own words.
+# FAIL-CLOSED. A non-zero rc, a wrong number of answers, or a value that is not
+# an object name means "could not look" — never "clean". An ERROR and an EMPTY
+# answer are distinguished, because collapsing those is the defect this
+# repository has now paid for at the bootstrap gate, at `MERGE_HEAD` and at
+# `_guard_conflict_markers`. The parent list is read with the `|| [[ -n … ]]`
+# idiom for the same reason: `read` returns non-zero on an unterminated last
+# line, which is exactly how `MERGE_HEAD` became readable as "nothing to check".
 #
-# `mapfile` rather than `while read`: `<<<` always terminates its line, but
-# `read` returns non-zero on an unterminated last line regardless — the exact
-# hazard that made `MERGE_HEAD` readable as "nothing to check" in the
-# pre-commit hook. The count below is this loop's equivalent of that fix.
+# STDOUT ONLY, and that is the one place fail-closed is deliberately NOT
+# applied: folding stderr in would put any `warning:` git felt like emitting
+# into the answer and fire the alarm on an honest finish. An alarm that cries
+# wolf is one nobody reads. The rc still separates an error from an empty
+# answer, and the block prints the command so the operator sees git's own words.
 _ALARM_WHY=""
 _ALARM_TIP=""
 _ALARM_P1=""
 _ALARM_P2=""
 _ALARM_RC=0
-_ALARM_CMD="git -C ${REPO_ROOT} rev-parse 'main^{commit}' 'main^1^{commit}' 'main^2^{commit}'"
-_ALARM_RAW=$(git -C "${REPO_ROOT}" rev-parse \
-    "main^{commit}" "main^1^{commit}" "main^2^{commit}" 2>/dev/null) || _ALARM_RC=$?
-if (( _ALARM_RC != 0 )); then
+_ALARM_NPARENTS=0
+_ALARM_HEX='^[0-9a-f]{40}$|^[0-9a-f]{64}$'
+_ALARM_CMD="git -C ${REPO_ROOT} rev-parse 'main^{commit}' && git -C ${REPO_ROOT} rev-parse '<tip>^@'"
+_ALARM_TIP=$(git -C "${REPO_ROOT}" rev-parse "main^{commit}" 2>/dev/null) || _ALARM_RC=$?
+if (( _ALARM_RC != 0 )) || ! [[ "${_ALARM_TIP}" =~ ${_ALARM_HEX} ]]; then
+    # `git rev-parse` echoes an argument it does not recognise back at you and
+    # exits 0 (CLAUDE.md records a test in this repo that was vacuous for
+    # exactly that reason), so the SHAPE of the answer is checked as well as
+    # the exit code. 40 or 64 hex digits covers sha1 and sha256.
     _ALARM_WHY="unreadable"
 else
-    mapfile -t _ALARM_LINES <<< "${_ALARM_RAW}"
-    if (( ${#_ALARM_LINES[@]} != 3 )); then
+    _ALARM_PARENTS=()
+    _ALARM_PRC=0
+    _ALARM_PRAW=$(git -C "${REPO_ROOT}" rev-parse "${_ALARM_TIP}^@" 2>/dev/null) || _ALARM_PRC=$?
+    if (( _ALARM_PRC != 0 )); then
+        _ALARM_RC="${_ALARM_PRC}"
         _ALARM_WHY="unreadable"
     else
-        _ALARM_TIP="${_ALARM_LINES[0]}"
-        _ALARM_P1="${_ALARM_LINES[1]}"
-        _ALARM_P2="${_ALARM_LINES[2]}"
-        # `git rev-parse` echoes an argument it does not recognise back at you
-        # and exits 0 (CLAUDE.md records a test in this repo that was vacuous
-        # for exactly that reason), so the SHAPE of each answer is checked, not
-        # merely the exit code. 40 or 64 hex digits covers sha1 and sha256.
-        if ! [[ "${_ALARM_TIP}" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]] \
-            || ! [[ "${_ALARM_P1}" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]] \
-            || ! [[ "${_ALARM_P2}" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]; then
-            _ALARM_WHY="unreadable"
-        elif [[ "${_ALARM_P1}" != "${TESTED_MAIN}" ]]; then
-            _ALARM_WHY="first-parent"
-        elif [[ "${_ALARM_P2}" != "${TESTED_HEAD}" ]]; then
-            _ALARM_WHY="second-parent"
+        while IFS= read -r _ap || [[ -n "${_ap}" ]]; do
+            [[ -n "${_ap}" ]] && _ALARM_PARENTS+=("${_ap}")
+        done <<< "${_ALARM_PRAW}"
+        _ALARM_NPARENTS="${#_ALARM_PARENTS[@]}"
+        if (( _ALARM_NPARENTS != 2 )); then
+            _ALARM_WHY="tip-not-a-merge"
+        else
+            _ALARM_P1="${_ALARM_PARENTS[0]}"
+            _ALARM_P2="${_ALARM_PARENTS[1]}"
+            if ! [[ "${_ALARM_P1}" =~ ${_ALARM_HEX} ]] || ! [[ "${_ALARM_P2}" =~ ${_ALARM_HEX} ]]; then
+                _ALARM_WHY="unreadable"
+            elif [[ "${_ALARM_P1}" != "${TESTED_MAIN}" ]]; then
+                _ALARM_WHY="first-parent"
+            elif [[ "${_ALARM_P2}" != "${TESTED_HEAD}" ]]; then
+                _ALARM_WHY="second-parent"
+            fi
         fi
     fi
 fi
+
+# ARMED AS AN EXIT TRAP, not as an `if` at the bottom of the file — and that is
+# the CB-41 lesson rather than defensive habit. `set -euo pipefail` is in force
+# and the cleanup below ends with a `git log … | sed` pipeline; a failure in it,
+# or in any statement a future edit inserts, would kill the script and the alarm
+# would never speak. A landed merge would then be reported as an ordinary
+# failure — a gate-shaped signal for exactly the state this exists to describe.
+# Point-of-use discipline is the wrong enforcement layer: it must be
+# re-established every time a statement is added. The trap makes that
+# unrepresentable. It also preserves the exit status untouched when there is
+# nothing to say, so an ordinary finish still exits 0.
+trap _alarm_speak EXIT
 flock -u 9
 
 # ---------------------------------------------------------------------------
@@ -610,52 +717,3 @@ echo ""
 echo "Remaining by hand: close the card (codebugs update CB-NN --status fixed)"
 echo "and add the ledger row in .claude/plans/BUGFIX-LOOP-LEDGER.md."
 
-# ---------------------------------------------------------------------------
-# The alarm SPEAKS here, last, after every cleanup step has run (CB-121). See
-# the long comment beside the read, above the unlock: the merge has landed, so
-# this is a report on a completed integration and never an instruction to try
-# again.
-if [[ -n "${_ALARM_WHY}" ]]; then
-    echo ""
-    echo "================================================================"
-    echo "  !!  POST-MERGE ALARM  —  THE MERGE ALREADY LANDED  !!"
-    echo "================================================================"
-    case "${_ALARM_WHY}" in
-        unreadable)
-            echo "  Could not read the parents of main after the merge, so this run"
-            echo "  CANNOT say the tested state is the landed state. This is"
-            echo "  'could not look', not 'clean'."
-            echo "      rc=${_ALARM_RC}, stdout: ${_ALARM_RAW//$'\n'/ | }"
-            echo "      run it yourself to see git's own words:"
-            echo "      ${_ALARM_CMD}"
-            ;;
-        first-parent)
-            echo "  main's FIRST PARENT is not the main this branch was tested"
-            echo "  against. Something landed on main between the in-lock re-check"
-            echo "  and the merge — a plan note, a cascade mint, a hand commit."
-            echo "      tested against (TESTED_MAIN): ${TESTED_MAIN}"
-            echo "      landed first parent:          ${_ALARM_P1}"
-            echo "      landed merge commit:          ${_ALARM_TIP}"
-            ;;
-        second-parent)
-            echo "  The merge's SECOND PARENT is not the branch head that was"
-            echo "  tested: the branch moved while this finish was running, and"
-            echo "  the merge resolved the NAME, not the tested SHA."
-            echo "      tested (TESTED_HEAD):  ${TESTED_HEAD}"
-            echo "      landed second parent:  ${_ALARM_P2}"
-            echo "      landed merge commit:   ${_ALARM_TIP}"
-            ;;
-    esac
-    echo ""
-    echo "  DO NOT RE-RUN tools/worktree-finish.sh. Exit 15 means LANDED with an"
-    echo "  UNCONFIRMED premise; it is not exit 13, which means nothing landed."
-    echo "  The worktree is removed and the claim released — this run is over."
-    echo "  Inspect and decide by hand:"
-    echo "      git -C ${REPO_ROOT} log --graph --oneline -6 main"
-    echo "      git -C ${REPO_ROOT} show --stat ${_ALARM_TIP:-main}"
-    echo "  The tree that landed was tested against ${TESTED_MAIN:0:9}; if what"
-    echo "  arrived in the window interacts with it, fix it forward on a NEW"
-    echo "  branch. Do not rewrite main."
-    echo "================================================================"
-    exit 15
-fi
