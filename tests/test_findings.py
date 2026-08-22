@@ -2684,3 +2684,215 @@ class TestAddLinesMetaConflict:
         for dest, _meta_key, spelling in findings._ADD_META_FLAGS:
             assert dest in dests, f"{dest!r} ({spelling}) is not an argument of `add`"
         assert "meta" in dests, "`--meta` itself must exist for the check to matter"
+
+
+class TestAddMetaRefusalsAndEmptyFlags:
+    """CB-132 + CB-133 — two residuals of CB-129, one handler, DIFFERENT mechanisms.
+
+    CB-132: `--meta` had no arm over its `json.loads`, so a malformed payload left
+    `codebugs add` as a RAW TRACEBACK (`json.JSONDecodeError`), and a well-formed
+    but non-object one (`--meta '[1,2]'`) as `TypeError: cannot convert dictionary
+    update sequence element #0` out of the `meta.update` below. CLAUDE.md names
+    this class outright under Error handling: a handler that catches NOTHING breaks
+    the rule exactly as surely as one that catches in the wrong order (CB-19/CB-79,
+    where an unknown `--status` printed a traceback and leaked the connection).
+
+    CB-133: the flag-seeded meta was guarded by TRUTHINESS (`if value:`), so an
+    explicitly typed `-l ""` landed nowhere, counted as no conflict, and reported
+    success — CB-129's own success-shaped-discard class surviving on the empty
+    string. A CLI flag is a WRITE path, so CB-82 applies (`None` is the only "not
+    supplied"), not CB-25 (where `""` legitimately means "no filter"). The write
+    side of this repo already answers what `""` should then do: `bench._require_text`
+    REFUSES it rather than defaulting or storing it.
+
+    These call `cli.main()` IN PROCESS on purpose, like `TestAddLinesMetaConflict`
+    above: both defects live in the seam between the parser and the handler, which
+    a unit test of a helper cannot see.
+    """
+
+    def _argv(self, tmp_project, extra):
+        return [
+            "codebugs", "--tracker-root", tmp_project, "add",
+            "-s", "low", "-c", "c", "-f", "f.py", "-d", "something is wrong",
+            "--new-category",
+        ] + extra
+
+    def _run(self, tmp_project, monkeypatch, extra):
+        from codebugs import cli
+
+        monkeypatch.setattr(sys, "argv", self._argv(tmp_project, extra))
+        cli.main()
+
+    def _rows(self, tmp_project):
+        conn = db.connect(tmp_project)
+        try:
+            return findings.query_findings(conn)["findings"]
+        finally:
+            conn.close()
+
+    # ---- CB-132: the SHAPE of the refusal for a bad --meta -------------------
+
+    def test_non_json_meta_refuses_instead_of_printing_a_traceback(
+        self, tmp_project, monkeypatch, capsys
+    ):
+        from codebugs import cli
+
+        monkeypatch.setattr(sys, "argv", self._argv(tmp_project, ["--meta", "не json"]))
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "Traceback" not in err
+        assert "--meta" in err
+        # The offending text must be named, or the caller cannot see WHICH of its
+        # arguments the parser choked on.
+        assert "не json" in err
+
+    def test_a_json_array_meta_refuses(self, tmp_project, monkeypatch, capsys):
+        """Well-formed JSON, wrong SHAPE. This is the arm the `json.JSONDecodeError`
+        one cannot cover: the payload parses and then kills `dict.update`."""
+        from codebugs import cli
+
+        monkeypatch.setattr(sys, "argv", self._argv(tmp_project, ["--meta", "[1,2]"]))
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "Traceback" not in err
+        assert "--meta" in err
+        assert "list" in err
+        assert "[1,2]" in err
+
+    def test_a_json_scalar_meta_refuses(self, tmp_project, monkeypatch, capsys):
+        from codebugs import cli
+
+        monkeypatch.setattr(sys, "argv", self._argv(tmp_project, ["--meta", '"text"']))
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "Traceback" not in err
+        assert "str" in err
+
+    def test_a_json_null_meta_refuses(self, tmp_project, monkeypatch, capsys):
+        """`json.loads("null")` is `None`, which `dict.update` also refuses — and
+        which a truthiness guard would have quietly read as "no --meta at all"."""
+        from codebugs import cli
+
+        monkeypatch.setattr(sys, "argv", self._argv(tmp_project, ["--meta", "null"]))
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "Traceback" not in err
+        assert "NoneType" in err
+
+    def test_an_empty_meta_refuses(self, tmp_project, monkeypatch, capsys):
+        """`--meta ""` is a SUPPLIED empty document, not an absent argument — the
+        same split `bench.py` draws between `csv_data=None` and `csv_data=""`. It
+        used to be discarded by `if args.meta` and reported as success."""
+        from codebugs import cli
+
+        monkeypatch.setattr(sys, "argv", self._argv(tmp_project, ["--meta", ""]))
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "Traceback" not in err
+        assert "--meta" in err
+        assert "empty" in err
+
+    def test_a_refused_meta_costs_no_partial_work(self, tmp_project, monkeypatch, capsys):
+        """CB-82: a refusal must land nothing. The parse already runs before
+        `db.connect()`; this pins that it stays there."""
+        from codebugs import cli
+
+        monkeypatch.setattr(sys, "argv", self._argv(tmp_project, ["--meta", "[1,2]"]))
+        with pytest.raises(SystemExit):
+            cli.main()
+        capsys.readouterr()
+        assert self._rows(tmp_project) == []
+
+    def test_a_valid_object_meta_still_lands(self, tmp_project, monkeypatch, capsys):
+        """Control. Without it the set is one-sided and a fix that refused EVERY
+        `--meta` would pass."""
+        self._run(tmp_project, monkeypatch, ["--meta", '{"module": "m"}'])
+        assert "Added" in capsys.readouterr().out
+        assert self._rows(tmp_project)[0]["meta"]["module"] == "m"
+
+    # ---- CB-133: an explicitly typed empty flag must not vanish --------------
+
+    def test_an_empty_lines_flag_refuses(self, tmp_project, monkeypatch, capsys):
+        from codebugs import cli
+
+        monkeypatch.setattr(sys, "argv", self._argv(tmp_project, ["-l", ""]))
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "Traceback" not in err
+        assert "--lines" in err
+        assert "empty" in err
+        assert self._rows(tmp_project) == []
+
+    def test_an_empty_lines_flag_refuses_even_when_meta_carries_lines(
+        self, tmp_project, monkeypatch, capsys
+    ):
+        """The nastiest spelling of CB-133: under the old truthiness guard the empty
+        `-l` was dropped, so this was not even a CB-129 conflict — `--meta` won and
+        the call reported success over a discarded argument."""
+        from codebugs import cli
+
+        monkeypatch.setattr(
+            sys, "argv",
+            self._argv(tmp_project, ["-l", "", "--meta", '{"lines": "10-20"}']),
+        )
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "Traceback" not in err
+        assert "--lines" in err
+        assert self._rows(tmp_project) == []
+
+    def test_a_lines_flag_with_a_value_still_lands(self, tmp_project, monkeypatch, capsys):
+        """Control, the other side of the empty-string predicate."""
+        self._run(tmp_project, monkeypatch, ["-l", "10-20"])
+        assert "Added" in capsys.readouterr().out
+        assert self._rows(tmp_project)[0]["meta"]["lines"] == "10-20"
+
+    def test_an_add_naming_neither_flag_still_lands(self, tmp_project, monkeypatch, capsys):
+        """Control: `None` really is "not supplied" and must stay silent."""
+        self._run(tmp_project, monkeypatch, [])
+        assert "Added" in capsys.readouterr().out
+        # `--new-category` stamps `category_minted` (CB-60), so the row's meta is
+        # not empty — what must be absent is any key the two flags write.
+        assert "lines" not in (self._rows(tmp_project)[0]["meta"] or {})
+
+    # ---- the arm must stay NARROW -------------------------------------------
+
+    def test_a_bump_over_corrupt_stored_meta_still_crashes(
+        self, tmp_project, monkeypatch, capsys
+    ):
+        """Pins behaviour the fix deliberately PRESERVES, so it passes on both sides
+        of the change — it exists to refuse a BROAD `try` around the whole handler.
+
+        `add_finding` raises `json.JSONDecodeError` from `_bump_row`'s pre-write
+        parse of a MATCHED row's stored meta: that is corruption, not bad input,
+        and folding it into the new `--meta` arm would print a tidy usage error for
+        a state no caller typed — the CB-15/CB-16 lie, and the twin of
+        `TestRetriageCliContract::test_a_committed_write_is_never_reported_as_bad_input`.
+        """
+        from codebugs import cli
+
+        self._run(tmp_project, monkeypatch, [])
+        capsys.readouterr()
+
+        conn = db.connect(tmp_project)
+        conn.execute("UPDATE findings SET meta = ?", ("{not json",))
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr(sys, "argv", self._argv(tmp_project, []))
+        with pytest.raises(json.JSONDecodeError):
+            cli.main()
