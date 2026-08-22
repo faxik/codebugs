@@ -19,7 +19,10 @@ below hold the properties that make that better than the discipline it replaces:
   * two concurrent mints get two DIFFERENT numbers — and removing the `flock`
     must turn that test RED, or it is green by construction;
   * the commit carries ONLY the registry even when a parallel session has its
-    own files staged, and its generated message passes the LIVE commit-msg hook.
+    own files staged, and its generated message passes the LIVE commit-msg hook;
+  * the test seam cannot write to a path at all (CB-138) — pointing its marker
+    at the real registry has no effect, because the marker's value is never
+    used as a path any more, only as a boolean that gates one stderr line.
 
 Everything runs in a throwaway git repository with a fixture registry. The real
 registry is never read, written or committed by this file.
@@ -28,8 +31,10 @@ registry is never read, written or committed by this file.
 from __future__ import annotations
 
 import os
+import queue
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -81,6 +86,7 @@ def _env() -> dict[str, str]:
         }
     )
     env.pop("CASCADE_MINT_TEST_DELAY", None)
+    env.pop("CASCADE_MINT_TEST_MARKER", None)
     return env
 
 
@@ -373,6 +379,45 @@ class TestTheMintCommit:
         assert "git commit" in body
 
 
+class TestSeamCannotWriteAnywhere:
+    """CB-138 — the seam used to `: > "$MARKER"` at a caller-supplied PATH, and
+    an acceptance walked it straight into the real registry: rc=0, a "minted"
+    report, and the registry truncated from 45 lines to one — landed on main
+    by the very commit this script issues, because the seam sat AFTER the
+    "registry is clean" gate and BEFORE the rollback trap was armed, so
+    neither defence saw it.
+
+    The fix removes the path capability outright: `CASCADE_MINT_TEST_MARKER`
+    is a boolean now, and its only effect is one line on the process's OWN
+    stderr. This test performs the ORIGINAL attack verbatim — pointing the
+    variable at the real registry's path — and proves it does nothing: the
+    mint completes normally and the registry carries exactly the one line the
+    mint itself appended, never a truncation.
+    """
+
+    def test_the_marker_pointed_at_the_registry_does_not_touch_it(self, tmp_path: Path) -> None:
+        repo = _make_repo(tmp_path)
+        before = _registry(repo)
+        env = _env()
+        # The exact value the T-29 acceptance used: the real registry's path.
+        env["CASCADE_MINT_TEST_MARKER"] = str(repo / REGISTRY_REL)
+        out = subprocess.run(
+            ["bash", str(SCRIPT), "--prefix", CYRILLIC_TE, "--text", "(DIR-1) something"],
+            cwd=str(repo),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert out.returncode == 0, out.stderr
+        after = _registry(repo)
+        assert after.splitlines()[:-1] == before.splitlines(), (
+            "the registry's original lines were disturbed — the marker touched "
+            "the path it was pointed at"
+        )
+        assert after.splitlines()[-1] == f"- {CYRILLIC_TE}-9 — (DIR-1) something"
+        assert len(after.splitlines()) == len(before.splitlines()) + 1
+
+
 class TestConcurrentMint:
     """§4.2 — the discriminating test, and the one the mutation probe targets.
 
@@ -384,15 +429,24 @@ class TestConcurrentMint:
 
     Removing `flock -w 60 9` from the script must make this test fail; that
     mutation was run, and the assertion below is what caught it.
+
+    CB-138: the handshake used to be a FILE the first process was told to
+    create at a caller-supplied path — the seam an acceptance walked into the
+    real registry. It is now a line on the first process's OWN stderr, read by
+    a background thread that drains the pipe continuously (so the child can
+    never block on a full pipe buffer) and hands the line to the main thread
+    over a `queue.Queue`. Waiting on that queue is still an event — a blocking
+    read that returns the instant the child writes, never a poll — not a timer;
+    a bounded `queue.Empty` retry loop is what turns "the first mint never
+    reached the window" into an assertion instead of a hang.
     """
 
     def test_two_concurrent_mints_get_two_different_ids(self, tmp_path: Path) -> None:
         repo = _make_repo(tmp_path)
-        marker = tmp_path / "first-has-computed"
 
         slow_env = _env()
         slow_env["CASCADE_MINT_TEST_DELAY"] = "5"
-        slow_env["CASCADE_MINT_TEST_MARKER"] = str(marker)
+        slow_env["CASCADE_MINT_TEST_MARKER"] = "1"
         first = subprocess.Popen(
             ["bash", str(SCRIPT), "--prefix", CYRILLIC_TE, "--text", "(DIR-1) first"],
             cwd=str(repo),
@@ -402,17 +456,39 @@ class TestConcurrentMint:
             text=True,
         )
 
+        # Drain first's stderr continuously from a background thread — both to
+        # detect the handshake line and so the child can never deadlock writing
+        # to a pipe nobody is reading while it sleeps out the delay.
+        stderr_lines: list[str] = []
+        handshake_q: "queue.Queue[str]" = queue.Queue()
+
+        def _pump() -> None:
+            assert first.stderr is not None
+            for line in first.stderr:
+                stderr_lines.append(line)
+                handshake_q.put(line)
+
+        pump_thread = threading.Thread(target=_pump, daemon=True)
+        pump_thread.start()
+
         # HANDSHAKE, not a timer. A fixed sleep only HOPES the first mint has
         # reached the window; on a loaded machine the second could finish first,
         # and the two ids would then differ with no lock at all — a green test
-        # over a broken gate. The marker is written inside the lock, after the
-        # number has been computed, so waiting for it is proof of the state this
-        # test needs.
+        # over a broken gate. The line is written inside the lock, after the
+        # number has been computed, so blocking on it is proof of the state
+        # this test needs.
         deadline = time.monotonic() + 60
-        while not marker.exists():
+        handshake_seen = False
+        while time.monotonic() < deadline:
             assert first.poll() is None, "the first mint exited before it computed an id"
-            assert time.monotonic() < deadline, "the first mint never reached the window"
-            time.sleep(0.02)
+            try:
+                line = handshake_q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if "CASCADE_MINT_TEST_MARKER" in line:
+                handshake_seen = True
+                break
+        assert handshake_seen, "the first mint never reached the window"
 
         second = subprocess.Popen(
             ["bash", str(SCRIPT), "--prefix", CYRILLIC_TE, "--text", "(DIR-2) second"],
@@ -422,10 +498,11 @@ class TestConcurrentMint:
             stderr=subprocess.PIPE,
             text=True,
         )
-        out1, err1 = first.communicate(timeout=180)
+        assert first.wait(timeout=180) == 0, "".join(stderr_lines)
+        out1 = first.stdout.read() if first.stdout is not None else ""
+        pump_thread.join(timeout=5)
         out2, err2 = second.communicate(timeout=180)
 
-        assert first.returncode == 0, err1
         assert second.returncode == 0, err2
 
         id1, id2 = out1.strip(), out2.strip()

@@ -350,19 +350,37 @@ if [[ -n "${dirty}" ]]; then
 fi
 
 # TEST SEAM (tests/test_cascade_mint.py), in two halves, both inert unless their
-# variable is set and neither able to change an outcome.
+# variable is set and NEITHER ABLE TO WRITE ANYWHERE OUTSIDE THIS PROCESS'S OWN
+# STREAMS (CB-138).
 #
-# The MARKER is a handshake, and it is the half that makes the concurrency test a
-# proof rather than a bet: it says "I am inside the lock and I have already
-# computed my number". Without it the test would launch its second mint after a
-# fixed sleep and merely HOPE the first had got this far — on a loaded machine
-# the second could finish first, and the two ids would then differ with no lock
-# at all, i.e. a green test over a broken gate (cross-model review reproduced
-# exactly that reasoning).
+# MARKER used to `: > "$MARKER"` at a caller-supplied PATH — a write capability
+# with no relationship to what a test double needs. The T-29 acceptance walked
+# it straight into the real registry (`CASCADE_MINT_TEST_MARKER=.claude/plans/
+# CASCADE-IDS.md`): rc=0, a "minted" report, and the registry truncated from 45
+# lines to one — landed on main by the very commit this script issues, because
+# the seam sat AFTER the "registry is clean" gate and BEFORE the rollback trap
+# was armed, so neither defence saw it. Fixed by removing the path capability
+# outright rather than validating the path: a seam that cannot write to a file
+# at all cannot be pointed at one. MARKER is a boolean now; its only effect is
+# one line on THIS PROCESS'S OWN STDERR — a stream the caller already owns and
+# reads, and whose destination cannot be redirected by the value of the
+# variable, because the value is never used as a path. Pointing it at the
+# registry's own path is therefore inert: the registry is untouched, exactly as
+# if the variable had never been set.
+#
+# The handshake is still the half that makes the concurrency test a proof
+# rather than a bet: it says "I am inside the lock and I have already computed
+# my number". Without it the test would launch its second mint after a fixed
+# sleep and merely HOPE the first had got this far — on a loaded machine the
+# second could finish first, and the two ids would then differ with no lock at
+# all, i.e. a green test over a broken gate (cross-model review reproduced
+# exactly that reasoning). The test now blocks on a line from the first
+# process's own stderr pipe instead of polling for a file to exist — still
+# event-driven, never a timer.
 #
 # The DELAY then holds the window open while the second caller runs into it.
 if [[ -n "${CASCADE_MINT_TEST_MARKER:-}" ]]; then
-    : > "${CASCADE_MINT_TEST_MARKER}"
+    echo "CASCADE_MINT_TEST_MARKER: computed ${NEXT_ID}" >&2
 fi
 if [[ -n "${CASCADE_MINT_TEST_DELAY:-}" ]]; then
     sleep "${CASCADE_MINT_TEST_DELAY}"
