@@ -607,7 +607,7 @@ fi
 # this run's best identification of the merge it just made, and a commit landing
 # on main in the microseconds after `git merge` returns would make the tip
 # somebody else's commit. That is why a tip whose parent count is not two is a
-# verdict of its OWN — `tip-not-a-merge` — instead of being forced through the
+# verdict of its OWN — `tip-not-ours` — instead of being forced through the
 # parent comparison, which would print a confident and wrong diagnosis. The same
 # verdict catches the other shape with no merge commit: a `git merge` that
 # reported "Already up to date" because main had meanwhile acquired the branch.
