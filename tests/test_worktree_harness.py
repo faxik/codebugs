@@ -2516,6 +2516,303 @@ def invocations(src: str, command: str) -> list[str]:
     return out
 
 
+CASCADE_REGISTRY_REL = ".claude/plans/CASCADE-IDS.md"
+CASCADE_MINT = REPO_ROOT / "tools" / "cascade-mint.sh"
+
+# Registries the gate and the allocator are driven over together. Each one
+# carries a case that a careless scanner gets WRONG, and the point of the pair
+# is that both readers must get it wrong or right together — see
+# TestCascadeMintGate.test_the_gate_accepts_exactly_the_id_the_tool_hands_out.
+CASCADE_CORPUS: dict[str, str] = {
+    # A Latin 'T' typo is a SPENT number. A scanner that reads only the Cyrillic
+    # spelling computes 9 here instead of 43 and hands out an id already used.
+    "a latin typo carries the maximum": (
+        "# reg\n- \u0422-3 \u2014 a\n- T-42 \u2014 latin typo\n- \u0422-9 \u2014 c\n"
+    ),
+    # Without a LEFT boundary the Latin arm of the unit pattern matches inside
+    # 'BT-40', and the BT family silently raises the unit counter to 41.
+    "a large BT id must not raise the unit counter": (
+        "# reg\n- \u0422-3 \u2014 a\n- BT-40 \u2014 a sub-topic\n- \u0422-5 \u2014 c\n"
+    ),
+    # The tail is ANNULLED. Its number stayed spent, so the next id is 8, not 7.
+    "the maximum sits on an annulled line": (
+        "# reg\n- \u0422-6 \u2014 a\n- \u0422-7 \u2014 b\n"
+        "- \u041a\u041e\u041b\u041b\u0418\u0417\u0418\u042f: \u0441\u0442\u0440\u043e\u043a\u0430 \u0432\u044b\u0448\u0435 \u0410\u041d\u041d\u0423\u041b\u0418\u0420\u041e\u0412\u0410\u041d\u0410\n"
+    ),
+    # The maximum is only MENTIONED, inside guillemets, in a collision note. The
+    # allocator counts it; a gate that only looked at allocation lines when it
+    # computed the maximum would hand 3 back out.
+    "the maximum appears only inside guillemets": (
+        "# reg\n- \u0422-2 \u2014 a\n- \u0422-3 \u2014 b\n"
+        "- \u041a\u041e\u041b\u041b\u0418\u0417\u0418\u042f: \u00ab\u0422-11\u00bb \u0430\u043d\u043d\u0443\u043b\u0438\u0440\u043e\u0432\u0430\u043d\u0430\n"
+    ),
+    # Leading zeros: '\u0422-007' is seven, not a separate id and not a syntax error.
+    "an id written with leading zeros": (
+        "# reg\n- \u0422-1 \u2014 a\n- \u0422-007 \u2014 b\n"
+    ),
+}
+
+CASCADE_CASES: list[tuple[str, str, str]] = [
+    ("the repository's own registry", "live", "\u0422"),
+    ("the repository's own registry", "live", "BT"),
+    ("the repository's own registry", "live", "DIR"),
+    *[(name, name, "\u0422") for name in CASCADE_CORPUS],
+    ("a large BT id must not raise the unit counter", "a large BT id must not raise the unit counter", "BT"),
+]
+
+
+class TestCascadeMintGate:
+    """The allocator had a tool and no gate; a hand-typed number still landed.
+
+    `tools/cascade-mint.sh` computes the number under a lock and commits it in
+    one operation, which closes the mint MADE BY THE SCRIPT. All three
+    collisions in `.claude/plans/CASCADE-IDS.md` were hand-typed numbers landed
+    with a plain `git commit`, and the third one satisfied the read-the-tail
+    convention by the letter — what was protected was the READING, not the
+    COMPUTATION (CB-137).
+
+    Every test here RUNS the hook in a throwaway repo. A structural test would
+    assert that a line exists in a file, which is the failure this repository
+    keeps filing cards about.
+    """
+
+    @staticmethod
+    def _arm(repo: Path, registry_text: str) -> None:
+        """Land a registry, THEN arm the hook: the baseline is not judged."""
+        (repo / ".claude" / "plans").mkdir(parents=True, exist_ok=True)
+        (repo / CASCADE_REGISTRY_REL).write_text(registry_text, encoding="utf-8")
+        git(repo, "add", "--", CASCADE_REGISTRY_REL)
+        git(repo, "commit", "-m", "registry")
+        TestPreCommitHook._install(repo)
+
+    @staticmethod
+    def _append(repo: Path, text: str) -> None:
+        with (repo / CASCADE_REGISTRY_REL).open("a", encoding="utf-8") as fh:
+            fh.write(text)
+
+    @staticmethod
+    def _commit(repo: Path, *extra: str) -> subprocess.CompletedProcess[str]:
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "--", CASCADE_REGISTRY_REL, *extra], check=True
+        )
+        return subprocess.run(
+            ["git", "-C", str(repo), "commit", "-m", "attempt"],
+            capture_output=True,
+            text=True,
+        )
+
+    @staticmethod
+    def _mint_line(id_: str, text: str = "probe") -> str:
+        return f"- {id_} \u2014 {text}\n"
+
+    @staticmethod
+    def _dry_run(repo: Path, prefix: str) -> str:
+        r = subprocess.run(
+            ["bash", str(CASCADE_MINT), "--prefix", prefix, "--dry-run"],
+            capture_output=True,
+            text=True,
+            cwd=str(repo),
+        )
+        assert r.returncode == 0, r.stderr
+        return r.stdout.strip()
+
+    # ---- the two sides of the rule ----------------------------------------
+
+    def test_a_hand_typed_number_is_refused_and_names_the_tool(self, repo: Path) -> None:
+        """A gate with no named way out is a wall (the card's item 3)."""
+        self._arm(repo, CASCADE_CORPUS["an id written with leading zeros"])
+        self._append(repo, self._mint_line("\u0422-42"))
+        result = self._commit(repo)
+        assert result.returncode != 0, result.stdout
+        assert "tools/cascade-mint.sh" in result.stderr, result.stderr
+        assert "--no-verify" in result.stderr, result.stderr
+
+    def test_the_allocators_own_mint_passes(self, repo: Path) -> None:
+        """A gate that refuses its own tool is a gate nobody can use.
+
+        The REAL script is run against the REAL hook: it computes the number,
+        appends and commits under its own lock, and the hook judges that commit.
+        """
+        self._arm(repo, CASCADE_CORPUS["the maximum sits on an annulled line"])
+        result = subprocess.run(
+            ["bash", str(CASCADE_MINT), "--prefix", "\u0422", "--text", "minted by the tool"],
+            capture_output=True,
+            text=True,
+            cwd=str(repo),
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "\u0422-8", result.stdout
+        assert "\u0422-8" in (repo / CASCADE_REGISTRY_REL).read_text(encoding="utf-8")
+        assert git(repo, "status", "--porcelain", "--untracked-files=no") == ""
+
+    # ---- the discriminating case: an EDIT is not a mint ---------------------
+
+    def test_editing_an_existing_line_passes(self, repo: Path) -> None:
+        """The case that killed the card's own mechanism.
+
+        The card said to judge the ADDED LINES of the diff. Renaming a brief
+        inside a registry line — `git mv`, which is what collision #2 actually
+        did — rewrites the line, so the diff shows an ADDED line carrying an
+        ALREADY SPENT id and a line-based predicate refuses an edit that is not
+        a mint at all. A false refusal on main is not a local cost: the path
+        stays staged and every worktree of this clone is then refused by
+        `_guard_main_clean` (CB-130).
+        """
+        self._arm(repo, "# reg\n- \u0422-4 \u2014 unit, `OLD-BRIEF.md`\n")
+        path = repo / CASCADE_REGISTRY_REL
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("OLD-BRIEF.md", "NEW-BRIEF.md"),
+            encoding="utf-8",
+        )
+        result = self._commit(repo)
+        assert result.returncode == 0, result.stderr
+
+    def test_a_note_that_only_mentions_an_id_passes(self, repo: Path) -> None:
+        """A collision note names the free number; naming is not allocating.
+
+        This is the other half of the letter-fix: `ids(staged) \\ ids(HEAD)`
+        would call this line a mint of \u0422-40 and refuse it, and writing such a
+        note is exactly what happens after a collision.
+        """
+        self._arm(repo, "# reg\n- \u0422-4 \u2014 a\n")
+        self._append(repo, "- \u041a\u041e\u041b\u041b\u0418\u0417\u0418\u042f: \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u044b\u0439 \u043d\u043e\u043c\u0435\u0440 \u2014 \u0422-40\n")
+        assert self._commit(repo).returncode == 0
+
+    def test_a_second_allocation_line_for_an_existing_id_is_refused(self, repo: Path) -> None:
+        """Collisions #2 and #3, which a SET of ids cannot see.
+
+        In both, the number typed by hand was ALREADY in the registry when the
+        commit was made — the other direction had landed it minutes earlier — so
+        `ids(staged) \\ ids(HEAD)` is EMPTY and a set-based gate accepts it.
+        Measured against the real registry before this test was written: it did.
+        Multiplicity over ALLOCATION LINES is what sees it.
+        """
+        self._arm(repo, "# reg\n- \u0422-4 \u2014 taken by the other direction\n")
+        self._append(repo, self._mint_line("\u0422-4", "mine, typed by hand"))
+        result = self._commit(repo)
+        assert result.returncode != 0, result.stdout
+        assert "tools/cascade-mint.sh" in result.stderr
+
+    def test_an_annulled_line_spends_its_number(self, repo: Path) -> None:
+        """A gate cleverer than the tool disagrees with it on the first re-mint.
+
+        The maximum sits on an annulled line, so the next id is 8. A gate that
+        skipped annulled lines would compute 7, refuse the correct mint and
+        accept a re-issue of a spent number.
+        """
+        text = CASCADE_CORPUS["the maximum sits on an annulled line"]
+        self._arm(repo, text)
+        self._append(repo, self._mint_line("\u0422-8"))
+        assert self._commit(repo).returncode == 0
+
+        git(repo, "reset", "--hard", "HEAD~1")
+        self._append(repo, self._mint_line("\u0422-7", "re-using the annulled number"))
+        assert self._commit(repo).returncode != 0
+
+    # ---- fail-closed states -------------------------------------------------
+
+    def test_two_allocation_lines_in_one_commit_are_refused(self, repo: Path) -> None:
+        self._arm(repo, "# reg\n- \u0422-4 \u2014 a\n")
+        self._append(repo, self._mint_line("\u0422-5") + self._mint_line("\u0422-6"))
+        result = self._commit(repo)
+        assert result.returncode != 0, result.stdout
+        assert "mints ONE id per run" in result.stderr, result.stderr
+
+    def test_a_registry_absent_from_head_is_refused(self, repo: Path) -> None:
+        """Every id is new; there is no allocator state to check against."""
+        TestPreCommitHook._install(repo)
+        (repo / ".claude" / "plans").mkdir(parents=True)
+        (repo / CASCADE_REGISTRY_REL).write_text("# reg\n- \u0422-1 \u2014 a\n", encoding="utf-8")
+        result = self._commit(repo)
+        assert result.returncode != 0, result.stdout
+        assert "does not exist in HEAD" in result.stderr, result.stderr
+
+    def test_no_verify_carries_it_through(self, repo: Path) -> None:
+        """The gate is against the accident, not against a stated intent."""
+        self._arm(repo, "# reg\n- \u0422-4 \u2014 a\n")
+        self._append(repo, self._mint_line("\u0422-999"))
+        subprocess.run(["git", "-C", str(repo), "add", "--", CASCADE_REGISTRY_REL], check=True)
+        result = subprocess.run(
+            ["git", "-C", str(repo), "commit", "--no-verify", "-m", "deliberate"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+
+    def test_a_plan_note_that_does_not_touch_the_registry_is_unaffected(
+        self, repo: Path
+    ) -> None:
+        """The gate fires on one path; every other note commits as before."""
+        self._arm(repo, "# reg\n- \u0422-4 \u2014 a\n")
+        (repo / ".claude" / "plans" / "note.md").write_text("# note\n")
+        result = subprocess.run(
+            ["git", "-C", str(repo), "add", "--", ".claude/plans/note.md"], check=True
+        )
+        assert (
+            subprocess.run(
+                ["git", "-C", str(repo), "commit", "-m", "note"],
+                capture_output=True,
+                text=True,
+            ).returncode
+            == 0
+        ), result
+
+    def test_the_families_are_independent(self, repo: Path) -> None:
+        """`max+1` is computed inside a family, never across the whole file."""
+        self._arm(repo, "# reg\n- \u0422-4 \u2014 a\n- BT-9 \u2014 b\n- DIR-2 \u2014 c\n")
+        for id_, ok in (("\u0422-5", True), ("BT-10", True), ("DIR-3", True),
+                        ("\u0422-10", False), ("BT-5", False), ("DIR-10", False)):
+            self._append(repo, self._mint_line(id_))
+            result = self._commit(repo)
+            assert (result.returncode == 0) is ok, (id_, result.returncode, result.stderr)
+            git(repo, "reset", "--hard", "HEAD" if result.returncode else "HEAD~1")
+
+    # ---- the gate and the tool must not drift -------------------------------
+
+    @pytest.mark.parametrize(
+        ("case", "corpus_key", "prefix"),
+        CASCADE_CASES,
+        ids=[f"{c}:{p}" for c, _k, p in CASCADE_CASES],
+    )
+    def test_the_gate_accepts_exactly_the_id_the_tool_hands_out(
+        self, repo: Path, case: str, corpus_key: str, prefix: str
+    ) -> None:
+        """The agreement is pinned on the ANSWER, not on a shared spelling.
+
+        Byte-identity between the two would not have been this claim. The two
+        read DIFFERENT INPUTS — the tool a file in the working tree, the gate two
+        blobs out of the index — and answer different questions (`max+1` versus
+        `is this max+1`), and "sharing an implementation does not share a
+        decision when the callers supply different inputs" is the correction
+        CB-57's shared merge predicate had to make.
+
+        So both are RUN, over one corpus, and the gate must accept the tool's
+        answer and refuse both of its neighbours. Break either side's scanner —
+        the Latin arm, the left boundary, `max+1` — and a corpus entry
+        disagrees.
+        """
+        text = (
+            (REPO_ROOT / CASCADE_REGISTRY_REL).read_text(encoding="utf-8")
+            if corpus_key == "live"
+            else CASCADE_CORPUS[corpus_key]
+        )
+        self._arm(repo, text)
+
+        allocated = self._dry_run(repo, prefix)
+        label, _, number = allocated.rpartition("-")
+        n = int(number)
+
+        self._append(repo, self._mint_line(allocated))
+        assert self._commit(repo).returncode == 0, f"{case}: gate refused the tool's own id"
+        git(repo, "reset", "--hard", "HEAD~1")
+
+        for neighbour in (n + 1, n - 1):
+            self._append(repo, self._mint_line(f"{label}-{neighbour}"))
+            result = self._commit(repo)
+            assert result.returncode != 0, f"{case}: gate accepted {label}-{neighbour}"
+            git(repo, "reset", "--hard")
+
+
 class TestClaimsWiringStructure:
     """The scripts must reach the claims ledger, not flip a status field.
 

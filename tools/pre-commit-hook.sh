@@ -7,11 +7,14 @@
 # agent, and every subprocess identically, and it cannot be forgotten by a
 # session that never read CLAUDE.md.
 #
-# It enforces exactly two things, both already written in CLAUDE.md:
+# It enforces three things, all already written in CLAUDE.md:
 #
 #   1. On main, the ONLY thing that may be committed is a .claude/plans/*.md
 #      note. Everything else belongs on a branch, in a worktree.
 #   2. On any other branch, the branch must carry a sanctioned type.
+#   3. On main, an id appearing in .claude/plans/CASCADE-IDS.md must be the one
+#      the allocator would have computed — a hand-typed cascade number is how
+#      all three collisions in that registry happened (CB-137).
 #
 # It does NOT run tests or lint. tools/worktree-finish.sh is the quality gate
 # and runs them in the worktree against the post-forward-merge tree; duplicating
@@ -266,6 +269,291 @@ fi
 # commit through on purpose.
 [[ -e "${git_dir}/MERGE_HEAD" ]] && exit 0
 
+# --- CASCADE-IDS MINT GATE (CB-137) -------------------------------------------
+#
+# tools/cascade-mint.sh computes the next cascade id under a lock and appends
+# and commits it as ONE operation, so the author never types a number. That
+# closes the mint MADE BY THE SCRIPT and nothing else: a hand-typed number
+# committed with a plain `git commit` still lands, and that is how all three
+# collisions in this registry happened — the third one with the read-the-tail
+# convention satisfied BY THE LETTER, because what was protected was the
+# READING of the tail and not the COMPUTATION of the number. A tool without a
+# gate is a convention, and this repo's doctrine is that a convention which
+# exists only as a pattern in the log is not a rule (CB-50).
+#
+# WHAT IS JUDGED IS THE ALLOCATION LINES THAT APPEARED, NOT THE ADDED LINES OF
+# THE DIFF, AND NOT THE SET OF IDS EITHER. Both of the simpler mechanisms were
+# tried and both are wrong, in opposite directions:
+#
+#   * ADDED LINES OF THE DIFF (the shape the card specified) cannot tell a mint
+#     from an EDIT of an existing line, and this registry is edited: renaming a
+#     brief inside a line (`git mv` — collision #2 did exactly that) rewrites
+#     the line, so the diff shows an ADDED line carrying an ALREADY SPENT id and
+#     the predicate refuses a legitimate edit. A false refusal costs far more
+#     here than it looks: a refused commit on main leaves the path staged, and a
+#     dirty main refuses tools/worktree-finish.sh in EVERY worktree of this
+#     clone, other sessions' included (CB-130).
+#   * THE SET OF IDS THAT APPEARED (`ids(staged) \ ids(HEAD)`) is blind to the
+#     collisions this gate exists for. In collisions #2 and #3 the number typed
+#     by hand was ALREADY IN THE REGISTRY when the commit was made — the other
+#     direction had landed it minutes earlier — so it is not a NEW id at all and
+#     a set difference is empty. Measured against the real registry before this
+#     paragraph was written: a hand-written `- Т-21 — …` beside the existing
+#     `Т-21` was accepted.
+#
+# So an ALLOCATION LINE is what counts, WITH MULTIPLICITY: a line that begins
+# with a bullet and an id is what the tool writes and what allocates a number
+# (`- Т-37 — …`), while the registry's collision notes and remarks begin with a
+# word (`- КОЛЛИЗИЯ №2 …`) and merely MENTION ids. Per family:
+#
+#     new = allocation ids(staged) - allocation ids(HEAD)     as MULTISETS
+#
+#   * new empty         -> an edit, or a note that only mentions ids. Nothing
+#                          to say — and mentioning a free number in a collision
+#                          note stays legal, which a set-based rule would have
+#                          made a refusal.
+#   * exactly one       -> a mint. It must equal max+1 over EVERY id of its
+#                          family ANYWHERE IN HEAD's registry — which is
+#                          literally the number the tool would have computed,
+#                          since the tool refuses to run unless the registry is
+#                          clean and therefore reads HEAD's bytes.
+#   * more than one     -> refused: the tool mints one id per run.
+#
+# `max` is taken over EVERY id of the family, prose mentions and ANNULLED LINES
+# included, because that is the population the tool reads. A gate that were
+# cleverer than the tool and skipped an annulled line would disagree with it on
+# the first re-mint: an annulled line's number stayed SPENT.
+#
+# THE INDEX, NOT THE WORKING TREE. `git show :<path>` and `git show HEAD:<path>`
+# read what is actually being committed; reading the file from disk would let an
+# unstaged edit decide the verdict.
+#
+# THE FAMILIES ARE ENUMERATED, and that is deliberate. This registry allocates
+# 'Т', 'BT' and 'DIR' and nothing else, while every line of it also carries
+# foreign tokens of the same shape (CB-137, ARCH-001, ...). Deriving the family
+# list from the file would let a line that first mentions a new CB card look
+# like a mint of a number this allocator does not own.
+#
+# 'Т' READS BOTH SPELLINGS — U+0422 CYRILLIC CAPITAL LETTER TE (two bytes in
+# UTF-8) and its Latin lookalike — as ONE family, the left boundary is a byte
+# that cannot be part of an id, and grep runs under LC_ALL=C. All three are
+# copied from tools/cascade-mint.sh together with their reasons: a Latin typo in
+# the registry is a SPENT number that must not become invisible to the
+# allocator; without the left boundary the Latin arm matches inside 'BT-4' and
+# the BT family silently raises the unit counter; and byte semantics keep the
+# verdict independent of the committer's LANG. LC_ALL is pinned per command
+# rather than exported, so this gate cannot change how the rest of this hook
+# reads a path.
+#
+# THE GATE AND THE TOOL MUST NOT DRIFT, and byte-identical code would not have
+# been that claim: the two read DIFFERENT INPUTS (the tool a file in the working
+# tree, this gate two blobs out of the index) and answer different questions
+# (`max+1` vs `is this max+1`). This repo has already paid for "sharing an
+# implementation does not share a decision when the callers supply different
+# inputs" — that is the correction CB-57's shared merge predicate had to make.
+# So the agreement is pinned where it is actually made, on the ANSWER:
+# tests/test_worktree_harness.py::TestCascadeMintGate runs the real tool and
+# this real gate over one corpus of registries and requires that the id the tool
+# hands out is exactly the id this gate accepts, and that its neighbours are
+# refused.
+_CASCADE_REGISTRY=".claude/plans/CASCADE-IDS.md"
+_CASCADE_MINT_TOOL="tools/cascade-mint.sh"
+# One ERE alternation per family. The label used in messages is the first
+# alternative, which is the spelling the tool WRITES.
+_CASCADE_FAMILIES=('Т|T' 'BT' 'DIR')
+
+_cascade_refuse() {
+    echo "" >&2
+    echo "ERROR: refusing this change to ${_CASCADE_REGISTRY}." >&2
+    echo "" >&2
+    while [[ $# -gt 0 ]]; do
+        echo "  $1" >&2
+        shift
+    done
+    echo "" >&2
+    echo "  The number is not typed by the author. The allocator computes it" >&2
+    echo "  (max+1 over the registry) and appends and commits it as one" >&2
+    echo "  operation, under a lock:" >&2
+    echo "" >&2
+    echo "    ${_CASCADE_MINT_TOOL} --prefix Т --text '<the rest of the line>'" >&2
+    echo "    ${_CASCADE_MINT_TOOL} --prefix Т --dry-run    # just show the number" >&2
+    echo "" >&2
+    echo "  All three collisions here were hand-typed numbers, and the third" >&2
+    echo "  one satisfied the read-the-tail convention by the letter: what was" >&2
+    echo "  protected was the READING, not the COMPUTATION." >&2
+    echo "" >&2
+    echo "  Deliberate exception: git commit --no-verify" >&2
+    exit 1
+}
+
+_cascade_scan() {
+    # $1 = family alternation, $2 = blob text, $3 = "all" | "alloc".
+    #   all   — every id of the family anywhere in the text, the population the
+    #           tool reads.
+    #   alloc — only ids that OPEN a bullet line, i.e. lines that ALLOCATE a
+    #           number rather than mention one.
+    # Echoes each id's number, normalised (leading zeros stripped), one per
+    # line, duplicates included — multiplicity is load-bearing for "alloc".
+    #   0 = read (possibly zero ids)   2 = grep failed   3 = number too large
+    local _alt="$1" _text="$2" _mode="$3" _re _raw="" _rc=0 _tok _n _stripped
+    if [[ "${_mode}" == "alloc" ]]; then
+        _re="^-[[:space:]]*(${_alt})-[0-9]+"
+    else
+        _re="(^|[^A-Za-z0-9-])(${_alt})-[0-9]+"
+    fi
+    # grep: 0 matched, 1 no match, >=2 ERROR. Three answers, and only one of
+    # them means "this family has no ids here" — the tool splits them for the
+    # same reason, and this repo has paid for the conflation in the bootstrap
+    # gate, in MERGE_HEAD and in _guard_conflict_markers.
+    _raw=$(printf '%s\n' "${_text}" | LC_ALL=C grep -oE "${_re}") || _rc=$?
+    if (( _rc >= 2 )); then return 2; fi
+    if (( _rc == 1 )); then return 0; fi
+    while IFS= read -r _tok || [[ -n "${_tok}" ]]; do
+        [[ -z "${_tok}" ]] && continue
+        _n="${_tok##*-}"
+        # A number the shell's arithmetic cannot hold wraps SILENTLY, and both
+        # wrap directions are allocator failures. The tool refuses on the same
+        # nine-digit limit, so this gate must not quietly accept what the tool
+        # would not have minted.
+        _stripped="${_n}"
+        while [[ "${_stripped}" == 0?* ]]; do _stripped="${_stripped#0}"; done
+        if (( ${#_stripped} > 9 )); then return 3; fi
+        printf '%s\n' "$((10#${_n}))"
+    done <<< "${_raw}"
+    return 0
+}
+
+_cascade_count() {
+    # $1 = number, $2 = newline-separated numbers. Echoes how many times it
+    # occurs.
+    local _needle="$1" _hay="$2" _x _c=0
+    if [[ -n "${_hay}" ]]; then
+        while IFS= read -r _x || [[ -n "${_x}" ]]; do
+            [[ "${_x}" == "${_needle}" ]] && _c=$((_c + 1))
+        done <<< "${_hay}"
+    fi
+    printf '%s\n' "${_c}"
+}
+
+_cascade_mint_gate() {
+    local _staged="" _head="" _rc=0
+    local _alt _label _sall _salloc _halloc _hall
+    local _n _m _seen _cs _ch _newcount _newid _max _display
+
+    if ! git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+        _cascade_refuse \
+            "there is no HEAD to compare the staged registry against, so every" \
+            "line in it is new and no allocator state can be verified."
+    fi
+
+    _staged=$(git show ":${_CASCADE_REGISTRY}" 2>/dev/null) || _rc=$?
+    if (( _rc != 0 )); then
+        _cascade_refuse \
+            "the STAGED version of the registry could not be read — it may be" \
+            "staged for deletion. Refusing rather than falling back to the" \
+            "working tree, which is not what is being committed."
+    fi
+
+    _rc=0
+    _head=$(git show "HEAD:${_CASCADE_REGISTRY}" 2>/dev/null) || _rc=$?
+    if (( _rc != 0 )); then
+        _cascade_refuse \
+            "the registry does not exist in HEAD, so every line in it is new" \
+            "and there is no allocator state to check max+1 against. Creating" \
+            "the registry is not a mint; say so explicitly rather than having" \
+            "this gate guess."
+    fi
+
+    for _alt in "${_CASCADE_FAMILIES[@]}"; do
+        _label="${_alt%%|*}"
+
+        _rc=0; _salloc=$(_cascade_scan "${_alt}" "${_staged}" alloc) || _rc=$?
+        if (( _rc == 2 )); then
+            _cascade_refuse \
+                "the staged registry could not be scanned for '${_label}-' ids" \
+                "(grep failed). Refusing rather than reading an unscannable" \
+                "registry as an empty one."
+        fi
+        if (( _rc == 3 )); then
+            _cascade_refuse \
+                "the staged registry carries a '${_label}-' id with more than" \
+                "nine digits. The shell's arithmetic wraps on it silently, and" \
+                "the allocator refuses it too. Fix the registry line."
+        fi
+
+        _rc=0; _halloc=$(_cascade_scan "${_alt}" "${_head}" alloc) || _rc=$?
+        if (( _rc != 0 )); then
+            _cascade_refuse \
+                "HEAD's registry could not be scanned for '${_label}-' ids." \
+                "Refusing rather than treating an unreadable baseline as one" \
+                "with no ids, which would make every line look new."
+        fi
+
+        # MULTISET difference: an id already in the registry that acquires a
+        # SECOND allocation line is exactly collisions #2 and #3, so counting is
+        # what makes this gate see them.
+        _newcount=0
+        _newid=""
+        _display=""
+        _seen=""
+        while IFS= read -r _n || [[ -n "${_n}" ]]; do
+            [[ -z "${_n}" ]] && continue
+            [[ "${_seen}" == *"|${_n}|"* ]] && continue
+            _seen="${_seen}|${_n}|"
+            _cs=$(_cascade_count "${_n}" "${_salloc}")
+            _ch=$(_cascade_count "${_n}" "${_halloc}")
+            if (( _cs > _ch )); then
+                _newcount=$((_newcount + _cs - _ch))
+                _newid="${_n}"
+                _display="${_display}${_label}-${_n} "
+            fi
+        done <<< "${_salloc}"
+
+        if (( _newcount == 0 )); then
+            continue
+        fi
+
+        if (( _newcount > 1 )); then
+            _cascade_refuse \
+                "this commit adds ${_newcount} '${_label}-' allocation lines at once:" \
+                "${_display}" \
+                "The allocator mints ONE id per run, so a commit carrying" \
+                "several of them was not produced by it."
+        fi
+
+        _rc=0; _hall=$(_cascade_scan "${_alt}" "${_head}" all) || _rc=$?
+        if (( _rc != 0 )); then
+            _cascade_refuse \
+                "HEAD's registry could not be scanned for '${_label}-' ids." \
+                "Refusing rather than treating an unreadable baseline as one" \
+                "with no ids."
+        fi
+
+        _max=-1
+        while IFS= read -r _m || [[ -n "${_m}" ]]; do
+            [[ -z "${_m}" ]] && continue
+            if (( _m > _max )); then _max=${_m}; fi
+        done <<< "${_hall}"
+
+        if (( _max < 0 )); then
+            _cascade_refuse \
+                "HEAD's registry carries no '${_label}-' id at all, so there is" \
+                "nothing to compute max+1 from. ZERO FOUND IS AN ERROR, NOT AN" \
+                "EMPTY ALLOCATOR: the tool refuses in this state rather than" \
+                "restart at 1, and this gate refuses to accept what the tool" \
+                "would not have produced."
+        fi
+
+        if (( _newid != _max + 1 )); then
+            _cascade_refuse \
+                "'${_label}-${_newid}' is not the next id. The highest" \
+                "'${_label}-' id in HEAD's registry is '${_label}-${_max}', so" \
+                "the next one is '${_label}-$((_max + 1))'." \
+                "Annulled lines and mentions count: their numbers stayed spent."
+        fi
+    done
+}
+
 if [[ "${branch}" == "main" ]]; then
     # --diff-filter excludes nothing: a deletion on main is as much an edit as
     # an addition. Compare against HEAD, so this reads the staged set only.
@@ -318,6 +606,18 @@ if [[ "${branch}" == "main" ]]; then
         echo "  Deliberate exception: git commit --no-verify" >&2
         exit 1
     fi
+
+    # The path allowlist has already passed, so everything staged is a plan
+    # note. If one of them is the cascade registry, the number in it is the
+    # allocator's to compute — see the CASCADE-IDS MINT GATE above.
+    _touches_registry=0
+    while IFS= read -r _staged_path || [[ -n "${_staged_path}" ]]; do
+        [[ "${_staged_path}" == "${_CASCADE_REGISTRY}" ]] && _touches_registry=1
+    done <<< "${staged}"
+    if [[ "${_touches_registry}" -eq 1 ]]; then
+        _cascade_mint_gate
+    fi
+
     exit 0
 fi
 
