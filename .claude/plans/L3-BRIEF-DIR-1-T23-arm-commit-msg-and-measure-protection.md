@@ -1,4 +1,4 @@
-# L3-BRIEF DIR-1 / Т-21 — гейт «клон вооружён» требует третий хук; CI-limits п.4 — по измерению
+# L3-BRIEF DIR-1 / Т-23 — гейт «клон вооружён» требует третий хук; CI-limits п.4 — по измерению
 
 Бриф уровня (2) → уровню (3). Написан 2026-08-22 держателем направления DIR-1 («Доверие и
 координация», ценности Н1 «инструменту можно верить» и Н3 «координация механическая, не
@@ -118,7 +118,7 @@ tools/worktree-setup.sh fix/t21-arm-commit-msg-hook
 # работа в .worktrees/fix-t21-arm-commit-msg-hook
 uv run --extra dev ruff check src/ tests/
 uv run --extra dev python -m pytest tests/test_worktree_harness.py -q   # затем полный сьют
-tools/worktree-finish.sh fix-t21-arm-commit-msg-hook 'msg' --merge-msg 'Merge fix/t21-arm-commit-msg-hook: _guard_enforcement_armed demands the commit-msg hook; CI-limits §4 re-measured (Т-21)'
+tools/worktree-finish.sh fix-t21-arm-commit-msg-hook 'msg' --merge-msg 'Merge fix/t21-arm-commit-msg-hook: _guard_enforcement_armed demands the commit-msg hook; CI-limits §4 re-measured (Т-23)'
 ```
 
 - **К-1. На `main` ты не коммитишь НИКОГДА.** Факт своей приёмки пишешь в этот бриф (§9) **на
