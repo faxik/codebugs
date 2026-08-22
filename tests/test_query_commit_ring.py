@@ -190,8 +190,12 @@ class TestMalformedNeighbours:
         fid = _ring_card(conn, desc="live card next to garbage")
         self._plant(conn, "malformed meta victim", "{not json")
         assert _ids(findings.query_findings(conn, commit=SECOND)) == [fid]
-        # The column branch keeps working for the garbage row itself.
-        assert findings.query_findings(conn, commit=THIRD)["total"] == 1
+        # The column branch still MATCHES the garbage row itself. Counted via
+        # group_by rather than fetched: returning the row would run db.row_to_dict
+        # over its malformed meta, which is the serializer's pre-existing contract
+        # and not what CB-128 touches (the filter is what must not crash).
+        grouped = findings.query_findings(conn, commit=THIRD, group_by="status")
+        assert sum(g["count"] for g in grouped["groups"]) == 1
 
     def test_8b_string_ring_element_on_another_row_does_not_break_commit_filter(self, conn):
         fid = _ring_card(conn, desc="live card next to string ring")

@@ -555,6 +555,9 @@ def file_status(
 def _effective_commit(f: dict[str, Any]) -> Any:
     """The commit staleness is checked against: newest ring observation, else first report.
 
+    Sister reader: `findings.query_findings(commit=)` matches ANY observation, column
+    or ring (CB-128) — a different question, so the two deliberately diverge.
+
     CB-53 (ratified via CB-63): the ``reported_at_commit`` COLUMN is frozen at first
     report — first-report provenance, immutable at update. Re-observations land in
     the occurrence ring (``meta["occurrences"]``, CB-43), appended chronologically;
