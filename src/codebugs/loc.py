@@ -192,7 +192,15 @@ class _Refused(Exception):  # noqa: N818 — a refusal, not an error; see Р7
     """
 
     def __init__(self, token: str) -> None:
-        assert token in CAPTURE_REASONS, token  # noqa: S101 — internal invariant
+        # RAISE, never `assert` — this repository's standing rule, and it earns
+        # its keep here specifically: `assert` is stripped under `-O`, so the
+        # optimized build would store a token outside the closed §4.3 vocabulary
+        # and `read_anchor` would later report it as `invalid_anchor`, blaming
+        # the stored object for this module's bug. A ValueError is not in
+        # `_EXCEPTION_TOKENS`, so it propagates and becomes `resolver_errors` —
+        # which is exactly what Р8 says an unclassified failure is.
+        if token not in CAPTURE_REASONS:
+            raise ValueError(f"capture refusal token {token!r} is not in CAPTURE_REASONS")
         super().__init__(token)
         self.token = token
 

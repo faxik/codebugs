@@ -456,6 +456,18 @@ class TestRefusalTable:
     def test_capture_reasons_are_a_subset_of_the_closed_vocabulary(self):
         assert loc.CAPTURE_REASONS <= loc.REASONS
 
+    def test_a_token_outside_the_closed_vocabulary_is_refused_loudly(self):
+        """`_Refused` validates its own token with a raise, not an `assert`.
+
+        `assert` is stripped under `-O`, and the optimized build would then store
+        a token the closed §4.3 vocabulary does not contain — which `read_anchor`
+        reports as `invalid_anchor`, blaming the stored object for a bug in this
+        module. Asserted through the class rather than through a capture path,
+        because no capture path can reach it while the code is correct.
+        """
+        with pytest.raises(ValueError, match="CAPTURE_REASONS"):
+            loc._Refused("a_token_nobody_declared")
+
     def test_the_classifier_order_is_load_bearing(self):
         """`TimeoutExpired` IS a `SubprocessError`.
 
