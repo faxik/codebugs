@@ -23,6 +23,7 @@
 #    6  base too far behind main     11  main working tree dirty
 #                                    12  enforcement not armed in this clone
 #                                    13  main or branch moved after testing
+#                                    14  worktree interpreter != main's
 
 # ---------------------------------------------------------------------------
 # Repo root, resolved so every script works from any cwd, including from inside
@@ -591,4 +592,139 @@ _guard_workspace_on_main() {
     echo "  ${repo_root}, so integrating now would silently orphan this work." >&2
     echo "  Fix: git -C ${repo_root} checkout main   # then re-run" >&2
     return 8
+}
+
+# ---------------------------------------------------------------------------
+# NEW (CB-135): the interpreter that runs the suite in the WORKTREE must be the
+# interpreter installed in MAIN.
+#
+# The gate runs `uv run --extra dev python -m pytest` in the worktree and the
+# work lands in main. Those are two statements, and on 2026-08-22 they came
+# apart: a manager reported "1943 passed" from a worktree on CPython 3.13.3
+# while the same suite on the landed main, under the documented command, gave
+# "1 failed, 1942 passed" on 3.14.4. The red existed on main BEFORE the merge
+# and no finish could ever have seen it. CLAUDE.md forbids validating a
+# worktree's change from main (pythonpath=["src"] resolves against the checkout
+# you run in) — a correct rule, which silently introduced a SECOND, unnamed
+# variable: the interpreter version.
+#
+# The fix has two halves and this is only the second one. The first is
+# `.python-version`, committed at the repo root, which makes `uv` choose the
+# same interpreter for main, for every worktree and for CI. That makes the
+# divergent state hard to reach; this guard makes it impossible to LAND.
+#
+# WHAT IS COMPARED, and why the two sides are probed differently.
+#
+#   worktree: `uv run --extra dev python -c <probe>` — byte for byte the
+#             launcher that [6/7] uses for pytest, so the answer IS the
+#             interpreter the suite will run under. This call also SYNCS the
+#             worktree to the pin (measured: uv removes and recreates a .venv
+#             whose version does not match `.python-version`), which is wanted
+#             here — the worktree is ours and is about to be tested.
+#
+#   main:     `<repo_root>/.venv/bin/python` executed directly. NOT `uv run`,
+#             deliberately: `uv run` in main would REBUILD main's environment,
+#             and main is a shared checkout other sessions are working in. A
+#             guard must not mutate the tree it is judging. Executing the
+#             installed interpreter also answers the exact question the CB-135
+#             incident asked — what main ACTUALLY has, not what it would
+#             acquire next time somebody ran something there.
+#
+# `pyvenv.cfg` is deliberately not read: it describes an environment rather
+# than being one, and a hand-edited or half-written file would be believed.
+#
+# FAIL-CLOSED, in the form of _guard_enforcement_armed. No `.venv` in main, no
+# `uv` on PATH, a non-zero rc, an empty answer, an unparseable answer — every
+# one of them REFUSES. "Could not look, so reported clean" is the precise
+# defect this card exists to close, and a version-comparison guard that treats
+# an unknown version as a match would reintroduce it inside its own fix.
+#
+# The pin file itself is demanded too. A single source that can silently vanish
+# is a convention again, and this repo's opening lesson is that a convention
+# which exists only as a pattern is not a rule.
+#
+# args: <worktree_path> <repo_root>
+# ---------------------------------------------------------------------------
+
+# Read as a bare version on STDOUT rather than `python -V`: `-V` prints
+# "Python X.Y.Z" and older interpreters printed it to STDERR, which is also
+# where `uv run` writes its own progress on the run that matters most — the one
+# where the pin forces a rebuild. tests/test_worktree_harness.py carries the
+# same probe; if they ever diverge the fixture stops measuring the guard.
+_INTERPRETER_PROBE='import sys; print("%d.%d.%d" % sys.version_info[:3])'
+
+_interpreter_version_is_sane() {
+    [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+_guard_interpreter_matches_main() {
+    local worktree="$1" repo_root="$2"
+
+    if [[ ! -f "${worktree}/.python-version" ]]; then
+        echo "ERROR: no .python-version in the tree about to become main." >&2
+        echo "  That file is the SINGLE SOURCE for the interpreter of main, of" >&2
+        echo "  every worktree and of CI (CB-135). Landing a tree without it" >&2
+        echo "  puts each checkout back to choosing for itself." >&2
+        echo "  Fix: restore it on the branch, then re-run." >&2
+        return 14
+    fi
+
+    # The worktree must own its project file, and this is NOT tidiness.
+    # `uv run` walks UP for a pyproject.toml, and every worktree lives INSIDE
+    # the repo (.worktrees/<slug>), so a worktree missing its own would resolve
+    # against MAIN's project: measured, `uv run` from such a directory answered
+    # with main's interpreter AND imported codebugs from main's src/. The guard
+    # would then compare main to main, agree, and pass — CB-135's own shape,
+    # one level deeper and completely silent.
+    if [[ ! -f "${worktree}/pyproject.toml" ]]; then
+        echo "ERROR: ${worktree} has no pyproject.toml of its own." >&2
+        echo "  uv resolves a project by walking UP, and a worktree lives inside" >&2
+        echo "  the repo, so this probe would answer about MAIN instead — a" >&2
+        echo "  comparison of main against itself, which can only agree." >&2
+        echo "  Fix: restore pyproject.toml on the branch, then re-run." >&2
+        return 14
+    fi
+
+    local wt_ver main_ver
+    # Same launcher [6/7] uses for pytest — see the header for why the two
+    # sides are probed differently. uv's own progress goes to stderr and is
+    # left visible: it is the message that explains a rebuild.
+    wt_ver=$(cd "${worktree}" && uv run --extra dev python -c "${_INTERPRETER_PROBE}") || wt_ver=""
+    if ! _interpreter_version_is_sane "${wt_ver}"; then
+        echo "ERROR: cannot determine the interpreter the suite would run under." >&2
+        echo "  Probed with: (cd ${worktree} && uv run --extra dev python -c ...)" >&2
+        echo "  Got: '${wt_ver}'" >&2
+        echo "  Refusing rather than assuming it matches main — a guard that" >&2
+        echo "  reports clean because it could not look is CB-135 itself." >&2
+        return 14
+    fi
+
+    local main_py="${repo_root}/.venv/bin/python"
+    if [[ -x "${main_py}" ]]; then
+        main_ver=$("${main_py}" -c "${_INTERPRETER_PROBE}" 2>/dev/null) || main_ver=""
+    else
+        main_ver=""
+    fi
+    if ! _interpreter_version_is_sane "${main_ver}"; then
+        echo "ERROR: cannot determine main's installed interpreter." >&2
+        echo "  Probed with: ${main_py} -c ..." >&2
+        echo "  Got: '${main_ver}'" >&2
+        echo "  Fix: (cd ${repo_root} && UV_PYTHON=${wt_ver} uv sync --extra dev)" >&2
+        return 14
+    fi
+
+    [[ "${wt_ver}" == "${main_ver}" ]] && return 0
+
+    echo "ERROR: the suite would run under a different interpreter than main has." >&2
+    echo "  worktree (uv run --extra dev python): ${wt_ver}" >&2
+    echo "  main     (.venv/bin/python):          ${main_ver}" >&2
+    echo "" >&2
+    echo "  A green gate on ${wt_ver} says nothing about the tree this merge" >&2
+    echo "  lands on (CB-135). Bring main to the tested interpreter:" >&2
+    echo "  Fix: (cd ${repo_root} && UV_PYTHON=${wt_ver} uv sync --extra dev)" >&2
+    echo "" >&2
+    echo "  UV_PYTHON rather than a bare 'uv sync' because a branch may be" >&2
+    echo "  CHANGING .python-version, and a bare sync re-reads main's OLD pin" >&2
+    echo "  and puts the old interpreter straight back." >&2
+    return 14
 }

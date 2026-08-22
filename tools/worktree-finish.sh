@@ -200,6 +200,18 @@ else
     echo "  ✓ Already current"
 fi
 
+# THE INTERPRETER CHECK GOES HERE, and the phase is load-bearing (CB-135).
+#
+# AFTER the forward-merge: `.python-version` may have arrived in it, and a
+# worktree judged before that merge is judged against a pin main no longer has.
+# BEFORE [6/7]: the whole claim is that a suite run under the wrong interpreter
+# proves nothing about main, so paying ~70s of pytest before saying so would
+# make the refusal cost more than the run it invalidates.
+# OUTSIDE the --skip-checks branch: that flag skips ruff and pytest, which are
+# CHECKS. This is a safety guard, and the script has never let that flag reach
+# one.
+_guard_interpreter_matches_main "${WORKTREE_PATH}" "${REPO_ROOT}" || exit $?
+
 # SAMPLE THE TESTED STATE HERE — before the gates, not after them.
 #
 # These two values are the definition of "what the gates below are about to run
