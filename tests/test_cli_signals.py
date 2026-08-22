@@ -375,14 +375,6 @@ class TestAClosedStdoutIsRefusedAtTheProcessEntry:
         assert stderr == "", stderr
         assert _count(project, desc) == 0, "the refusal must happen before any work"
 
-    def test_both_spellings_of_a_closed_stdout_agree(self, project):
-        """The uniformity claim itself, as one assertion rather than as two tests
-        that happen to expect the same number. Before CB-134 these two cells
-        differed on this very interpreter."""
-        a = self._closed_fd(project, "query", "--status", "open")
-        b = self._closed_object(project, "query", "--status", "open")
-        assert a == b == (self.EXPECTED, ""), f"closed_fd={a!r} closed_object={b!r}"
-
     @pytest.mark.parametrize("neutralise", [False, True], ids=["without", "with"])
     def test_premise_a_failed_shutdown_flush_rewrites_the_exit_status(self, tmp_path, neutralise):
         """PREMISE, not a property of the gate — and the distinction is the whole
