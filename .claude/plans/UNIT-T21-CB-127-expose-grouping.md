@@ -216,8 +216,64 @@ tolerant)».
 
 ## Факт приёмки (3)←(4)
 
-_(заполняется после приёмки)_
+**Т-21 ПРИНЯТ на коммите `35f2285` (голова ветки `feature/cb-127-expose-grouping`), 2026-08-22.**
+Неизменяемый факт. Цитаты грепаемые, номера строк не приводятся.
+
+Контракт §13, семь пунктов:
+
+1. **Дифф прочитан против ЗАМЫСЛА — ПРИНЯТО.** Один домен-функционал с двух поверхностей:
+   MCP `grouping_citations`/`grouping_tags`/`grouping_filing` и CLI `grouping-citations`/
+   `grouping-tags`/`grouping-filing`. Каждая обёртка — `with conn_factory() as conn: return
+   <report>(conn, …все параметры…)`; сигнатуры повторяют keyword-only сигнатуры функций
+   один-в-один (пинит `test_wrapper_signature_equals_domain_keyword_signature`). Оговорки
+   стоят в докстрингах: citations — «READ-ONLY, and an ANNOTATION of what people already
+   wrote — no link here is inferred» + определение anchor/hub; tags — «Co-occurrence carries
+   Jaccard beside the raw count» + «`variants` spans tags AND categories»; filing —
+   «LINEAGE IS TRAVERSED, NOT GROUPED» + «resolve against EVERY card in the tracker, not
+   just the population». Ни одной строки логики отчёта в обёртках, ни одного `execute(`
+   во всём модуле (`test_module_issues_no_sql`, `test_wrappers_and_cli_issue_no_sql`).
+2. **Мутационная проба приёмщика — во ВРЕМЕННОМ worktree на `35f2285`, три мутации, все
+   КРАСНЫЕ**: (М1) `hub_degree=hub_degree` → `hub_degree=DEFAULT_HUB_DEGREE` в обёртке
+   `grouping_citations` → `FAILED …test_mcp_delivers_every_parameter_verbatim[grouping_citations]`;
+   (М2) `"grouping"` убран из `choices` в `cli.main` (другой список, чем проверял
+   исполнитель — он убирал из `SERVER_NAMES`) → `FAILED
+   …test_grouping_is_registered_in_all_three_hardcoded_lists`; (М3, независимая) CLI-хэндлер
+   `grouping-tags` перестаёт пробрасывать `min_pair_count` → `FAILED
+   …test_cli_delivers_every_parameter_verbatim[grouping-tags]`. Worktree удалён
+   (`git worktree list` без `mut-t21`).
+3. **Три списка — ровно по одной строке**: `db.py` `+            grouping,`; `server.py`
+   `+    "grouping": "codegrouping",`; `cli.py` — `"similarity", "grouping", "relations"`.
+   Больше в этих файлах ничего (проверено `git diff a6fed9a..HEAD`).
+4. **Golden** — `1 file changed, 201 insertions(+)`, ноль удалений, добавлены ровно
+   `grouping_citations`, `grouping_filing`, `grouping_tags`; `test_schema_matches_golden`
+   и `test_golden_is_already_normalized` зелёные в полном прогоне исполнителя
+   (`1916 passed`), ruff `All checks passed!`.
+5. **JSONDecodeError-арма** — не нужна, вердикт preflight подтверждён кодом: хэндлеры
+   ловят `(KeyError, ValueError)` и несут комментарий «no stored-data JSONDecodeError can
+   surface here». **Цикл импорта** — перемерен исполнителем из worktree после добавления
+   `from codebugs import db`: `ok`.
+6. **Заместитель §13 п.6 — `tools/worktree-finish.sh`** с обязательным `--merge-msg`
+   (ветка начинается с красного коммита `94925cf`).
+7. **CB-127 → `fixed` с `append_note`** после мерджа (SHA — в возврате (2)).
+
+**Расхождения с брифом, принятые как буква, не замысел:** (а) `_run` — общий
+try/except/finally трёх CLI-хэндлеров вынесен в локальную функцию (семантика та же, что в
+`_cmd_similarity_report`); (б) `hub_degree=None` с CLI — через `--hub-degree none`
+(`type=_hub_degree_arg`), один флаг = один параметр домена; покрыто
+`test_cli_can_disable_hubs`; (в) премисса брифа (2) «никто кроме test_grouping не
+импортирует grouping» была ложной (`similarity.py: from codebugs.grouping import DSU`) —
+без последствий, см. preflight п.1.
 
 ## Эскалации (§13 п.4 — слот обязателен)
 
-_(слот исполнителя переносится дословно после возврата)_
+**Блокирующих эскалаций НЕТ.** Слот исполнителя (4), ДОСЛОВНО:
+
+> - **Новый SELECT не понадобился** — все параметры трёх отчётов идут через `findings.grouping_candidates` и Python-срезы; предпосылка брифа подтвердилась, эскалации по этому пункту нет.
+> - **Цикл импорта**: перемерен из worktree после добавления `from codebugs import db` — `ok` (см. выше). Не блокирует.
+> - Отклонение от буквы брифа — одно, непринципиальное: в CLI-хэндлерах общий `try/except/finally` вынесен в локальную функцию `_run` (три хэндлера делили бы байт-в-байт одинаковый блок); семантика (`except (KeyError, ValueError)` → stderr + `sys.exit(1)`, `finally: conn.close()`) та же, что в `_cmd_similarity_report`. Замысел не сдвинут.
+> - Иных эскалаций нет.
+
+Наблюдение приёмщика, не блокирующее: `test_module_issues_no_sql` зелёный с обеих сторон
+любой мутации этого юнита (ратчет на будущее добавление SQL) — исполнитель сам назвал это
+в сообщении красного коммита; вакуозным не считается, потому что пинит свойство, которое
+юнит обязан СОХРАНИТЬ, и сказано это явно.
