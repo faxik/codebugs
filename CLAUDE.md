@@ -501,12 +501,20 @@ environment rather than being one.
 
 **Fail-closed, in the form of `_guard_enforcement_armed`.** No `.venv` in main, no `uv` on `PATH`, a
 non-zero rc, an empty answer, an unparseable answer — every one refuses with **exit 14**. The
-version-shape check earns its keep in exactly one state, and a mutation probe was needed to find it:
-every other fail-closed case is caught by the two answers being UNEQUAL (`""` never matches a real
-version), so neutering the validator left the whole class green. It bites when BOTH probes fail —
-no uv and no `.venv` gives `""` on both sides, and `"" == ""` is agreement. That is "could not look,
-so reported clean" arriving through the comparison itself, i.e. CB-135 reconstituted inside its own
-fix, and `test_two_undeterminable_sides_refuse_rather_than_agree` is what holds it.
+version-shape check was meant to earn its keep in exactly one state — both probes failing with `""`
+on each side, which `"" == ""` would otherwise wave through as agreement — and
+`test_two_undeterminable_sides_refuse_rather_than_agree` was written to pin it. **That test stopped
+discriminating the mutant the day the UV_PYTHON-outranks-the-pin check (below) landed ABOVE the shape
+check (CB-140).** An empty `wt_ver` is also unequal to the pin and does not extend it with a dot, so
+the pin check now refuses that state on its own, before the shape check ever runs — measured, a
+mutant turning `_interpreter_version_is_sane` into `return 0` left that test, and the entire
+248-test harness suite, green. The state neither check catches alone is a NON-version that
+PREFIX-MATCHES the pin: a bare pin like `"3"` accepts anything spelled `"3."` + more as if it were a
+legitimate patch release, so a stub `"3.0"` on both sides clears the pin check by looking like one
+while still failing the strict `X.Y.Z` shape the sanity check demands.
+`test_two_prefix_matching_non_versions_refuse_rather_than_agree` is what actually holds the
+version-shape check now; the older test is kept as a premise fixture (both probes genuinely absent)
+but is no longer sufficient on its own.
 
 **The guard also demands that the worktree carry its own `pyproject.toml`, and that is not
 tidiness.** `uv run` resolves a project by walking UP, and every worktree lives INSIDE the repo at

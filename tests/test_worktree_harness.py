@@ -3794,6 +3794,52 @@ class TestInterpreterMatchesMain:
         r = self._guard(trees["wt"], trees["main"], PATH="/usr/bin:/bin")
         assert r.returncode == 14, (r.returncode, r.stderr)
 
+    def test_two_prefix_matching_non_versions_refuse_rather_than_agree(
+        self, tmp_path: Path
+    ) -> None:
+        """CB-140: the state that survived the UV_PYTHON fix without a test.
+
+        `test_two_undeterminable_sides_refuse_rather_than_agree` above was
+        written to be the ONE case where the version-SHAPE check is all that
+        stands between a pass and CB-135 recurring. It stopped doing that the
+        day the UV_PYTHON-outranks-the-pin check (this same class's HIGH
+        finding, `test_an_override_that_outranks_the_pin_refuses`) landed
+        ABOVE the shape check: an empty `wt_ver` is not just "not sane", it is
+        also unequal to the pin and does not extend it with a dot, so THAT
+        check already refuses it — measured, a mutant turning
+        `_interpreter_version_is_sane` into `return 0` still leaves that test
+        green, and left the whole 248-test suite green with it (CB-140).
+
+        The state neither check catches alone is a NON-version that
+        PREFIX-MATCHES the pin. A bare pin of "3" accepts anything spelled
+        "3." + more as if it were a legitimate patch release, so "3.0" clears
+        the pin-outranking check by looking like one — while still failing
+        the strict `X.Y.Z` shape `_interpreter_version_is_sane` demands, since
+        it is missing its own patch component. With BOTH the worktree probe
+        (`uv` itself is faked here to answer "3.0" without ever running
+        python) and main's stub interpreter printing that same "3.0", the
+        pin-outranking check finds nothing to object to and the final
+        `wt_ver == main_ver` compares two copies of a string that was never a
+        real interpreter version — exactly the shape the sanity check exists
+        to refuse. Only the version-shape check can catch it, so a mutant
+        that neuters it must turn this test red.
+        """
+        wt = tmp_path / "wt"
+        _uv_project(wt, "3")
+        main_root = tmp_path / "main"
+        main_root.mkdir()
+
+        fake_bin = tmp_path / "fakebin"
+        fake_bin.mkdir()
+        fake_uv = fake_bin / "uv"
+        fake_uv.write_text('#!/usr/bin/env bash\necho "3.0"\nexit 0\n')
+        fake_uv.chmod(0o755)
+
+        _fake_main_interpreter(main_root, "3.0")
+
+        r = self._guard(wt, main_root, PATH=f"{fake_bin}:/usr/bin:/bin")
+        assert r.returncode == 14, (r.returncode, r.stderr)
+
     def test_a_tree_with_no_pin_file_refuses(self, tmp_path: Path) -> None:
         """The single source must EXIST, or it is a convention again.
 
