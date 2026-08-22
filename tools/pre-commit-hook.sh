@@ -292,6 +292,19 @@ if [[ "${branch}" == "main" ]]; then
         echo "  Files outside .claude/plans/*.md:" >&2
         echo "${offending}" | sed 's/^/    /' >&2
         echo "" >&2
+        echo "  THOSE FILES ARE STILL STAGED. A refused commit unstages nothing:" >&2
+        echo "  git does not, and this hook deliberately does not either — a hook" >&2
+        echo "  that rewrites your index turns a refusal into an action. So main's" >&2
+        echo "  working tree counts as dirty from here on, and _guard_main_clean" >&2
+        echo "  reads exactly that index: until you clear it, EVERY" >&2
+        echo "  tools/worktree-finish.sh in EVERY worktree of this clone is refused" >&2
+        echo "  with exit 11 — other sessions' included. That cost is paid by" >&2
+        echo "  people who did not make it: measured 2026-08-22, ~40 minutes of two" >&2
+        echo "  blocked integrations (CB-130)." >&2
+        echo "" >&2
+        echo "  Clear it now, even if you are moving the work later:" >&2
+        echo "    git restore --staged -- <files>" >&2
+        echo "" >&2
         echo "  CLAUDE.md: every code edit happens on a short-lived branch, in a" >&2
         echo "  worktree. The only thing that may land on main directly is a" >&2
         echo "  .claude/plans/*.md note." >&2
