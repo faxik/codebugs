@@ -200,9 +200,13 @@ class TestNumberIsComputed:
         assert out.stdout.strip() == f"{CYRILLIC_TE}-9"
 
     def test_other_prefixes_are_allocated_independently(self, tmp_path: Path) -> None:
+        """DIR is 3, not 2: the fixture's `(DIR-2)` attribution on a unit line is
+        a real occurrence of that id, and the real registry attributes every unit
+        the same way. A family's number is spent wherever it appears, which is
+        the same rule that makes an annulled line count."""
         repo = _make_repo(tmp_path)
         assert _mint(repo, "--prefix", "BT", "--dry-run").stdout.strip() == "BT-4"
-        assert _mint(repo, "--prefix", "DIR", "--dry-run").stdout.strip() == "DIR-2"
+        assert _mint(repo, "--prefix", "DIR", "--dry-run").stdout.strip() == "DIR-3"
 
     def test_a_number_in_guillemets_is_still_seen(self, tmp_path: Path) -> None:
         """The registry quotes annulled ids as «Т-21»; a non-ASCII neighbour is a
