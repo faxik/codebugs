@@ -180,7 +180,7 @@ class TestGeneratedMcpSurface:
         listing = called(srv, "codebench_list", {})
         assert [b["benchmark"] for b in listing["benchmarks"]] == ["perf"]
 
-    def test_a_generated_body_forwards_every_declared_parameter(self, tracker):
+    def test_a_generated_body_reaches_the_domain(self, tracker):
         """`codebench_query` is the one tool with no handwritten body at all."""
         srv = build_server(tracker)
         called(
@@ -191,6 +191,34 @@ class TestGeneratedMcpSurface:
         out = called(srv, "codebench_query", {"benchmark": "perf", "rows": ["a"]})
         assert out["runs_matched"] == 1
         assert [r["row_label"] for t in out["data"] for r in t["rows"]] == ["a"]
+
+    def test_a_generated_body_forwards_EVERY_declared_parameter(self, tracker):
+        """All nine, by name, with the declared defaults filled in.
+
+        Asserted with a spy rather than by observing a query result: a call that
+        exercises two arguments cannot see an emitter that silently drops the
+        other seven, and cross-model review named exactly that gap in the
+        earlier version of this test.
+        """
+        seen: dict = {}
+
+        def spy(conn, **kwargs):
+            seen.update(kwargs)
+            return {"ok": True}
+
+        clone = copy.deepcopy(SURFACE)
+        for decl in clone:
+            if decl["mcp"]["name"] == "codebench_query":
+                decl["mcp"]["calls"] = spy
+        srv = build_server(tracker, clone)
+        called(srv, "codebench_query", {"benchmark": "perf"})
+
+        facet = next(d["mcp"] for d in SURFACE if d["mcp"]["name"] == "codebench_query")
+        assert sorted(seen) == sorted(p["name"] for p in facet["params"])
+        for param in facet["params"]:
+            if "default" in param:
+                assert seen[param["name"]] == param["default"], param["name"]
+        assert seen["benchmark"] == "perf"
 
     def test_an_unknown_argument_is_refused(self, tracker):
         """CB-15 over a GENERATED tool: the emitted signature is what the
@@ -392,6 +420,90 @@ class TestGeneratorRefusesMalformedDeclarations:
         del clone[0]["cli"]["manual_handler"]
         with pytest.raises(surfacegen.DeclarationError):
             build_parser(clone)
+
+    def test_a_duplicate_tool_name_is_refused_before_anything_registers(self, tracker):
+        """The refusal must arrive with the server still EMPTY.
+
+        Validating after the emission loop leaves a half-built server behind the
+        exception — and for the CLI, argparse raises its own conflict error
+        first, so `DeclarationError` never gets to speak. Cross-model review
+        found both; this asserts the refusal AND the untouched state.
+        """
+        clone = copy.deepcopy(SURFACE)
+        clone[1]["mcp"]["name"] = clone[0]["mcp"]["name"]
+        raw = MCPServer("codebugs")
+        with pytest.raises(surfacegen.DeclarationError):
+            surfacegen.emit_tools(server._NormalizedDescriptions(raw), tracker, clone)
+        assert asyncio.run(raw.list_tools()) == []
+
+    def test_a_duplicate_verb_name_is_refused_before_anything_registers(self):
+        clone = copy.deepcopy(SURFACE)
+        clone[1]["cli"]["name"] = clone[0]["cli"]["name"]
+        parser = argparse.ArgumentParser(prog="codebugs")
+        sub = parser.add_subparsers(dest="command")
+        commands: dict = {}
+        with pytest.raises(surfacegen.DeclarationError):
+            surfacegen.emit_cli(sub, commands, clone)
+        assert commands == {}
+        assert not sub.choices
+
+    def test_a_misspelled_side_key_is_refused_rather_than_dropping_a_surface(self):
+        """The fail-open cross-model review reproduced: `cl` for `cli` used to
+        emit three verbs at exit 0, and no later check could tell that from a
+        legitimately one-sided declaration."""
+        clone = copy.deepcopy(SURFACE)
+        clone[0]["cl"] = clone[0].pop("cli")
+        with pytest.raises(surfacegen.DeclarationError) as excinfo:
+            build_parser(clone)
+        assert "cl" in str(excinfo.value)
+
+    def test_a_declaration_naming_no_side_is_refused(self):
+        clone = copy.deepcopy(SURFACE)
+        clone[0].pop("mcp")
+        clone[0].pop("cli")
+        with pytest.raises(surfacegen.DeclarationError):
+            build_parser(clone)
+
+    def test_a_one_sided_declaration_is_still_legal(self, tracker):
+        """The refusal above must not cost the asymmetric shape the package has:
+        `merge` exposes 5 MCP-only and 3 CLI-only capabilities."""
+        clone = copy.deepcopy(SURFACE)
+        clone[0].pop("cli")
+        assert len(listed(build_server(tracker, clone))) == 4
+        _p, sub, commands = build_parser(clone)
+        assert sorted(sub.choices) == ["bench-delete", "bench-list", "bench-query"]
+        assert sorted(commands) == ["bench-delete", "bench-list", "bench-query"]
+
+    def test_a_misspelled_facet_key_is_refused(self):
+        """A misspelled `manual_handler` would otherwise leave a verb bodyless,
+        and a misspelled `default` would make a parameter required."""
+        clone = copy.deepcopy(SURFACE)
+        clone[0]["cli"]["manual_hander"] = clone[0]["cli"].pop("manual_handler")
+        with pytest.raises(surfacegen.DeclarationError) as excinfo:
+            build_parser(clone)
+        assert "manual_hander" in str(excinfo.value)
+
+    def test_a_facet_missing_a_required_key_raises_the_declared_type(self, tracker):
+        """`DeclarationError`, not `KeyError` — the contract is what the module
+        promises, and half the malformations arriving as `KeyError` makes that
+        contract half true."""
+        clone = copy.deepcopy(SURFACE)
+        del clone[0]["mcp"]["doc"]
+        with pytest.raises(surfacegen.DeclarationError):
+            build_server(tracker, clone)
+
+    def test_a_verb_missing_its_handler_registers_no_parser_either(self):
+        """The handler check is a whole-set precondition too: a later verb's
+        missing handler must not leave the earlier verbs' parsers built."""
+        clone = copy.deepcopy(SURFACE)
+        del clone[-1]["cli"]["manual_handler"]
+        parser = argparse.ArgumentParser(prog="codebugs")
+        sub = parser.add_subparsers(dest="command")
+        commands: dict = {}
+        with pytest.raises(surfacegen.DeclarationError):
+            surfacegen.emit_cli(sub, commands, clone)
+        assert commands == {}
+        assert not sub.choices
 
 
 class TestGeneratorIssuesNoSql:

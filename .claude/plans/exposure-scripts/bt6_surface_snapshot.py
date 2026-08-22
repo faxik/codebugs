@@ -18,10 +18,13 @@ artefact may and may not contain, and this script is that decision in code:
     are not printed by `--help` AT ALL: naming a text render and a structural
     introspection in one breath is two artefacts, not one.
 
-  * CLI text — `format_help()` for each verb, captured with `COLUMNS` and
-    `LC_ALL` PINNED, because the seventh pass measured `COLUMNS=80` and
+  * CLI text — `format_help()` for each verb AND for the parent parser, plus the
+    UNSORTED registration order, captured with `COLUMNS` and `LC_ALL` pinned by
+    this script itself, because the seventh pass measured `COLUMNS=80` and
     `COLUMNS=120` producing different hashes.  Unpinned, byte-equality is a
-    false-refusal generator rather than a constraint.
+    false-refusal generator rather than a constraint; and without the parent's
+    help and the unsorted order, swapping two declarations changes what a user
+    sees at `codebugs --help` while leaving this document identical.
 
 Run identically on the base checkout and on the pilot tip:
 
@@ -39,9 +42,14 @@ import json
 import os
 import sys
 
-# Pinned BEFORE argparse builds anything: HelpFormatter reads the terminal width
-# once, at construction.  Setting it later would capture the ambient width.
-os.environ.setdefault("COLUMNS", "80")
+# Pinned BEFORE argparse formats anything, and pinned UNCONDITIONALLY.  It was
+# `setdefault` first, which is not a pin: an ambient `COLUMNS=120` survived it,
+# and `COLUMNS=80` versus `COLUMNS=120` really do produce different hashes
+# (measured).  A snapshot whose determinism depends on the caller's environment
+# is exactly the false-refusal generator this artefact exists to avoid, so the
+# script pins the value itself and the `COLUMNS=80` in the documented invocation
+# is now belt-and-braces rather than the mechanism.
+os.environ["COLUMNS"] = "80"
 os.environ["LC_ALL"] = "C"
 
 
@@ -111,7 +119,21 @@ def cli_surface(provider_name: str) -> dict[str, object]:
             "handler": getattr(commands.get(name), "__name__", None),
             "format_help": child.format_help(),
         }
-    return {"verbs": verbs, "command_names": sorted(commands)}
+    return {
+        "verbs": verbs,
+        # SORTED, so a reordering does not show up here...
+        "command_names": sorted(commands),
+        # ...and UNSORTED beside it, because it does show up to a user. Every
+        # per-verb view above is keyed or sorted by name, so with only those, two
+        # declarations swapped would leave this document byte-identical while the
+        # top-level `--help` listed the verbs in the new order. Cross-model review
+        # found that: the artefact claimed to constrain "the whole CLI help
+        # surface" and constrained every part of it except the order.
+        "registration_order": list(commands),
+        # The PARENT parser's own help, for the same reason: the child parsers'
+        # `format_help()` never contains the subcommand list.
+        "root_format_help": parser.format_help(),
+    }
 
 
 def mcp_surface(provider_name: str) -> list[dict[str, object]]:

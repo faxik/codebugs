@@ -23,6 +23,14 @@ Its measured cost, worth naming because the pilot exists to price things: the
 grammar admits data only, so `str | None` (an operator) and `list[str]` (a
 subscript) cannot be written here at all. The optional and parameterised
 annotations therefore arrive as the named vocabulary imported below.
+
+DECLARED, because the repository rule says modules must not import each other's
+private functions: the handler names below ARE private and this file imports
+them. It is not a second module reaching into `bench` — it is `bench`'s own
+declaration half, split out only because the measurement needed the two halves
+countable apart, and `bench.py` imports it straight back at registration time.
+The alternative, making seven handler names public, would widen the module's
+API for a file that is part of the module.
 """
 
 from codebugs.bench import (

@@ -76,13 +76,68 @@ class DeclarationError(ValueError):
     """
 
 
-def _facet(decl: dict[str, Any], side: str) -> dict[str, Any] | None:
-    facet = decl.get(side)
-    if facet is None:
-        return None
+#: The two sides a capability can be exposed on. A declaration may carry one or
+#: both — an asymmetric capability (CLI-only, MCP-only) is a real shape in this
+#: package — but it must carry at least one, and it may carry nothing else.
+SIDES = ("mcp", "cli")
+
+_FACET_KEYS = {
+    "mcp": ({"name", "doc", "params"}, {"calls", "manual_handler"}),
+    "cli": ({"name", "help", "args"}, {"manual_handler"}),
+}
+
+
+def _validate_declaration(index: int, decl: Any) -> None:
+    """Refuse a declaration whose keys this module does not recognise.
+
+    THE UNRECOGNISED KEY IS THE WHOLE POINT, and this is FAIL-OPEN WITHOUT IT.
+    Reading a side with `decl.get(side)` and skipping on `None` means a MISSPELLED
+    side key — `cl` for `cli` — silently emits one surface fewer and exits 0.
+    Cross-model review reproduced exactly that: three verbs instead of four, no
+    diagnostic anywhere. For a module whose entire job is exposure, "one
+    capability quietly stopped existing" is the worst answer available, and it
+    cannot be distinguished from the LEGITIMATE one-sided declaration by any
+    later check — so the unknown is refused here, before anything is built.
+    """
+    if not isinstance(decl, dict):
+        raise DeclarationError(
+            f"declaration {index}: must be a dict, got {type(decl).__name__}"
+        )
+    unknown = sorted(set(decl) - set(SIDES))
+    if unknown:
+        raise DeclarationError(
+            f"declaration {index}: unknown key(s) {unknown} — a declaration carries "
+            f"only {list(SIDES)} (a misspelled side would silently drop a surface)"
+        )
+    if not any(decl.get(side) is not None for side in SIDES):
+        raise DeclarationError(f"declaration {index}: names no side at all")
+
+
+def _validate_facet(index: int, side: str, facet: Any) -> None:
+    """Refuse a facet with a missing or unrecognised key.
+
+    Required keys are checked HERE rather than left to a `KeyError` at build
+    time, because `DeclarationError` is what this module's contract promises and
+    half the malformations reaching a caller as `KeyError` makes that contract
+    half true. Unknown keys are refused for `_validate_declaration`'s reason one
+    level down: a misspelled `manual_handler` would otherwise leave a tool with
+    neither body form, and a misspelled `default` would make a parameter
+    required.
+    """
     if not isinstance(facet, dict):
-        raise DeclarationError(f"{side!r} facet must be a dict, got {type(facet).__name__}")
-    return facet
+        raise DeclarationError(
+            f"declaration {index}: {side!r} facet must be a dict, got {type(facet).__name__}"
+        )
+    required, optional = _FACET_KEYS[side]
+    missing = sorted(required - set(facet))
+    if missing:
+        raise DeclarationError(f"declaration {index}: {side!r} facet is missing {missing}")
+    unknown = sorted(set(facet) - required - optional)
+    if unknown:
+        raise DeclarationError(
+            f"declaration {index}: {side!r} facet has unknown key(s) {unknown} — "
+            f"accepted: {sorted(required | optional)}"
+        )
 
 
 def _signature(params) -> tuple[inspect.Signature, dict[str, Any]]:
@@ -141,7 +196,13 @@ def build_tool(facet: dict[str, Any], conn_factory) -> Any:
     # reach the body with the parameter simply MISSING rather than defaulted.
     # Binding through the declared signature makes the emitted callable behave as
     # the hand-written `def` it replaces, including the TypeError on a missing
-    # required argument or an unknown name.
+    # required argument or an unknown name. ONE DECLARED COST, because it is a
+    # real difference and not a claim of equivalence: the TEXT of that TypeError
+    # is `Signature.bind`'s ("missing a required argument: 'benchmark'"), not
+    # CPython's call-site text naming the function. Nothing in the exposed
+    # surface carries it — the MCP path validates through pydantic long before
+    # the call — so it is visible only to an in-process caller reading the
+    # message, and closing it would mean generating and `exec`ing real source.
     def tool(*args: Any, **kwargs: Any) -> dict[str, Any]:
         bound = signature.bind(*args, **kwargs)
         bound.apply_defaults()
@@ -163,6 +224,31 @@ def build_tool(facet: dict[str, Any], conn_factory) -> Any:
     return tool
 
 
+def _facets(declarations, side: str) -> list[dict[str, Any]]:
+    """Every facet of one side, VALIDATED AS A SET before anything is emitted.
+
+    The duplicate check runs here rather than after the emission loop, and the
+    difference is not cosmetic: registering first and validating afterwards
+    leaves the server or the parser half-built when the refusal arrives —
+    argparse raises its own conflict error before `DeclarationError` can, and an
+    MCP registrar may simply overwrite. A declaration set is either buildable or
+    it is refused, and it must be refused before it has mutated anything.
+    """
+    facets: list[dict[str, Any]] = []
+    for index, decl in enumerate(declarations):
+        _validate_declaration(index, decl)
+        facet = decl.get(side)
+        if facet is None:
+            continue
+        _validate_facet(index, side, facet)
+        facets.append(facet)
+    names = [f["name"] for f in facets]
+    duplicates = sorted({n for n in names if names.count(n) > 1})
+    if duplicates:
+        raise DeclarationError(f"duplicate {side} name(s) declared: {duplicates}")
+    return facets
+
+
 def emit_tools(mcp, conn_factory, declarations) -> list[str]:
     """Register every declared MCP tool. Returns the names, in declaration order.
 
@@ -170,17 +256,11 @@ def emit_tools(mcp, conn_factory, declarations) -> list[str]:
     closure over the loop variable — late binding in exactly this shape is the
     classic way a generated surface ends up with N copies of the last tool.
     """
-    emitted: list[str] = []
-    for decl in declarations:
-        facet = _facet(decl, "mcp")
-        if facet is None:
-            continue
-        fn = build_tool(facet, conn_factory)
+    facets = _facets(declarations, "mcp")
+    built = [build_tool(facet, conn_factory) for facet in facets]
+    for fn in built:
         mcp.tool()(fn)
-        emitted.append(fn.__name__)
-    if len(set(emitted)) != len(emitted):
-        raise DeclarationError(f"duplicate tool name among {emitted}")
-    return emitted
+    return [fn.__name__ for fn in built]
 
 
 def emit_cli(sub, commands, declarations) -> list[str]:
@@ -192,22 +272,16 @@ def emit_cli(sub, commands, declarations) -> list[str]:
     argparse's, and the declaration would stop being a readable statement of the
     surface.
     """
-    emitted: list[str] = []
-    for decl in declarations:
-        facet = _facet(decl, "cli")
-        if facet is None:
-            continue
+    facets = _facets(declarations, "cli")
+    for facet in facets:
+        if facet.get("manual_handler") is None:
+            raise DeclarationError(f"verb {facet['name']!r} declares no manual_handler")
+    for facet in facets:
         name = facet["name"]
         parser = sub.add_parser(name, help=facet["help"])
         for arg in facet["args"]:
             flags = arg["flags"]
             options = {key: value for key, value in arg.items() if key != "flags"}
             parser.add_argument(*flags, **options)
-        handler = facet.get("manual_handler")
-        if handler is None:
-            raise DeclarationError(f"verb {name!r} declares no manual_handler")
-        commands[name] = handler
-        emitted.append(name)
-    if len(set(emitted)) != len(emitted):
-        raise DeclarationError(f"duplicate verb name among {emitted}")
-    return emitted
+        commands[name] = facet["manual_handler"]
+    return [facet["name"] for facet in facets]
