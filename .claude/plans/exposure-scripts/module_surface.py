@@ -10,9 +10,11 @@ about what a predicate sees is produced by RUNNING the predicate):
 
 2. SLOC (`--sloc FILE...`): ONE counter, applied identically BEFORE and
    AFTER, over every production file the pilot touches, on a `ruff format`ed
-   TEMP copy.  A line counts when it is non-blank and non-comment — DOCSTRINGS
-   AND STRING LITERALS INCLUDED (third review pass: excluding docstrings made
-   a relocated docstring count 2 before / 11-14 after).  The headline
+   TEMP copy, reported as TWO columns: CODE (lines with a non-string token)
+   and PROSE (newline segments inside string tokens). See `measure()` for
+   why: every single-number variant tried (v2 partition, v3 no-docstrings,
+   v4 NBNC) charged a relocated prose block differently depending on its
+   surrounding syntax; the split bounds that to <=2 code lines per block.  The headline
    answer to the owner's question ("does the code shrink") is the NET delta of
    this number — no relocation accounting, because two independent attackers
    showed the v1 partition (below) charged relocated text to the generator
@@ -146,102 +148,144 @@ def partition(path: str, func_names: tuple[str, ...]) -> None:
 def _normalized_source(path: str) -> str:
     """Source after `ruff format` (line-length 100) in a TEMP copy — never in place.
 
-    Two attackers measured a 7x swing in the count from layout alone (one
-    declaration on one line vs. formatted). The repo gates `ruff check`, not
-    `ruff format`, so the counter normalizes BOTH sides itself. If ruff is not
-    reachable the raw text is used and that is PRINTED, never silent.
+    Two attackers measured a 7x swing in the count from layout alone. The repo
+    gates `ruff check`, not `ruff format`, so the counter normalizes BOTH sides
+    itself. If ruff is unavailable or fails the counter REFUSES: a fourth pass
+    measured 917 raw vs 931 formatted on bench.py, so a silent fallback would
+    switch metrics mid-measurement.
     """
-    src = open(path, encoding="utf-8").read()
     if not path.endswith(".py"):
         raise SystemExit(f"refusing non-Python file (a JSON blob counts as 1 line): {path}")
+    src = open(path, encoding="utf-8").read()
     import shutil
     import subprocess
     import tempfile
 
     ruff = shutil.which("ruff")
     if ruff is None:
-        print(f"  WARNING: ruff not found; counting {path} UNFORMATTED")
-        return src
+        raise SystemExit("ruff not found: refusing to count unformatted source (metric would change)")
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8") as tf:
         tf.write(src)
         tmp = tf.name
     try:
-        subprocess.run([ruff, "format", "--line-length", "100", "-q", tmp], check=True)
+        r = subprocess.run([ruff, "format", "--line-length", "100", "-q", tmp],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise SystemExit(f"ruff format failed on {path}: {r.stderr.strip()}")
         return open(tmp, encoding="utf-8").read()
     finally:
         os.unlink(tmp)
 
 
-def nbnc_lines(src: str) -> set[int]:
-    """Non-blank, non-comment physical lines. DOCSTRINGS AND STRING LITERALS COUNT.
+_SKIP = {tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE, tokenize.INDENT,
+         tokenize.DEDENT, tokenize.ENCODING, tokenize.ENDMARKER}
 
-    Counting docstrings is the whole point: three review passes showed that any
-    counter which excludes a docstring statement but counts the same text once
-    it becomes `fn.__doc__ = ...` or a declaration field books a pure
-    relocation as growth (measured: 2 vs 11 vs 14 lines for identical text).
-    A line is counted when it carries any token other than COMMENT/NL/NEWLINE/
-    INDENT/DEDENT/ENCODING/ENDMARKER — string tokens included, spanning lines.
+
+def measure(src: str, *, lo: int = 1, hi: int | None = None,
+            keep=None) -> tuple[int, int]:
+    """(code, prose) over the lines selected by [lo, hi] and/or `keep(ln)`.
+
+    CODE  = physical lines carrying at least one token that is neither
+            comment/whitespace NOR a string literal.  A docstring statement is
+            0 code lines; `description="..."` is 1 (the field name IS code);
+            `fn.__doc__ = "..."` is 1.  So relocating a prose block between
+            those three forms moves CODE by at most 2 lines per block (the key line
+            and a closing-punctuation line: a triple-quote followed by a comma) — measured 2/3/7 with
+            the surrounding `dict(...)` accounting for the rest — a bound,
+            not a hope, and those lines are genuine declaration syntax.
+    PROSE = newline-separated segments inside string tokens (a 6-line
+            docstring = 6; the same 6 lines as a field value = 6; as an
+            assignment = 6), attributed to the token's START line so a
+            multi-line string is counted once.  Representation-independent by
+            construction: `ruff format` never reflows string CONTENT.  Empty
+            segments (blank lines inside a string) count — the author wrote them.
+    Fourth review pass measured the previous NBNC counter at 8 vs 6 (Opus) and
+    2/5/1 (Codex) for byte-identical prose in three forms; this split is the
+    structural answer, and the headline reports BOTH plus their sum.
     """
-    skip = {tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE, tokenize.INDENT,
-            tokenize.DEDENT, tokenize.ENCODING, tokenize.ENDMARKER}
-    out: set[int] = set()
+    def _in(ln: int) -> bool:
+        if hi is not None and not (lo <= ln <= hi):
+            return False
+        return keep(ln) if keep else True
+
+    code: set[int] = set()
+    prose = 0
     for tok in tokenize.generate_tokens(io.StringIO(src).readline):
-        if tok.type in skip:
+        if tok.type in _SKIP:
             continue
-        out.update(range(tok.start[0], tok.end[0] + 1))
-    return out
+        if tok.type == tokenize.STRING:
+            if _in(tok.start[0]):
+                prose += tok.string.count("\n") + 1
+            continue
+        if tok.type in _FSTRING_TYPES:
+            continue
+        code.update(ln for ln in range(tok.start[0], tok.end[0] + 1) if _in(ln))
+    return len(code), prose
+
+
+_FSTRING_TYPES = {getattr(tokenize, n) for n in ("FSTRING_START", "FSTRING_MIDDLE", "FSTRING_END")
+                  if hasattr(tokenize, n)}
 
 
 def sloc_of(src: str, *, lo: int = 1, hi: int | None = None) -> int:
-    lines = nbnc_lines(src)
-    if hi is not None:
-        lines = {ln for ln in lines if lo <= ln <= hi}
-    return len(lines)
+    c, _p = measure(src, lo=lo, hi=hi)
+    return c
 
 
 def sloc_report(paths: list[str], *, expect_absent: set[str]) -> None:
     """Same file list both sides. A missing file counts 0 ONLY if named in
     --absent; an unexpected absence is refused (typo vs. intentional)."""
-    total = 0
-    print(f"{'file':48}{'sloc':>7}")
+    tc = tp = 0
+    print(f"  interpreter {sys.version.split()[0]} — use the SAME one on both sides "
+          f"(tokenizer differs across versions on f-strings)")
+    print(f"{'file':44}{'code':>7}{'prose':>7}{'total':>7}")
     for p in paths:
         if not os.path.exists(p):
             if p in expect_absent:
-                print(f"{p + '  (absent, expected)':48}{0:>7}")
+                print(f"{p + '  (absent, expected)':44}{0:>7}{0:>7}{0:>7}")
                 continue
             raise SystemExit(f"unexpected absent file (name it in --absent if intended): {p}")
-        n = sloc_of(_normalized_source(p))
-        total += n
-        print(f"{p:48}{n:>7}")
-    print(f"{'TOTAL':48}{total:>7}")
-    print("  headline = NET delta of TOTAL between the pinned base and the pilot tip, same file list")
+        c, pr = measure(_normalized_source(p))
+        tc += c
+        tp += pr
+        print(f"{p:44}{c:>7}{pr:>7}{c + pr:>7}")
+    print(f"{'TOTAL':44}{tc:>7}{tp:>7}{tc + tp:>7}")
+    print("  headline = NET delta of each column between the pinned base and the pilot tip")
+    print("  (relocating a prose block moves `code` by <= 2 lines per block, `prose` by 0)")
 
 
 def declared_manual_handlers(path: str) -> list[str]:
     """Extract `manual_handler=<Name>` from a declaration file by AST.
 
     Refuses anything that is not a bare Name (lambda, attribute, partial,
-    call): H_manual must point at a def the instrument can measure, or the
-    number is self-reported rather than measured.
+    call), a non-.py file, and a name declared twice.
     """
+    if not path.endswith(".py"):
+        raise SystemExit(f"declaration file must be .py: {path}")
     tree = ast.parse(open(path, encoding="utf-8").read(), filename=path)
     names: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             for kw in node.keywords:
                 if kw.arg == "manual_handler":
-                    if isinstance(kw.value, ast.Name):
-                        names.append(kw.value.id)
-                    else:
+                    if not isinstance(kw.value, ast.Name):
                         raise SystemExit(
                             f"{path}:{kw.value.lineno}: manual_handler must be a bare Name, "
                             f"got {type(kw.value).__name__}"
                         )
+                    if kw.value.id in names:
+                        raise SystemExit(f"{path}: manual_handler {kw.value.id!r} declared twice")
+                    names.append(kw.value.id)
     return names
 
 
-def handlers_report(path: str, names: list[str]) -> None:
-    src = _normalized_source(path)
+def _resolve_spans(src: str, path: str, names: list[str]) -> dict[str, tuple[int, int]]:
+    """ONE validation path for --handlers and --surface: missing, duplicate
+    (in the input list or in the file), and overlapping spans all refuse.
+    The fourth pass found --surface accepting a missing name (165 -> 184, rc 0)
+    because validation lived only in the other mode."""
+    if len(set(names)) != len(names):
+        raise SystemExit(f"duplicate handler name in input: {names}")
     tree = ast.parse(src, filename=path)
     spans: dict[str, tuple[int, int]] = {}
     for node in ast.walk(tree):
@@ -252,45 +296,51 @@ def handlers_report(path: str, names: list[str]) -> None:
     missing = [n for n in names if n not in spans]
     if missing:
         raise SystemExit(f"declared manual handler(s) not found: {missing}")
-    # Overlap check: a nested def inside another listed def would be counted
-    # twice (measured: register_cli 152 + its four nested _cmd_* 118 = 330).
     items = sorted(spans.items(), key=lambda kv: kv[1])
     for (a, (a0, a1)), (b, (b0, b1)) in zip(items, items[1:]):
         if b0 <= a1:
             raise SystemExit(f"spans overlap: {a} [{a0}-{a1}] contains/abuts {b} [{b0}-{b1}]")
-    print(f"{'handler':40}{'sloc':>7}")
-    total = 0
+    return spans
+
+
+def handlers_report(path: str, names: list[str]) -> None:
+    src = _normalized_source(path)
+    spans = _resolve_spans(src, path, names)
+    print(f"{'handler':40}{'code':>7}{'prose':>7}")
+    tc = tp = 0
     for n in names:
         lo, hi = spans[n]
-        v = sloc_of(src, lo=lo, hi=hi)
-        total += v
-        print(f"{n:40}{v:>7}")
-    print(f"{'H_manual':40}{total:>7}")
+        c, pr = measure(src, lo=lo, hi=hi)
+        tc += c
+        tp += pr
+        print(f"{n:40}{c:>7}{pr:>7}")
+    print(f"{'H_manual':40}{tc:>7}{tp:>7}")
 
 
 def surface_report(path: str, exclude: list[str]) -> None:
-    """SLOC of register_tools + register_cli MINUS listed nested handlers —
-    the 'wiring' figure with H_manual subtracted, never overlapping it."""
+    """register_tools + register_cli MINUS the named handler spans (which must
+    resolve — same validation as --handlers). The declared drop of this figure
+    is what makes 'reduced to a loop' measurable (T_second bar)."""
     src = _normalized_source(path)
+    ex = _resolve_spans(src, path, exclude) if exclude else {}
     tree = ast.parse(src, filename=path)
     reg: dict[str, tuple[int, int]] = {}
-    ex: list[tuple[int, int]] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef):
-            if node.name in ("register_tools", "register_cli"):
-                reg[node.name] = (M.def_start(node), M.end_of(node))
-            elif node.name in exclude:
-                ex.append((M.def_start(node), M.end_of(node)))
-    lines = nbnc_lines(src)
-    total = 0
-    print(f"{'block':40}{'sloc':>7}")
+        if isinstance(node, ast.FunctionDef) and node.name in ("register_tools", "register_cli"):
+            reg[node.name] = (M.def_start(node), M.end_of(node))
+    if not reg:
+        raise SystemExit(f"no register_tools/register_cli in {path}")
+    exl: set[int] = set()
+    for e0, e1 in ex.values():
+        exl.update(range(e0, e1 + 1))
+    tc = tp = 0
+    print(f"{'block':40}{'code':>7}{'prose':>7}")
     for name, (lo, hi) in reg.items():
-        inside = {ln for ln in lines if lo <= ln <= hi}
-        for e0, e1 in ex:
-            inside -= {ln for ln in inside if e0 <= ln <= e1}
-        total += len(inside)
-        print(f"{name:40}{len(inside):>7}")
-    print(f"{'wiring (excl. manual handlers)':40}{total:>7}")
+        c, pr = measure(src, lo=lo, hi=hi, keep=lambda ln: ln not in exl)
+        tc += c
+        tp += pr
+        print(f"{name:40}{c:>7}{pr:>7}")
+    print(f"{'wiring (excl. manual handlers)':40}{tc:>7}{tp:>7}")
 
 
 def main() -> int:
@@ -306,12 +356,12 @@ def main() -> int:
                     help="with --in: SLOC of register_* minus the handlers named by --handlers")
     args = ap.parse_args()
     if args.sloc:
-        print("SLOC (one counter, before == after; NBNC lines incl. docstrings; ruff-formatted copy)")
+        print("SLOC = code + prose (one counter, before == after; ruff-formatted copy)")
         sloc_report(args.sloc, expect_absent=set(args.absent))
         return 0
-    if args.handlers or args.declarations:
+    if args.handlers or args.declarations or args.surface:
         if not args.in_file:
-            ap.error("--handlers/--declarations need --in FILE")
+            ap.error("--handlers/--declarations/--surface need --in FILE")
         names = [n.strip() for n in (args.handlers or "").split(",") if n.strip()]
         if args.declarations:
             names += declared_manual_handlers(args.declarations)
