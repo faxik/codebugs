@@ -301,6 +301,24 @@ class TestMainClean:
         git(repo, "add", "seed.txt")
         assert run_guard("_guard_main_clean", str(repo)).returncode == 11
 
+    def test_the_refusal_points_at_the_likely_cross_session_cause(self, repo: Path) -> None:
+        """The side that is blocked is usually not the side that made the mess.
+
+        A commit refused by the pre-commit hook leaves its files in main's
+        index, and this guard then refuses every OTHER worktree's finish with
+        exit 11. Told only "main's working tree has uncommitted changes", that
+        side reads the sentence as a statement about its own work and waits —
+        which is how ~40 minutes of two blocked integrations were spent on
+        2026-08-22 (CB-130). The symmetric half of the hook's new lines.
+        """
+        (repo / "seed.txt").write_text("changed\n")
+        git(repo, "add", "seed.txt")
+        result = run_guard("_guard_main_clean", str(repo))
+        assert result.returncode == 11
+        err = result.stderr
+        assert "another session" in err.lower(), err
+        assert f'git -C "{repo}" status --porcelain' in err, err
+
     def test_untracked_colliding_with_a_branch_added_path_refused(self, repo: Path) -> None:
         """"git cannot collide with an untracked file" is FALSE.
 
@@ -1880,6 +1898,41 @@ class TestPreCommitHook:
         (repo / "src").mkdir()
         (repo / "src" / "mod.py").write_text("x = 1\n")
         assert self._commit(repo, "src/mod.py").returncode != 0
+
+    def test_the_main_refusal_names_the_cost_other_sessions_pay(self, repo: Path) -> None:
+        """A refusal must name the state it LEAVES, not only the state it refused.
+
+        `git add` stages before the hook runs, and a refusal unstages nothing —
+        git does not, and this hook deliberately does not either (a hook that
+        mutates the operator's index turns a refusal into an action). So the
+        files sit in main's index afterwards, `_guard_main_clean` reads exactly
+        that index, and one refused commit here refuses
+        `tools/worktree-finish.sh` in EVERY worktree of this clone — other
+        sessions' included. Measured 2026-08-22: ~40 minutes of two blocked
+        DIR-2 integrations, by an operator who had been told only "refusing to
+        commit on main" (CB-130).
+
+        The hook is RUN, not grepped: a file can carry a line the hook never
+        prints on this path, and a structural test would assert the wrong thing.
+        """
+        self._install(repo)
+        hooks = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")) / "hooks"
+        assert (hooks / "pre-commit").is_file(), "fixture never armed the throwaway repo"
+
+        (repo / "src").mkdir()
+        (repo / "src" / "mod.py").write_text("x = 1\n")
+        result = self._commit(repo, "src/mod.py")
+        assert result.returncode != 0, "fixture did not take: the hook let a source edit onto main"
+
+        # The PREMISE the new lines assert, pinned rather than trusted: the
+        # refusal really does leave the path staged, and that staged path really
+        # is what stops every other worktree.
+        assert git(repo, "status", "--porcelain", "--untracked-files=no") == "A  src/mod.py"
+        assert run_guard("_guard_main_clean", str(repo)).returncode == 11
+
+        err = result.stderr
+        assert "still staged" in err.lower(), err
+        assert "worktree-finish.sh" in err, err
 
     def test_plan_note_on_main_allowed(self, repo: Path) -> None:
         """CLAUDE.md's single stated exception, and the repo relies on it.
