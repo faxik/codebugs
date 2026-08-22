@@ -983,6 +983,28 @@ delete, so `release_reason` (`explicit` | `terminal:<status>`) is a queryable re
   over a truncated backup. A `| while read` loop that `break`s now kills the producer at 141 rather
   than 1; both are non-zero, so no `set -e` script changes behaviour. Observable only when the
   reader closes without draining (any size) or un-drained output exceeds the 64 KB pipe buffer.
+  **`74` was added by CB-136** and is not a claims outcome either — same reason it is recorded here,
+  same **CLI** ownership. It is `EX_IOERR` from `sysexits(3)`, meaning *my output could not be
+  WRITTEN* on a descriptor that was healthy at the process entry — `/dev/full`, a filesystem that
+  filled while the verb ran, a wedged PTY — and it deliberately asserts **nothing** about whether the
+  command's effect landed, because the write that failed is usually the line reporting a mutation
+  that has already committed. It replaces the two codes that state produced before it (`1`
+  unbuffered, with a raw traceback; `120` block-buffered, with "Exception ignored while flushing
+  sys.stdout"), the first of which is this package's code for **bad input** printed over a landed
+  write — the CB-15/CB-16 lie. `141` is deliberately not reused: there the reader is gone, here it is
+  present and the medium is full, and blurring that is what CB-78 refused. When a verb had already
+  chosen its own non-zero code, `74` wins, since the caller never received the output that code
+  describes. Three limits, each measured rather than assumed, because the first draft of this
+  paragraph overclaimed and cross-model review said so. **`EPIPE` is excluded and reports `141`**:
+  `cli.run` restores the SIGPIPE *disposition* but cannot clear an inherited signal *mask*, so a
+  caller that blocked SIGPIPE gets `EPIPE` back from the write instead of dying by signal, and
+  calling that "the medium is full" would undo CB-78 inside CB-136's own fix. **It covers what goes
+  through `sys.stdout`** — `print` and the `csv` writer, i.e. every verb's ordinary output — and NOT
+  `export-csv <path>`, where `fsio.atomic_write` writes through its own file object and CB-76's arm
+  still reports exit 1, `export-csv /dev/stdout` included; that is unchanged behaviour rather than a
+  hole this opened, and nothing is committed on that path, so it is not the CB-15/CB-16 lie. **A verb
+  that CRASHES** keeps its traceback and its own code, so a still-buffered stdout can reach `120`
+  there as before — trading a crash's traceback for a tidy code is the worse of the two.
 - **Adoption**: autosorter's `worktree-setup.sh` claims every card in the branch name (and in
   `--items`) **before** `git worktree add`, with an EXIT trap that releases them if setup aborts;
   `worktree-finish.sh` releases whatever the branch still holds. Exactly one of those calls may be

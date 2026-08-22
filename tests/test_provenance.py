@@ -1751,3 +1751,220 @@ class TestStalenessReadsTheNewestObservation:
         assert by_id["CB-1"]["checked_commit"] == initial_sha, by_id
         assert by_id["CB-2"]["file_status"] == "current", by_id
         assert by_id["CB-2"]["checked_commit"] == head, by_id
+
+
+class TestWorktreeRootIsPublic:
+    """`worktree_root` — BT-7 Т-0's first half.
+
+    An anchor capture must ask "which tree am I standing in" WITHOUT reaching
+    into `provenance._repo_root` (a private of another domain, which CLAUDE.md's
+    module rule forbids) and WITHOUT `db.describe_root()`, which answers a
+    different question. The linked-worktree case below is the one that makes
+    that difference observable rather than asserted.
+    """
+
+    def test_ordinary_checkout_resolves_to_the_repo_root(self, git_project):
+        project, _ = git_project
+        assert provenance.worktree_root(project_dir=project) == os.path.realpath(project)
+
+    def test_a_subdirectory_still_resolves_to_the_root(self, git_project):
+        project, _ = git_project
+        sub = os.path.join(project, "src")
+        assert provenance.worktree_root(project_dir=sub) == os.path.realpath(project)
+
+    def test_linked_worktree_gives_the_branch_root_not_mains(self, git_project, tmp_path_factory):
+        """The reason this function exists at all.
+
+        `db.describe_root()` follows the `.git` FILE's `commondir` pointer and
+        therefore reports the MAIN checkout — correct for finding the tracker,
+        wrong for anchoring a revision of the branch you are standing on. The
+        two answers are asserted against each other here, so a future change
+        that collapses them turns this red instead of silently anchoring an
+        anchor to another tree (BT-7 П-b).
+        """
+        # NOT the `git_project` fixture: it commits its own `.codebugs/`, so a
+        # linked worktree checks one out and the tracker walk stops there —
+        # which would make the contrast below vacuously false for a reason that
+        # has nothing to do with the property under test. Here the tracker is
+        # created AFTER the commit, so it is untracked and exists only in main.
+        main = str(tmp_path_factory.mktemp("main"))
+        for cmd in (
+            ["git", "init"],
+            ["git", "config", "user.email", "test@test.com"],
+            ["git", "config", "user.name", "Test"],
+        ):
+            subprocess.run(cmd, cwd=main, check=True, capture_output=True)
+        with open(os.path.join(main, "f.txt"), "w") as fh:
+            fh.write("x\n")
+        subprocess.run(["git", "add", "-A"], cwd=main, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "i"], cwd=main, check=True, capture_output=True)
+        db.init_project(main)
+
+        linked = os.path.join(str(tmp_path_factory.mktemp("linked")), "wt")
+        subprocess.run(
+            ["git", "worktree", "add", "-b", "t37-probe", linked],
+            cwd=main,
+            check=True,
+            capture_output=True,
+        )
+        previous = os.getcwd()
+        try:
+            assert provenance.worktree_root(project_dir=linked) == os.path.realpath(linked)
+            assert provenance.worktree_root(project_dir=linked) != os.path.realpath(main)
+
+            # And the contrast that motivates the whole unit: the tracker
+            # resolver, standing in the SAME directory, answers with main.
+            os.chdir(linked)
+            assert os.path.realpath(db.describe_root()["root"]) == os.path.realpath(main)
+        finally:
+            os.chdir(previous)
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", linked],
+                cwd=main,
+                check=True,
+                capture_output=True,
+            )
+
+    def test_a_directory_without_git_is_none_not_an_exception(self, tmp_path):
+        plain = tmp_path / "no-git-here"
+        plain.mkdir()
+        assert provenance.worktree_root(project_dir=str(plain)) is None
+
+    def test_a_nonexistent_project_dir_is_none(self, tmp_path):
+        assert provenance.worktree_root(project_dir=str(tmp_path / "definitely-absent")) is None
+
+    def test_ambient_cwd_is_the_fallback_when_no_project_dir_is_given(self, git_project):
+        project, _ = git_project
+        previous = os.getcwd()
+        os.chdir(project)
+        try:
+            assert provenance.worktree_root() == os.path.realpath(project)
+        finally:
+            os.chdir(previous)
+
+    def test_a_deleted_cwd_degrades_to_none(self, git_project, monkeypatch):
+        """CB-79's shape: a long-lived server outlives the worktree it started
+        in. `_ambient_cwd` already answers None there; this function must
+        degrade the same way rather than raise, because every caller in this
+        module is written against a degraded answer."""
+        monkeypatch.setattr(provenance, "_ambient_cwd", lambda: None)
+        assert provenance.worktree_root() is None
+
+
+class TestResolveInWorktreeIsPublic:
+    """`resolve_in_worktree` — BT-7 Т-0's second half.
+
+    It exposes the COMPOSITION `file_status` already performed inline (place,
+    contain, relativize), not just the placing step: a caller handed only the
+    absolute candidate would have to rebuild the containment decision and the
+    root-relative spelling itself, which is a second implementation of a scope
+    decision — this repository's own recurring defect.
+    """
+
+    def test_a_relative_value_keeps_its_spelling_and_gains_a_root(self, git_project):
+        project, _ = git_project
+        placed = provenance.resolve_in_worktree(root=os.path.realpath(project), file_path="src/auth.py")
+        assert placed is not None
+        assert placed.root == os.path.realpath(project)
+        assert placed.rel == "src/auth.py"
+        assert placed.abspath == os.path.join(os.path.realpath(project), "src", "auth.py")
+
+    def test_a_noncanonical_spelling_is_canonicalized(self, git_project):
+        """Every spelling of one file must ask git the same question (CB-93)."""
+        project, _ = git_project
+        placed = provenance.resolve_in_worktree(
+            root=os.path.realpath(project), file_path="src/../src/auth.py"
+        )
+        assert placed is not None
+        assert placed.rel == "src/auth.py"
+
+    def test_an_absolute_value_inside_the_worktree_resolves(self, git_project):
+        project, _ = git_project
+        root = os.path.realpath(project)
+        placed = provenance.resolve_in_worktree(
+            root=root, file_path=os.path.join(root, "src", "auth.py")
+        )
+        assert placed is not None
+        assert placed.rel == "src/auth.py"
+
+    def test_an_absolute_value_outside_the_worktree_is_refused(self, git_project):
+        project, _ = git_project
+        assert (
+            provenance.resolve_in_worktree(root=os.path.realpath(project), file_path="/etc/passwd")
+            is None
+        )
+
+    def test_a_dotdot_escape_is_refused(self, git_project):
+        project, _ = git_project
+        assert (
+            provenance.resolve_in_worktree(
+                root=os.path.realpath(project), file_path="../elsewhere/x.py"
+            )
+            is None
+        )
+
+    def test_an_in_repo_symlinked_directory_that_escapes_is_refused(
+        self, git_project, tmp_path_factory
+    ):
+        """Lexically inside, physically outside — the case `_resolve_candidate`
+        resolves the PARENT for."""
+        project, _ = git_project
+        outside = str(tmp_path_factory.mktemp("outside"))
+        os.symlink(outside, os.path.join(project, "escape"))
+        assert (
+            provenance.resolve_in_worktree(
+                root=os.path.realpath(project), file_path="escape/secret.py"
+            )
+            is None
+        )
+
+    def test_a_final_symlink_is_preserved_not_followed(self, git_project):
+        """The contract `_resolve_candidate` documents and this API does not
+        change: git can answer about its own blob, so the LINK is the subject."""
+        project, _ = git_project
+        root = os.path.realpath(project)
+        os.symlink("/etc/passwd", os.path.join(project, "src", "link.py"))
+        placed = provenance.resolve_in_worktree(root=root, file_path="src/link.py")
+        assert placed is not None
+        assert placed.rel == "src/link.py"
+        assert placed.abspath == os.path.join(root, "src", "link.py")
+
+    def test_the_root_itself_resolves(self, git_project):
+        project, _ = git_project
+        root = os.path.realpath(project)
+        placed = provenance.resolve_in_worktree(root=root, file_path=".")
+        assert placed is not None
+        assert placed.rel == "."
+        assert placed.abspath == root
+
+    def test_both_parameters_are_keyword_only(self, git_project):
+        """Two same-typed strings whose swap produces a silently wrong path
+        rather than an error. Keyword-only forecloses that at the call site."""
+        project, _ = git_project
+        with pytest.raises(TypeError):
+            provenance.resolve_in_worktree(os.path.realpath(project), "src/auth.py")
+
+
+class TestFileStatusGoesThroughThePublicResolver:
+    """One implementation of the scope decision, not two.
+
+    `file_status` used to compose place/contain/relativize inline. Т-0 made that
+    composition public and left `file_status` on it; a future edit that re-inlines
+    it would restore the drift this exposure exists to prevent, and the suite
+    would not otherwise notice, because both copies would start out agreeing.
+    """
+
+    def test_the_resolver_is_on_the_live_path(self, git_project, monkeypatch):
+        project, initial_sha = git_project
+        calls = []
+        real = provenance.resolve_in_worktree
+
+        def spy(*, root, file_path):
+            calls.append((root, file_path))
+            return real(root=root, file_path=file_path)
+
+        monkeypatch.setattr(provenance, "resolve_in_worktree", spy)
+        provenance.file_status(
+            file_path="src/auth.py", reported_at_commit=initial_sha, project_dir=project
+        )
+        assert calls == [(os.path.realpath(project), "src/auth.py")]
