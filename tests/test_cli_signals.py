@@ -273,3 +273,112 @@ class TestConsoleScriptTargetsTheWrapper:
         source = (_REPO_ROOT / "src" / "codebugs" / "cli.py").read_text()
         tail = source.split('if __name__ == "__main__":')[-1]
         assert "run()" in tail and "main()" not in tail, tail
+
+
+class TestAClosedStdoutIsRefusedAtTheProcessEntry:
+    """CB-134 — the CB-78 contract must mean the SAME thing on every interpreter
+    `requires-python` admits, and before this it meant four different things.
+
+    A closed stdout is not a dead pipe: nothing raises SIGPIPE, so `cli.run`'s
+    disposition never fires and the process falls into whatever the stdlib
+    happens to do that release. Measured on this repo's own two interpreters,
+    for one mutating verb, across the two ways a stdout can be closed:
+
+        state                       3.13.3                      3.14.4
+        ----------------------------------------------------------------------
+        sys.stdout.close()          rc 1, traceback, LANDED     rc 1, traceback, nothing
+        fd 1 closed at exec (>&-)   rc 120, "Exception          rc 0, SILENT, LANDED
+                                    ignored ... EBADF", LANDED
+
+    Not one of those four is the declared outcome, and they disagree on all
+    three axes at once — exit code, whether stderr carries a raw traceback, and
+    whether the write landed.
+
+    THE 3.14 `>&-` CELL IS THE WORST OF THE FOUR AND IS NOT WHAT THE CARD
+    RECORDS. 3.14 sets `sys.stdout` to `None` when fd 1 is invalid at startup,
+    `print()` is a documented no-op against `None`, and `argparse`'s colour probe
+    short-circuits on `hasattr(None, "fileno")` — so every verb runs to
+    completion, discards its whole output, and exits **0**. That is the "silent
+    exit 0" the CB-78 ratification rejected by name, arrived at by upgrading the
+    interpreter: `codebugs export-csv /dev/stdout | gzip > backup.gz` reports
+    success over a backup that was never written.
+
+    THE CONTRACT THIS PINS. `cli.run` refuses at the process entry, before any
+    work, with **141** — the code CB-78 already declares for "the reader of my
+    output is gone". Uniform across interpreters, no raw traceback, never 1,
+    never a silent 0.
+
+    THE PRICE, STATED RATHER THAN LEFT TO BE DISCOVERED. On 3.13 a closed-object
+    stdout used to let the write LAND and then fail on output; it now lands
+    nothing. That is a real behaviour change and it is the point: with the
+    refusal before the work there is no committed write left to misreport, so
+    the CB-15/CB-16 success-shaped lie becomes unrepresentable on this path
+    instead of merely being caught. `run` is the only place this can live —
+    `main` is called in-process by three test modules (see
+    `TestMainDoesNotTouchProcessSignalState`).
+    """
+
+    EXPECTED = 128 + signal.SIGPIPE  # 141
+
+    @staticmethod
+    def _closed_fd(project, *args) -> tuple[int, str]:
+        """fd 1 closed at exec — what a shell's `>&-` actually does.
+
+        `exec` is load-bearing: it replaces the shell, so the status observed is
+        the CLI's own and not `sh`'s report of it.
+        """
+        import shlex
+
+        cmd = " ".join(shlex.quote(a) for a in [sys.executable, "-m", "codebugs.cli", *args])
+        proc = subprocess.run(
+            ["sh", "-c", f"exec {cmd} >&-"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            cwd=str(project), env=_env(), timeout=60,
+        )
+        return proc.returncode, proc.stderr.decode()
+
+    @staticmethod
+    def _closed_object(project, *args) -> tuple[int, str]:
+        """`sys.stdout.close()` before the entry point — the in-process spelling,
+        and the one `tests/test_bench.py` used to reach for."""
+        script = (
+            "import sys\n"
+            f"sys.argv = {['codebugs', *args]!r}\n"
+            "from codebugs.cli import run\n"
+            "sys.stdout.close()\n"
+            "run()\n"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            cwd=str(project), env=_env(), timeout=60,
+        )
+        return proc.returncode, proc.stderr.decode()
+
+    @pytest.mark.parametrize("how", ["closed_fd", "closed_object"])
+    def test_a_closed_stdout_exits_141_without_a_traceback(self, project, how):
+        rc, stderr = getattr(self, f"_{how}")(project, "query", "--status", "open")
+        assert rc == self.EXPECTED, f"rc={rc}, stderr={stderr!r}"
+        assert "Traceback" not in stderr, stderr
+        assert stderr == "", stderr
+
+    @pytest.mark.parametrize("how", ["closed_fd", "closed_object"])
+    def test_a_mutating_verb_refuses_before_it_writes_anything(self, project, how):
+        """The declared half of the price. This is the assertion that would have
+        to be edited — not merely re-run — if someone later decided the write
+        should land, so the decision cannot be reversed silently."""
+        desc = f"cb-134 closed stdout {how}"
+        rc, stderr = getattr(self, f"_{how}")(
+            project, "add", "-f", "x.py", "-c", "test", "-s", "low", "-d", desc, "--new-category",
+        )
+        assert rc == self.EXPECTED, f"rc={rc}, stderr={stderr!r}"
+        assert stderr == "", stderr
+        assert _count(project, desc) == 0, "the refusal must happen before any work"
+
+    def test_both_spellings_of_a_closed_stdout_agree(self, project):
+        """The uniformity claim itself, as one assertion rather than as two tests
+        that happen to expect the same number. Before CB-134 these two cells
+        differed on this very interpreter."""
+        a = self._closed_fd(project, "query", "--status", "open")
+        b = self._closed_object(project, "query", "--status", "open")
+        assert a == b == (self.EXPECTED, ""), f"closed_fd={a!r} closed_object={b!r}"
