@@ -254,6 +254,36 @@ class TestFailClosed:
         assert out.returncode != 0
         assert "not allowed" in out.stderr
 
+    def test_an_id_too_large_for_shell_arithmetic_is_refused(self, tmp_path: Path) -> None:
+        """`$((10#...))` wraps silently: 18446744073709551616 becomes 0, so max+1
+        would be 1 — "start from 1" arriving past the fail-closed check."""
+        text = FIXTURE_REGISTRY + f"- {CYRILLIC_TE}-18446744073709551616 — a corrupt line\n"
+        repo = _make_repo(tmp_path, text)
+        out = _mint(repo, "--prefix", CYRILLIC_TE, "--dry-run")
+        assert out.returncode != 0
+        assert "digit id" in out.stderr
+        assert out.stdout.strip() == ""
+
+    def test_a_newline_in_the_text_is_refused(self, tmp_path: Path) -> None:
+        """A second line could carry its own id and make the next mint skip it."""
+        repo = _make_repo(tmp_path)
+        injected = f"(DIR-1) a normal line\n- {CYRILLIC_TE}-999 — a smuggled entry"
+        out = _mint(repo, "--prefix", CYRILLIC_TE, "--text", injected)
+        assert out.returncode != 0
+        assert "single line" in out.stderr
+        assert f"{CYRILLIC_TE}-999" not in _registry(repo)
+
+    def test_dry_run_writes_nothing_and_commits_nothing(self, tmp_path: Path) -> None:
+        """The `--help` contract, asserted rather than believed."""
+        repo = _make_repo(tmp_path)
+        before_text = _registry(repo)
+        before_head = _git(repo, "rev-parse", "HEAD").strip()
+        out = _mint(repo, "--prefix", CYRILLIC_TE, "--dry-run")
+        assert out.returncode == 0, out.stderr
+        assert _registry(repo) == before_text
+        assert _git(repo, "rev-parse", "HEAD").strip() == before_head
+        assert _git(repo, "status", "--porcelain", "--", REGISTRY_REL).strip() == ""
+
     def test_minting_off_main_is_refused(self, tmp_path: Path) -> None:
         repo = _make_repo(tmp_path)
         _git(repo, "checkout", "-q", "-b", "fix/somewhere-else")
@@ -328,11 +358,19 @@ class TestTheMintCommit:
         assert ".claude/plans/stranger-note.md" in still_staged
 
     def test_help_names_the_hole_the_lock_does_not_close(self, tmp_path: Path) -> None:
-        """§4.6 — the uncovered case is two different checkouts."""
+        """§4.6 — the uncovered case is two different checkouts.
+
+        It also has to name the two writers on main the lock does not serialise
+        either, since the first draft of the help claimed the lock covered every
+        process in one working tree, which it does not.
+        """
         out = _mint(tmp_path, "--help")
         assert out.returncode == 0
-        assert "checkout" in out.stdout
         assert "DOES NOT CLOSE" in out.stdout
+        body = out.stdout.lower()
+        assert "checkout" in body
+        assert "worktree-finish.sh" in body
+        assert "git commit" in body
 
 
 class TestConcurrentMint:
@@ -350,9 +388,11 @@ class TestConcurrentMint:
 
     def test_two_concurrent_mints_get_two_different_ids(self, tmp_path: Path) -> None:
         repo = _make_repo(tmp_path)
+        marker = tmp_path / "first-has-computed"
 
         slow_env = _env()
-        slow_env["CASCADE_MINT_TEST_DELAY"] = "2"
+        slow_env["CASCADE_MINT_TEST_DELAY"] = "5"
+        slow_env["CASCADE_MINT_TEST_MARKER"] = str(marker)
         first = subprocess.Popen(
             ["bash", str(SCRIPT), "--prefix", CYRILLIC_TE, "--text", "(DIR-1) first"],
             cwd=str(repo),
@@ -361,7 +401,19 @@ class TestConcurrentMint:
             stderr=subprocess.PIPE,
             text=True,
         )
-        time.sleep(0.4)
+
+        # HANDSHAKE, not a timer. A fixed sleep only HOPES the first mint has
+        # reached the window; on a loaded machine the second could finish first,
+        # and the two ids would then differ with no lock at all — a green test
+        # over a broken gate. The marker is written inside the lock, after the
+        # number has been computed, so waiting for it is proof of the state this
+        # test needs.
+        deadline = time.monotonic() + 60
+        while not marker.exists():
+            assert first.poll() is None, "the first mint exited before it computed an id"
+            assert time.monotonic() < deadline, "the first mint never reached the window"
+            time.sleep(0.02)
+
         second = subprocess.Popen(
             ["bash", str(SCRIPT), "--prefix", CYRILLIC_TE, "--text", "(DIR-2) second"],
             cwd=str(repo),
@@ -370,8 +422,8 @@ class TestConcurrentMint:
             stderr=subprocess.PIPE,
             text=True,
         )
-        out1, err1 = first.communicate(timeout=120)
-        out2, err2 = second.communicate(timeout=120)
+        out1, err1 = first.communicate(timeout=180)
+        out2, err2 = second.communicate(timeout=180)
 
         assert first.returncode == 0, err1
         assert second.returncode == 0, err2
@@ -404,7 +456,15 @@ class TestScriptIsPresentAndExecutable:
         so a refactor that moves `_compute_next_id` above the `flock` restores
         the defect while every behavioural test still passes on a fast machine.
         """
-        body = SCRIPT.read_text(encoding="utf-8")
-        lock_at = body.index("flock -w 60 9")
-        compute_at = body.index("NEXT_ID=$(_compute_next_id)")
-        assert lock_at < compute_at
+        lines = SCRIPT.read_text(encoding="utf-8").splitlines()
+        # By STRIPPED LINE, not by substring: `true  # flock -w 60 9` satisfies a
+        # substring search while doing nothing, so the earlier version of this
+        # assert would have certified the very mutant it exists to catch
+        # (cross-model review).
+        lock_at = [i for i, ln in enumerate(lines) if ln.strip() == "if ! flock -w 60 9; then"]
+        compute_at = [
+            i for i, ln in enumerate(lines) if ln.strip().startswith("NEXT_ID=$(_compute_next_id)")
+        ]
+        assert len(lock_at) == 1, f"expected exactly one flock acquisition, found {len(lock_at)}"
+        assert len(compute_at) == 1, f"expected exactly one compute call, found {len(compute_at)}"
+        assert lock_at[0] < compute_at[0]

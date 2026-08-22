@@ -22,14 +22,27 @@
 # guards the append and the commit. The author never types a number.
 #
 # WHAT THIS DOES NOT CLOSE — said out loud, because a gate described better than
-# it behaves is the failure this repository keeps paying for. The lock is a
-# `flock` on a file under `.worktrees/`, so it serialises processes that share
-# ONE working tree. TWO DIFFERENT CHECKOUTS (separate clones) racing, with no
-# `git pull` between the computation and the commit, are NOT serialised by it,
-# and this script cannot detect that. The measured population of this repo is
-# ONE checkout carrying every parallel session, which is exactly the population
-# the lock covers; claiming it covers "everything" would repeat the overclaim
-# the registry header already made.
+# it behaves is the failure this repository keeps paying for. Stated precisely,
+# because the first draft of this paragraph overclaimed and cross-model review
+# said so: the `flock` serialises THE PROCESSES THAT TAKE THIS LOCK — that is,
+# other runs of this script — and nothing else. It is NOT a lock on main.
+#
+#   * TWO DIFFERENT CHECKOUTS (separate clones) racing, with no `git pull`
+#     between the computation and the commit, are not serialised, and this
+#     script cannot detect that. The measured population of this repo is ONE
+#     checkout carrying every parallel session, which is the population the
+#     lock does cover.
+#   * A HAND-WRITTEN `git commit` of a plan note on main is not serialised
+#     against a mint either, and neither is `tools/worktree-finish.sh`, which
+#     holds a DIFFERENT lock (`.worktrees/.integrate.lock`). So a mint can land
+#     on main inside finish's window between its in-lock SHA re-check and its
+#     merge. That check-then-act window is a property of the finish harness and
+#     of every direct committer on main — it predates this script and is not
+#     created by it (CB-121 / unit Т-28 is where it is being answered). Sharing
+#     `.integrate.lock` here was considered and rejected: it would weave this
+#     tool into the integration harness, which this unit's brief forbids, would
+#     park every mint behind a ~70s gate run, and would still not cover the
+#     plain `git commit` that has the identical effect.
 #
 # This is NOT a guard of tools/worktree-finish.sh. It is run by hand, by the
 # holder of a direction, at the moment a unit is minted.
@@ -77,7 +90,11 @@ USAGE
   --text S     Everything that follows the ID on the line. The script writes
                    - <ID> — <S>
                and nothing else. Required unless --dry-run.
-  --dry-run    Compute and print the ID; write nothing, commit nothing.
+  --dry-run    Compute and print the ID. The registry is NOT written and
+               nothing is committed. It DOES create and take the lock file
+               under .worktrees/ — reading the registry while another mint is
+               appending to it would defeat the point — so on a fresh clone
+               that directory appears. It is gitignored here.
   -h, --help   This text.
 
 WHAT IT PRINTS
@@ -90,10 +107,18 @@ EXAMPLE
       --text '(DIR-1) CB-137: ... — 2026-08-22, DIR-1, `L3-BRIEF-...md`'
 
 WHAT IT REFUSES, AND WHY EACH REFUSAL IS NOT "START FROM 1"
+  Always, --dry-run included:
   * The registry is missing, unreadable, or contains NO recognisable ID for the
     requested prefix. Zero found is an ERROR, never an empty allocator: this
     repository has paid three times for a guard that reported clean because it
     could not look.
+  * A number too large for the shell's signed arithmetic. Bash WRAPS silently,
+    and the two directions it wraps in are both allocator failures: one lands on
+    "start from 1" through a back door, the other yields a negative id the
+    pattern no longer matches, so the next mint reissues it.
+  * A --text carrying a newline, which would append a SECOND registry line.
+
+  On the writing path only (a --dry-run is a read and answers anyway):
   * HEAD is not `main`. The registry is committed directly on main and read
     from the working tree; a mint parked on a branch is invisible to the other
     direction until it merges, which is the collision this script exists to
@@ -111,10 +136,12 @@ WHAT IT COMMITS
   would make the mint hostage to another session's index, which is worse.
 
 WHAT IT DOES NOT CLOSE
-  The lock serialises processes sharing ONE working tree, which is this repo's
-  measured population (all parallel sessions live in one checkout). TWO
-  DIFFERENT CHECKOUTS or clones racing are NOT serialised, and this script
-  cannot detect that. Nothing here makes that case safe.
+  The lock serialises OTHER RUNS OF THIS SCRIPT, and nothing else. It is not a
+  lock on main. TWO DIFFERENT CHECKOUTS or clones racing are not serialised;
+  neither is a hand-written `git commit` of a plan note, nor
+  tools/worktree-finish.sh, which holds a different lock. This script cannot
+  detect any of those. See the header comment for why sharing the integration
+  lock was considered and rejected.
 USAGE_EOF
 }
 
@@ -172,6 +199,16 @@ if [[ "${DRY_RUN}" -eq 0 && "${TEXT_GIVEN}" -eq 0 ]]; then
 fi
 if [[ "${TEXT_GIVEN}" -eq 1 && -z "${TEXT}" ]]; then
     _die "--text is empty; refusing to append a line with no content."
+fi
+
+# A registry entry is ONE line, and the append below writes exactly one. A
+# newline inside --text would smuggle a second line past that promise: it can
+# carry its own `- <ID> — …` and the NEXT mint then jumps over the number it
+# names. Refusing is the fix; silently joining the lines would be a different
+# lie about what was written.
+if [[ "${TEXT}" == *$'\n'* || "${TEXT}" == *$'\r'* ]]; then
+    _die "--text contains a line break; a registry entry is a single line." \
+         "Refusing rather than appending two lines from one mint."
 fi
 
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) \
@@ -234,6 +271,28 @@ _compute_next_id() {
         [[ -z "${tok}" ]] && continue
         n="${tok##*-}"
         [[ "${n}" =~ ^[0-9]+$ ]] || continue
+
+        # REFUSE A NUMBER THE SHELL CANNOT HOLD, before any arithmetic touches
+        # it. `$((10#...))` wraps SILENTLY, and both wrap directions are exactly
+        # the failures this tool exists to prevent (measured on this bash):
+        #   18446744073709551616 -> 0,  so max+1 is 1 — "start from 1" arriving
+        #                               through a back door, past the fail-closed
+        #                               check below, with the registry non-empty;
+        #   9223372036854775807  -> its own negative successor, which the id
+        #                               pattern no longer matches, so the next
+        #                               mint hands the SAME id out again.
+        # Nine digits is four orders of magnitude past anything this cascade will
+        # mint, so the refusal can only be reached by a corrupt registry — which
+        # is precisely when guessing is worst.
+        local stripped="${n}"
+        while [[ "${stripped}" == 0?* ]]; do stripped="${stripped#0}"; done
+        if (( ${#stripped} > 9 )); then
+            _die "the registry carries a ${#stripped}-digit id (${PREFIX}-${n})." \
+                 "The shell's arithmetic wraps silently on it, which would either" \
+                 "restart the allocator at 1 or reissue a spent id. Refusing." \
+                 "Fix the registry line; do not raise this limit to get past it."
+        fi
+
         n=$((10#${n}))
         if (( n > max )); then max=${n}; fi
     done <<< "${raw}"
@@ -259,7 +318,14 @@ fi
 # Everything time-dependent happens from here on, inside the lock. The
 # computation is inside it too — that is the whole point of the unit: collision
 # #3 happened with the READ protected and the COMPUTATION unprotected.
-NEXT_ID=$(_compute_next_id)
+# `|| exit $?` is EXPLICIT on purpose. `_compute_next_id` refuses by calling
+# `_die`, which runs inside this command substitution's SUBSHELL, so its `exit`
+# ends the subshell and not this script. `set -e` does abort the assignment
+# today, but a later refactor that puts this line inside an `if` or a `&&` list
+# silently disables that and the script would carry on with an EMPTY id — a
+# refusal turning into a bad allocation is the one outcome this tool may not
+# produce.
+NEXT_ID=$(_compute_next_id) || exit $?
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then
     echo "${NEXT_ID}"
@@ -283,12 +349,21 @@ if [[ -n "${dirty}" ]]; then
          "mint. Land or discard it first."
 fi
 
-# TEST SEAM (tests/test_cascade_mint.py). Widens the window between computing
-# the number and writing it, so the concurrency test discriminates DETERMINISTIC-
-# ally instead of by timing luck: with the lock, the second caller blocks here
-# and recomputes afterwards; without it, both callers have already computed the
-# same number and the test goes red. It can only sleep — it cannot change any
-# outcome — and it is inert unless the variable is set.
+# TEST SEAM (tests/test_cascade_mint.py), in two halves, both inert unless their
+# variable is set and neither able to change an outcome.
+#
+# The MARKER is a handshake, and it is the half that makes the concurrency test a
+# proof rather than a bet: it says "I am inside the lock and I have already
+# computed my number". Without it the test would launch its second mint after a
+# fixed sleep and merely HOPE the first had got this far — on a loaded machine
+# the second could finish first, and the two ids would then differ with no lock
+# at all, i.e. a green test over a broken gate (cross-model review reproduced
+# exactly that reasoning).
+#
+# The DELAY then holds the window open while the second caller runs into it.
+if [[ -n "${CASCADE_MINT_TEST_MARKER:-}" ]]; then
+    : > "${CASCADE_MINT_TEST_MARKER}"
+fi
 if [[ -n "${CASCADE_MINT_TEST_DELAY:-}" ]]; then
     sleep "${CASCADE_MINT_TEST_DELAY}"
 fi
@@ -299,7 +374,34 @@ if [[ -s "${REGISTRY}" ]] && [[ "$(tail -c 1 "${REGISTRY}" | wc -l)" -eq 0 ]]; t
     printf '\n' >> "${REGISTRY}"
 fi
 
+# ARM THE ROLLBACK BEFORE THE WRITE, not after the commit fails. A refused hook
+# is only one way to die between the append and the commit; a Ctrl-C or a TERM
+# is another, and leaving the line behind poisons the NEXT mint (which then
+# refuses on a dirty registry, naming a change nobody made). SIGKILL cannot be
+# trapped and is not covered — said here rather than left to be discovered.
+APPEND_DONE=0
+_rollback_if_uncommitted() {
+    local rc=$?
+    trap - EXIT INT TERM
+    if [[ "${APPEND_DONE}" -eq 1 ]]; then
+        APPEND_DONE=0
+        if git -C "${REPO_ROOT}" checkout -- "${REGISTRY_REL}" 2>/dev/null; then
+            echo "  the appended line was rolled back; nothing was allocated." >&2
+        else
+            # NEVER claim a rollback that did not happen: a failure-shaped
+            # message over a half-landed state is the lie this repo files cards
+            # about.
+            echo "  WARNING: could NOT roll the appended line back." >&2
+            echo "  ${REGISTRY_REL} still carries an uncommitted line; inspect" >&2
+            echo "  it before the next mint." >&2
+        fi
+    fi
+    exit "${rc}"
+}
+trap _rollback_if_uncommitted EXIT INT TERM
+
 printf -- '- %s — %s\n' "${NEXT_ID}" "${TEXT}" >> "${REGISTRY}"
+APPEND_DONE=1
 
 # ONLY THE REGISTRY. A pathspec commit builds a temporary index from HEAD plus
 # these paths, so a parallel session's staged files are neither committed nor
@@ -311,14 +413,12 @@ printf -- '- %s — %s\n' "${NEXT_ID}" "${TEXT}" >> "${REGISTRY}"
 # live hook, not reasoned about.
 MSG="docs(cascade): минт ${NEXT_ID} — CASCADE-IDS.md"
 
+# The registry was verified clean above, so the trap's `git checkout` can only
+# undo this script's own append.
 if ! git -C "${REPO_ROOT}" commit -q -m "${MSG}" -- "${REGISTRY_REL}"; then
-    # Roll the append back. The registry was verified clean above, so restoring
-    # from the index cannot destroy anything: a refused mint must leave no
-    # half-allocated number behind for the next caller to trip over.
-    git -C "${REPO_ROOT}" checkout -- "${REGISTRY_REL}" || true
-    _die "the mint commit was refused; the appended line has been rolled back." \
-         "Nothing was allocated."
+    _die "the mint commit was refused."
 fi
+APPEND_DONE=0
 
 echo "minted ${NEXT_ID} in ${REGISTRY_REL}" >&2
 echo "${NEXT_ID}"
