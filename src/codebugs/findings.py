@@ -3373,9 +3373,9 @@ def register_cli(sub, commands) -> None:
                 continue
             if not value:
                 print(
-                    f"codebugs add: {spelling} was given an empty value. On a write "
-                    f"path an empty string is not the same as an omitted argument, and "
-                    f"there is no {key!r} anyone could have meant by it.\n"
+                    f"codebugs add: {spelling} was given an empty value, which is not "
+                    f"a {key} anyone could have meant. An empty string is not the same "
+                    f"as leaving the flag out.\n"
                     f"Omit {spelling}, or give it a value.",
                     file=sys.stderr,
                 )
