@@ -32,6 +32,7 @@ import tomllib
 import pytest
 
 from codebugs import cli, db
+from codebugs.cli import _NO_READER_EXIT
 
 pytestmark = pytest.mark.skipif(
     not hasattr(signal, "SIGPIPE"), reason="SIGPIPE does not exist on this platform"
@@ -407,3 +408,362 @@ class TestAClosedStdoutIsRefusedAtTheProcessEntry:
             cwd=str(tmp_path), env=_env(), timeout=60,
         )
         assert proc.returncode == (self.EXPECTED if neutralise else 120), proc.returncode
+
+
+def _status(project: pathlib.Path, finding_id: str) -> str | None:
+    conn = db.connect(str(project))
+    try:
+        row = conn.execute(
+            "SELECT status FROM findings WHERE id = ?", (finding_id,)
+        ).fetchone()
+        return None if row is None else row["status"]
+    finally:
+        conn.close()
+
+
+class TestAFullDeviceReportsALostOutputAndNotBadInput:
+    """CB-136 — the THIRD state, the one CB-78 and CB-134 are each blind to by
+    construction: a descriptor that was HEALTHY at the process entry and refuses
+    the WRITE.
+
+    `/dev/full` is the reproducer. It is a real, open, writable character device
+    whose every write returns ENOSPC — the same shape as a filesystem that fills
+    while the verb runs. CB-78's cure is `signal(SIGPIPE, SIG_DFL)`, and there is
+    no signal here at all; CB-134's cure is a gate at the entry, and at the entry
+    this descriptor genuinely is fine (pinned below, because that is a PREMISE of
+    this card, not a defect in that gate). Measured on the unfixed tree, one
+    mutating verb whose write had already COMMITTED:
+
+        unbuffered (-u)      raw OSError traceback              rc 1
+        block (the default)  "Exception ignored while           rc 120
+                             flushing sys.stdout"
+
+    `1` is this package's code for BAD INPUT, printed over a landed mutation —
+    the CB-15/CB-16 lie. Both cells must now be **74** (`EX_IOERR`), which claims
+    only that the output was lost.
+
+    WHAT DISCRIMINATES, so a reader can tell these from vacuous tests: against
+    the unfixed tree every assertion below on `rc == 74` fails with 1 or 120.
+    THE MUTANT: delete either half of the classification — the
+    `except _StdoutWriteFailed` arm in `cli.run` (case A) or the
+    `_flush_stdout_or_exit()` calls (case B) — and
+    `test_a_committed_mutation_is_not_reported_as_bad_input` goes red for the
+    corresponding buffering mode. Removing `_ClassifyingStdout.write`'s
+    conversion reddens the unbuffered parametrisation of every test here.
+    """
+
+    # `/dev/full` is the reproducer, and a platform without it cannot reach the
+    # state at all — a skip there is honest, not a disarm. The file is already
+    # POSIX-only (module-level `pytestmark` guards on SIGPIPE).
+    pytestmark = pytest.mark.skipif(
+        not os.path.exists("/dev/full"), reason="/dev/full is the CB-136 reproducer"
+    )
+
+    EXPECTED = 74
+
+    @staticmethod
+    def _on_dev_full(
+        project: pathlib.Path, *args: str, unbuffered: bool, stderr_too: bool = False
+    ) -> tuple[int, str]:
+        """Run the CLI with stdout redirected onto `/dev/full`.
+
+        The parent opens `/dev/full` and hands the DESCRIPTOR to the child, which
+        is what a shell's `>` does: the child receives fd 1 already pointing at
+        the device, and the interpreter then chooses the buffering it always
+        chooses for a character device. That is what makes the block-buffered
+        cell the DEFAULT case here rather than an exotic one, and it is why
+        `_env()` removes `PYTHONUNBUFFERED` — with it set, both parametrisations
+        would silently run the same experiment.
+
+        (An earlier draft of this docstring claimed a parent-opened file object
+        was deliberately NOT used, which is the opposite of the code four lines
+        below. Cross-model review caught it.)
+        """
+        interp = [sys.executable] + (["-u"] if unbuffered else [])
+        with open("/dev/full", "wb") as full:
+            proc = subprocess.run(
+                [*interp, "-m", "codebugs.cli", *args],
+                stdout=full,
+                stderr=full if stderr_too else subprocess.PIPE,
+                cwd=str(project),
+                env=_env(),
+                timeout=60,
+            )
+        return proc.returncode, "" if stderr_too else proc.stderr.decode()
+
+    @pytest.fixture()
+    def a_finding(self, project):
+        conn = db.connect(str(project))
+        try:
+            from codebugs import findings
+
+            findings.add_finding(
+                conn, severity="low", category="test",
+                description="cb-136 subject", file="x.py", new_category=True,
+            )
+        finally:
+            conn.close()
+        assert _status(project, "CB-1") == "open"
+        return "CB-1"
+
+    @pytest.mark.parametrize("unbuffered", [False, True], ids=["block", "unbuffered"])
+    def test_a_committed_mutation_is_not_reported_as_bad_input(
+        self, project, a_finding, unbuffered
+    ):
+        """The card's own reproducer. The landed-row assertion is the PREMISE
+        that makes this a lie rather than ugly output, exactly as in
+        `TestAClosedReaderKillsTheProcessBySignal`."""
+        rc, stderr = self._on_dev_full(
+            project, "update", a_finding, "--status", "fixed", unbuffered=unbuffered
+        )
+        assert _status(project, a_finding) == "fixed", "premise: the write landed"
+        assert rc == self.EXPECTED, f"rc={rc}, stderr={stderr!r}"
+        assert "Traceback" not in stderr, stderr
+        assert "Exception ignored" not in stderr, stderr
+
+    @pytest.mark.parametrize("unbuffered", [False, True], ids=["block", "unbuffered"])
+    def test_the_stderr_line_says_the_output_was_lost_and_refuses_to_guess(
+        self, project, a_finding, unbuffered
+    ):
+        """The contract is the CODE plus what the code is allowed to CLAIM. 74
+        asserts the output was lost and NOTHING about the effect, because the CLI
+        cannot know: here the effect landed, and the very line that would have
+        said so is what failed to write."""
+        rc, stderr = self._on_dev_full(
+            project, "update", a_finding, "--status", "fixed", unbuffered=unbuffered
+        )
+        assert rc == self.EXPECTED, f"rc={rc}, stderr={stderr!r}"
+        assert "74" in stderr, stderr
+        assert "LOST" in stderr, stderr
+        assert "says nothing about whether the command's effect landed" in stderr, stderr
+
+    @pytest.mark.parametrize("unbuffered", [False, True], ids=["block", "unbuffered"])
+    def test_a_read_verb_reports_the_same_way(self, project, a_finding, unbuffered):
+        """Nothing was committed here, and the code is the same on purpose: 74 is
+        about the OUTPUT, so it must not vary with what the verb did."""
+        rc, stderr = self._on_dev_full(project, "query", unbuffered=unbuffered)
+        assert rc == self.EXPECTED, f"rc={rc}, stderr={stderr!r}"
+        assert "Traceback" not in stderr, stderr
+
+    @pytest.mark.parametrize("unbuffered", [False, True], ids=["block", "unbuffered"])
+    def test_a_failing_stderr_does_not_change_the_code(self, project, a_finding, unbuffered):
+        """`verb >/dev/full 2>/dev/full` — one full filesystem serves both
+        descriptors, so the diagnostic must not become the next failure.
+
+        This is not hypothetical hardening: measured, the first draft exited
+        **120** here, because stderr is LINE-buffered and the failed diagnostic
+        stayed pending until finalization flushed it. The cure had reproduced the
+        disease on the neighbouring descriptor.
+        """
+        rc, _ = self._on_dev_full(
+            project, "update", a_finding, "--status", "fixed",
+            unbuffered=unbuffered, stderr_too=True,
+        )
+        assert rc == self.EXPECTED, f"rc={rc}"
+
+    @pytest.mark.parametrize("unbuffered", [False, True], ids=["block", "unbuffered"])
+    def test_a_closed_stderr_does_not_push_the_diagnostic_into_the_broken_stdout(
+        self, project, a_finding, unbuffered
+    ):
+        """`verb >/dev/full 2>&-` — the spelling `2>/dev/full` cannot reach.
+
+        With fd 2 closed at exec the interpreter sets `sys.stderr` to None, and
+        `print(file=None)` is DOCUMENTED to fall back to stdout. The diagnostic
+        therefore went into the stream that had just failed, raised a second
+        `_StdoutWriteFailed` out of the handler, and restored exit 1 (unbuffered)
+        / 120 (block) verbatim — the cure reproducing the disease one descriptor
+        over. Found by cross-model review and reproduced here before the fix:
+        rc was 1 and 120 respectively.
+
+        `2>/dev/full` does NOT cover this, which is the point of a separate test:
+        there stderr is a live object that merely fails, so the `(OSError, ...)`
+        arm catches it and the None branch is never taken.
+        """
+        import shlex
+
+        argv = [sys.executable] + (["-u"] if unbuffered else [])
+        argv += ["-m", "codebugs.cli", "update", a_finding, "--status", "fixed"]
+        cmd = " ".join(shlex.quote(a) for a in argv)
+        proc = subprocess.run(
+            ["sh", "-c", f"exec {cmd} >/dev/full 2>&-"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            cwd=str(project), env=_env(), timeout=60,
+        )
+        assert proc.returncode == self.EXPECTED, proc.returncode
+
+    def test_a_dead_reader_reports_141_even_when_sigpipe_is_blocked(self, project):
+        """EPIPE is not ENOSPC, and 74 must never be said about a GONE reader.
+
+        `run` restores the SIGPIPE DISPOSITION (CB-78); it does not clear the
+        signal MASK, and POSIX preserves a mask across `exec`. A caller that
+        blocked SIGPIPE therefore gets `EPIPE` returned from the write instead of
+        dying by signal — and the new classifier, catching every `OSError`, called
+        that "the medium is full". Found by cross-model review, measured at 74
+        before the fix.
+
+        The unblocked control is what makes this non-vacuous: it must still die
+        by SIGNAL, so a "fix" that routed both cases through the classifier would
+        fail here.
+        """
+        def _run(block: bool) -> int:
+            read_fd, write_fd = os.pipe()
+            os.close(read_fd)
+            pre = None
+            if block:
+                def pre():  # noqa: E306 - defined only for the blocked case
+                    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGPIPE})
+            try:
+                proc = subprocess.Popen(
+                    [sys.executable, "-u", "-m", "codebugs.cli", "query"],
+                    stdout=write_fd, stderr=subprocess.PIPE,
+                    cwd=str(project), env=_env(), preexec_fn=pre,
+                )
+            finally:
+                os.close(write_fd)
+            proc.communicate(timeout=60)
+            return proc.returncode
+
+        assert _run(block=False) == -signal.SIGPIPE, "control: CB-78 still holds"
+        assert _run(block=True) == _NO_READER_EXIT
+
+    def test_writelines_does_not_bypass_the_classifier(self, project):
+        """`__getattr__` hands out methods bound to the UNDERLYING stream, so
+        every stream method the proxy does not define is a bypass. `writelines`
+        is the one a future handler is most likely to reach for; measured at
+        exit 1 with a raw traceback before the proxy defined it.
+
+        `sys.stdout.buffer.write` remains a bypass and is documented as one on
+        `_ClassifyingStdout` — wrapping the binary layer is a bigger change than
+        this card, and nothing in `src/` uses it.
+        """
+        script = (
+            "import sys\n"
+            "from codebugs import cli\n"
+            "cli.main = lambda: sys.stdout.writelines(['x' * 100 + chr(10)])\n"
+            "cli.run()\n"
+        )
+        with open("/dev/full", "wb") as full:
+            proc = subprocess.run(
+                [sys.executable, "-u", "-c", script],
+                stdout=full, stderr=subprocess.PIPE,
+                cwd=str(project), env=_env(), timeout=60,
+            )
+        assert proc.returncode == self.EXPECTED, proc.stderr.decode()
+        assert "Traceback" not in proc.stderr.decode(), proc.stderr.decode()
+
+    def test_premise_dev_full_passes_the_closed_stdout_gate(self, project):
+        """PREMISE, and the reason this card is not a tail of CB-134.
+
+        `_stdout_is_usable` must keep answering True here. At the process entry
+        the descriptor is open, writable and perfectly valid — the failure is in
+        the future. Widening that gate to catch this would be a different (and
+        undecidable) question, and would break the 3.11-3.14 contracts it was
+        measured against. If this assertion ever flips, CB-136's whole design
+        rests on a premise that no longer holds.
+        """
+        script = (
+            "import sys\n"
+            "from codebugs.cli import _stdout_is_usable\n"
+            "print('usable=%r' % _stdout_is_usable(), file=sys.stderr)\n"
+        )
+        with open("/dev/full", "wb") as full:
+            proc = subprocess.run(
+                [sys.executable, "-c", script],
+                stdout=full, stderr=subprocess.PIPE,
+                cwd=str(project), env=_env(), timeout=60,
+            )
+        assert "usable=True" in proc.stderr.decode(), proc.stderr.decode()
+
+    def test_premise_a_block_buffered_stdout_can_fail_inside_print(self, project):
+        """PREMISE: case (A) is NOT a `-u` curiosity, so `_ClassifyingStdout` is
+        not dead weight beside the flush.
+
+        Measured on this interpreter: a SINGLE 50 KB `print` to a block-buffered
+        failing stdout returns without raising (the failure waits for the
+        shutdown flush — case B), but repeated small `print`s raise ENOSPC inside
+        `print` as soon as the buffer fills — case A, reached with the DEFAULT
+        buffering and no flag at all.
+        """
+        script = (
+            "import sys\n"
+            "raised = None\n"
+            "for i in range(2000):\n"
+            "    try:\n"
+            "        print('z' * 100)\n"
+            "    except OSError as e:\n"
+            "        raised = e.errno; break\n"
+            "print('raised=%r' % raised, file=sys.stderr)\n"
+            "sys.stdout = None\n"
+        )
+        with open("/dev/full", "wb") as full:
+            proc = subprocess.run(
+                [sys.executable, "-c", script],
+                stdout=full, stderr=subprocess.PIPE,
+                cwd=str(project), env=_env(), timeout=60,
+            )
+        assert "raised=28" in proc.stderr.decode(), proc.stderr.decode()
+
+    def test_export_csv_to_dev_stdout_still_writes_in_place(self, project, tmp_path):
+        """CB-76's held-open-inode branch must survive `sys.stdout` being wrapped.
+
+        `fsio.atomic_write` recognises `/dev/stdout` by (st_dev, st_ino) against
+        `/proc/self/fd` and writes IN PLACE rather than replacing, which is what
+        keeps `export-csv /dev/stdout > out.csv` working. That detection never
+        touches the `sys.stdout` OBJECT, so a proxy cannot reach it — but the
+        claim is cheap to assert and expensive to rediscover.
+
+        WHAT THIS DELIBERATELY DOES NOT ASSERT. The redirected file is not a
+        pristine CSV: `/dev/stdout` resolves through `/proc/self/fd/1`, and
+        reopening that path yields a fresh file description at offset 0, so the
+        handler's own "Exported N findings" confirmation lands on top of the
+        header. That is PRE-EXISTING and outside this card — measured
+        byte-identical (666 bytes, the same five lines) against main and against
+        this branch. What CB-136 owes here is that this path still WORKS at all —
+        which is what the assertions below check; the byte-identity was established
+        by running both trees, and is deliberately not asserted (see below).
+        Asserting a clean header would be asserting a repair nobody made.
+
+        AND SAY THE REST PLAINLY, because a reader cannot otherwise tell this
+        from a broken test: this one PASSES AGAINST THE UNFIXED TREE by
+        construction. It is a REGRESSION GUARD on behaviour CB-136 must not
+        disturb, not a discriminator for the defect — the repo's own convention
+        for such a test is to say so rather than let it look like coverage. The
+        "666 bytes" measured against main is NOT asserted here either: the byte
+        count moves with ids and timestamps, so pinning it would be pinning the
+        fixture, and the equality was established by running both trees rather
+        than by this test.
+        """
+        conn = db.connect(str(project))
+        try:
+            from codebugs import findings
+
+            for i in range(3):
+                findings.add_finding(
+                    conn, severity="low", category="test",
+                    description=f"row {i} for the /dev/stdout export path",
+                    file="x.py", new_category=True,
+                )
+        finally:
+            conn.close()
+
+        out = tmp_path / "out.csv"
+        with open(out, "wb") as fh:
+            proc = subprocess.run(
+                [sys.executable, "-m", "codebugs.cli", "export-csv", "/dev/stdout"],
+                stdout=fh, stderr=subprocess.PIPE,
+                cwd=str(project), env=_env(), timeout=60,
+            )
+        assert proc.returncode == 0, proc.stderr.decode()
+        lines = out.read_text().splitlines()
+        assert sum(1 for line in lines if line.startswith("CB-")) == 3, lines
+        assert any("Exported 3 findings" in line for line in lines), lines
+
+    def test_the_code_is_declared_in_claude_md(self):
+        """The exit codes are an API for shell callers, and CLAUDE.md is where
+        that list lives (`Claims module`, "Exit codes are the API for shell
+        callers"). A code that exists only in the source is a contract nobody
+        can look up — the same reason `141` was written down there by CB-78."""
+        text = (_REPO_ROOT / "CLAUDE.md").read_text()
+        assert str(cli._WRITE_FAILURE_EXIT) == "74"
+        assert "74" in text
+        assert "EX_IOERR" in text
