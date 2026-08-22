@@ -35,6 +35,12 @@ about what a predicate sees is produced by RUNNING the predicate):
    23 help lines are add_parser/add_argument calls).  Do not use `code` as a
    headline; use SLOC.
 
+5. DECLARATION GRAMMAR LINT (`--lint-declarations FILE`) plus the interpreter
+   pin (`--require-python X.Y[.Z]`, and `--sloc` refuses without one).  The
+   PROSE column is invariant only inside a restricted grammar; the lint REFUSES
+   outside it.  Ratified 2026-08-22 (Э-11, option (А)) after five review passes
+   showed that no counter is representation-neutral on its own.
+
 Usage:
     PYTHONPATH=src uv run python .claude/plans/exposure-scripts/module_surface.py
     PYTHONPATH=src uv run python .claude/plans/exposure-scripts/module_surface.py --module bench
@@ -351,6 +357,160 @@ def surface_report(path: str, exclude: list[str]) -> None:
     print(f"{'wiring (excl. manual handlers)':40}{tc:>7}{tp:>7}")
 
 
+# --------------------------------------------------------------------------
+# 5. DECLARATION GRAMMAR LINT (`--lint-declarations FILE`) — ratified 2026-08-22
+#    (Э-11, option (А)).  The PROSE column is invariant only for a verbatim
+#    string literal; five review passes measured three forms that break it
+#    (implicit concatenation, escaped `\n`, f-strings).  Fixing the counter was
+#    the wrong move four times; restricting the GRAMMAR of the one authored file
+#    is the decision the owner ratified.  This lint is that restriction, and it
+#    REFUSES — it does not warn, because a warned-past file yields a number that
+#    looks like every other number.
+#
+#    The guarantee it buys, stated as the sentence it proves: FOR EVERY STRING
+#    LITERAL IN THIS FILE, THE NUMBER OF `\n`-SEGMENTS THE COUNTER SEES EQUALS
+#    THE NUMBER OF NEWLINES IN THE VALUE AT RUNTIME, AND EACH LITERAL IS
+#    ATTRIBUTED EXACTLY ONCE.
+#
+#    Four rules.  R1-R3 are token-level (the forms measured to break the
+#    invariant); R4 is the structural one that closes the class rather than the
+#    three known members — a check that validates elements cannot validate their
+#    composition, so the composition is what R4 states.
+# --------------------------------------------------------------------------
+
+_CONTAINER_CALLS = frozenset({"dict", "list", "tuple", "set", "frozenset"})
+
+
+def _string_prefix(text: str) -> str:
+    return text[: len(text) - len(text.lstrip("rRbBuUfF"))].lower()
+
+
+def _escapes_in(text: str) -> bool:
+    """A backslash in a NON-RAW literal.  Deliberately wider than the newline
+    escape alone: the hex, named-codepoint and octal spellings of a line feed,
+    and a trailing line continuation, all produce a newline the counter cannot
+    see, and enumerating the spellings is the letter, not the intent.
+    """
+    prefix = _string_prefix(text)
+    if "r" in prefix:
+        return False
+    body = text[len(prefix) :]
+    return "\\" in body
+
+
+def _lint_tokens(src: str, path: str) -> list[str]:
+    """R1 f-strings, R2 implicit concatenation, R3 escapes in non-raw literals."""
+    bad: list[str] = []
+    prev_string_end: tuple[int, int] | None = None
+    for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+        if tok.type in _FSTRING_TYPES:
+            if tok.type == getattr(tokenize, "FSTRING_START", -1):
+                bad.append(f"{path}:{tok.start[0]}: R1 f-string literal")
+            continue
+        if tok.type == tokenize.STRING:
+            if "f" in _string_prefix(tok.string):
+                bad.append(f"{path}:{tok.start[0]}: R1 f-string literal")
+            if _escapes_in(tok.string):
+                bad.append(f"{path}:{tok.start[0]}: R3 backslash escape in a non-raw literal")
+            if prev_string_end is not None:
+                bad.append(
+                    f"{path}:{tok.start[0]}: R2 implicit concatenation with the literal at "
+                    f"line {prev_string_end[0]} (ruff format MERGES these: measured 8 -> 2)"
+                )
+            prev_string_end = tok.start
+            continue
+        if tok.type in _SKIP:
+            continue
+        prev_string_end = None
+    return bad
+
+
+def _lint_structure(src: str, path: str) -> list[str]:
+    """R4: every string literal is reached from the module root through
+    containers, keyword arguments and assignments ONLY.
+
+    Refused by construction, not by name: concatenation with the plus operator
+    and percent-formatting (BinOp), a join or format call on a literal
+    (Attribute), a literal wrapped in any call that is not a container
+    constructor (a dedent helper, chr, a translator), a conditional or a
+    comprehension that picks between two literals.  Each of those makes the
+    written segment count differ from the rendered one, and NOT ONE of them was
+    named by a reviewer in five passes -- which is why the rule is stated as a
+    shape rather than as a list of the three forms that were.
+    """
+    tree = ast.parse(src, filename=path)
+    parents: dict[int, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+    bad: list[str] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+            continue
+        cur: ast.AST | None = node
+        while True:
+            parent = parents.get(id(cur))
+            if parent is None:
+                break
+            why = None
+            if isinstance(parent, (ast.BinOp, ast.BoolOp, ast.UnaryOp)):
+                why = "an operator (implicit concatenation's twin: `+`, `%`)"
+            elif isinstance(parent, ast.Attribute):
+                why = "an attribute access on a literal (`.join`, `.format`)"
+            elif isinstance(parent, (ast.IfExp, ast.comprehension, ast.ListComp,
+                                     ast.DictComp, ast.SetComp, ast.GeneratorExp)):
+                why = "a conditional or comprehension"
+            elif isinstance(parent, ast.Call):
+                func = parent.func
+                if not (isinstance(func, ast.Name) and func.id in _CONTAINER_CALLS):
+                    why = (
+                        "a call that is not a container constructor "
+                        f"({sorted(_CONTAINER_CALLS)}) — its result is not this literal"
+                    )
+            if why is not None:
+                bad.append(f"{path}:{node.lineno}: R4 string literal reached through {why}")
+                break
+            cur = parent
+    return bad
+
+
+def lint_declarations(path: str) -> int:
+    """Refuse a declarations file whose prose the counter cannot read invariantly.
+
+    Returns the process exit code.  Loud on both outcomes: a silent pass would be
+    indistinguishable from a lint that was never run, which is the failure this
+    repository keeps re-filing."""
+    with open(path, encoding="utf-8") as fh:
+        src = fh.read()
+    bad = _lint_tokens(src, path) + _lint_structure(src, path)
+    if bad:
+        print(f"DECLARATION GRAMMAR: REFUSED — {len(bad)} violation(s) in {path}")
+        for line in sorted(set(bad)):
+            print(f"  {line}")
+        print("  the PROSE column is meaningless outside the restricted grammar (BT-6 v6, Э-11 (А))")
+        return 1
+    print(f"DECLARATION GRAMMAR: OK — {path} (R1 no f-strings, R2 no implicit concatenation,")
+    print("  R3 no escapes in non-raw literals, R4 literals reached through containers only)")
+    return 0
+
+
+def require_python(spec: str) -> None:
+    """Pin the interpreter by dotted-component prefix, and REFUSE on a mismatch.
+
+    The counter is version-sensitive (f-string tokenization changed in 3.12); a
+    number carried across versions is two objects counted two ways, which is the
+    single defect all five review passes found at a new address."""
+    actual = ".".join(str(n) for n in sys.version_info[:3])
+    want = spec.split(".")
+    have = actual.split(".")
+    if have[: len(want)] != want:
+        raise SystemExit(
+            f"interpreter pin: required {spec}, running {actual} — refusing "
+            f"(the count is version-sensitive; run both sides on one interpreter)"
+        )
+    print(f"  interpreter pin OK: required {spec}, running {actual}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", default=os.path.join("src", "codebugs"))
@@ -362,8 +522,27 @@ def main() -> int:
     ap.add_argument("--in", dest="in_file", help="file to resolve handlers in")
     ap.add_argument("--surface", action="store_true",
                     help="with --in: SLOC of register_* minus the handlers named by --handlers")
+    ap.add_argument("--lint-declarations", dest="lint_decl", metavar="FILE",
+                    help="REFUSE a declarations file outside the restricted prose grammar "
+                         "(BT-6 v6 / E-11 option A): R1 no f-strings, R2 no implicit "
+                         "concatenation, R3 no escapes in non-raw literals, R4 literals "
+                         "reached through containers only")
+    ap.add_argument("--require-python", metavar="X.Y[.Z]",
+                    help="refuse unless the running interpreter matches (dotted prefix)")
+    ap.add_argument("--no-pin", action="store_true",
+                    help="run --sloc without an interpreter pin: a NAMED opt-out, because an "
+                         "unpinned count silently compares two tokenizers")
     args = ap.parse_args()
+    if args.require_python:
+        require_python(args.require_python)
+    if args.lint_decl:
+        return lint_declarations(args.lint_decl)
     if args.sloc:
+        if not args.require_python and not args.no_pin:
+            # A protocol that says "pass the pin on both sides" is a convention,
+            # and a convention is not a rule (this repo's own Н3).  Refuse.
+            ap.error("--sloc needs --require-python X.Y[.Z] (or an explicit --no-pin): "
+                     "the count is version-sensitive and the two sides must be one interpreter")
         print("SLOC = code + prose (one counter, before == after; ruff-formatted copy)")
         sloc_report(args.sloc, expect_absent=set(args.absent))
         return 0
@@ -371,7 +550,7 @@ def main() -> int:
         if not args.in_file:
             ap.error("--handlers/--declarations/--surface need --in FILE")
         print(f"  interpreter {sys.version.split()[0]} — the count is version-sensitive "
-              f"(f-string tokens; measured 42-line skew 3.11 vs 3.14); pin it on both sides")
+              f"(f-string tokens); pin it with --require-python on both sides")
         names = [n.strip() for n in (args.handlers or "").split(",") if n.strip()]
         if args.handlers is not None and not names:
             # An empty list from a shell variable that expanded to nothing once
