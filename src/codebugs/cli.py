@@ -173,7 +173,12 @@ _NO_READER_EXIT = (128 + signal.SIGPIPE) if hasattr(signal, "SIGPIPE") else 141
 
 
 def _stdout_is_usable() -> bool:
-    """Can this process write to stdout at all? A CHECK — it mutates nothing.
+    """Is stdout PROVABLY unwritable? A CHECK — it mutates nothing.
+
+    The question is asked in that direction on purpose. "Can this process write
+    to stdout" is what an earlier summary line here claimed to answer, and no
+    preflight can: see WHAT THE PREDICATE ACTUALLY CLAIMS below. `False` is a
+    proof; `True` is the absence of one.
 
     CB-134. A closed stdout is NOT a dead pipe: no write ever reaches the kernel,
     so nothing raises SIGPIPE and `run`'s disposition never fires. What happened
