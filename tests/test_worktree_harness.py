@@ -1604,6 +1604,95 @@ class TestHarnessIntegrity:
             f"workflow baseline {match.group(1)} is not a commit in this repo"
         )
 
+    def test_ci_suite_job_checks_out_the_history_its_own_suite_reads(self) -> None:
+        """CB-139. `actions/checkout` defaults to depth 1; this suite reads history.
+
+        The test immediately above runs `git cat-file -e <baseline>` against the
+        REAL repository. In a depth-1 clone that commit is absent, so the `tests`
+        job was red in CI ALWAYS while staying green in every local run — and a
+        gate that cannot pass is indistinguishable from a gate broken on the
+        merits, so a genuine regression in that job is no longer visible to
+        anyone. `main-invariants.yml` already carries `fetch-depth: 0` with a
+        comment saying it is a requirement and not an optimisation; `ci.yml`,
+        whose own suite is the thing reading history, carried nothing. The link
+        was understood for one workflow and missed for the other.
+
+        Three properties, and the first two are why the obvious spelling of this
+        test would be vacuous:
+
+        * COMMENTS DO NOT COUNT. The fix's own comment contains the literal
+          `fetch-depth: 0`, so a test that greps the raw file stays GREEN after
+          the key itself is deleted — a gate that cannot fire, inside the fix
+          whose whole subject is gates that cannot fire. Same reason `code()`
+          exists in `test_invariants_job_is_not_subscribed_to_pull_request`.
+        * A FILE IS NOT A COMPOSITION. `ci.yml` declares TWO jobs and TWO
+          checkouts. "`fetch-depth: 0` somewhere in ci.yml" is satisfied by
+          moving the key to `contracts`, which leaves the suite job shallow and
+          the gate just as broken. The property is that the key sits on the
+          checkout of the job that runs the SUITE.
+        * FAIL CLOSED, AND THE INDENTATION BINDING IS SAID OUT LOUD. `pyyaml` is
+          not a dependency here (measured: `import yaml` under `--extra dev`
+          raises ModuleNotFoundError), so the job is sliced TEXTUALLY, by the
+          two-space indentation of a key under `jobs:`. If the workflow is ever
+          reformatted to a different indentation this test FAILS with "cannot
+          find job `tests`" rather than passing vacuously: a false refusal is
+          loud and costs one edit, whereas the vacuous pass is the defect being
+          repaired.
+
+        `contracts` is deliberately left shallow: it runs
+        `tests/test_cli_signals.py tests/test_fsio.py`, neither of which reads
+        this repository's history, and putting the key where nothing needs it
+        teaches the next reader to read it as boilerplate.
+        """
+
+        def job_block(text: str, name: str) -> str:
+            """The body of one job, bounded by the next two-space-indented key."""
+            _, _, body = text.partition("\njobs:")
+            assert body, "ci.yml declares no `jobs:` block"
+            bounds = list(re.finditer(r"^  ([A-Za-z_][\w-]*):[ \t]*$", body, re.M))
+            for i, m in enumerate(bounds):
+                if m.group(1) == name:
+                    end = bounds[i + 1].start() if i + 1 < len(bounds) else len(body)
+                    return body[m.end() : end]
+            raise AssertionError(
+                f"cannot find job `{name}` in ci.yml; found {[b.group(1) for b in bounds]}"
+            )
+
+        def checkout_step(block: str) -> str:
+            """One step, from its `- uses:` line to the next item at that indent."""
+            m = re.search(r"^([ \t]*)- +uses: +actions/checkout@", block, re.M)
+            assert m, "the job does not check the repository out at all"
+            rest = block[m.end() :]
+            nxt = re.search(rf"^{re.escape(m.group(1))}- ", rest, re.M)
+            return rest[: nxt.start() if nxt else len(rest)]
+
+        wf = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        assert wf.exists(), "ci.yml is missing"
+        raw = wf.read_text()
+        code = "\n".join(ln for ln in raw.splitlines() if not ln.lstrip().startswith("#"))
+
+        step = checkout_step(job_block(code, "tests"))
+        assert re.search(r"^[ \t]*fetch-depth:[ \t]*0[ \t]*$", step, re.M), (
+            "the `tests` job checks the repository out SHALLOW "
+            "(actions/checkout defaults to depth 1) while its own suite reads this "
+            "repository's history — that job is then red in CI always and green "
+            "everywhere else. See CB-139."
+        )
+
+        # The comment is not the gate; the assertion above is. But a bare
+        # `fetch-depth: 0` reads as an optimisation and the next reader deletes
+        # it, which is precisely how this defect is reintroduced. Pin that the
+        # reason travels with the key — and pin it by the test's OWN name, so a
+        # rename cannot leave a stale pointer behind in the workflow.
+        needs_history = (
+            TestHarnessIntegrity.test_ci_workflow_asserts_the_first_parent_invariant.__name__
+        )
+        raw_step = checkout_step(job_block(raw, "tests"))
+        assert needs_history in raw_step, (
+            "the checkout step does not name the test that needs the history; "
+            "an unexplained `fetch-depth: 0` gets deleted as dead weight"
+        )
+
     def test_invariants_job_is_not_subscribed_to_pull_request(self) -> None:
         """A skipped job is reported as PASSING for required status checks.
 
