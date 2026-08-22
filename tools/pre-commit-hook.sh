@@ -308,16 +308,18 @@ fi
 #
 #     new = allocation ids(staged) - allocation ids(HEAD)     as MULTISETS
 #
-#   * new empty         -> an edit, or a note that only mentions ids. Nothing
-#                          to say — and mentioning a free number in a collision
-#                          note stays legal, which a set-based rule would have
-#                          made a refusal.
+#   * new empty         -> an edit, a note that only mentions ids, or anything
+#                          else this gate does not classify as an allocation.
+#                          Nothing to say — and mentioning a free number in a
+#                          collision note stays legal, which a set-based rule
+#                          would have made a refusal.
 #   * exactly one       -> a mint. It must equal max+1 over EVERY id of its
 #                          family ANYWHERE IN HEAD's registry — which is
 #                          literally the number the tool would have computed,
 #                          since the tool refuses to run unless the registry is
 #                          clean and therefore reads HEAD's bytes.
-#   * more than one     -> refused: the tool mints one id per run.
+#   * more than one     -> refused: the tool mints one id per run. The count is
+#                          ACROSS families, not within one.
 #
 # `max` is taken over EVERY id of the family, prose mentions and ANNULLED LINES
 # included, because that is the population the tool reads. A gate that were
@@ -371,8 +373,9 @@ _cascade_refuse() {
         shift
     done
     echo "" >&2
-    echo "  The number is not typed by the author. The allocator computes it" >&2
-    echo "  (max+1 over the registry) and appends and commits it as one" >&2
+    echo "  This gate checks the VALUE, not who typed it — a correct number" >&2
+    echo "  typed by hand passes, necessarily. Let the allocator compute it" >&2
+    echo "  (max+1 over the registry) and append and commit it as one" >&2
     echo "  operation, under a lock:" >&2
     echo "" >&2
     echo "    ${_CASCADE_MINT_TOOL} --prefix Т --text '<the rest of the line>'" >&2
@@ -387,23 +390,31 @@ _cascade_refuse() {
 }
 
 _cascade_scan() {
-    # $1 = family alternation, $2 = blob text, $3 = "all" | "alloc".
-    #   all   — every id of the family anywhere in the text, the population the
-    #           tool reads.
-    #   alloc — only ids that OPEN a bullet line, i.e. lines that ALLOCATE a
-    #           number rather than mention one. Indentation and a '*' bullet
-    #           are accepted: anchoring on a bare '- ' made one leading space a
-    #           bypass, and a line that OPENS with an id is an allocation
-    #           whatever its bullet.
+    # $1 = family alternation, $2 = blob text, $3 = mode.
+    #   all   — every id of the family anywhere in the text. This is the
+    #           population tools/cascade-mint.sh reads, byte for byte.
+    #   alloc — ids that OPEN a bullet line, i.e. lines that ALLOCATE a number
+    #           rather than mention one. Indentation and a '*' bullet are
+    #           accepted: anchoring on a bare '- ' made ONE LEADING SPACE a
+    #           bypass, and a line that OPENS with an id allocates it whatever
+    #           its bullet.
+    #   hug   — the one bullet spelling the allocator CANNOT SEE: '-' with no
+    #           separator before the id ('-Т-5'). The left-boundary rule
+    #           excludes a '-', so `all` misses it and so does the tool. It is
+    #           recognised here only so that a NEW one can be REFUSED — cross-
+    #           model review reproduced the whole chain: such a line lands, the
+    #           allocator's max never sees it, and the allocator then hands the
+    #           same number out again. ('*Т-5' is not in this class: '*' is a
+    #           boundary byte, so `all` sees that id.)
     # Echoes each id's number, normalised (leading zeros stripped), one per
     # line, duplicates included — multiplicity is load-bearing for "alloc".
     #   0 = read (possibly zero ids)   2 = grep failed   3 = number too large
     local _alt="$1" _text="$2" _mode="$3" _re _raw="" _rc=0 _tok _n _stripped
-    if [[ "${_mode}" == "alloc" ]]; then
-        _re="^[[:space:]]*[-*][[:space:]]*(${_alt})-[0-9]+"
-    else
-        _re="(^|[^A-Za-z0-9-])(${_alt})-[0-9]+"
-    fi
+    case "${_mode}" in
+        alloc) _re="^[[:space:]]*[-*][[:space:]]*(${_alt})-[0-9]+" ;;
+        hug)   _re="^[[:space:]]*-(${_alt})-[0-9]+" ;;
+        *)     _re="(^|[^A-Za-z0-9-])(${_alt})-[0-9]+" ;;
+    esac
     # grep: 0 matched, 1 no match, >=2 ERROR. Three answers, and only one of
     # them means "this family has no ids here" — the tool splits them for the
     # same reason, and this repo has paid for the conflation in the bootstrap
@@ -414,13 +425,16 @@ _cascade_scan() {
     while IFS= read -r _tok || [[ -n "${_tok}" ]]; do
         [[ -z "${_tok}" ]] && continue
         _n="${_tok##*-}"
-        # A number the shell's arithmetic cannot hold wraps SILENTLY, and both
-        # wrap directions are allocator failures. The tool refuses on the same
-        # nine-digit limit, so this gate must not quietly accept what the tool
-        # would not have minted.
+        # ARITHMETIC SAFETY ONLY — this is NOT the tool's limit, and saying it
+        # was cost a review round. The tool refuses a number of more than nine
+        # digits IN WHAT IT READS, but its OUTPUT may be one digit longer:
+        # Т-999999999 is accepted and mints Т-1000000000. A gate that applied
+        # the nine-digit rule to the staged blob therefore REFUSED THE TOOL'S
+        # OWN MINT. So the population limit lives where the tool puts it — on
+        # HEAD, below — and this one only keeps `(( ))` inside signed 64-bit.
         _stripped="${_n}"
         while [[ "${_stripped}" == 0?* ]]; do _stripped="${_stripped#0}"; done
-        if (( ${#_stripped} > 9 )); then return 3; fi
+        if (( ${#_stripped} > 18 )); then return 3; fi
         printf '%s\n' "$((10#${_n}))"
     done <<< "${_raw}"
     return 0
@@ -428,20 +442,44 @@ _cascade_scan() {
 
 _cascade_count() {
     # $1 = number, $2 = newline-separated numbers. Echoes how many times it
-    # occurs.
+    # occurs. With $1 empty, echoes how many numbers there are at all.
     local _needle="$1" _hay="$2" _x _c=0
     if [[ -n "${_hay}" ]]; then
         while IFS= read -r _x || [[ -n "${_x}" ]]; do
-            [[ "${_x}" == "${_needle}" ]] && _c=$((_c + 1))
+            [[ -z "${_x}" ]] && continue
+            if [[ -z "${_needle}" || "${_x}" == "${_needle}" ]]; then _c=$((_c + 1)); fi
         done <<< "${_hay}"
     fi
     printf '%s\n' "${_c}"
 }
 
+_cascade_scan_or_refuse() {
+    # Runs _cascade_scan and turns its two failure codes into refusals, naming
+    # WHICH blob and WHICH failure — an unreadable registry and a number the
+    # shell cannot hold are two states, and one sentence for both is the shape
+    # this file exists to refuse.
+    local _alt="$1" _text="$2" _mode="$3" _which="$4" _label="$5"
+    local _out _rc=0
+    _out=$(_cascade_scan "${_alt}" "${_text}" "${_mode}") || _rc=$?
+    if (( _rc == 2 )); then
+        _cascade_refuse \
+            "${_which} registry could not be scanned for '${_label}-' ids" \
+            "(grep failed). Refusing rather than reading an unscannable" \
+            "registry as one with no ids."
+    fi
+    if (( _rc == 3 )); then
+        _cascade_refuse \
+            "${_which} registry carries a '${_label}-' id too large for the" \
+            "shell's arithmetic, which wraps on it silently. Fix the line."
+    fi
+    printf '%s' "${_out}"
+}
+
 _cascade_mint_gate() {
     local _staged="" _head="" _rc=0
-    local _alt _label _salloc _halloc _hall
-    local _n _m _seen _cs _ch _newcount _newid _max _display
+    local _alt _label _salloc _halloc _hall _shug _hhug
+    local _n _m _seen _cs _ch _max
+    local _newtotal=0 _display="" _pending_alt="" _pending_label="" _pending_id=""
 
     if ! git rev-parse --verify -q HEAD >/dev/null 2>&1; then
         _cascade_refuse \
@@ -470,41 +508,28 @@ _cascade_mint_gate() {
     for _alt in "${_CASCADE_FAMILIES[@]}"; do
         _label="${_alt%%|*}"
 
-        _rc=0; _salloc=$(_cascade_scan "${_alt}" "${_staged}" alloc) || _rc=$?
-        if (( _rc == 2 )); then
+        # A NEW line whose id hugs the '-' bullet is refused before anything
+        # else is judged: the allocator cannot see that id, so letting it land
+        # guarantees the allocator re-issues the number. An OLD one cancels out
+        # of the comparison, because a permanent refusal over a line already on
+        # main would block every session for a defect nobody can fix from here.
+        _shug=$(_cascade_scan_or_refuse "${_alt}" "${_staged}" hug "the staged" "${_label}")
+        _hhug=$(_cascade_scan_or_refuse "${_alt}" "${_head}" hug "HEAD's" "${_label}")
+        if (( $(_cascade_count "" "${_shug}") > $(_cascade_count "" "${_hhug}") )); then
             _cascade_refuse \
-                "the staged registry could not be scanned for '${_label}-' ids" \
-                "(grep failed). Refusing rather than reading an unscannable" \
-                "registry as an empty one."
-        fi
-        if (( _rc == 3 )); then
-            _cascade_refuse \
-                "the staged registry carries a '${_label}-' id with more than" \
-                "nine digits. The shell's arithmetic wraps on it silently, and" \
-                "the allocator refuses it too. Fix the registry line."
+                "this commit adds a line whose '${_label}-' id follows the '-'" \
+                "bullet with nothing between them ('-${_label}-N')." \
+                "The allocator's own scanner cannot see an id in that position," \
+                "so the number would be handed out a second time. Put a space" \
+                "after the bullet, or let the allocator write the line."
         fi
 
-        _rc=0; _halloc=$(_cascade_scan "${_alt}" "${_head}" alloc) || _rc=$?
-        if (( _rc == 2 )); then
-            _cascade_refuse \
-                "HEAD's registry could not be scanned for '${_label}-' ids" \
-                "(grep failed). Refusing rather than treating an unreadable" \
-                "baseline as one with no ids, which would make every line look" \
-                "new."
-        fi
-        if (( _rc == 3 )); then
-            _cascade_refuse \
-                "HEAD's registry carries a '${_label}-' id with more than nine" \
-                "digits. The shell's arithmetic wraps on it silently, and the" \
-                "allocator refuses it too. Fix the registry line."
-        fi
+        _salloc=$(_cascade_scan_or_refuse "${_alt}" "${_staged}" alloc "the staged" "${_label}")
+        _halloc=$(_cascade_scan_or_refuse "${_alt}" "${_head}" alloc "HEAD's" "${_label}")
 
         # MULTISET difference: an id already in the registry that acquires a
         # SECOND allocation line is exactly collisions #2 and #3, so counting is
         # what makes this gate see them.
-        _newcount=0
-        _newid=""
-        _display=""
         _seen=""
         while IFS= read -r _n || [[ -n "${_n}" ]]; do
             [[ -z "${_n}" ]] && continue
@@ -513,60 +538,65 @@ _cascade_mint_gate() {
             _cs=$(_cascade_count "${_n}" "${_salloc}")
             _ch=$(_cascade_count "${_n}" "${_halloc}")
             if (( _cs > _ch )); then
-                _newcount=$((_newcount + _cs - _ch))
-                _newid="${_n}"
+                _newtotal=$((_newtotal + _cs - _ch))
                 _display="${_display}${_label}-${_n} "
+                _pending_alt="${_alt}"
+                _pending_label="${_label}"
+                _pending_id="${_n}"
             fi
         done <<< "${_salloc}"
-
-        if (( _newcount == 0 )); then
-            continue
-        fi
-
-        if (( _newcount > 1 )); then
-            _cascade_refuse \
-                "this commit adds ${_newcount} '${_label}-' allocation lines at once:" \
-                "${_display}" \
-                "The allocator mints ONE id per run, so a commit carrying" \
-                "several of them was not produced by it."
-        fi
-
-        _rc=0; _hall=$(_cascade_scan "${_alt}" "${_head}" all) || _rc=$?
-        if (( _rc == 2 )); then
-            _cascade_refuse \
-                "HEAD's registry could not be scanned for '${_label}-' ids" \
-                "(grep failed). Refusing rather than treating an unreadable" \
-                "baseline as one with no ids."
-        fi
-        if (( _rc == 3 )); then
-            _cascade_refuse \
-                "HEAD's registry carries a '${_label}-' id with more than nine" \
-                "digits, which the allocator refuses to mint against."
-        fi
-
-        _max=-1
-        while IFS= read -r _m || [[ -n "${_m}" ]]; do
-            [[ -z "${_m}" ]] && continue
-            if (( _m > _max )); then _max=${_m}; fi
-        done <<< "${_hall}"
-
-        if (( _max < 0 )); then
-            _cascade_refuse \
-                "HEAD's registry carries no '${_label}-' id at all, so there is" \
-                "nothing to compute max+1 from. ZERO FOUND IS AN ERROR, NOT AN" \
-                "EMPTY ALLOCATOR: the tool refuses in this state rather than" \
-                "restart at 1, and this gate refuses to accept what the tool" \
-                "would not have produced."
-        fi
-
-        if (( _newid != _max + 1 )); then
-            _cascade_refuse \
-                "'${_label}-${_newid}' is not the next id. The highest" \
-                "'${_label}-' id in HEAD's registry is '${_label}-${_max}', so" \
-                "the next one is '${_label}-$((_max + 1))'." \
-                "Annulled lines and mentions count: their numbers stayed spent."
-        fi
     done
+
+    if (( _newtotal == 0 )); then
+        return 0
+    fi
+
+    # ACROSS FAMILIES, not within one. The tool mints ONE id per run, so a
+    # commit carrying the next Т and the next BT was not produced by it either —
+    # counting per family would have let that through while the refusal text
+    # claimed otherwise (cross-model review).
+    if (( _newtotal > 1 )); then
+        _cascade_refuse \
+            "this commit adds ${_newtotal} allocation lines at once:" \
+            "${_display}" \
+            "The allocator mints ONE id per run, so a commit carrying several" \
+            "of them was not produced by it."
+    fi
+
+    _hall=$(_cascade_scan_or_refuse "${_pending_alt}" "${_head}" all "HEAD's" "${_pending_label}")
+
+    _max=-1
+    while IFS= read -r _m || [[ -n "${_m}" ]]; do
+        [[ -z "${_m}" ]] && continue
+        # THE TOOL'S OWN LIMIT, applied where the tool applies it: to what it
+        # READS. Above nine digits it refuses to mint at all, so in that state
+        # no id can be "the one the allocator would have computed".
+        if (( ${#_m} > 9 )); then
+            _cascade_refuse \
+                "HEAD's registry carries a '${_pending_label}-' id of more than" \
+                "nine digits. The allocator refuses to mint against it, so no" \
+                "number here can be the one it would have computed."
+        fi
+        if (( _m > _max )); then _max=${_m}; fi
+    done <<< "${_hall}"
+
+    if (( _max < 0 )); then
+        _cascade_refuse \
+            "HEAD's registry carries no '${_pending_label}-' id at all, so" \
+            "there is nothing to compute max+1 from. ZERO FOUND IS AN ERROR," \
+            "NOT AN EMPTY ALLOCATOR: the tool refuses in this state rather" \
+            "than restart at 1, and this gate refuses to accept what the tool" \
+            "would not have produced."
+    fi
+
+    if (( _pending_id != _max + 1 )); then
+        _cascade_refuse \
+            "'${_pending_label}-${_pending_id}' is not the next id. The highest" \
+            "'${_pending_label}-' id in HEAD's registry is" \
+            "'${_pending_label}-${_max}', so the next one is" \
+            "'${_pending_label}-$((_max + 1))'." \
+            "Annulled lines and mentions count: their numbers stayed spent."
+    fi
 }
 
 if [[ "${branch}" == "main" ]]; then

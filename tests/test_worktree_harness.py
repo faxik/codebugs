@@ -2546,6 +2546,12 @@ CASCADE_CORPUS: dict[str, str] = {
         "# reg\n- \u0422-2 \u2014 a\n- \u0422-3 \u2014 b\n"
         "- \u041a\u041e\u041b\u041b\u0418\u0417\u0418\u042f: \u00ab\u0422-11\u00bb \u0430\u043d\u043d\u0443\u043b\u0438\u0440\u043e\u0432\u0430\u043d\u0430\n"
     ),
+    # The allocator refuses a number of more than nine digits IN WHAT IT READS,
+    # but its OUTPUT may be one digit longer. A gate that applied the nine-digit
+    # rule to the staged blob refused the allocator's OWN mint here.
+    "the allocator's successor is one digit longer": (
+        "# reg\n- \u0422-3 \u2014 a\n- \u0422-999999999 \u2014 the tail\n"
+    ),
     # Leading zeros: '\u0422-007' is seven, not a separate id and not a syntax error.
     "an id written with leading zeros": (
         "# reg\n- \u0422-1 \u2014 a\n- \u0422-007 \u2014 b\n"
@@ -2731,6 +2737,47 @@ class TestCascadeMintGate:
             result = self._commit(repo)
             assert result.returncode != 0, (line, result.stdout)
             git(repo, "reset", "--hard")
+
+    def test_an_id_hugging_the_bullet_is_refused(self, repo: Path) -> None:
+        """The one bullet spelling the ALLOCATOR cannot see.
+
+        `-\u0422-5` puts the id straight after the '-' bullet, and the left
+        boundary excludes a '-', so `tools/cascade-mint.sh` misses that id
+        entirely. Cross-model review reproduced the whole chain: the line lands,
+        the allocator's `max` never sees it, and the allocator then hands the
+        same number out a second time. A gate that recognised the line as an
+        allocation while its own `max` could not see it would bless exactly
+        that.
+        """
+        self._arm(repo, "# reg\n- \u0422-4 \u2014 a\n")
+        self._append(repo, "-\u0422-5 \u2014 hugging the bullet\n")
+        result = self._commit(repo)
+        assert result.returncode != 0, result.stdout
+        assert "bullet" in result.stderr, result.stderr
+
+    def test_a_bullet_hugging_line_already_on_main_does_not_block_everything(
+        self, repo: Path
+    ) -> None:
+        """An OLD one cancels out: a permanent refusal would block every session.
+
+        The line is already in HEAD, so it is nobody's to fix from a commit
+        hook, and the ordinary next mint must still land.
+        """
+        self._arm(repo, "# reg\n- \u0422-4 \u2014 a\n-\u0422-9 \u2014 legacy\n")
+        self._append(repo, self._mint_line("\u0422-5"))
+        assert self._commit(repo).returncode == 0
+
+    def test_one_mint_per_commit_is_counted_ACROSS_families(self, repo: Path) -> None:
+        """The allocator mints one id per RUN, so one per COMMIT.
+
+        Counting inside a family let a commit carrying the next \u0422 and the next
+        BT through while the refusal text said otherwise (cross-model review).
+        """
+        self._arm(repo, "# reg\n- \u0422-4 \u2014 a\n- BT-9 \u2014 b\n")
+        self._append(repo, self._mint_line("\u0422-5") + self._mint_line("BT-10"))
+        result = self._commit(repo)
+        assert result.returncode != 0, result.stdout
+        assert "mints ONE id per run" in result.stderr, result.stderr
 
     def test_a_registry_absent_from_head_is_refused(self, repo: Path) -> None:
         """Every id is new; there is no allocator state to check against."""
