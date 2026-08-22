@@ -306,6 +306,14 @@ def _validate_meta_keys(meta: dict[str, Any] | None, *, updating: bool = False) 
 # which are refused on both paths.
 _ADD_ONLY_RESERVED_META_KEYS = frozenset({"category_minted"})
 
+# Every `codebugs add` FLAG that writes into `meta`, paired with the meta key it
+# writes and the spelling a caller types. `_cmd_add` reads this tuple twice — once
+# to seed `meta` and once to refuse a conflict with the same key arriving through
+# `--meta` — so the two can never drift apart, and a second such flag is covered the
+# day it is declared rather than the day someone remembers the check (CB-129).
+# (dest, meta key, spelling)
+_ADD_META_FLAGS: tuple[tuple[str, str, str], ...] = (("lines", "lines", "-l/--lines"),)
+
 
 def _levenshtein(a: str, b: str) -> int:
     """Plain edit distance. Category names are short and few — no cap needed."""
@@ -3337,13 +3345,48 @@ def register_cli(sub, commands) -> None:
     from codebugs.fsio import atomic_write
 
     def _cmd_add(args: argparse.Namespace) -> None:
-        conn = db.connect()
-        meta = {}
-        if args.lines:
-            meta["lines"] = args.lines
-        if args.meta:
-            meta.update(json.loads(args.meta))
+        # CB-129. Two spellings can name one `meta` field: a dedicated flag and a key
+        # inside `--meta`. `meta.update(json.loads(args.meta))` over a flag-seeded dict
+        # let the JSON win SILENTLY, so `-l "10-20" --meta '{"lines": [10, 20]}'` stored
+        # only the list and reported success — an explicitly typed argument discarded by
+        # a success-shaped call, the CB-15 class reached through composition rather than
+        # through validation. There is no "honour both" path (one key, one value), so
+        # CB-28's rule leaves refusal as the only honest answer; applying the flag LAST
+        # was rejected because it would silently invert the stored type for every caller
+        # that already passes both. Equal values are not a conflict and still pass.
+        #
+        # This runs BEFORE db.connect(): a refusal must cost no partial work and no open
+        # connection (CB-82). It exits directly rather than raising ValueError, so it
+        # cannot disturb the json.JSONDecodeError-before-ValueError arm ordering below.
+        flag_meta = {}
+        for dest, key, _spelling in _ADD_META_FLAGS:
+            value = getattr(args, dest, None)
+            if value:
+                flag_meta[key] = value
 
+        json_meta = json.loads(args.meta) if args.meta else {}
+        # A non-dict payload is left exactly as it behaved before — `dict.update` below
+        # raises on it. Testing `key in json_meta` on a str would be a SUBSTRING test,
+        # which is a wrong answer rather than an error.
+        if isinstance(json_meta, dict):
+            for _dest, key, spelling in _ADD_META_FLAGS:
+                if key in flag_meta and key in json_meta and json_meta[key] != flag_meta[key]:
+                    print(
+                        f"codebugs add: {spelling} and the {key!r} key in --meta name the "
+                        f"same field with different values, and only one of them can be "
+                        f"stored.\n"
+                        f"  {spelling} gives {flag_meta[key]!r}\n"
+                        f"  --meta gives {json_meta[key]!r}"
+                        f"  <- this one would have won, silently discarding {spelling}.\n"
+                        f"Pass only one of the two spellings, or make them equal.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+
+        meta = dict(flag_meta)
+        meta.update(json_meta)
+
+        conn = db.connect()
         tags = [t.strip() for t in args.tags.split(",")] if args.tags else []
 
         try:
