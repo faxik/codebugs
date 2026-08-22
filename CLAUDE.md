@@ -24,6 +24,7 @@ Prose cannot enforce prose. That is CB-50, and the harness below is its fix.
 | Branch carries `fix/`\|`feature/`\|`refactor/`\|`docs/` | `_guard_branch_type` (7) + pre-commit hook (1) | exit 7 / 1 |
 | Nothing but `.claude/plans/*.md` is committed on main | pre-commit hook | exit 1 |
 | A plan note committed on main is NAMED in the commit message | commit-msg hook | exit 1 |
+| A cascade id added to `.claude/plans/CASCADE-IDS.md` on main is the one `tools/cascade-mint.sh` would have computed (`max+1` per family, annulled lines and mentions included) | pre-commit hook | exit 1 |
 | A merge onto main comes from a typed local branch, or from main's own upstream `main` | pre-merge-commit hook (clean merge) + pre-commit hook (conflicted merge) | exit 1 |
 | An in-progress cherry-pick/revert marker no longer exempts a commit | pre-commit hook | exit 1 |
 | Integration never fast-forwards | `--no-ff` + `git config merge.ff false` | — |
