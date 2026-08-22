@@ -138,6 +138,16 @@ _guard_main_clean() {
     echo "  Integrating now would either fail outright (git refuses to clobber" >&2
     echo "  local changes) or sweep unrelated edits into the merge." >&2
     echo "  Commit or restore them in main first, then re-run." >&2
+    echo "" >&2
+    echo "  THIS MAY NOT BE YOUR MESS. The commonest cause is a commit REFUSED" >&2
+    echo "  by the pre-commit hook in another session: git stages before the" >&2
+    echo "  hook runs and a refusal unstages nothing, so the files stay in" >&2
+    echo "  main's index and block every worktree in this clone, not just the" >&2
+    echo "  session that left them. A staged entry is one with a non-space in" >&2
+    echo "  the FIRST column above." >&2
+    echo "" >&2
+    echo "  See the whole picture, untracked files included:" >&2
+    echo "    git -C \"${repo_root}\" status --porcelain" >&2
     return 11
 }
 
