@@ -149,6 +149,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   domain docstrings, pinned by prose↔code and behaviour tests.
 
 ### Fixed
+- **`codebugs add --meta` now REFUSES a malformed payload instead of printing a Python
+  traceback (CB-132).** `--meta 'not json'` used to end in a `json.JSONDecodeError`
+  traceback, and `--meta '[1,2]'` — valid JSON of the wrong shape — in
+  `TypeError: cannot convert dictionary update sequence element #0`. Both now print one
+  line naming `--meta` and the offending text (and, for a well-formed non-object, the
+  type it parsed as) and exit 1. Nothing is written on either path: the parse happens
+  before the tracker is opened, so a refusal costs no partial work. An empty
+  `--meta ""` is likewise a supplied-but-empty document rather than an omitted
+  argument, and is refused the same way — see the `-l ""` entry under Changed for why
+  an empty string is not an absent one on a write path. Unchanged, deliberately: a
+  `json.JSONDecodeError` coming from a *stored* row with corrupt metadata still
+  surfaces as a crash, because that is data corruption rather than bad input and must
+  not be disguised as a usage error.
 - **`query(commit=)` now sees the occurrence ring, not only the first report (CB-128).**
   The `reported_at_commit` column is frozen at first report by design (CB-53); every
   re-observation of a deduplicated card records its commit only in
@@ -326,6 +339,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   deliberate; the traceback is what tells you the failure came after work had begun.
 
 ### Changed
+- **BREAKING (CLI): `codebugs add -l ""` now refuses instead of quietly doing nothing
+  (CB-133).** An explicitly typed empty `-l/--lines` used to be dropped on the floor:
+  it stored no `lines`, was not treated as a conflict with `--meta`, and the call
+  reported success — so a script whose variable came back empty recorded a finding
+  that silently lacked the line range it thought it had passed. It now prints one line
+  naming `-l/--lines` and exits 1. The rule behind it: on a write path an empty string
+  is a value you typed, not an argument you omitted, so only omitting the flag means
+  "no line range". Passing a real value (`-l "10-20"`) is unaffected, and so is leaving
+  the flag out.
 - **BREAKING (CLI): `codebugs add` now REFUSES a `-l/--lines` value that disagrees with a
   `lines` key inside `--meta`, instead of silently storing only the `--meta` one
   (CB-129).** If your script passes both spellings — for example
