@@ -487,13 +487,29 @@ def lint_declarations(path: str) -> int:
     with open(path, encoding="utf-8") as fh:
         src = fh.read()
     bad = _lint_tokens(src, path) + _lint_structure(src, path)
+    # A fixture that is not there passes every check over it.  An EMPTY file, or
+    # one holding only comments, used to print OK at rc 0 -- so the acceptance
+    # precondition "the lint returned 0 on the declarations file" was satisfiable
+    # by a file with no declarations in it.  This repository's own lesson, from
+    # the TestKnownLimits litter: a check that sets up its own fixture must
+    # assert the fixture exists.  Count what was actually judged, and say so.
+    literals = sum(
+        1
+        for node in ast.walk(ast.parse(src, filename=path))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    )
+    if not bad and literals == 0:
+        print(f"DECLARATION GRAMMAR: REFUSED — {path} holds no string literal at all")
+        print("  a lint that judged nothing is not a passed lint (BT-6 v6, Э-11 (А))")
+        return 1
     if bad:
         print(f"DECLARATION GRAMMAR: REFUSED — {len(bad)} violation(s) in {path}")
         for line in sorted(set(bad)):
             print(f"  {line}")
         print("  the PROSE column is meaningless outside the restricted grammar (BT-6 v6, Э-11 (А))")
         return 1
-    print(f"DECLARATION GRAMMAR: OK — {path} (R1 no f-strings, R2 no implicit concatenation,")
+    print(f"DECLARATION GRAMMAR: OK — {path}: {literals} string literal(s) judged "
+          f"(R1 no f-strings, R2 no implicit concatenation,")
     print("  R3 no escapes in non-raw literals, R4 literals reached through containers only)")
     return 0
 
