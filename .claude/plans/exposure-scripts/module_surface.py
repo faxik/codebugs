@@ -425,52 +425,56 @@ def _lint_tokens(src: str, path: str) -> list[str]:
     return bad
 
 
-def _lint_structure(src: str, path: str) -> list[str]:
-    """R4: every string literal is reached from the module root through
-    containers, keyword arguments and assignments ONLY.
+_ALLOWED_NODES: tuple[type, ...] = (
+    ast.Module, ast.Expr, ast.Assign, ast.AnnAssign, ast.Name, ast.Load, ast.Store,
+    ast.Constant, ast.Tuple, ast.List, ast.Dict, ast.Set, ast.keyword,
+    ast.Import, ast.ImportFrom, ast.alias, ast.Call,
+)
 
-    Refused by construction, not by name: concatenation with the plus operator
-    and percent-formatting (BinOp), a join or format call on a literal
-    (Attribute), a literal wrapped in any call that is not a container
-    constructor (a dedent helper, chr, a translator), a conditional or a
-    comprehension that picks between two literals.  Each of those makes the
-    written segment count differ from the rendered one, and NOT ONE of them was
-    named by a reviewer in five passes -- which is why the rule is stated as a
-    shape rather than as a list of the three forms that were.
-    """
+
+def _lint_structure(src: str, path: str) -> list[str]:
+    """R4: the file may contain ONLY data.
+
+    THE SHAPE OF THIS RULE IS THE RULE.  Its first version walked UP from every
+    string literal and named the ancestors it refused -- an ENUMERATION, in the
+    very function whose comment claimed to close a class by composition.  Both
+    reviewers of the sixth pass walked straight past it, and the holder
+    reproduced them: a string with NO literal to walk up from is invisible to
+    that direction of travel.  Measured, rc 0 on both:
+
+        doc=chr(65) + chr(10) + chr(66)      prose 1, runtime 2 lines
+        doc=RAW[:5]                          prose 4, runtime 1 line
+
+    So the rule now travels DOWN over every node and admits an allowlist:
+    assignments, names, container literals, keyword arguments, imports, and a
+    call whose callee is a bare container constructor.  Nothing that can COMPUTE
+    a string survives -- no operator, no attribute, no subscript, no
+    comprehension, no conditional, no lambda, no function or class body -- so a
+    prose field is a literal or the file is refused.  `bytes` is refused with
+    the same sentence: the counter books a bytes token as prose, and no
+    declarations file has a use for one."""
     tree = ast.parse(src, filename=path)
-    parents: dict[int, ast.AST] = {}
-    for node in ast.walk(tree):
-        for child in ast.iter_child_nodes(node):
-            parents[id(child)] = node
     bad: list[str] = []
     for node in ast.walk(tree):
-        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+        if isinstance(node, ast.Constant) and isinstance(node.value, (bytes, bytearray)):
+            bad.append(f"{path}:{node.lineno}: R4 bytes literal (the counter books it as prose)")
             continue
-        cur: ast.AST | None = node
-        while True:
-            parent = parents.get(id(cur))
-            if parent is None:
-                break
-            why = None
-            if isinstance(parent, (ast.BinOp, ast.BoolOp, ast.UnaryOp)):
-                why = "an operator (implicit concatenation's twin: `+`, `%`)"
-            elif isinstance(parent, ast.Attribute):
-                why = "an attribute access on a literal (`.join`, `.format`)"
-            elif isinstance(parent, (ast.IfExp, ast.comprehension, ast.ListComp,
-                                     ast.DictComp, ast.SetComp, ast.GeneratorExp)):
-                why = "a conditional or comprehension"
-            elif isinstance(parent, ast.Call):
-                func = parent.func
-                if not (isinstance(func, ast.Name) and func.id in _CONTAINER_CALLS):
-                    why = (
-                        "a call that is not a container constructor "
-                        f"({sorted(_CONTAINER_CALLS)}) — its result is not this literal"
-                    )
-            if why is not None:
-                bad.append(f"{path}:{node.lineno}: R4 string literal reached through {why}")
-                break
-            cur = parent
+        if isinstance(node, ast.Call):
+            func = node.func
+            if not (isinstance(func, ast.Name) and func.id in _CONTAINER_CALLS):
+                where = getattr(node, "lineno", "?")
+                bad.append(
+                    f"{path}:{where}: R4 call to something other than a container constructor "
+                    f"({sorted(_CONTAINER_CALLS)}) — it could compute a string the counter cannot see"
+                )
+            continue
+        if not isinstance(node, _ALLOWED_NODES):
+            where = getattr(node, "lineno", "?")
+            bad.append(
+                f"{path}:{where}: R4 {type(node).__name__} is not admitted — a declarations file "
+                f"holds DATA only (no operator, attribute, subscript, comprehension, "
+                f"conditional, lambda, def or class)"
+            )
     return bad
 
 
@@ -495,15 +499,24 @@ def lint_declarations(path: str) -> int:
 
 
 def require_python(spec: str) -> None:
-    """Pin the interpreter by dotted-component prefix, and REFUSE on a mismatch.
+    """Pin the interpreter, and REFUSE on a mismatch.
 
-    The counter is version-sensitive (f-string tokenization changed in 3.12); a
-    number carried across versions is two objects counted two ways, which is the
-    single defect all five review passes found at a new address."""
+    At least MAJOR.MINOR is required: the first version accepted a bare `3`,
+    which matched every interpreter and printed `pin OK` -- a guard reporting
+    clean because it could not look, which is the exact shape this instrument
+    exists to refuse.  Reproduced by the sixth pass and by the holder.  The
+    counter is version-sensitive (f-string tokenization changed in 3.12), so a
+    number carried across versions is one object counted two ways."""
+    parts = spec.split(".")
+    if len(parts) < 2 or not all(p.isdigit() for p in parts) or len(parts) > 3:
+        raise SystemExit(
+            f"interpreter pin: {spec!r} is not a version — give at least MAJOR.MINOR "
+            f"(a bare major matches every interpreter and pins nothing)"
+        )
     actual = ".".join(str(n) for n in sys.version_info[:3])
-    want = spec.split(".")
-    have = actual.split(".")
-    if have[: len(want)] != want:
+    want = [int(p) for p in parts]
+    have = list(sys.version_info[: len(want)])
+    if have != want:
         raise SystemExit(
             f"interpreter pin: required {spec}, running {actual} — refusing "
             f"(the count is version-sensitive; run both sides on one interpreter)"
@@ -536,7 +549,23 @@ def main() -> int:
     if args.require_python:
         require_python(args.require_python)
     if args.lint_decl:
-        return lint_declarations(args.lint_decl)
+        # Compose, never shadow: with --sloc alongside, the lint used to return
+        # first and the measurement was silently skipped — and the two are meant
+        # to be ONE protocol step (lint the declarations file, then count).
+        if args.sloc:
+            # The linted file must be one of the files being counted, or the
+            # protocol proves nothing: lint A, measure B is a green light for an
+            # unlinted number.  Same shape as the pin — a step that can be
+            # satisfied beside the object it is about is not a step.
+            want = os.path.realpath(args.lint_decl)
+            if want not in {os.path.realpath(f) for f in args.sloc}:
+                raise SystemExit(
+                    f"--lint-declarations {args.lint_decl} is not among the --sloc files: "
+                    f"refusing (linting one file and counting another proves nothing)"
+                )
+        rc = lint_declarations(args.lint_decl)
+        if rc != 0 or not args.sloc:
+            return rc
     if args.sloc:
         if not args.require_python and not args.no_pin:
             # A protocol that says "pass the pin on both sides" is a convention,
