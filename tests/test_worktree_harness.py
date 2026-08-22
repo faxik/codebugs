@@ -4059,6 +4059,23 @@ if [[ "$*" == *'main^{commit}'* ]]; then
 fi
 """
 
+# Round-2 cross-model review, HIGH: a two-parent tip is SHAPE, not IDENTITY.
+# An off-harness `--no-ff` merge landing on main in the moment after ours also
+# has two parents, and reading its parents as ours produces a confident, wrong
+# diagnosis. Fires on the alarm's own tip read, i.e. after our merge returned.
+_SHIM_STRANGER_MERGE_AFTER = r"""
+if [[ "$*" == *'main^{commit}'* && ! -e "$MARKER" ]]; then
+    : > "$MARKER"
+    "$REAL" -C "$REPO" branch -q stranger-side "main^2" 2>/dev/null || true
+    "$REAL" -C "$REPO" worktree add -q --detach "$REPO/.stranger" "main^2" 2>/dev/null
+    printf 'stranger\n' > "$REPO/.stranger/stranger.txt"
+    "$REAL" -C "$REPO/.stranger" add -- stranger.txt
+    "$REAL" -C "$REPO/.stranger" commit -q --no-verify -m 'stranger work'
+    "$REAL" -C "$REPO" merge --no-verify --no-ff -q \
+        -m 'Merge stranger' "$("$REAL" -C "$REPO/.stranger" rev-parse HEAD)"
+fi
+"""
+
 # Break the last cleanup statement ONLY. Used to pin the other half of the
 # trap's contract: with nothing to say it must leave the run's own status
 # alone, or a failing cleanup would silently become a success.
@@ -4282,11 +4299,46 @@ class TestPostMergeAlarm:
         # The merge itself was PERFECT — that is what makes the wrong diagnosis
         # a real cost rather than a nicety.
         assert git(armed["repo"], "rev-parse", "main^1^1") == tested_main
-        assert "not a two-parent merge" in r.stdout, r.stdout[-4000:]
+        assert "not the merge this run made" in r.stdout, r.stdout[-4000:]
+        assert "USUALLY BENIGN" in r.stdout, (
+            "an honest merge followed by a legitimate note was reported as damage"
+        )
         assert "between the in-lock" not in r.stdout, (
             "the alarm blamed the pre-merge window for a post-merge commit"
         )
         assert not wt.exists()
+
+    def test_a_strangers_merge_landing_after_ours_is_not_read_as_ours(
+        self, armed: dict
+    ) -> None:
+        """Round-2 cross-model review, HIGH: parent COUNT is shape, not identity.
+
+        A tip with two parents was accepted as this run's merge. An off-harness
+        `--no-ff` merge landing on main in the moment after ours has two parents
+        too, and its first parent is OUR merge — so the alarm compared a
+        stranger's parents against TESTED_MAIN and told a confident story about
+        the wrong event. `ORIG_HEAD` is what supplies identity: `git merge` sets
+        it to the HEAD it merged into, which is our merge's first parent by
+        construction, so a tip whose first parent is not `ORIG_HEAD` is not
+        ours and gets a verdict that says exactly that.
+        """
+        self._branch(armed)
+        marker = self._shim(armed, _SHIM_STRANGER_MERGE_AFTER)
+        tested_main = git(armed["repo"], "rev-parse", "main")
+
+        r = self._finish(armed)
+
+        assert marker.exists(), "the shim never fired — this test proved nothing"
+        # The stranger really did land a second merge on top of ours.
+        assert len(git(armed["repo"], "rev-parse", "main^@").split()) == 2
+        assert git(armed["repo"], "rev-parse", "main^1^1") == tested_main, (
+            "the fixture did not build the shape this test is about"
+        )
+        assert r.returncode == 15, (r.returncode, r.stdout[-4000:], r.stderr[-4000:])
+        assert "not the merge this run made" in r.stdout, r.stdout[-4000:]
+        assert "FIRST PARENT" not in r.stdout, (
+            "a stranger's parents were reported as this run's"
+        )
 
     def test_a_git_that_cannot_answer_is_not_read_as_clean(self, armed: dict) -> None:
         """Fail-closed. "Could not look" and "nothing wrong" must be distinct.
@@ -4407,6 +4459,59 @@ class TestPostMergeAlarm:
         assert "POST-MERGE ALARM" not in r.stdout, r.stdout[-3000:]
 
 
+    def test_premise_merge_sets_orig_head_to_the_merges_first_parent(
+        self, repo: Path
+    ) -> None:
+        """The identity premise, pinned so a git change turns the suite red.
+
+        The alarm decides "is this tip my merge?" by comparing the tip's first
+        parent with `ORIG_HEAD`. That works only because `git merge` sets
+        ORIG_HEAD to the HEAD it merged into — which IS the merge's first
+        parent. If a future git stops doing that, every finish would report
+        `tip-not-ours` and the alarm would become noise; that must be a red
+        suite, not a quiet degradation.
+        """
+        git(repo, "checkout", "-qb", "side")
+        (repo / "b.txt").write_text("b\n")
+        git(repo, "add", "b.txt")
+        git(repo, "commit", "--no-verify", "-m", "side")
+        git(repo, "checkout", "-q", "main")
+        (repo / "c.txt").write_text("c\n")
+        git(repo, "add", "c.txt")
+        git(repo, "commit", "--no-verify", "-m", "main work")
+
+        pre = git(repo, "rev-parse", "main")
+        git(repo, "merge", "side", "--no-ff", "--no-verify", "-m", "merge")
+
+        assert git(repo, "rev-parse", "ORIG_HEAD") == pre
+        assert git(repo, "rev-parse", "main^1") == pre
+
+    def test_premise_an_already_up_to_date_merge_cannot_masquerade(
+        self, repo: Path
+    ) -> None:
+        """The one shape that could have defeated the identity check.
+
+        If a no-op `git merge` left ORIG_HEAD STALE, a stale value could happen
+        to equal the tip's first parent and a tip that is not ours would be
+        accepted as ours. Measured: it sets ORIG_HEAD to the CURRENT tip
+        instead, which can never equal that tip's own first parent — so the
+        no-op falls into `tip-not-ours`, which is the honest answer.
+        """
+        git(repo, "checkout", "-qb", "side")
+        (repo / "b.txt").write_text("b\n")
+        git(repo, "add", "b.txt")
+        git(repo, "commit", "--no-verify", "-m", "side")
+        git(repo, "checkout", "-q", "main")
+        git(repo, "merge", "side", "--no-ff", "--no-verify", "-m", "merge")
+        tip = git(repo, "rev-parse", "main")
+
+        git(repo, "merge", "side", "--no-ff", "--no-verify", "-m", "again")
+
+        assert git(repo, "rev-parse", "main") == tip, "the no-op merge moved main"
+        assert git(repo, "rev-parse", "ORIG_HEAD") == tip
+        assert git(repo, "rev-parse", "main^1") != tip
+
+
 class TestPostMergeAlarmIsNotAGate:
     """The CATEGORY of the alarm, pinned in the source and in CLAUDE.md (CB-121).
 
@@ -4446,15 +4551,18 @@ class TestPostMergeAlarmIsNotAGate:
         """
         src = code_only(self.FINISH.read_text())
         merge_at = src.index('git -C "${REPO_ROOT}" merge "${BRANCH}" --no-ff')
-        tip_at = src.index('_ALARM_TIP=$(git')
         arm_at = src.index("trap _alarm_speak EXIT")
+        tip_at = src.index('_ALARM_TIP=$(git')
         # The LAST unlock: the three before it are refusal paths, and anchoring
         # on the first one after the merge finds the merge-failed branch, where
         # nothing has landed and there is nothing for an alarm to read.
         unlock_at = src.rindex("flock -u 9\n")
-        assert merge_at < tip_at < arm_at < unlock_at, (
-            "the alarm must read main's tip after the merge and arm before the unlock"
+        assert merge_at < arm_at < tip_at < unlock_at, (
+            "arm the trap the instant the merge returns, then read before the unlock"
         )
+        # And the arming must sit on the SUCCESS branch of the merge, not after
+        # the `fi` — a merge that failed has landed nothing to alarm about.
+        assert arm_at < src.index("Merge failed", merge_at)
 
     def test_the_parents_are_read_from_the_named_tip_not_from_main(self) -> None:
         """Cross-model review round 1, HIGH: three `main`-relative revs are not a snapshot.
@@ -4469,6 +4577,46 @@ class TestPostMergeAlarmIsNotAGate:
         assert "main^1" not in src and "main^2" not in src, (
             "a main-relative parent revision is back; that read cannot be coherent"
         )
+
+    def test_the_tip_is_identified_by_orig_head_not_by_its_parent_count(self) -> None:
+        """Round-2 cross-model review, HIGH: shape is not identity.
+
+        Behavioural coverage is
+        TestPostMergeAlarm::test_a_strangers_merge_landing_after_ours_is_not_read_as_ours;
+        this pins the mechanism, because a regression could restore the
+        count-only test and still pass every fixture where no stranger merges.
+        """
+        src = code_only(self.FINISH.read_text())
+        assert "ORIG_HEAD^{commit}" in src, "the alarm no longer reads ORIG_HEAD"
+        assert '[[ "${_ALARM_P1}" != "${_ALARM_ORIG}" ]]' in src, (
+            "the tip is accepted without being identified as this run's merge"
+        )
+
+    def test_the_parent_read_ignores_replace_refs(self) -> None:
+        """`^@` resolves through replace refs and grafts unless told not to.
+
+        Without the flag the code's "an object's parents are immutable" claim
+        is true of the object and false of the answer, which is the same class
+        of overclaim this whole card exists to remove.
+        """
+        # LOGICAL lines: two of the three reads wrap, and the flag sits on the
+        # first physical line while `rev-parse` sits on the second — a
+        # line-wise filter reports the continuation as a bare read and the flag
+        # as a read that does nothing.
+        src = code_only(self.FINISH.read_text()).replace("\\\n", " ")
+        reads = [ln for ln in src.splitlines() if "rev-parse" in ln and "_ALARM" in ln]
+        assert len(reads) == 3, f"expected the tip, ORIG_HEAD and parent reads: {reads}"
+        bare = [ln for ln in reads if "--no-replace-objects" not in ln]
+        assert not bare, f"an alarm read resolves through replace refs: {bare}"
+
+    def test_the_voice_is_defined_before_the_trap_names_it(self) -> None:
+        """bash resolves a trap's command when it FIRES, not when it is set.
+
+        With the definition below the arming, a failure in between leaves the
+        trap resolving to nothing: exit 127 and no alarm, on a landed merge.
+        """
+        src = self.FINISH.read_text()
+        assert src.index("_alarm_speak() {") < src.index("trap _alarm_speak EXIT")
 
     def test_the_alarm_is_delivered_by_an_exit_trap(self) -> None:
         """A trailing `if` is preemptable by `set -e`; a trap is not.
