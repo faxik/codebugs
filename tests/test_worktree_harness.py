@@ -4006,6 +4006,22 @@ done
 # breaks the alarm's own read and nothing else. The spelling is load-bearing:
 # if the script's rev spelling changes, this test goes red rather than silently
 # stopping to exercise the fail-closed path.
+# A git that is merely NOISY on stderr must not raise an alarm. Folding stderr
+# into the captured output would put every `warning:` line into the parsed line
+# count, and the alarm would fire on an ordinary finish — a check failing
+# because it could not parse is the mirror image of one reporting clean because
+# it could not look, and it is the worse of the two here, because an alarm
+# nobody believes is an alarm nobody reads.
+_SHIM_NOISY_STDERR = r"""
+for _a in "$@"; do
+    if [[ "$_a" == *'^1^{commit}'* ]]; then
+        : > "$MARKER"
+        echo "warning: simulated noisy git on stderr" >&2
+        break
+    fi
+done
+"""
+
 _SHIM_BREAK_REV_PARSE = r"""
 for _a in "$@"; do
     if [[ "$_a" == *'^1^{commit}'* ]]; then
@@ -4180,6 +4196,27 @@ class TestPostMergeAlarm:
         assert tested_head in r.stdout, r.stdout[-4000:]
         assert landed_p2 in r.stdout, r.stdout[-4000:]
         assert "DO NOT RE-RUN" in r.stdout
+
+    def test_a_noisy_git_does_not_raise_a_false_alarm(self, armed: dict) -> None:
+        """The alarm reads stdout only, and this is why.
+
+        `git rev-parse` can print `warning:` lines on stderr for reasons that
+        have nothing to do with the merge — an unreadable global config, a
+        deprecation. Capturing them alongside the answer puts them into the
+        parsed line count, and an ordinary finish then exits 15. An alarm that
+        fires on clean runs is worse than none, because every caller learns to
+        ignore it; this is the one direction the fail-closed rule must NOT be
+        applied to, and the rc is what still separates error from empty.
+        """
+        wt = self._branch(armed)
+        marker = self._shim(armed, _SHIM_NOISY_STDERR)
+
+        r = self._finish(armed)
+
+        assert marker.exists(), "the shim never fired — this test proved nothing"
+        assert r.returncode == 0, (r.returncode, r.stdout[-4000:], r.stderr[-4000:])
+        assert "POST-MERGE ALARM" not in r.stdout, r.stdout[-4000:]
+        assert not wt.exists()
 
     def test_a_git_that_cannot_answer_is_not_read_as_clean(self, armed: dict) -> None:
         """Fail-closed. "Could not look" and "nothing wrong" must be distinct.

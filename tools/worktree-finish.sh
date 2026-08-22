@@ -487,13 +487,25 @@ fi
 # distinguished, because collapsing those is the defect this repository has now
 # paid for at the bootstrap gate, at `MERGE_HEAD` and at
 # `_guard_conflict_markers`.
+#
+# STDOUT ONLY. Folding stderr in would put any `warning:` git felt like emitting
+# into the line count and turn an ordinary finish into a false alarm — a gate
+# firing because it could not parse is the mirror of one reporting clean
+# because it could not look. The rc still distinguishes error from empty, and
+# the block prints the command so the operator can see git's own words.
+#
+# `mapfile` rather than `while read`: `<<<` always terminates its line, but
+# `read` returns non-zero on an unterminated last line regardless — the exact
+# hazard that made `MERGE_HEAD` readable as "nothing to check" in the
+# pre-commit hook. The count below is this loop's equivalent of that fix.
 _ALARM_WHY=""
 _ALARM_TIP=""
 _ALARM_P1=""
 _ALARM_P2=""
 _ALARM_RC=0
+_ALARM_CMD="git -C ${REPO_ROOT} rev-parse 'main^{commit}' 'main^1^{commit}' 'main^2^{commit}'"
 _ALARM_RAW=$(git -C "${REPO_ROOT}" rev-parse \
-    "main^{commit}" "main^1^{commit}" "main^2^{commit}" 2>&1) || _ALARM_RC=$?
+    "main^{commit}" "main^1^{commit}" "main^2^{commit}" 2>/dev/null) || _ALARM_RC=$?
 if (( _ALARM_RC != 0 )); then
     _ALARM_WHY="unreadable"
 else
@@ -613,7 +625,9 @@ if [[ -n "${_ALARM_WHY}" ]]; then
             echo "  Could not read the parents of main after the merge, so this run"
             echo "  CANNOT say the tested state is the landed state. This is"
             echo "  'could not look', not 'clean'."
-            echo "      git rev-parse: rc=${_ALARM_RC}  output: ${_ALARM_RAW//$'\n'/ | }"
+            echo "      rc=${_ALARM_RC}, stdout: ${_ALARM_RAW//$'\n'/ | }"
+            echo "      run it yourself to see git's own words:"
+            echo "      ${_ALARM_CMD}"
             ;;
         first-parent)
             echo "  main's FIRST PARENT is not the main this branch was tested"
