@@ -24,6 +24,16 @@
 #                                    12  enforcement not armed in this clone
 #                                    13  main or branch moved after testing
 #                                    14  worktree interpreter != main's
+#
+# 15 shares this NUMBER SPACE and is deliberately absent from the table above,
+# because it is not a guard: nothing in this file returns it and no guard can.
+# It is worktree-finish.sh's post-merge alarm (CB-121), and its meaning is the
+# opposite of every code listed here — THE MERGE STEP ALREADY RAN, and the
+# "tested state == landed state" premise could not be confirmed afterwards.
+# Note the precise wording: it does NOT promise a merge commit exists, because
+# one of the states it reports is a `git merge` that had nothing left to do.
+# Recorded here only so the next guard added does not reuse the number; a guard
+# returning 15 would make two incompatible meanings share one code.
 
 # ---------------------------------------------------------------------------
 # Repo root, resolved so every script works from any cwd, including from inside

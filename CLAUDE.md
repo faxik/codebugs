@@ -28,7 +28,7 @@ Prose cannot enforce prose. That is CB-50, and the harness below is its fix.
 | An in-progress cherry-pick/revert marker no longer exempts a commit | pre-commit hook | exit 1 |
 | Integration never fast-forwards | `--no-ff` + `git config merge.ff false` | — |
 | One integration at a time | `flock` on `.worktrees/.integrate.lock` | exit 1 |
-| The tested state is the landed state | in-lock SHA re-check | exit 13 |
+| The tested state still matched at the moment it was re-checked | in-lock SHA re-check | exit 13 |
 | The suite ran under the interpreter main has | `_guard_interpreter_matches_main` | exit 14 |
 | This clone is actually armed | `_guard_enforcement_armed` | exit 12 |
 | Main has main checked out, and is clean | `_guard_workspace_on_main`, `_guard_main_clean` | exit 8, 11 |
@@ -41,6 +41,71 @@ table's own title. It asserts that main's first-parent line carries nothing but 
 mechanically enforced"* with a *"refuses with"* column was a category error inside the very table
 meant to be precise (round-3 review). It is an **alarm**. The gate is branch protection on
 `origin/main`; see the CI limits below.
+
+**The re-check row was NARROWED, and what closes the remaining gap is a second alarm — not a gate
+(CB-121).** That row used to read *"The tested state is the landed state"*, and it overclaimed: the
+in-lock re-check is a **check-then-act**. It proves main and the branch were still the tested ones
+**at the moment of the check**; two statements later `git merge "${BRANCH}"` resolves both refs
+again, by NAME, for itself. Nothing carries a verified SHA into the merge and porcelain git has no
+`--expect-old-oid`, so a window sits between them. The flock serializes **finishes against each
+other** and nothing else, and the traffic that walks into that window is **ordinary sanctioned
+work**: level-(2) sessions commit plan notes to main continuously, and since 2026-08-22
+`tools/cascade-mint.sh` does it automatically while holding a *different* lock. The narrowed row is
+still a checkable claim — the state matched under the lock, and a mismatch there really does refuse
+with exit 13 before anything lands. It simply no longer promises the interval it cannot cover.
+
+The gap is covered by a **post-merge alarm**, and it is an alarm for the same reason
+`main-invariants.yml` is: by the time it can look, **the merge step has already run**, so it cannot
+refuse anything and it gets no row in the table above. Immediately after the integration merge and
+**before** `flock -u 9` — after the unlock another finish could move main, and the alarm would start
+lying in the way it exists to catch — `worktree-finish.sh` asks whether the merge that just ran has
+`TESTED_MAIN` as its first parent and `TESTED_HEAD` as its second. Both parents, because what lands
+is a merge and checking one of them while asserting the premise is this section's own recurring
+defect. It then lets the cleanup finish (worktree removal, claim release) and speaks at the very
+end, with a loud block and `exit 15`. That code is new and means *the merge step already ran and the
+premise is unconfirmed*; it is deliberately not `exit 13`, which means *nothing landed, re-run*, and
+the block says in words not to re-run — a second finish after a landed merge is a worse outcome than
+the defect being reported.
+
+**Four details are load-bearing, and every one of them is a cross-model review finding rather than
+foresight.** They are worth reading before touching this, because each is a way the alarm can lie.
+
+1. **Identity, not shape.** The alarm must first know that main's tip *is the merge this run made*,
+   and a two-parent tip does not establish that: an off-harness merge landing on main in the moment
+   after ours has two parents too, and its first parent is *our* merge — so its parents would be
+   reported as ours, with a confident and wrong story. `ORIG_HEAD` supplies identity: `git merge`
+   sets it to the HEAD it merged into, which **is** the merge's first parent by construction. So the
+   tip is ours exactly when it has two parents and its first parent is `ORIG_HEAD`. Anything else is
+   one verdict, `tip-not-ours`, which says what it does not know instead of inventing a cause — and
+   that single verdict covers a stranger's commit or merge, an *Already up to date* merge (which
+   sets `ORIG_HEAD` to the **current** tip, so it cannot masquerade as a match), an octopus and a
+   root commit. Both git behaviours are pinned as premise tests.
+2. **`tip-not-ours` is usually benign, and the text says so.** A plan note landing on main in the
+   moment after a perfectly correct merge produces it. The block therefore tells the operator to
+   read the log rather than to fix anything, and only the two real mismatches carry the *fix it
+   forward on a new branch* advice.
+3. **The block is delivered from an `EXIT` trap armed the instant the merge returns**, not from a
+   trailing `if`. Under `set -euo pipefail` any failure in the cleanup — its own final
+   `git log … | sed`, or any statement a later edit inserts — would otherwise kill the script
+   between detecting the condition and reporting it, presenting a landed merge as an ordinary
+   failure. That is CB-41's rule again: make the bad state unrepresentable rather than
+   re-establish discipline at each insertion point. The initial verdict is the pessimistic `unreadable`, so a
+   signal arriving before the verdict is computed still reports *could not look*. The residual is
+   stated rather than claimed away: the interval between `git merge` returning and `trap` executing
+   is two assignments wide, and nothing in the script can close that.
+4. **The reads are `--no-replace-objects` and stdout-only.** Replace refs and `info/grafts` make
+   `^@` answer with parents that are not in the commit's own header, so without the flag the
+   "an object's parents are immutable" argument would be true of the object and false of the answer.
+   Stdout-only is the one place fail-closed is deliberately **not** applied — folding stderr in
+   would make any `warning:` git emitted unparseable and fire the alarm on an honest finish, and an
+   alarm that cries wolf is one nobody reads; the rc still separates an error from an empty answer.
+   Every answer is shape-checked as well, because `rev-parse` echoes an argument it does not
+   recognise back at you and exits 0.
+
+Rejected forms, with their reasons: making the merge name the pinned `TESTED_HEAD` closes only the
+branch half and pays a false refusal, since `pre-merge-commit` refuses a head with no ref; and a real
+CAS needs `git update-ref` over `commit-tree`, which this repo's own CI alarm treats as a
+hook-bypassing shape.
 
 `merge.ff=false` is the one no hook could replace: **git fires no hook on a fast-forward at all**,
 because no commit is created, so nothing can catch it after the fact. Verified by replaying the
