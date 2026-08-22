@@ -1886,11 +1886,36 @@ class TestGuardsAreActuallyInvoked:
         """
         src = self.FINISH.read_text()
         call_at = src.index("_guard_interpreter_matches_main ")
-        assert src.index("Forward-merging main into worktree") < call_at
+        # Anchored on the MERGE, not on the echo that announces it. Cross-model
+        # review moved the call between `echo "[5/7] Forward-merging…"` and the
+        # `git merge` itself and this test stayed green — "after the text that
+        # says a merge is coming" is not "after the merge".
+        assert src.index('git -C "${WORKTREE_PATH}" merge "${CURRENT_MAIN}"') < call_at
         # Anchored on the emitted phase line, not the bare string: the comment
         # explaining this ordering names [6/7] too, and matching that would
         # make the assertion pass on the comment rather than on the code.
         assert call_at < src.index('echo "[6/7]')
+
+    def test_the_interpreter_check_is_re_asserted_inside_the_lock(self) -> None:
+        """A pre-check is not an invariant at landing time (cross-model review).
+
+        main's `.venv` is gitignored, so `_guard_main_clean` cannot see it move
+        and the in-lock SHA re-checks are about commits. A
+        `UV_PYTHON=… uv sync` in main during the ~90s suite run would otherwise
+        land work tested on one interpreter onto a main that now has another —
+        the very skew the TESTED_MAIN re-check exists for, arriving through the
+        one piece of state neither of them watches. So it gets the same answer
+        those two got: assert it again where nothing can intervene.
+        """
+        src = self.FINISH.read_text()
+        calls = [i for i in range(len(src)) if src.startswith("_guard_interpreter_matches_main ", i)]
+        assert len(calls) == 2, f"expected a pre-check and an in-lock re-check, found {len(calls)}"
+        lock_at = src.index("exec 9>")
+        # The integration merge itself, not the header comment that mentions
+        # `--no-ff` 400 lines earlier.
+        merge_at = src.index('git -C "${REPO_ROOT}" merge "${BRANCH}" --no-ff')
+        assert calls[0] < lock_at, "the cheap pre-check must run before the lock is waited on"
+        assert lock_at < calls[1] < merge_at, "the re-check must sit inside the lock, before the merge"
 
     def test_skip_checks_cannot_disable_the_interpreter_guard(self) -> None:
         """`--skip-checks` skips ruff and pytest, never a safety guard.
@@ -3599,6 +3624,34 @@ class TestInterpreterMatchesMain:
     exact defect the card is about.
     """
 
+    @staticmethod
+    def _env(**delta: str) -> dict:
+        """The environment these cases run in: the PIN regime, explicitly.
+
+        `UV_PYTHON` is stripped by default. It outranks `.python-version`, and
+        since the guard now REFUSES when anything outranks the pin, a developer
+        with it exported would turn every case in this class red for a reason
+        none of them is about. The two cases that ARE about an override set it
+        back deliberately.
+        """
+        env = {k: v for k, v in os.environ.items() if k != "UV_PYTHON"}
+        env.update(delta)
+        return env
+
+    @classmethod
+    def _guard(cls, wt: Path, main_root: Path, **delta: str) -> subprocess.CompletedProcess[str]:
+        script = (
+            f'source "{GUARDS}"\n'
+            f"_guard_interpreter_matches_main '{wt}' '{main_root}'\n"
+        )
+        return subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+            env=cls._env(**delta),
+        )
+
     @pytest.fixture
     def trees(self, tmp_path: Path) -> dict:
         """A real uv project standing in for the worktree, plus a bare main."""
@@ -3613,6 +3666,7 @@ class TestInterpreterMatchesMain:
             capture_output=True,
             text=True,
             check=True,
+            env=self._env(),
         ).stdout.strip()
         assert re.fullmatch(r"\d+\.\d+\.\d+", got), got
         return {"wt": wt, "main": main_root, "version": got, "pin": pin}
@@ -3634,25 +3688,16 @@ class TestInterpreterMatchesMain:
         divergence with `UV_PYTHON=3.13.3` turned this test red, which was the
         test being wrong about its own subject rather than the pin failing.
         """
-        env = {k: v for k, v in os.environ.items() if k != "UV_PYTHON"}
-        got = subprocess.run(
-            ["uv", "run", "--extra", "dev", "python", "-c", _PROBE],
-            cwd=str(trees["wt"]),
-            capture_output=True,
-            text=True,
-            check=True,
-            env=env,
-        ).stdout.strip()
-        assert got == trees["pin"]
+        assert trees["version"] == trees["pin"]
 
     def test_agreeing_interpreters_pass(self, trees: dict) -> None:
         _fake_main_interpreter(trees["main"], trees["version"])
-        r = run_guard("_guard_interpreter_matches_main", str(trees["wt"]), str(trees["main"]))
+        r = self._guard(trees["wt"], trees["main"])
         assert r.returncode == 0, r.stderr
 
     def test_divergent_interpreters_refuse(self, trees: dict) -> None:
         _fake_main_interpreter(trees["main"], "3.0.1")
-        r = run_guard("_guard_interpreter_matches_main", str(trees["wt"]), str(trees["main"]))
+        r = self._guard(trees["wt"], trees["main"])
         assert r.returncode == 14, (r.returncode, r.stderr)
 
     def test_the_refusal_names_both_versions_and_a_repair_command(self, trees: dict) -> None:
@@ -3665,7 +3710,7 @@ class TestInterpreterMatchesMain:
         (measured), so one command covers both.
         """
         _fake_main_interpreter(trees["main"], "3.0.1")
-        r = run_guard("_guard_interpreter_matches_main", str(trees["wt"]), str(trees["main"]))
+        r = self._guard(trees["wt"], trees["main"])
         assert trees["version"] in r.stderr
         assert "3.0.1" in r.stderr
         assert "UV_PYTHON" in r.stderr
@@ -3673,18 +3718,18 @@ class TestInterpreterMatchesMain:
 
     def test_main_with_no_venv_at_all_refuses(self, trees: dict) -> None:
         """Fail-closed: no interpreter to compare is not 'the same interpreter'."""
-        r = run_guard("_guard_interpreter_matches_main", str(trees["wt"]), str(trees["main"]))
+        r = self._guard(trees["wt"], trees["main"])
         assert r.returncode == 14, (r.returncode, r.stderr)
 
     def test_main_interpreter_failing_refuses(self, trees: dict) -> None:
         _fake_main_interpreter(trees["main"], trees["version"], rc=3)
-        r = run_guard("_guard_interpreter_matches_main", str(trees["wt"]), str(trees["main"]))
+        r = self._guard(trees["wt"], trees["main"])
         assert r.returncode == 14, (r.returncode, r.stderr)
 
     def test_main_interpreter_printing_nothing_refuses(self, trees: dict) -> None:
         """rc 0 and an empty answer is the quietest form of 'could not look'."""
         _fake_main_interpreter(trees["main"], None)
-        r = run_guard("_guard_interpreter_matches_main", str(trees["wt"]), str(trees["main"]))
+        r = self._guard(trees["wt"], trees["main"])
         assert r.returncode == 14, (r.returncode, r.stderr)
 
     def test_main_interpreter_printing_garbage_refuses(self, trees: dict) -> None:
@@ -3693,7 +3738,7 @@ class TestInterpreterMatchesMain:
         Two trees both answering `banana` would otherwise 'agree'.
         """
         _fake_main_interpreter(trees["main"], "banana")
-        r = run_guard("_guard_interpreter_matches_main", str(trees["wt"]), str(trees["main"]))
+        r = self._guard(trees["wt"], trees["main"])
         assert r.returncode == 14, (r.returncode, r.stderr)
 
     def test_worktree_without_its_own_project_file_refuses(self, tmp_path: Path) -> None:
@@ -3715,7 +3760,7 @@ class TestInterpreterMatchesMain:
         main_root = tmp_path / "main"
         main_root.mkdir()
         _fake_main_interpreter(main_root, "3.14.4")
-        r = run_guard("_guard_interpreter_matches_main", str(wt), str(main_root))
+        r = self._guard(wt, main_root)
         assert r.returncode == 14, (r.returncode, r.stderr)
         assert "pyproject.toml" in r.stderr
 
@@ -3726,17 +3771,7 @@ class TestInterpreterMatchesMain:
         working while removing exactly the binary under test.
         """
         _fake_main_interpreter(trees["main"], trees["version"])
-        script = (
-            f'source "{GUARDS}"\n'
-            f"_guard_interpreter_matches_main '{trees['wt']}' '{trees['main']}'\n"
-        )
-        r = subprocess.run(
-            ["bash", "-c", script],
-            capture_output=True,
-            text=True,
-            cwd=str(REPO_ROOT),
-            env={**os.environ, "PATH": "/usr/bin:/bin"},
-        )
+        r = self._guard(trees["wt"], trees["main"], PATH="/usr/bin:/bin")
         assert r.returncode == 14, (r.returncode, r.stderr)
 
     def test_two_undeterminable_sides_refuse_rather_than_agree(self, trees: dict) -> None:
@@ -3756,17 +3791,7 @@ class TestInterpreterMatchesMain:
         fix. Not contrived either: a machine without uv and a clone that has
         never been synced is a fresh setup.
         """
-        script = (
-            f'source "{GUARDS}"\n'
-            f"_guard_interpreter_matches_main '{trees['wt']}' '{trees['main']}'\n"
-        )
-        r = subprocess.run(
-            ["bash", "-c", script],
-            capture_output=True,
-            text=True,
-            cwd=str(REPO_ROOT),
-            env={**os.environ, "PATH": "/usr/bin:/bin"},
-        )
+        r = self._guard(trees["wt"], trees["main"], PATH="/usr/bin:/bin")
         assert r.returncode == 14, (r.returncode, r.stderr)
 
     def test_a_tree_with_no_pin_file_refuses(self, tmp_path: Path) -> None:
@@ -3785,11 +3810,75 @@ class TestInterpreterMatchesMain:
             capture_output=True,
             text=True,
             check=True,
+            env=self._env(),
         ).stdout.strip()
         _fake_main_interpreter(main_root, got)
-        r = run_guard("_guard_interpreter_matches_main", str(wt), str(main_root))
+        r = self._guard(wt, main_root)
         assert r.returncode == 14, (r.returncode, r.stderr)
         assert ".python-version" in r.stderr
+
+    def test_an_override_that_outranks_the_pin_refuses(self, trees: dict) -> None:
+        """The HIGH finding of the cross-model review, 2026-08-22.
+
+        `UV_PYTHON` beats `.python-version`. With it exported, BOTH probes
+        answer with the override, so they agree and a first draft of this guard
+        passed — while the branch was landing a different pin that main would
+        pick up on its next `uv run`. CB-135 reconstituted through the one
+        mechanism this change documents, invisible to a check that only asked
+        whether the pin file EXISTS.
+
+        The main side is stubbed to the override's version deliberately: this
+        must refuse even when the two interpreters genuinely DO match, because
+        what is wrong is that the pin did not decide.
+        """
+        other = "3.13.3" if not trees["pin"].startswith("3.13") else "3.12.10"
+        r = self._guard(trees["wt"], trees["main"], UV_PYTHON=other)
+        assert r.returncode == 14, (r.returncode, r.stderr)
+        assert "UV_PYTHON" in r.stderr
+        # And it is not merely the missing .venv talking.
+        _fake_main_interpreter(trees["main"], other)
+        r = self._guard(trees["wt"], trees["main"], UV_PYTHON=other)
+        assert r.returncode == 14, (r.returncode, r.stderr)
+        assert trees["pin"] in r.stderr
+
+    def test_a_pin_this_guard_cannot_compare_refuses(self, tmp_path: Path) -> None:
+        """Fail-closed on a pin that is not a plain version.
+
+        `.python-version` also accepts implementation and platform requests
+        (`pypy@3.11`, a full `cpython-…-linux-…` triple). This guard compares
+        version strings, so it says so rather than guessing what such a request
+        resolves to.
+        """
+        wt = tmp_path / "wt"
+        _uv_project(wt, None)
+        (wt / ".python-version").write_text("pypy@3.11\n")
+        main_root = tmp_path / "main"
+        main_root.mkdir()
+        _fake_main_interpreter(main_root, "3.14.4")
+        r = self._guard(wt, main_root)
+        assert r.returncode == 14, (r.returncode, r.stderr)
+        assert "plain CPython version" in r.stderr
+
+    def test_a_shared_venv_refuses_instead_of_agreeing_with_itself(
+        self, trees: dict, tmp_path: Path
+    ) -> None:
+        """Cross-model review, 2026-08-22.
+
+        Point main's `.venv` at the worktree's and the two sides of the
+        comparison become one environment — it can only ever agree, and the
+        worktree removal at the end of the finish would then leave main's link
+        dangling. Same can-only-agree shape as the walk-up case above.
+
+        The DIRECTORIES are compared, never the interpreters they resolve to:
+        two honest venvs built from one system python both resolve to a single
+        /usr/bin/pythonX.Y, so an interpreter-level test would refuse every
+        ordinary case. `test_agreeing_interpreters_pass` is what holds that
+        line.
+        """
+        (trees["main"] / ".venv").symlink_to(trees["wt"] / ".venv")
+        r = self._guard(trees["wt"], trees["main"])
+        assert r.returncode == 14, (r.returncode, r.stderr)
+        assert "same directory" in r.stderr
 
     def test_the_repo_carries_the_pin(self) -> None:
         """The file this whole unit is about, asserted to exist and be a version."""

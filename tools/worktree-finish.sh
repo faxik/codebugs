@@ -364,6 +364,16 @@ echo "  ✓ Lock acquired"
 # the gates above ran BEFORE the lock existed.
 _guard_workspace_on_main "${REPO_ROOT}" || exit $?
 _guard_main_clean "${REPO_ROOT}" "${WORKTREE_PATH}" "${CURRENT_MAIN}" || exit $?
+# The interpreter check above was a PRE-check, and a pre-check is not an
+# invariant at landing time (cross-model review, 2026-08-22). main's `.venv` is
+# gitignored, so `_guard_main_clean` cannot see it change and the in-lock SHA
+# re-checks are about commits; a `UV_PYTHON=… uv sync` in main during the ~90s
+# suite run would land work tested on one interpreter onto a main that now has
+# another. That is the same shape the TESTED_MAIN skew guard exists for, so it
+# gets the same answer: re-assert it here, where nothing else can intervene
+# before the merge. Re-probing costs ~100ms and cannot drift from the value it
+# is checking, which is why this is a second CALL rather than a stored sample.
+_guard_interpreter_matches_main "${WORKTREE_PATH}" "${REPO_ROOT}" || exit $?
 CURRENT_MAIN=$(git -C "${REPO_ROOT}" rev-parse main)
 
 # THE LOCK ONLY SERIALIZES THE MERGE, NOT THE TESTING — so verify the tested

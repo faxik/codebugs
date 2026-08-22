@@ -381,16 +381,27 @@ this paragraph overclaimed.**
 
 **`.python-version` is the SINGLE SOURCE for the interpreter — of main, of every worktree and of
 CI — and `_guard_interpreter_matches_main` refuses to land work the two of them did not agree on
-(CB-135).** The gate runs the suite in the WORKTREE and the work lands in MAIN; those are two
+(CB-135).** "Single source" is a claim about what DECIDED, not merely about what is written down,
+and it needs that reading because **`UV_PYTHON` and `--python` outrank the file** (measured). So the
+guard does not stop at "the pin exists": it requires the interpreter uv actually chose to be the one
+the pin asked for, and refuses when something outranked it. Without that clause an exported
+`UV_PYTHON` made BOTH trees answer with the override, they agreed, the gate passed, and the branch
+landed a different pin that main would adopt on its next `uv run` — CB-135 rebuilt out of the very
+mechanism this section documents. Cross-model review found it; the first draft had only the
+existence check. The gate runs the suite in the WORKTREE and the work lands in MAIN; those are two
 statements, and on 2026-08-22 they came apart. A manager reported "1943 passed" from a worktree on
 3.13.3 while the same suite on the landed main, under the documented command, gave "1 failed, 1942
 passed" on 3.14.4. The red was on main BEFORE the merge and no finish could ever have seen it. The
 rule immediately above — never validate a worktree's changes from main, because `pythonpath=["src"]`
 resolves against the checkout you run in — is correct for its own reason and is exactly what
 introduced a second, unnamed variable: **which python**. Before the pin there were three untracked
-trees, `uv.lock` having already fixed everything else: main took the system interpreter its `.venv`
-was built with, a fresh worktree took uv's default (the newest uv-MANAGED install, which is a
-different thing), and `.github/workflows/ci.yml` named no version at all.
+trees — main took the system interpreter its `.venv` was built with, a fresh worktree took uv's
+default (the newest uv-MANAGED install, which is a different thing), and
+`.github/workflows/ci.yml` named no version at all. `uv.lock` had already fixed the *dependency*
+versions, which is what made the interpreter the conspicuous remaining one; it is **not** true that
+everything else is nailed down, and an earlier draft of this sentence said so. uv's own version,
+the platform, and the BUILD of a given CPython all still vary, and the guard below compares a
+version STRING, so two builds of 3.14.4 read as identical to it.
 
 **The pin is `3.14.4`, full patch, and both halves of that were chosen rather than defaulted.**
 *Which version:* it is what main already runs, so landing the pin moved no environment and opened no
@@ -444,7 +455,25 @@ which is a gate that cannot fire, in the change whose subject is precisely that.
 so a refusal costs seconds instead of the ~70s suite run it is declaring meaningless. It is outside
 the `--skip-checks` branch: that flag skips ruff and pytest, which are CHECKS, and this is what
 decides whether running them would have meant anything. Both bounds are pinned structurally and the
-`--skip-checks` half behaviourally as well, by a class that runs the script end to end.
+`--skip-checks` half behaviourally as well, by a class that runs the script end to end. **Anchor
+that structural test on the `git merge` and not on the echo announcing it** — review moved the call
+between the two and the first version stayed green, because "after the text that says a merge is
+coming" is not "after the merge".
+
+**And it is asserted a SECOND time, inside the lock, because a pre-check is not an invariant at
+landing time.** main's `.venv` is gitignored, so `_guard_main_clean` cannot see it move and the
+in-lock SHA re-checks are about commits: a `UV_PYTHON=… uv sync` in main during the ~90s suite run
+would land work tested on one interpreter onto a main that now has another. That is exactly the skew
+`TESTED_MAIN` exists for, reaching main through the one piece of state neither guard watches, so it
+gets the same answer — re-assert where nothing can intervene before the merge. It is a second CALL
+rather than a stored sample (~100ms) so it cannot drift from the thing it is checking. Also found by
+cross-model review.
+
+**A shared `.venv` is refused, and the comparison is between DIRECTORIES.** Point main's `.venv` at a
+worktree's and the two sides become one environment: it can only agree, and the worktree removal at
+the end of the finish then leaves main's link dangling. Compare the resolved venv *directories*,
+never the interpreters they resolve to — two honest venvs built from one system python both resolve
+to a single `/usr/bin/pythonX.Y`, so an interpreter-level test would refuse every ordinary case.
 
 **Bumping the pin is a two-step procedure, and the guard makes the order mandatory.** A branch that
 changes `.python-version` is refused until main is brought to the NEW interpreter first —
@@ -453,12 +482,20 @@ is not enough there: it re-reads main's OLD pin and puts the old interpreter str
 refusal prints that command with both versions filled in, because a gate with no way out is a wall
 rather than a diagnostic.
 
+**The usual bootstrap wall applies, and it is milder than CB-57's.** `worktree-finish.sh` runs from
+the REPO ROOT, so the script that lands this change is MAIN's copy — which does not yet contain the
+call. The commit introducing the guard is therefore not gated by it; the first finish AFTER it lands
+is the first gated one. Nothing special is required (unlike CB-57, no re-run of `install-hooks.sh`),
+because this guard is in the script rather than in an installed hook.
+
 **What this does NOT do.** It is per-clone and client-side like the rest of the harness — it says
 nothing about the interpreter any other machine or CI actually used, only that these two trees
 agree. It compares a version string, so two builds of the same version with different compile-time
-options read as identical. And a `.python-version` naming a build this machine cannot obtain fails
-at `uv run`, which the guard reports as undeterminable — correctly, but the message will be uv's
-rather than a diagnosis of the pin.
+options read as identical. A `.python-version` naming a build this machine cannot obtain fails at
+`uv run`, which the guard reports as undeterminable — correctly, but the message will be uv's rather
+than a diagnosis of the pin. And the pin is required to be a plain `X`, `X.Y` or `X.Y.Z`: uv also
+accepts implementation and platform requests (`pypy@3.11`, a full `cpython-…-linux-…` triple), and
+rather than guess what one of those resolves to the guard refuses and says so.
 
 - **Create:** `tools/worktree-setup.sh <type>/<slug> [base]`, which validates the name, refuses a
   card already carried by another branch, **claims every card the branch names through the claims
