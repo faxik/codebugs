@@ -89,7 +89,13 @@ class TestAddFinding:
         assert result["source"] == "human"
         assert result["tags"] == []
         # The first add of a category in an empty tracker MINTS it (CB-60).
-        assert result["meta"] == {"category_minted": True}
+        # `loc` is the capture resolver's record and is ALWAYS present (BT-7 Р7:
+        # a refusal is persisted as an object, never as an absent key) — it is
+        # excluded rather than relaxing the equality, so this still pins that
+        # nothing ELSE appears in meta.
+        assert {k: v for k, v in result["meta"].items() if k != "loc"} == {
+            "category_minted": True
+        }
 
     def test_add_with_meta_and_tags(self, conn):
         result = findings.add_finding(
@@ -1082,7 +1088,11 @@ class TestGetFinding:
         assert result["id"] == added["id"]
         assert result["description"] == "boom"
         assert result["tags"] == ["a", "b"]
-        assert result["meta"] == {"k": "v", "category_minted": True}
+        # `loc` excluded, not relaxed away — see TestAddFinding::test_add_basic.
+        assert {k: v for k, v in result["meta"].items() if k != "loc"} == {
+            "k": "v",
+            "category_minted": True,
+        }
 
     def test_get_missing_raises_keyerror(self, conn):
         with pytest.raises(KeyError, match="CB-MISSING"):
