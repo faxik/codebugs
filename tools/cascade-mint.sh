@@ -368,13 +368,7 @@ if [[ -n "${CASCADE_MINT_TEST_DELAY:-}" ]]; then
     sleep "${CASCADE_MINT_TEST_DELAY}"
 fi
 
-# Keep the append a single line by making sure the file ends with a newline
-# first; a registry whose last line was truncated must not absorb the new id.
-if [[ -s "${REGISTRY}" ]] && [[ "$(tail -c 1 "${REGISTRY}" | wc -l)" -eq 0 ]]; then
-    printf '\n' >> "${REGISTRY}"
-fi
-
-# ARM THE ROLLBACK BEFORE THE WRITE, not after the commit fails. A refused hook
+# ARM THE ROLLBACK BEFORE THE FIRST WRITE, not after the commit fails. A refused hook
 # is only one way to die between the append and the commit; a Ctrl-C or a TERM
 # is another, and leaving the line behind poisons the NEXT mint (which then
 # refuses on a dirty registry, naming a change nobody made). SIGKILL cannot be
@@ -400,8 +394,19 @@ _rollback_if_uncommitted() {
 }
 trap _rollback_if_uncommitted EXIT INT TERM
 
-printf -- '- %s — %s\n' "${NEXT_ID}" "${TEXT}" >> "${REGISTRY}"
+# From here the registry may be written, so the rollback is live BEFORE the
+# first byte — including the newline normalisation below, which is a write to
+# the registry like any other. An earlier draft armed the trap after it, so a
+# death in between left a one-byte change nobody could explain.
 APPEND_DONE=1
+
+# Keep the append a single line by making sure the file ends with a newline
+# first; a registry whose last line was truncated must not absorb the new id.
+if [[ -s "${REGISTRY}" ]] && [[ "$(tail -c 1 "${REGISTRY}" | wc -l)" -eq 0 ]]; then
+    printf '\n' >> "${REGISTRY}"
+fi
+
+printf -- '- %s — %s\n' "${NEXT_ID}" "${TEXT}" >> "${REGISTRY}"
 
 # ONLY THE REGISTRY. A pathspec commit builds a temporary index from HEAD plus
 # these paths, so a parallel session's staged files are neither committed nor
