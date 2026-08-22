@@ -246,7 +246,7 @@ exemption already waves the whole staged set through on that path, which is the 
 spot the CI-limits list records for `main-invariants.yml`. The gate is an accident-stopper, and a
 merge state is not something one enters by accident.
 
-**`_guard_enforcement_armed` demands this hook too, since T-21 — and the paragraph this replaces
+**`_guard_enforcement_armed` demands this hook too, since T-23 — and the paragraph this replaces
 said the opposite, for a reason that was true at the time.** The guard reads `REPO_ROOT/tools/<hook>`
 from the PRIMARY checkout and gates on whether the path has history, so adding the clause in the same
 change that introduced the source would have made that change unlandable by the harness it extends —
@@ -256,7 +256,7 @@ installer alone, and the guard followed once `tools/commit-msg-hook.sh` had hist
 condition is the SAME monotonic one `pre-merge-commit` uses — extracted into `_hook_source_known` and
 called once per gated hook rather than copied, because a four-review-round condition in two places is
 two rules one edit apart; `test_bootstrap_condition_is_one_function_called_per_gated_hook` counts the
-call sites. A clone armed before T-21 is therefore refused at its next finish until
+call sites. A clone armed before T-23 is therefore refused at its next finish until
 `tools/install-hooks.sh` is re-run, which is correct: it really is missing a third of its enforcement.
 **What stays open:** the gate is invisible to the CI alarm, which reads paths and not messages, and
 to `--amend`: an amend that changes only the message stages nothing against HEAD, so a note already
@@ -279,7 +279,7 @@ CLIENT-SIDE and PER-CLONE: hooks and git config cannot be committed. A fresh clo
 until `tools/install-hooks.sh` is run — which is why `_guard_enforcement_armed` refuses to integrate
 from an unarmed clone, the one moment being unarmed can cost anything. **It checks all three hooks**
 — pre-commit unconditionally, pre-merge-commit and commit-msg once their source has history — so a
-clone armed before CB-57 or before T-21 is refused until `install-hooks.sh` is re-run. Even armed, all of
+clone armed before CB-57 or before T-23 is refused until `install-hooks.sh` is re-run. Even armed, all of
 these move or publish `main` without passing any hook: `git rebase`, `git am`, `git reset --hard`,
 `git push`, `core.hooksPath`, **`git subtree add`** (which commits via `commit-tree` plumbing — added
 to this list because round-4 review landed content on main with it and the list did not mention it),
@@ -342,19 +342,29 @@ this paragraph overclaimed.**
    CB-59 is closed at that scope, not at this paragraph's original four items. It remains repository
    configuration, not committed state, so nothing in this tree can verify or restore it.
 
-   **Two residuals, measured rather than assumed, because a gate described better than it behaves is
-   precisely what this list exists to prevent.** First: an **unarmed** clone can still push a
-   non-merge commit straight to `main`, since require-PR is off — `main-invariants.yml` stays the
-   alarm for that, not a gate. Second, and *not* recorded when the protection was enabled:
-   **`enforce_admins` is `false`**, so every rule above binds non-admin actors only, while the sole
-   account that pushes here is an admin. Measured, not inferred — `gh api
-   repos/faxik/codebugs/branches/main/protection` returns `"allow_force_pushes":{"enabled":false}`
-   and `"allow_deletions":{"enabled":false}` beside `"enforce_admins":{"enabled":false}`; `gh api
+   **One residual and one closed residual, each measured rather than assumed, because a gate
+   described better than it behaves is precisely what this list exists to prevent.** First, still
+   open: an **unarmed** clone can still push a non-merge commit straight to `main`, since require-PR
+   is off — `main-invariants.yml` stays the alarm for that, not a gate. Re-measured 2026-08-22: `gh
+   api repos/faxik/codebugs/branches/main/protection --jq keys` returns no
+   `required_pull_request_reviews` and no `required_status_checks` key, so that residual is
+   unchanged. Second, **closed by the owner on 2026-08-22**: this paragraph used to record
+   **`enforce_admins` is `false`** — measured 2026-08-21, and true then — so that every rule above
+   bound non-admin actors only, while the sole account that pushes here is an admin, and the
+   protection was "advisory against the owner's own credentials". Measured 2026-08-22 (UTC 09:24):
+   `gh api repos/faxik/codebugs/branches/main/protection` returns `"enforce_admins":{"enabled":true}`
+   beside `"allow_force_pushes":{"enabled":false}` and `"allow_deletions":{"enabled":false}`
+   (`required_linear_history`, `required_signatures`, `lock_branch` all `false`); `gh api
    repos/faxik/codebugs --jq .permissions.admin` returns `true`; and `gh api
-   repos/faxik/codebugs/rulesets` returns `[]`, so no ruleset supplies what the branch rule leaves
-   out. Against a leaked token or a future collaborator the protection is real; against the owner's
-   own credentials it is advisory. Turning `enforce_admins` on is the owner's call and is **not**
-   assumed here.
+   repos/faxik/codebugs/rulesets` returns `[]`, so the branch rule is the whole of the server-side
+   protection and it now binds the owner too. **The cost of that switch is accepted and named**: an
+   emergency rewrite of `origin/main`'s history — the one thing force-push protection exists to
+   refuse — now requires first turning `enforce_admins` off (or the protection itself), an explicit
+   repository-settings act rather than a `git push --force` typed in a hurry, which is exactly the
+   friction the setting buys. The 2026-08-21 measurement is not an error in this document's history;
+   it was the state on that date, and it is what CB-59 and the DIR-1 acceptance record (Э-9)
+   describe. This remains repository configuration, not committed state, so nothing in this tree can
+   verify or restore it — a later measurement, not this paragraph, is the authority.
 5. **`main-invariants.yml` deliberately does not subscribe to `pull_request`.** It used to, guarded
    by `if: github.event_name != 'pull_request'` — and a job skipped by an `if:` is reported as
    **passing** for required-status-check purposes, so marking it required would have produced a check

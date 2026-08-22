@@ -116,7 +116,7 @@ echo "    refuses a merge onto main from a branch with no sanctioned type"
 #    This one was armed by the installer ALONE at first: _guard_enforcement_armed
 #    could not demand it in the same change that introduced the source without
 #    making that change unlandable by the harness it extends — the CB-50/CB-57
-#    bootstrap for a third time. Since T-21 the guard demands it too, under the
+#    bootstrap for a third time. Since T-23 the guard demands it too, under the
 #    same monotonic condition as [2/4], so a clone that never re-ran this script
 #    is refused at its next finish instead of silently lacking a third hook.
 #

@@ -593,7 +593,7 @@ class TestEnforcementArmed:
         assert result.returncode == 12
         assert "pre-merge-commit" in result.stderr
 
-    # -- the commit-msg third (T-21) ---------------------------------------
+    # -- the commit-msg third (T-23) ---------------------------------------
     #
     # The fixture repo has NO history of tools/commit-msg-hook.sh, so a gate
     # keyed on history alone would never fire here and every test below would
@@ -615,7 +615,7 @@ class TestEnforcementArmed:
     def test_all_three_hooks_armed_passes(self, repo: Path) -> None:
         """Pins behaviour the change PRESERVES: a fully armed clone is rc 0.
 
-        Green on both sides of T-21 by design — it exists so the refusing tests
+        Green on both sides of T-23 by design — it exists so the refusing tests
         below cannot be satisfied by a gate that refuses everything.
         """
         self._arm(repo)
@@ -624,7 +624,7 @@ class TestEnforcementArmed:
         assert run_guard("_guard_enforcement_armed", str(repo)).returncode == 0
 
     def test_commit_msg_hook_missing_is_refused_once_its_source_exists(self, repo: Path) -> None:
-        """The case a clone armed before T-21 is actually in.
+        """The case a clone armed before T-23 is actually in.
 
         pre-commit and pre-merge-commit installed, merge.ff set — and the
         naming gate is simply absent. CLAUDE.md used to record this as a
@@ -1482,7 +1482,7 @@ class TestHarnessIntegrity:
     def test_installer_arms_the_commit_msg_hook_too(self) -> None:
         """A third hook, and the installer is the only thing that INSTALLS it.
 
-        `_guard_enforcement_armed` now demands it too (T-21), but the guard only
+        `_guard_enforcement_armed` now demands it too (T-23), but the guard only
         refuses — it never installs. If the installer skipped this step every
         finish would be refused with no way to arm, which is the mirror image
         of the "described better than it behaves" failure this test was written

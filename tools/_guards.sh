@@ -529,7 +529,7 @@ _guard_enforcement_armed() {
     # demanding the hook unconditionally would make the commit introducing it
     # unlandable by the very harness it extends (CB-57, same shape as CB-50;
     # the commit-msg hook hit the identical wall and was left out of this guard
-    # until its source had history — T-21 closes that follow-up).
+    # until its source had history — T-23 closes that follow-up).
     #
     # The condition lives in ONE function, _hook_source_known, and is called
     # once per gated hook. Two copies of a four-review-round condition would be
