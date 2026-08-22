@@ -210,6 +210,7 @@ SERVER_NAMES = {
     "claims": "codeclaims",
     "similarity": "codesimilarity",
     "relations": "coderelations",
+    "grouping": "codegrouping",
     "all": "codebugs",
 }
 
