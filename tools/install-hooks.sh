@@ -117,7 +117,7 @@ echo "    refuses a merge onto main from a branch with no sanctioned type"
 #    could not demand it in the same change that introduced the source without
 #    making that change unlandable by the harness it extends — the CB-50/CB-57
 #    bootstrap for a third time. Since T-23 the guard demands it too, under the
-#    same monotonic condition as [2/4], so a clone that never re-ran this script
+#    same monotonic condition as [3/4], so a clone that never re-ran this script
 #    is refused at its next finish instead of silently lacking a third hook.
 #
 #    Same symlink discipline and the same reason as [2/4].

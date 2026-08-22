@@ -674,6 +674,27 @@ class TestEnforcementArmed:
         assert result.returncode == 12, "deleting the commit-msg source silently disarmed the check"
         assert "commit-msg" in result.stderr
 
+    def test_hook_source_known_fails_closed_when_git_cannot_answer(self, tmp_path: Path) -> None:
+        """The third door: a history probe that ERRORS must DEMAND the hook.
+
+        `2>/dev/null || true` once made "git failed" identical to "no history",
+        and review reproduced a full disarm through a `--filter=tree:0` clone
+        whose promisor remote had gone away (`git log --all` exits 128). No
+        test pinned that arm: a mutant deleting `-z "${log_ok}" ||` passed the
+        whole suite (Opus review of T-23). A directory that is not a repository
+        is the cheapest state in which `git log` fails, so it is used here.
+        """
+        not_a_repo = tmp_path / "plain"
+        not_a_repo.mkdir()
+        assert not (not_a_repo / "tools" / "commit-msg-hook.sh").exists()
+        result = run_guard("_hook_source_known", str(not_a_repo), "tools/commit-msg-hook.sh")
+        assert result.returncode == 0, "a failed history probe excused the hook instead of demanding it"
+
+    def test_hook_source_known_is_false_with_no_history_and_no_file(self, repo: Path) -> None:
+        """The bootstrap window, at the helper: fresh repo, no file → 1."""
+        result = run_guard("_hook_source_known", str(repo), "tools/commit-msg-hook.sh")
+        assert result.returncode == 1
+
     def test_commit_msg_hook_not_demanded_before_its_source_lands(self, repo: Path) -> None:
         """The bootstrap branch, kept: no history, no file → not demanded.
 
@@ -1506,10 +1527,19 @@ class TestHarnessIntegrity:
         """
         src = GUARDS.read_text()
         body = src.split("_guard_enforcement_armed() {", 1)[1].split("\n}\n", 1)[0]
-        calls = re.findall(r"_hook_source_known\s+\"\$\{repo_root\}\"\s+([^\s;]+)", body)
+        # Executable lines only — a commented-out call must not count as a site.
+        code = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
+        # Tolerate `"${repo_root}"` / `"$repo_root"` and a quoted or bare second
+        # argument; what is pinned is WHICH sources are gated and in what order.
+        calls = re.findall(
+            r'_hook_source_known[\s\\]+"?\$\{?repo_root\}?"?[\s\\]+"?([^\s;"]+)"?', code
+        )
         assert calls == ["tools/pre-merge-commit-hook.sh", "tools/commit-msg-hook.sh"], calls
         assert "tools/pre-commit-hook.sh" not in calls, "pre-commit must not be bootstrap-gated"
         assert src.count("_hook_source_known() {") == 1
+        # The condition must not ALSO be re-spelled inline beside the calls: the
+        # history probe belongs to the helper and nowhere else in the guard.
+        assert "log -1 --format=%H --all" not in code, "monotonic condition duplicated inline"
 
     def test_the_hooks_do_not_depend_on_the_tools_directory(self) -> None:
         """Each hook runs from `.git/hooks/` and must work when `tools/` is not

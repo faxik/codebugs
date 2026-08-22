@@ -278,7 +278,7 @@ own merge: leaving it would have made the harness the single caller exempt from 
 CLIENT-SIDE and PER-CLONE: hooks and git config cannot be committed. A fresh clone has none of it
 until `tools/install-hooks.sh` is run — which is why `_guard_enforcement_armed` refuses to integrate
 from an unarmed clone, the one moment being unarmed can cost anything. **It checks all three hooks**
-— pre-commit unconditionally, pre-merge-commit and commit-msg once their source has history — so a
+— pre-commit unconditionally, pre-merge-commit and commit-msg once their source is KNOWN (it has history, or the file is present, or the history probe itself failed — fail closed) — so a
 clone armed before CB-57 or before T-23 is refused until `install-hooks.sh` is re-run. Even armed, all of
 these move or publish `main` without passing any hook: `git rebase`, `git am`, `git reset --hard`,
 `git push`, `core.hooksPath`, **`git subtree add`** (which commits via `commit-tree` plumbing — added
@@ -337,7 +337,7 @@ this paragraph overclaimed.**
    and rebase-merging. That narrower scope was **ratified by the owner as sufficient for CB-59**, on
    this reasoning: force-push and deletion are the class **nothing local can catch**, because they
    rewrite or destroy history every local hook has already approved, whereas require-PR and a
-   required check constrain *how work arrives* — which `merge.ff=false`, the two hooks and
+   required check constrain *how work arrives* — which `merge.ff=false`, the three hooks and
    `_guard_enforcement_armed` already govern **for a clone that has run `tools/install-hooks.sh`**.
    CB-59 is closed at that scope, not at this paragraph's original four items. It remains repository
    configuration, not committed state, so nothing in this tree can verify or restore it.
@@ -592,7 +592,7 @@ installed hook (git skips a dangling hook silently) *and* made the guard skip it
 reviewers. The gate is now whether **the path has history on main**, which deleting the file cannot
 undo: after CB-57 the check is genuinely unconditional, and a missing source reports as "cannot verify
 the hook identity" instead of vanishing. So **run `tools/install-hooks.sh` right after that merge** or
-the next finish refuses — correctly, since a clone armed before CB-57 really is missing half its
+the next finish refuses — correctly, since a clone armed before CB-57 really is missing part of its
 enforcement.
 Every landing after that goes through the harness. If `tools/` is ever rewritten the same way,
 expect the same one-time manual merge.
