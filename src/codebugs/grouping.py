@@ -38,6 +38,7 @@ import sqlite3
 from collections import defaultdict
 from typing import Any
 
+from codebugs import db
 from codebugs.findings import (
     LIVE_STATUSES,
     grouping_candidates,
@@ -639,3 +640,367 @@ def filing_report(
         "event_keys": list(FILING_EVENT_KEYS),
         "lineage_keys": list(LINEAGE_PARENT_KEYS + LINEAGE_CHILD_KEYS),
     }
+
+
+# --- Surfaces -----------------------------------------------------------------
+
+
+def register_tools(mcp, conn_factory) -> None:
+    """Register grouping MCP tools — thin forwards to the three reports."""
+
+    @mcp.tool()
+    def grouping_citations(
+        status: str | None = None,
+        category: str | None = None,
+        hub_degree: int | None = DEFAULT_HUB_DEGREE,
+        component_limit: int | None = None,
+        member_limit: int | None = None,
+        anchor_limit: int = 25,
+        orphan_limit: int = 50,
+    ) -> dict[str, Any]:
+        """Connected components of the hand-written CB-id reference graph.
+
+        READ-ONLY, and an ANNOTATION of what people already wrote — no link here
+        is inferred. Every edge carries the field it came from and the quoted
+        context of its first mention. A node whose degree exceeds hub_degree is
+        a landmark many work units point AT, not a member of one: it does not
+        transmit connectivity and is reported as an ANCHOR with its citers, so
+        the components either side of it stay separate. References to ids
+        outside the population are COUNTED as dangling, never dropped.
+
+        Args:
+            status: Narrow/widen the population (default: live statuses; "all")
+            category: Restrict to one category
+            hub_degree: Degree above which a node becomes an anchor (default 3,
+                chosen on the outcome — see DEFAULT_HUB_DEGREE); None disables
+                hub splitting and returns the raw components
+            component_limit: Max components returned (totals stay visible)
+            member_limit: Max members per component (edges follow the page)
+            anchor_limit: Max anchors returned (default 25)
+            orphan_limit: Max orphan ids returned (default 50)
+        """
+        with conn_factory() as conn:
+            return citation_report(
+                conn,
+                status=status,
+                category=category,
+                hub_degree=hub_degree,
+                component_limit=component_limit,
+                member_limit=member_limit,
+                anchor_limit=anchor_limit,
+                orphan_limit=orphan_limit,
+            )
+
+    @mcp.tool()
+    def grouping_tags(
+        status: str | None = None,
+        category: str | None = None,
+        min_pair_count: int = 2,
+        tag_limit: int | None = None,
+        pair_limit: int | None = 50,
+    ) -> dict[str, Any]:
+        """Tag pivots: counts, co-occurrence, and near-duplicate taxonomy strings.
+
+        READ-ONLY. Co-occurrence carries Jaccard beside the raw count, because
+        on a corpus with one 390-card tag the raw count ranks that tag's pairs
+        first no matter how weak the association is. `variants` spans tags AND
+        categories in one namespace: the taxonomy drift is not confined to one
+        column (`process_improvement` / `process-improvement`).
+
+        Args:
+            status: Narrow/widen the population (default: live statuses; "all")
+            category: Restrict to one category
+            min_pair_count: Drop tag pairs co-occurring fewer times (default 2)
+            tag_limit: Max tags returned (totals stay visible)
+            pair_limit: Max pairs returned (default 50; None for all)
+        """
+        with conn_factory() as conn:
+            return tag_report(
+                conn,
+                status=status,
+                category=category,
+                min_pair_count=min_pair_count,
+                tag_limit=tag_limit,
+                pair_limit=pair_limit,
+            )
+
+    @mcp.tool()
+    def grouping_filing(
+        status: str | None = None,
+        category: str | None = None,
+        lineage_limit: int | None = None,
+        event_limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Split lineages and shared filing events (sprint / plan).
+
+        READ-ONLY. LINEAGE IS TRAVERSED, NOT GROUPED: A → B → C is one lineage
+        with depths, and its links resolve against EVERY card in the tracker,
+        not just the population, so a `fixed` middle card does not sever the
+        chain. A lineage surfaces when at least one member is in the population;
+        a lineage value naming no card is reported unresolved, not dropped.
+        Filing events are grouped by exact value within the population.
+
+        Args:
+            status: Narrow/widen the population (default: live statuses; "all")
+            category: Restrict to one category
+            lineage_limit: Max lineages returned (totals stay visible)
+            event_limit: Max filing events returned (totals stay visible)
+        """
+        with conn_factory() as conn:
+            return filing_report(
+                conn,
+                status=status,
+                category=category,
+                lineage_limit=lineage_limit,
+                event_limit=event_limit,
+            )
+
+
+def _hub_degree_arg(value: str) -> int | None:
+    """argparse type for --hub-degree: an int, or `none` to disable hub splitting.
+
+    The domain's None is a real setting (raw components), and `type=int` has no
+    spelling for it — a CLI that could not reach it would be a hole against MCP.
+    A negative int is passed through so the DOMAIN refuses it (one message, one
+    place), not argparse.
+    """
+    if value.strip().lower() == "none":
+        return None
+    return int(value)
+
+
+def register_cli(sub, commands) -> None:
+    """Register grouping CLI subcommands."""
+    import json
+    import sys
+
+    from codebugs.fmt import format_table
+
+    p_cit = sub.add_parser(
+        "grouping-citations",
+        help="Components of the hand-written CB-id reference graph (read-only; "
+        "nodes above --hub-degree become anchors, not connectors)",
+    )
+    p_cit.add_argument("--status", default=None)
+    p_cit.add_argument("--category", default=None)
+    p_cit.add_argument(
+        "--hub-degree",
+        type=_hub_degree_arg,
+        default=DEFAULT_HUB_DEGREE,
+        dest="hub_degree",
+        help=f"degree above which a node is an anchor (default {DEFAULT_HUB_DEGREE}); "
+        "'none' disables hub splitting and returns the raw components",
+    )
+    p_cit.add_argument("--component-limit", type=int, default=None, dest="component_limit")
+    p_cit.add_argument("--member-limit", type=int, default=None, dest="member_limit")
+    p_cit.add_argument("--anchor-limit", type=int, default=25, dest="anchor_limit")
+    p_cit.add_argument("--orphan-limit", type=int, default=50, dest="orphan_limit")
+    p_cit.add_argument("--json", action="store_true", dest="as_json")
+
+    p_tags = sub.add_parser(
+        "grouping-tags",
+        help="Tag counts, co-occurrence (Jaccard beside raw count) and near-duplicate "
+        "labels across tags AND categories (read-only)",
+    )
+    p_tags.add_argument("--status", default=None)
+    p_tags.add_argument("--category", default=None)
+    p_tags.add_argument("--min-pair-count", type=int, default=2, dest="min_pair_count")
+    p_tags.add_argument("--tag-limit", type=int, default=None, dest="tag_limit")
+    p_tags.add_argument("--pair-limit", type=int, default=50, dest="pair_limit")
+    p_tags.add_argument("--json", action="store_true", dest="as_json")
+
+    p_fil = sub.add_parser(
+        "grouping-filing",
+        help="Split lineages (traversed against the whole tracker, not grouped) and "
+        "sprint/plan filing events (read-only)",
+    )
+    p_fil.add_argument("--status", default=None)
+    p_fil.add_argument("--category", default=None)
+    p_fil.add_argument("--lineage-limit", type=int, default=None, dest="lineage_limit")
+    p_fil.add_argument("--event-limit", type=int, default=None, dest="event_limit")
+    p_fil.add_argument("--json", action="store_true", dest="as_json")
+
+    # All three handlers: no JSONDecodeError-first arm (the _cmd_update pattern).
+    # These read-only reports parse stored meta/tags through the deliberately
+    # tolerant parse_meta/parse_tags, so no stored-data JSONDecodeError can
+    # surface here and the arm would assert a hazard that does not exist.
+
+    def _run(args, fn, **kw):
+        conn = db.connect()
+        try:
+            return fn(conn, status=args.status, category=args.category, **kw)
+        except (KeyError, ValueError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
+
+    def _cmd_grouping_citations(args) -> None:
+        report = _run(
+            args,
+            citation_report,
+            hub_degree=args.hub_degree,
+            component_limit=args.component_limit,
+            member_limit=args.member_limit,
+            anchor_limit=args.anchor_limit,
+            orphan_limit=args.orphan_limit,
+        )
+        if args.as_json:
+            print(json.dumps(report, indent=2))
+            return
+        print(
+            f"populations={report['populations']} rows={report['rows_considered']} "
+            f"hub_degree={report['hub_degree']} citations={report['citations_total']} "
+            f"edges={report['edges_total']} dangling={report['dangling_total']} "
+            f"components={report['components_total']} "
+            f"cards_in_components={report['cards_in_components']} hubs={len(report['hubs'])}"
+        )
+        if not report["components"]:
+            print("No citation components.")
+        for comp in report["components"]:
+            print(
+                f"\n[{comp['root_id']}] size={comp['size']} edges={comp['edge_count']} "
+                f"hub_neighbours={','.join(comp['hub_neighbours']) or '-'}"
+            )
+            rows = [
+                {
+                    "id": m["id"],
+                    "status": m["status"],
+                    "sev": m["severity"],
+                    "category": m["category"],
+                    "description": m["description_excerpt"],
+                }
+                for m in comp["members"]
+            ]
+            print(format_table(rows, ["id", "status", "sev", "category", "description"],
+                               max_widths={"description": 60}))
+        shown = len(report["components"])
+        if report["components_total"] > shown:
+            print(f"\n({report['components_total'] - shown} more components truncated; "
+                  "--component-limit)")
+        if report["anchors"]:
+            print("\nAnchors (most-cited cards):")
+            rows = [
+                {
+                    "id": a["id"],
+                    "in_degree": a["in_degree"],
+                    "degree": a["degree"],
+                    "hub": "yes" if a["is_hub"] else "",
+                    "description": a["card"]["description_excerpt"],
+                }
+                for a in report["anchors"]
+            ]
+            print(format_table(rows, ["id", "in_degree", "degree", "hub", "description"],
+                               max_widths={"description": 60}))
+            if report["anchors_total"] > len(report["anchors"]):
+                print(f"({report['anchors_total'] - len(report['anchors'])} more anchors "
+                      "truncated; --anchor-limit)")
+
+    def _cmd_grouping_tags(args) -> None:
+        report = _run(
+            args,
+            tag_report,
+            min_pair_count=args.min_pair_count,
+            tag_limit=args.tag_limit,
+            pair_limit=args.pair_limit,
+        )
+        if args.as_json:
+            print(json.dumps(report, indent=2))
+            return
+        print(
+            f"populations={report['populations']} rows={report['rows_considered']} "
+            f"untagged={report['rows_untagged']} tags={report['tags_total']} "
+            f"applications={report['tag_applications']} pairs={report['pairs_total']} "
+            f"variants={report['variants_total']}"
+        )
+        if not report["tags"]:
+            print("No tags.")
+            return
+        print(format_table(report["tags"], ["tag", "count"]))
+        shown = len(report["tags"])
+        if report["tags_total"] > shown:
+            print(f"({report['tags_total'] - shown} more tags truncated; --tag-limit)")
+        if report["pairs"]:
+            print("\nCo-occurring pairs:")
+            print(format_table(report["pairs"], ["a", "b", "count", "jaccard"]))
+            if report["pairs_total"] > len(report["pairs"]):
+                print(f"({report['pairs_total'] - len(report['pairs'])} more pairs truncated; "
+                      "--pair-limit)")
+        if report["variants"]:
+            print("\nNear-duplicate labels (tags and categories):")
+            rows = [
+                {
+                    "key": v["key"],
+                    "total": v["total"],
+                    "labels": ", ".join(
+                        f"{e['label']} ({e['kind']}:{e['count']})" for e in v["labels"]
+                    ),
+                }
+                for v in report["variants"]
+            ]
+            print(format_table(rows, ["key", "total", "labels"], max_widths={"labels": 80}))
+
+    def _cmd_grouping_filing(args) -> None:
+        report = _run(
+            args,
+            filing_report,
+            lineage_limit=args.lineage_limit,
+            event_limit=args.event_limit,
+        )
+        if args.as_json:
+            print(json.dumps(report, indent=2))
+            return
+        print(
+            f"populations={report['populations']} rows={report['rows_considered']} "
+            f"universe={report['universe_rows']} lineages={report['lineages_total']} "
+            f"cards_in_lineages={report['cards_in_lineages']} "
+            f"unresolved={report['unresolved_total']} events={report['events_total']}"
+        )
+        if not report["lineages"]:
+            print("No lineages.")
+        for lin in report["lineages"]:
+            print(
+                f"\n[{lin['root_id']}] size={lin['size']} in_population={lin['in_population']}"
+                f"{' cyclic' if lin['cyclic'] else ''}"
+            )
+            rows = [
+                {
+                    "depth": m["depth"],
+                    "id": m["id"],
+                    "status": m["status"],
+                    "in_pop": "yes" if m["in_population"] else "",
+                    "parents": ",".join(m["parents"]),
+                    "description": m["description_excerpt"],
+                }
+                for m in lin["members"]
+            ]
+            print(format_table(rows, ["depth", "id", "status", "in_pop", "parents", "description"],
+                               max_widths={"description": 60}))
+        shown = len(report["lineages"])
+        if report["lineages_total"] > shown:
+            print(f"\n({report['lineages_total'] - shown} more lineages truncated; "
+                  "--lineage-limit)")
+        if not report["events"]:
+            print("\nNo filing events.")
+        for ev in report["events"]:
+            print(f"\n{ev['key']}={ev['value']!r} size={ev['size']}")
+            rows = [
+                {"id": m["id"], "status": m["status"], "description": m["description_excerpt"]}
+                for m in ev["members"]
+            ]
+            print(format_table(rows, ["id", "status", "description"],
+                               max_widths={"description": 60}))
+        shown = len(report["events"])
+        if report["events_total"] > shown:
+            print(f"\n({report['events_total'] - shown} more events truncated; --event-limit)")
+        if report["unresolved_refs"]:
+            print(f"\n{report['unresolved_total']} lineage value(s) name no card "
+                  "(see --json unresolved_refs)")
+
+    commands["grouping-citations"] = _cmd_grouping_citations
+    commands["grouping-tags"] = _cmd_grouping_tags
+    commands["grouping-filing"] = _cmd_grouping_filing
+
+
+db.register_tool_provider("grouping", register_tools)
+db.register_cli_provider("grouping", register_cli)
