@@ -326,6 +326,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   deliberate; the traceback is what tells you the failure came after work had begun.
 
 ### Changed
+- **BREAKING (CLI): `codebugs add` now REFUSES a `-l/--lines` value that disagrees with a
+  `lines` key inside `--meta`, instead of silently storing only the `--meta` one
+  (CB-129).** If your script passes both spellings — for example
+  `codebugs add -l "1033-1035" --meta '{"lines": [1033, 1035], ...}'` — that call used to
+  succeed and store `[1033, 1035]`; the `-l` value went nowhere and nothing said so. It
+  now prints both values, says which one would have won, and exits 1.
+
+  **How to fix a call that starts failing: delete one of the two spellings.** Keep
+  `--meta '{"lines": ...}'` and drop `-l` if you want the structured value stored (that is
+  what was actually being stored before, so keeping it changes nothing about your data);
+  keep `-l` and remove the `lines` key from `--meta` if you want the range string. Making
+  the two EQUAL also passes — equal values were never a conflict.
+
+  Nothing else changes: `-l` alone still stores its string, `--meta` alone still stores its
+  value, and `--meta` keys that no flag writes are untouched. There is no MCP equivalent of
+  this argument, so MCP clients are unaffected.
+
 - **A closed pipe now ends a `codebugs` command at exit 141, silently, instead of
   reporting a committed write as a failure (CB-78).** Piping any verb into a reader
   that goes away — `| head`, `| true`, a `gzip` that dies — used to print a Python
