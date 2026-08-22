@@ -109,12 +109,26 @@ class TestRingIsVisible:
     def test_5_card_matching_column_and_ring_returned_exactly_once(self, conn):
         """Green on both sides of CB-128 by design: the column alone already
         matched before the fix; what this pins is that adding the ring branch
-        (OR + EXISTS) does not turn a double match into a duplicated row."""
-        # First report AND re-observation on the same commit: both branches match.
+        (OR + EXISTS) does not turn a multi-match into duplicated rows.
+
+        The ring deliberately carries TWO matching entries. Acceptance mutation
+        M2 (EXISTS rewritten as a JOIN without DISTINCT) yields one row per
+        matching ring entry, so a one-entry ring is exactly the fixture that
+        cannot tell the two forms apart — measured: with one entry this test
+        stayed green under M2. Three observations on one commit make the JOIN
+        form return 3 and the EXISTS form return 1."""
+        # First report AND two re-observations on the same commit: every branch
+        # and every ring element matches.
         fid = _ring_card(conn, desc="double match", first=FIRST, second=FIRST)
+        c = _observe(conn, desc="double match", commit=FIRST)
+        assert c["dedup_action"] == "bumped" and c["id"] == fid, c
+        ring = findings.get_finding(conn, fid)["meta"]["occurrences"]
+        assert [e["reported_at_commit"] for e in ring] == [FIRST, FIRST], ring
         res = findings.query_findings(conn, commit=FIRST)
         assert res["total"] == 1
         assert len(res["findings"]) == 1 and res["findings"][0]["id"] == fid
+        grouped = findings.query_findings(conn, commit=FIRST, group_by="severity")
+        assert sum(g["count"] for g in grouped["groups"]) == 1, grouped
 
     def test_6_limit_offset_group_by_survive_commit_plus_other_filter(self, conn):
         """Pins the load-bearing parameter order: WHERE params (now two for the
