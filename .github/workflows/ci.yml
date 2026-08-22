@@ -22,6 +22,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # fetch-depth: 0 is REQUIRED, not an optimisation — and unlike the
+          # identical key in main-invariants.yml the requirement belongs to this
+          # job's OWN SUITE, not to an audit step written beside it.
+          # tests/test_worktree_harness.py::TestHarnessIntegrity::
+          # test_ci_workflow_asserts_the_first_parent_invariant runs
+          # `git cat-file -e <baseline>^{commit}` against the real repository,
+          # and that baseline is hundreds of commits back by design. Under the
+          # default depth-1 checkout the object is simply absent, so this job
+          # was red in CI ALWAYS while every local run stayed green: a gate that
+          # cannot pass is indistinguishable from a gate broken on the merits,
+          # and the real regressions it exists to catch stop being visible.
+          # Deleting this key does not make the job faster, it makes it useless;
+          # the structural pin that refuses the deletion lives in that same
+          # class. CB-139.
+          #
+          # The sibling `contracts` job below is deliberately left SHALLOW: it
+          # runs tests/test_cli_signals.py and tests/test_fsio.py only, and
+          # neither reads this repository's history (measured — exactly one test
+          # in the whole suite does, the one named above).
+          fetch-depth: 0
 
       - uses: astral-sh/setup-uv@v5
         with:

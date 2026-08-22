@@ -443,6 +443,20 @@ this paragraph overclaimed.**
 6. It needs **`fetch-depth: 0`**: with a shallow checkout the baseline commit is absent and
    `origin/main` may not exist, which would drop the audit back to `HEAD`. Stated at the checkout
    step, because the coupling was previously implicit.
+   **`ci.yml` needs the same key for a DIFFERENT reason, and that asymmetry is exactly why it was
+   missed for months (CB-139): here the history is read by the AUDIT step, there by the SUITE
+   itself.** Exactly one test in the whole suite reads this repository's real history —
+   `test_ci_workflow_asserts_the_first_parent_invariant`, which `cat-file`s the baseline above — so
+   under the default depth-1 checkout `ci.yml`'s `tests` job was red in CI **always** and green in
+   every local run, and a gate that cannot pass hides the regressions it exists to catch. The link
+   was understood for one workflow and missed for the other.
+   `test_ci_suite_job_checks_out_the_history_its_own_suite_reads` pins it, and both halves of how it
+   is written are load-bearing: the fix's own comment contains the literal `fetch-depth: 0`, so
+   comments are stripped before the comparison, and `ci.yml` declares two jobs and two checkouts, so
+   the key is required on the checkout of the job that runs the **suite** — "somewhere in `ci.yml`"
+   is satisfied by moving it to `contracts`, which leaves the gate just as broken. `contracts` stays
+   shallow deliberately: it runs `tests/test_cli_signals.py` and `tests/test_fsio.py`, neither of
+   which reads history.
 
 **`.python-version` is the SINGLE SOURCE for the interpreter — of main, of every worktree and of
 CI — and `_guard_interpreter_matches_main` refuses to land work the two of them did not agree on
