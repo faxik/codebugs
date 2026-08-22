@@ -1612,24 +1612,39 @@ class TestHarnessIntegrity:
         job was red in CI ALWAYS while staying green in every local run — and a
         gate that cannot pass is indistinguishable from a gate broken on the
         merits, so a genuine regression in that job is no longer visible to
-        anyone. `main-invariants.yml` already carries `fetch-depth: 0` with a
+        anyone. `main-invariants.yml` already carried `fetch-depth: 0` with a
         comment saying it is a requirement and not an optimisation; `ci.yml`,
         whose own suite is the thing reading history, carried nothing. The link
         was understood for one workflow and missed for the other.
 
-        Three properties, and the first two are why the obvious spelling of this
-        test would be vacuous:
+        WHAT THE ASSERTIONS ARE, and why the obvious spelling of each is wrong:
 
         * COMMENTS DO NOT COUNT. The fix's own comment contains the literal
           `fetch-depth: 0`, so a test that greps the raw file stays GREEN after
-          the key itself is deleted — a gate that cannot fire, inside the fix
-          whose whole subject is gates that cannot fire. Same reason `code()`
-          exists in `test_invariants_job_is_not_subscribed_to_pull_request`.
-        * A FILE IS NOT A COMPOSITION. `ci.yml` declares TWO jobs and TWO
+          the real key is deleted — a gate that cannot fire, inside the fix whose
+          whole subject is gates that cannot fire. Same reason `code()` exists in
+          `test_invariants_job_is_not_subscribed_to_pull_request`. Stripping is
+          WHOLE-LINE only (parsing YAML quoting to find an inline `#` is exactly
+          the parser this repo does not have), so an INLINE comment is tolerated
+          by the matchers instead, rather than silently refusing a legal edit.
+        * A FILE IS NOT A COMPOSITION. `ci.yml` declares two jobs and two
           checkouts. "`fetch-depth: 0` somewhere in ci.yml" is satisfied by
           moving the key to `contracts`, which leaves the suite job shallow and
-          the gate just as broken. The property is that the key sits on the
-          checkout of the job that runs the SUITE.
+          the gate just as broken.
+        * THE KEY MUST BE AN INPUT, NOT MERELY TEXT IN THE STEP. Cross-model
+          review broke the first draft with a step whose multiline `name:` scalar
+          contained both `fetch-depth: 0` and the test's name: valid YAML, both
+          assertions green, checkout still depth 1. So the key is looked for
+          inside the step's `with:` MAPPING, and the explanation is required to
+          be a COMMENT LINE — a `name:` carrying the test's name is not an
+          explanation travelling with the key.
+        * ONE CHECKOUT, UNCONDITIONAL. The same review defeated "the first
+          checkout step carries the key" with `if: ${{ false }}` on that step
+          followed by a second, bare `actions/checkout`: green here, depth 1 in
+          Actions. The `tests` job must therefore declare EXACTLY ONE checkout
+          and it must carry no `if:`. Both refusals are deliberate: a second or
+          conditional checkout in the job whose suite reads history is precisely
+          the hole, so it is refused loudly rather than judged.
         * FAIL CLOSED, AND THE INDENTATION BINDING IS SAID OUT LOUD. `pyyaml` is
           not a dependency here (measured: `import yaml` under `--extra dev`
           raises ModuleNotFoundError), so the job is sliced TEXTUALLY, by the
@@ -1643,13 +1658,17 @@ class TestHarnessIntegrity:
         `tests/test_cli_signals.py tests/test_fsio.py`, neither of which reads
         this repository's history, and putting the key where nothing needs it
         teaches the next reader to read it as boilerplate.
+
+        Known and NOT closed here, so it is not discovered as a surprise: a
+        job-level `if:` that switches the whole `tests` job off is the same
+        "gate that cannot fire" shape and this test does not look at it.
         """
 
         def job_block(text: str, name: str) -> str:
             """The body of one job, bounded by the next two-space-indented key."""
             _, _, body = text.partition("\njobs:")
             assert body, "ci.yml declares no `jobs:` block"
-            bounds = list(re.finditer(r"^  ([A-Za-z_][\w-]*):[ \t]*$", body, re.M))
+            bounds = list(re.finditer(r"^  ([A-Za-z_][\w-]*):[ \t]*(#.*)?$", body, re.M))
             for i, m in enumerate(bounds):
                 if m.group(1) == name:
                     end = bounds[i + 1].start() if i + 1 < len(bounds) else len(body)
@@ -1658,21 +1677,64 @@ class TestHarnessIntegrity:
                 f"cannot find job `{name}` in ci.yml; found {[b.group(1) for b in bounds]}"
             )
 
-        def checkout_step(block: str) -> str:
-            """One step, from its `- uses:` line to the next item at that indent."""
-            m = re.search(r"^([ \t]*)- +uses: +actions/checkout@", block, re.M)
-            assert m, "the job does not check the repository out at all"
+        def steps_of(block: str) -> list[str]:
+            """The job's steps, split on the indentation of the first list item."""
+            m = re.search(r"^([ \t]*)steps:[ \t]*(#.*)?$", block, re.M)
+            assert m, "the `tests` job declares no `steps:`"
             rest = block[m.end() :]
-            nxt = re.search(rf"^{re.escape(m.group(1))}- ", rest, re.M)
-            return rest[: nxt.start() if nxt else len(rest)]
+            items = list(re.finditer(r"^([ \t]*)- ", rest, re.M))
+            assert items, "the `tests` job's `steps:` list is empty"
+            top = [x for x in items if x.group(1) == items[0].group(1)]
+            return [
+                rest[x.start() : (top[i + 1].start() if i + 1 < len(top) else len(rest))]
+                for i, x in enumerate(top)
+            ]
+
+        def checkouts(block: str) -> list[str]:
+            return [
+                st
+                for st in steps_of(block)
+                if re.search(r"^[ \t]*(-[ \t]+)?uses:[ \t]*actions/checkout@", st, re.M)
+            ]
+
+        def with_mapping(step: str) -> str:
+            """The entries strictly nested under the step's `with:` key."""
+            m = re.search(r"^([ \t]*)with:[ \t]*(#.*)?$", step, re.M)
+            assert m, (
+                "the checkout step of the `tests` job declares no `with:` mapping, "
+                "so it passes no inputs to actions/checkout at all"
+            )
+            depth = len(m.group(1))
+            body: list[str] = []
+            for ln in step[m.end() :].splitlines():
+                if ln.strip() and len(ln) - len(ln.lstrip()) <= depth:
+                    break
+                body.append(ln)
+            return "\n".join(body)
 
         wf = REPO_ROOT / ".github" / "workflows" / "ci.yml"
         assert wf.exists(), "ci.yml is missing"
         raw = wf.read_text()
         code = "\n".join(ln for ln in raw.splitlines() if not ln.lstrip().startswith("#"))
 
-        step = checkout_step(job_block(code, "tests"))
-        assert re.search(r"^[ \t]*fetch-depth:[ \t]*0[ \t]*$", step, re.M), (
+        found = checkouts(job_block(code, "tests"))
+        assert len(found) == 1, (
+            f"the `tests` job declares {len(found)} checkout steps; exactly one is "
+            "required, or a shallow one can run after the deep one and the job is "
+            "back to depth 1 with this test still green"
+        )
+        step = found[0]
+        assert not re.search(r"^[ \t]*if:", step, re.M), (
+            "the checkout of the `tests` job is conditional; a checkout that can be "
+            "skipped is a checkout this test cannot vouch for"
+        )
+        # `'0'` and a trailing inline comment are both legal YAML meaning the same
+        # thing, and the whole-line stripping above does not remove an inline
+        # comment. A non-zero depth is still refused: only 0 is "all of it", and
+        # the baseline is hundreds of commits back.
+        assert re.search(
+            r"^[ \t]*fetch-depth:[ \t]*['\"]?0['\"]?[ \t]*(#.*)?$", with_mapping(step), re.M
+        ), (
             "the `tests` job checks the repository out SHALLOW "
             "(actions/checkout defaults to depth 1) while its own suite reads this "
             "repository's history — that job is then red in CI always and green "
@@ -1682,14 +1744,16 @@ class TestHarnessIntegrity:
         # The comment is not the gate; the assertion above is. But a bare
         # `fetch-depth: 0` reads as an optimisation and the next reader deletes
         # it, which is precisely how this defect is reintroduced. Pin that the
-        # reason travels with the key — and pin it by the test's OWN name, so a
-        # rename cannot leave a stale pointer behind in the workflow.
+        # reason travels with the key as a COMMENT — and pin it by the test's OWN
+        # name, so a rename cannot leave a stale pointer behind in the workflow.
         needs_history = (
             TestHarnessIntegrity.test_ci_workflow_asserts_the_first_parent_invariant.__name__
         )
-        raw_step = checkout_step(job_block(raw, "tests"))
-        assert needs_history in raw_step, (
-            "the checkout step does not name the test that needs the history; "
+        raw_step = checkouts(job_block(raw, "tests"))[0]
+        assert any(
+            needs_history in ln for ln in raw_step.splitlines() if ln.lstrip().startswith("#")
+        ), (
+            "no comment on the checkout step names the test that needs the history; "
             "an unexplained `fetch-depth: 0` gets deleted as dead weight"
         )
 
