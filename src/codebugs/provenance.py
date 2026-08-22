@@ -249,6 +249,83 @@ def _kind_at_commit(cwd: str, commit: str, rel: str) -> str | None:
     return "other"
 
 
+class WorktreePath(NamedTuple):
+    """One `file` value, placed in one worktree, in the three spellings that differ.
+
+    `root` — the worktree root the other two are anchored to, physically
+    resolved. `rel` — the ROOT-RELATIVE spelling, which is the one git is asked
+    about (`git log -- <rel>`, `git show <commit>:<rel>`); it is canonical, so
+    every spelling of the same file asks git the same question (CB-93).
+    `abspath` — the filesystem path `os.stat` gets.
+
+    All three are returned because the two consumers need different ones and
+    deriving either from the other at the call site is where a coordinate system
+    gets lost: `file_status` stats `abspath` and greps `rel`, while a caller
+    that reads from git STORAGE (BT-7 Р3, §7.1 — the boundary is git's, not
+    ours) needs `rel` alone and must never touch the disk.
+    """
+
+    root: str
+    rel: str
+    abspath: str
+
+
+def worktree_root(*, project_dir: str | None = None) -> str | None:
+    """The git worktree root containing `project_dir`, physically resolved.
+
+    None when git cannot say — no repository, a bare repository, git unusable,
+    or a `project_dir` that does not exist. Degrading rather than raising is
+    this module's contract everywhere (CB-79); a caller that needs a root and
+    has none must fail closed on the None.
+
+    **This is NOT `db.describe_root()`, and the difference is the whole reason
+    the function exists.** `describe_root` reports where the TRACKER is, and in
+    a linked worktree that is the main checkout — measured (BT-7 П-b). A caller
+    anchoring to a revision of the branch it is standing on needs the root of
+    THIS worktree, which is what `git rev-parse --show-toplevel` answers.
+
+    `project_dir=None` falls back to the process cwd, matching `file_status`'s
+    own resolution, and yields None when that cwd has been deleted out from
+    under a long-lived server (CB-79). A caller for which ambient cwd is the
+    wrong answer — BT-7 Р3 says so in capitals — passes `project_dir`
+    explicitly and treats None as its refusal, rather than reading a root it
+    did not ask for.
+    """
+    cwd = project_dir or _ambient_cwd()
+    if cwd is None:
+        return None
+    return _repo_root(cwd)
+
+
+def resolve_in_worktree(*, root: str, file_path: str) -> WorktreePath | None:
+    """Place a stored `file` value inside `root`. None when it falls outside.
+
+    `root` comes from `worktree_root`. The value is joined, its parent resolved
+    physically, and then judged by CONTAINMENT rather than by spelling — so an
+    absolute value naming a file in this worktree resolves, and a relative one
+    escaping through `..` or through a symlinked directory does not. None is the
+    refusal; the caller owns the vocabulary it reports, because `file_status`
+    says `out_of_repo` and an anchor capture says something else.
+
+    Keyword-only on purpose. Both parameters are strings and swapping them
+    produces a silently wrong path rather than an error, which is the class of
+    defect this module has been patched for three times.
+
+    The final component's symlink is deliberately PRESERVED (`_resolve_candidate`
+    documents why: git can answer about its own blob). A caller needing a fully
+    physical path expresses that itself; this function does not change the
+    contract `file_status` was built on.
+    """
+    abspath = _resolve_candidate(root, file_path)
+    try:
+        inside = os.path.commonpath([root, abspath]) == root
+    except ValueError:
+        inside = False  # different drives, or a mix of absolute and relative
+    if not inside:
+        return None
+    return WorktreePath(root=root, rel=os.path.relpath(abspath, root), abspath=abspath)
+
+
 def head_sha(*, project_dir: str | None = None) -> str | None:
     """Current HEAD SHA for provenance auto-population. Returns None if git unavailable."""
     return db.git_rev_parse("HEAD", silent=True, cwd=project_dir)
@@ -333,17 +410,18 @@ def file_status(
     rel: str | None = None
     candidate: str | None = None
     if root is not None:
-        candidate = _resolve_candidate(root, file_path)
-        try:
-            inside = os.path.commonpath([root, candidate]) == root
-        except ValueError:
-            inside = False  # different drives, or a mix of absolute and relative
-        if not inside:
+        # `resolve_in_worktree` is this function's own composition, made public
+        # for BT-7 Т-0 rather than copied: an anchor capture asks the same two
+        # questions ("what is my root", "where does this value point in it"),
+        # and a second implementation of a SCOPE decision is one drift away from
+        # this module and its caller disagreeing about which file a card names.
+        placed = resolve_in_worktree(root=root, file_path=file_path)
+        if placed is None:
             # The root is named in the reason: a scope decision you cannot see
             # is a scope decision you cannot debug, and this package already
             # learned that once (CB-11/CB-49, `db.describe_root`).
             return _verdict("unknown", f"out_of_repo (worktree {root})")
-        rel = os.path.relpath(candidate, root)
+        candidate, rel = placed.abspath, placed.rel
 
     try:
         subprocess.check_output(
