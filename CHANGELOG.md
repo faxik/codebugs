@@ -7,6 +7,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`grouping.py` is now exposed — three MCP tools and three CLI verbs (CB-127).**
+  `citation_report`, `tag_report` and `filing_report` shipped (see the
+  "`grouping.py` — the three grouping axes the tracker stored but could not query"
+  entry below) but were reachable from neither surface. MCP: `grouping_citations`,
+  `grouping_tags`, `grouping_filing`; CLI: `codebugs grouping-citations`,
+  `grouping-tags`, `grouping-filing` (every domain parameter as a dashed flag, plus
+  `--json`). The wrappers are thin forwards — parameter names, types and defaults
+  match the domain functions one-to-one, no SQL and no logic in between — and each
+  tool description carries the module's own caveats (read-only annotation of what
+  people wrote; hubs become anchors; lineage is traversed against the whole tracker).
+  `--hub-degree none` reaches the domain's `hub_degree=None` (raw components), so the
+  CLI has no hole against MCP. `grouping` is also a `--mode` of its own on both the
+  server and the CLI.
 - **`recent` — "what closed since &lt;date&gt;" in ONE call, on both surfaces (CB-123).**
   MCP tool `recent`, CLI verb `codebugs recent --since DATE [--status ...]`, domain
   function `findings.recent_findings`. The answer used to be assembled by hand out of a

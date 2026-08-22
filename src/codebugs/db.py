@@ -1141,6 +1141,7 @@ def _ensure_modules_loaded() -> None:
             blockers,
             claims,
             findings,
+            grouping,
             merge,
             milestones,
             provenance,

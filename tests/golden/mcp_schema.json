@@ -1345,6 +1345,207 @@
     "name": "get"
   },
   {
+    "description": "Connected components of the hand-written CB-id reference graph.\n\nREAD-ONLY, and an ANNOTATION of what people already wrote \u2014 no link here\nis inferred. Every edge carries the field it came from and the quoted\ncontext of its first mention. A node whose degree exceeds hub_degree is\na landmark many work units point AT, not a member of one: it does not\ntransmit connectivity and is reported as an ANCHOR with its citers, so\nthe components either side of it stay separate. References to ids\noutside the population are COUNTED as dangling, never dropped.\n\nArgs:\n    status: Narrow/widen the population (default: live statuses; \"all\")\n    category: Restrict to one category\n    hub_degree: Degree above which a node becomes an anchor (default 3,\n        chosen on the outcome \u2014 see DEFAULT_HUB_DEGREE); None disables\n        hub splitting and returns the raw components\n    component_limit: Max components returned (totals stay visible)\n    member_limit: Max members per component (edges follow the page)\n    anchor_limit: Max anchors returned (default 25)\n    orphan_limit: Max orphan ids returned (default 50)\n",
+    "inputSchema": {
+      "properties": {
+        "anchor_limit": {
+          "default": 25,
+          "title": "Anchor Limit",
+          "type": "integer"
+        },
+        "category": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Category"
+        },
+        "component_limit": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Component Limit"
+        },
+        "hub_degree": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 3,
+          "title": "Hub Degree"
+        },
+        "member_limit": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Member Limit"
+        },
+        "orphan_limit": {
+          "default": 50,
+          "title": "Orphan Limit",
+          "type": "integer"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        }
+      },
+      "title": "grouping_citationsArguments",
+      "type": "object"
+    },
+    "name": "grouping_citations"
+  },
+  {
+    "description": "Split lineages and shared filing events (sprint / plan).\n\nREAD-ONLY. LINEAGE IS TRAVERSED, NOT GROUPED: A \u2192 B \u2192 C is one lineage\nwith depths, and its links resolve against EVERY card in the tracker,\nnot just the population, so a `fixed` middle card does not sever the\nchain. A lineage surfaces when at least one member is in the population;\na lineage value naming no card is reported unresolved, not dropped.\nFiling events are grouped by exact value within the population.\n\nArgs:\n    status: Narrow/widen the population (default: live statuses; \"all\")\n    category: Restrict to one category\n    lineage_limit: Max lineages returned (totals stay visible)\n    event_limit: Max filing events returned (totals stay visible)\n",
+    "inputSchema": {
+      "properties": {
+        "category": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Category"
+        },
+        "event_limit": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event Limit"
+        },
+        "lineage_limit": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lineage Limit"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        }
+      },
+      "title": "grouping_filingArguments",
+      "type": "object"
+    },
+    "name": "grouping_filing"
+  },
+  {
+    "description": "Tag pivots: counts, co-occurrence, and near-duplicate taxonomy strings.\n\nREAD-ONLY. Co-occurrence carries Jaccard beside the raw count, because\non a corpus with one 390-card tag the raw count ranks that tag's pairs\nfirst no matter how weak the association is. `variants` spans tags AND\ncategories in one namespace: the taxonomy drift is not confined to one\ncolumn (`process_improvement` / `process-improvement`).\n\nArgs:\n    status: Narrow/widen the population (default: live statuses; \"all\")\n    category: Restrict to one category\n    min_pair_count: Drop tag pairs co-occurring fewer times (default 2)\n    tag_limit: Max tags returned (totals stay visible)\n    pair_limit: Max pairs returned (default 50; None for all)\n",
+    "inputSchema": {
+      "properties": {
+        "category": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Category"
+        },
+        "min_pair_count": {
+          "default": 2,
+          "title": "Min Pair Count",
+          "type": "integer"
+        },
+        "pair_limit": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 50,
+          "title": "Pair Limit"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        },
+        "tag_limit": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tag Limit"
+        }
+      },
+      "title": "grouping_tagsArguments",
+      "type": "object"
+    },
+    "name": "grouping_tags"
+  },
+  {
     "description": "Flag an item as living on a feature branch (not yet integrated).\nCalled by worktree-setup.sh when a branch is created.\n\nArgs:\n    item_ref: The item id (e.g. CB-5).\n    branch_name: Git branch holding the work.\n",
     "inputSchema": {
       "properties": {
