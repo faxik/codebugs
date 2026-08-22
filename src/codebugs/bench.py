@@ -9,16 +9,19 @@ Convention: CSV first column = row_label, remaining columns = metric names.
 
 from __future__ import annotations
 
+import argparse
 import csv
 import io
 import json
 import math
 import re
 import sqlite3
+import sys
 from collections.abc import Mapping
 from typing import Any
 
-from codebugs import db
+from codebugs import db, surfacegen
+from codebugs.fmt import format_table
 from codebugs.types import utc_now
 
 
@@ -847,333 +850,244 @@ from codebugs.db import register_schema, register_tool_provider, register_cli_pr
 register_schema("bench", ensure_schema)
 
 
-def register_tools(mcp, conn_factory) -> None:
-    """Register benchmark result tools on the given MCP server."""
+# --- Tool bodies -----------------------------------------------------------
+#
+# LOGIC ONLY. The name, the description and the parameter list of every tool
+# below live in `bench_surface.py`; these functions decide what a call DOES and
+# describe nothing. Each receives the connection FACTORY rather than an open
+# connection, because three of the four refuse before they connect and a
+# generator that opened one first would create a tracker for a call that is
+# about to be rejected.
 
-    @mcp.tool()
-    def codebench_import(
-        benchmark: str,
-        csv_data: str | None = None,
-        json_data: str | list | None = None,
-        date: str | None = None,
-        tags: list[str] | None = None,
-        meta: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Import benchmark results from CSV or JSON.
 
-        CSV convention: first column is the row label, remaining columns are
-        metric names with finite numeric values.
-
-        JSON convention: array of objects, first key is the row label, rest
-        are metric keys with finite numeric values.
-
-        Each (row label, metric) pair may appear only once per import, and
-        NaN/Infinity are refused: a non-finite measurement is not one.
-
-        Args:
-            benchmark: Benchmark name (e.g. "search-perf")
-            csv_data: CSV string (header + data rows). Provide csv_data OR json_data.
-            json_data: JSON array string. Provide csv_data OR json_data.
-            date: Run date (default: today, ISO format YYYY-MM-DD)
-            tags: Optional tags (e.g. ["nightly", "v2.1"])
-            meta: Optional metadata (e.g. {"git_sha": "abc123", "ci_url": "..."})
-        """
-        # A payload is "supplied" when it is not None: csv_data="" is an empty
-        # document for import_csv to reject, never an absent argument. Dispatch
-        # below MUST use this same predicate — validating with one and dispatching
-        # with `if csv_data:` is what sent an empty CSV into the JSON branch.
-        csv_given = csv_data is not None
-        _require_exactly_one(("csv_data", csv_given), ("json_data", json_data is not None))
-        with conn_factory() as conn:
-            if csv_given:
-                return import_csv(
-                    conn, benchmark=benchmark, csv_data=csv_data,
-                    date=date, tags=tags, meta=meta,
-                )
-            return import_json(
-                conn, benchmark=benchmark, json_data=json_data,
+def _tool_bench_import(
+    conn_factory, *, benchmark, csv_data, json_data, date, tags, meta
+) -> dict[str, Any]:
+    # A payload is "supplied" when it is not None: csv_data="" is an empty
+    # document for import_csv to reject, never an absent argument. Dispatch
+    # below MUST use this same predicate — validating with one and dispatching
+    # with `if csv_data:` is what sent an empty CSV into the JSON branch.
+    csv_given = csv_data is not None
+    _require_exactly_one(("csv_data", csv_given), ("json_data", json_data is not None))
+    with conn_factory() as conn:
+        if csv_given:
+            return import_csv(
+                conn, benchmark=benchmark, csv_data=csv_data,
                 date=date, tags=tags, meta=meta,
             )
+        return import_json(
+            conn, benchmark=benchmark, json_data=json_data,
+            date=date, tags=tags, meta=meta,
+        )
 
-    @mcp.tool()
-    def codebench_query(
-        benchmark: str,
-        runs: list[str] | None = None,
-        date_from: str | None = None,
-        date_to: str | None = None,
-        metrics: list[str] | None = None,
-        rows: list[str] | None = None,
-        group_by: str = "row",
-        last_n: int | None = None,
-        format: str = "json",
-    ) -> dict[str, Any]:
-        """Query and pivot benchmark results.
 
-        group_by="row": original table shape (row_labels as rows, metrics as
-        columns). Returns one table per run.
+def _tool_bench_list(conn_factory, *, benchmark, last_n) -> dict[str, Any]:
+    with conn_factory() as conn:
+        if benchmark:
+            return list_runs(conn, benchmark=benchmark, last_n=last_n)
+        return list_benchmarks(conn)
 
-        group_by="run": trend view (runs as rows, metrics as columns).
-        Returns one table per row_label.
 
-        Args:
-            benchmark: Benchmark name to query
-            runs: Specific run IDs (default: all matching)
-            date_from: Start date filter (inclusive, YYYY-MM-DD)
-            date_to: End date filter (inclusive, YYYY-MM-DD)
-            metrics: Which metrics to include (default: all)
-            rows: Which row_labels to include (default: all)
-            group_by: Pivot axis — "row" or "run"
-            last_n: Limit to last N runs by date
-            format: Output — "json" or "csv"
-        """
-        with conn_factory() as conn:
-            return query(
-                conn, benchmark=benchmark, runs=runs,
-                date_from=date_from, date_to=date_to,
-                metrics=metrics, rows=rows, group_by=group_by,
-                last_n=last_n, format=format,
-            )
+def _tool_bench_delete(conn_factory, *, run_id, benchmark) -> dict[str, Any]:
+    # An entity id is "supplied" when it is non-empty — an empty string names
+    # nothing — and the dispatch below must use that same predicate.
+    _require_exactly_one(("run_id", bool(run_id)), ("benchmark", bool(benchmark)))
+    with conn_factory() as conn:
+        if run_id:
+            return delete_run(conn, run_id)
+        return delete_benchmark(conn, benchmark)
 
-    @mcp.tool()
-    def codebench_list(
-        benchmark: str | None = None,
-        last_n: int | None = None,
-    ) -> dict[str, Any]:
-        """List benchmarks or runs.
 
-        Without benchmark: lists all benchmark names with run counts.
-        With benchmark: lists runs for that benchmark.
+# --- CLI handlers ----------------------------------------------------------
+#
+# Also logic only, and also named by the declarations rather than naming
+# themselves: no `add_parser`, no `add_argument`, no `help=` occurs below. The
+# four different `except` shapes and the print OUTSIDE the arm are behaviour,
+# not surface, and they survive the move unchanged.
 
-        Args:
-            benchmark: If provided, list runs for this benchmark
-            last_n: Limit to last N runs (only when benchmark is provided)
-        """
-        with conn_factory() as conn:
-            if benchmark:
-                return list_runs(conn, benchmark=benchmark, last_n=last_n)
-            return list_benchmarks(conn)
 
-    @mcp.tool()
-    def codebench_delete(
-        run_id: str | None = None,
-        benchmark: str | None = None,
-    ) -> dict[str, Any]:
-        """Delete a single run or all runs for a benchmark.
+def _cmd_bench_import(args: argparse.Namespace) -> None:
+    conn = db.connect()
+    try:
+        # A path is "supplied" when it is non-empty, and the selection below
+        # must use that same predicate.
+        json_flag_given = bool(args.json_file)
+        _require_exactly_one(
+            ("a file path", bool(args.file)), ("--json-file", json_flag_given)
+        )
 
-        Args:
-            run_id: Delete a specific run (e.g. "BE-1")
-            benchmark: Delete all runs for a benchmark name
-        """
-        # An entity id is "supplied" when it is non-empty — an empty string names
-        # nothing — and the dispatch below must use that same predicate.
-        _require_exactly_one(("run_id", bool(run_id)), ("benchmark", bool(benchmark)))
-        with conn_factory() as conn:
-            if run_id:
-                return delete_run(conn, run_id)
-            return delete_benchmark(conn, benchmark)
+        kwargs: dict[str, Any] = {
+            "benchmark": args.benchmark,
+            "date": args.date,
+        }
+        if args.tags:
+            kwargs["tags"] = [t.strip() for t in args.tags.split(",")]
+        if args.meta:
+            kwargs["meta"] = json.loads(args.meta)
+
+        path = args.json_file if json_flag_given else args.file
+        # The flag forces JSON; a bare positional still infers it from the
+        # extension, which is independent of WHICH argument was supplied.
+        is_json = json_flag_given or path.endswith(".json")
+        # The read is guarded on its own, NOT by a handler-wide `except
+        # OSError` (CB-71). It is the only OSError source that runs BEFORE
+        # import_csv/import_json commit, and a wider arm would also catch a
+        # failure raised AFTER that commit — reporting a landed import as bad
+        # input, the CB-15/CB-16 success-shaped lie.
+        try:
+            with open(path) as f:
+                data = f.read()
+        except OSError as e:
+            print(f"codebugs: {e}", file=sys.stderr)
+            sys.exit(1)
+        if is_json:
+            result = import_json(conn, json_data=data, **kwargs)
+        else:
+            result = import_csv(conn, csv_data=data, **kwargs)
+    except (ValueError, json.JSONDecodeError) as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
+
+    # OUTSIDE the arm above, deliberately: this runs after the import has
+    # committed, so a failure here is not an input error. While it sat inside
+    # that try, a ValueError from a closed stdout ("I/O operation on closed
+    # file") was caught and reported as one tidy line at exit 1 for a run
+    # that had already landed — measured, and the same class as CB-15/CB-16.
+    # A post-commit output failure must surface as a crash, and CB-78 made
+    # the closed-pipe case of that crash POSIX-clean: `cli.run` installs
+    # SIG_DFL, so a dead reader kills the process by signal (141, empty
+    # stderr) instead of the old exit 1 traceback / exit 120 "Exception
+    # ignored on flushing sys.stdout". Note what did NOT change, because it
+    # is what tests/test_bench.py:745 pins: closing the sys.stdout OBJECT
+    # raises `ValueError: I/O operation on closed file`, which is not a
+    # signal and never was — that path still crashes with a traceback, which
+    # is the ratified discriminator between a post-commit failure and an
+    # input error.
+    print(f"Imported: {result['run_id']} ({result['rows']} rows, {result['results_stored']} values)")
+
+
+def _cmd_bench_query(args: argparse.Namespace) -> None:
+    conn = db.connect()
+    try:
+        kwargs: dict[str, Any] = {
+            "benchmark": args.benchmark,
+            "group_by": args.group_by or "row",
+            "format": args.format or "json",
+        }
+        if args.runs:
+            kwargs["runs"] = args.runs
+        if args.date_from:
+            kwargs["date_from"] = args.date_from
+        if args.date_to:
+            kwargs["date_to"] = args.date_to
+        if args.metrics:
+            kwargs["metrics"] = [m.strip() for m in args.metrics.split(",")]
+        if args.rows:
+            kwargs["rows"] = [r.strip() for r in args.rows.split(",")]
+        if args.last_n:
+            kwargs["last_n"] = args.last_n
+
+        result = query(conn, **kwargs)
+
+        if result["runs_matched"] == 0:
+            print("(no matching runs)")
+            return
+
+        if result["format"] == "csv":
+            print(result["csv"])
+        else:
+            print(json.dumps(result["data"], indent=2))
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
+
+
+def _cmd_bench_list(args: argparse.Namespace) -> None:
+    conn = db.connect()
+    try:
+        if args.benchmark:
+            result = list_runs(conn, benchmark=args.benchmark, last_n=args.last_n)
+            if not result["runs"]:
+                print("(no runs)")
+                return
+            data = [
+                {
+                    "run_id": r["run_id"],
+                    "date": r["date"],
+                    "results": str(r["result_count"]),
+                    "tags": ",".join(r["tags"]),
+                }
+                for r in result["runs"]
+            ]
+            print(format_table(data, ["run_id", "date", "results", "tags"]))
+        else:
+            result = list_benchmarks(conn)
+            if not result["benchmarks"]:
+                print("(no benchmarks)")
+                return
+            data = [
+                {
+                    "benchmark": b["benchmark"],
+                    "runs": str(b["run_count"]),
+                    "first": b["first_date"],
+                    "last": b["last_date"],
+                }
+                for b in result["benchmarks"]
+            ]
+            print(format_table(data, ["benchmark", "runs", "first", "last"]))
+    finally:
+        conn.close()
+
+
+def _cmd_bench_delete(args: argparse.Namespace) -> None:
+    conn = db.connect()
+    try:
+        _require_exactly_one(
+            ("--run-id", bool(args.run_id)), ("--benchmark", bool(args.benchmark))
+        )
+        if args.run_id:
+            result = delete_run(conn, args.run_id)
+            print(f"Deleted run {result['deleted']} ({result['results_removed']} results)")
+        else:
+            result = delete_benchmark(conn, args.benchmark)
+            print(f"Deleted benchmark {result['deleted_benchmark']} ({result['runs_removed']} runs, {result['results_removed']} results)")
+    # ValueError is the refusal above. No JSONDecodeError-first arm is needed
+    # here — neither delete function parses stored JSON, so no failure can
+    # follow the write and be misreported as bad input.
+    except (KeyError, ValueError) as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
+
+
+# --- Registration ----------------------------------------------------------
+#
+# The declarations are imported at CALL time, not at module load: the
+# declaration file names these handlers, so importing it at the top of this
+# module would be a cycle. By the time either function below runs, this module
+# is fully initialised.
+
+
+def register_tools(mcp, conn_factory) -> None:
+    """Register benchmark result tools on the given MCP server."""
+    from codebugs.bench_surface import SURFACE
+
+    surfacegen.emit_tools(mcp, conn_factory, SURFACE)
 
 
 register_tool_provider("bench", register_tools)
 
 
-# --- CLI ---
-
 def register_cli(sub, commands) -> None:
     """Register bench CLI subcommands."""
-    import argparse
-    import sys
-    from codebugs import db
-    from codebugs.fmt import format_table
+    from codebugs.bench_surface import SURFACE
 
-    def _cmd_bench_import(args: argparse.Namespace) -> None:
-        conn = db.connect()
-        try:
-            # A path is "supplied" when it is non-empty, and the selection below
-            # must use that same predicate.
-            json_flag_given = bool(args.json_file)
-            _require_exactly_one(
-                ("a file path", bool(args.file)), ("--json-file", json_flag_given)
-            )
-
-            kwargs: dict[str, Any] = {
-                "benchmark": args.benchmark,
-                "date": args.date,
-            }
-            if args.tags:
-                kwargs["tags"] = [t.strip() for t in args.tags.split(",")]
-            if args.meta:
-                kwargs["meta"] = json.loads(args.meta)
-
-            path = args.json_file if json_flag_given else args.file
-            # The flag forces JSON; a bare positional still infers it from the
-            # extension, which is independent of WHICH argument was supplied.
-            is_json = json_flag_given or path.endswith(".json")
-            # The read is guarded on its own, NOT by a handler-wide `except
-            # OSError` (CB-71). It is the only OSError source that runs BEFORE
-            # import_csv/import_json commit, and a wider arm would also catch a
-            # failure raised AFTER that commit — reporting a landed import as bad
-            # input, the CB-15/CB-16 success-shaped lie.
-            try:
-                with open(path) as f:
-                    data = f.read()
-            except OSError as e:
-                print(f"codebugs: {e}", file=sys.stderr)
-                sys.exit(1)
-            if is_json:
-                result = import_json(conn, json_data=data, **kwargs)
-            else:
-                result = import_csv(conn, csv_data=data, **kwargs)
-        except (ValueError, json.JSONDecodeError) as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
-        finally:
-            conn.close()
-
-        # OUTSIDE the arm above, deliberately: this runs after the import has
-        # committed, so a failure here is not an input error. While it sat inside
-        # that try, a ValueError from a closed stdout ("I/O operation on closed
-        # file") was caught and reported as one tidy line at exit 1 for a run
-        # that had already landed — measured, and the same class as CB-15/CB-16.
-        # A post-commit output failure must surface as a crash, and CB-78 made
-        # the closed-pipe case of that crash POSIX-clean: `cli.run` installs
-        # SIG_DFL, so a dead reader kills the process by signal (141, empty
-        # stderr) instead of the old exit 1 traceback / exit 120 "Exception
-        # ignored on flushing sys.stdout". Note what did NOT change, because it
-        # is what tests/test_bench.py:745 pins: closing the sys.stdout OBJECT
-        # raises `ValueError: I/O operation on closed file`, which is not a
-        # signal and never was — that path still crashes with a traceback, which
-        # is the ratified discriminator between a post-commit failure and an
-        # input error.
-        print(f"Imported: {result['run_id']} ({result['rows']} rows, {result['results_stored']} values)")
-
-    def _cmd_bench_query(args: argparse.Namespace) -> None:
-        conn = db.connect()
-        try:
-            kwargs: dict[str, Any] = {
-                "benchmark": args.benchmark,
-                "group_by": args.group_by or "row",
-                "format": args.format or "json",
-            }
-            if args.runs:
-                kwargs["runs"] = args.runs
-            if args.date_from:
-                kwargs["date_from"] = args.date_from
-            if args.date_to:
-                kwargs["date_to"] = args.date_to
-            if args.metrics:
-                kwargs["metrics"] = [m.strip() for m in args.metrics.split(",")]
-            if args.rows:
-                kwargs["rows"] = [r.strip() for r in args.rows.split(",")]
-            if args.last_n:
-                kwargs["last_n"] = args.last_n
-
-            result = query(conn, **kwargs)
-
-            if result["runs_matched"] == 0:
-                print("(no matching runs)")
-                return
-
-            if result["format"] == "csv":
-                print(result["csv"])
-            else:
-                print(json.dumps(result["data"], indent=2))
-        except ValueError as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
-        finally:
-            conn.close()
-
-    def _cmd_bench_list(args: argparse.Namespace) -> None:
-        conn = db.connect()
-        try:
-            if args.benchmark:
-                result = list_runs(conn, benchmark=args.benchmark, last_n=args.last_n)
-                if not result["runs"]:
-                    print("(no runs)")
-                    return
-                data = [
-                    {
-                        "run_id": r["run_id"],
-                        "date": r["date"],
-                        "results": str(r["result_count"]),
-                        "tags": ",".join(r["tags"]),
-                    }
-                    for r in result["runs"]
-                ]
-                print(format_table(data, ["run_id", "date", "results", "tags"]))
-            else:
-                result = list_benchmarks(conn)
-                if not result["benchmarks"]:
-                    print("(no benchmarks)")
-                    return
-                data = [
-                    {
-                        "benchmark": b["benchmark"],
-                        "runs": str(b["run_count"]),
-                        "first": b["first_date"],
-                        "last": b["last_date"],
-                    }
-                    for b in result["benchmarks"]
-                ]
-                print(format_table(data, ["benchmark", "runs", "first", "last"]))
-        finally:
-            conn.close()
-
-    def _cmd_bench_delete(args: argparse.Namespace) -> None:
-        conn = db.connect()
-        try:
-            _require_exactly_one(
-                ("--run-id", bool(args.run_id)), ("--benchmark", bool(args.benchmark))
-            )
-            if args.run_id:
-                result = delete_run(conn, args.run_id)
-                print(f"Deleted run {result['deleted']} ({result['results_removed']} results)")
-            else:
-                result = delete_benchmark(conn, args.benchmark)
-                print(f"Deleted benchmark {result['deleted_benchmark']} ({result['runs_removed']} runs, {result['results_removed']} results)")
-        # ValueError is the refusal above. No JSONDecodeError-first arm is needed
-        # here — neither delete function parses stored JSON, so no failure can
-        # follow the write and be misreported as bad input.
-        except (KeyError, ValueError) as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
-        finally:
-            conn.close()
-
-    # Argparse setup
-    p = sub.add_parser("bench-import", help="Import benchmark results from CSV/JSON")
-    p.add_argument("file", nargs="?", help="CSV or JSON file path")
-    p.add_argument("--json-file", help="JSON benchmark file (always treated as JSON)")
-    p.add_argument("-b", "--benchmark", required=True, help="Benchmark name")
-    p.add_argument("--date", help="Run date (YYYY-MM-DD, default: today)")
-    p.add_argument("--tags", help="Comma-separated tags")
-    p.add_argument("--meta", help="JSON metadata string")
-
-    p = sub.add_parser("bench-query", help="Query and pivot benchmark results")
-    p.add_argument("benchmark", help="Benchmark name")
-    p.add_argument("--runs", nargs="+", help="Specific run IDs")
-    p.add_argument("--date-from", help="Start date (YYYY-MM-DD)")
-    p.add_argument("--date-to", help="End date (YYYY-MM-DD)")
-    p.add_argument("--metrics", help="Comma-separated metric names")
-    p.add_argument("--rows", help="Comma-separated row labels")
-    p.add_argument("--group-by", choices=["row", "run"], default="row", help="Pivot axis")
-    p.add_argument("--last-n", type=int, help="Last N runs only")
-    p.add_argument("--format", choices=["json", "csv"], default="json", help="Output format")
-
-    p = sub.add_parser("bench-list", help="List benchmarks or runs")
-    p.add_argument("benchmark", nargs="?", help="List runs for this benchmark")
-    p.add_argument("--last-n", type=int, help="Last N runs")
-
-    p = sub.add_parser("bench-delete", help="Delete a run or benchmark")
-    p.add_argument("--run-id", help="Delete a specific run (e.g. BE-1)")
-    p.add_argument("--benchmark", help="Delete all runs for a benchmark")
-
-    commands.update({
-        "bench-import": _cmd_bench_import,
-        "bench-query": _cmd_bench_query,
-        "bench-list": _cmd_bench_list,
-        "bench-delete": _cmd_bench_delete,
-    })
+    surfacegen.emit_cli(sub, commands, SURFACE)
 
 
 register_cli_provider("bench", register_cli)
