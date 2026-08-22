@@ -211,6 +211,7 @@ SERVER_NAMES = {
     "similarity": "codesimilarity",
     "relations": "coderelations",
     "grouping": "codegrouping",
+    "loc": "codeloc",
     "all": "codebugs",
 }
 

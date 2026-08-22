@@ -105,7 +105,7 @@ def main() -> None:
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument(
         "--mode",
-        choices=["findings", "provenance", "reqs", "merge", "sweep", "bench", "blockers", "milestones", "claims", "similarity", "grouping", "relations", "all"],
+        choices=["findings", "provenance", "reqs", "merge", "sweep", "bench", "blockers", "milestones", "claims", "similarity", "grouping", "relations", "loc", "all"],
         default="all",
     )
     pre_parser.add_argument(

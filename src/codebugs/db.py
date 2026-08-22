@@ -1142,6 +1142,7 @@ def _ensure_modules_loaded() -> None:
             claims,
             findings,
             grouping,
+            loc,
             merge,
             milestones,
             provenance,

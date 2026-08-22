@@ -25,19 +25,29 @@ def conn():
 
 @pytest.fixture(autouse=True)
 def clean_registry(monkeypatch):
-    """Snapshot the registry EXCLUDING similarity.annotate: pytest collection imports
-    test_similarity.py first, which registers the real resolver process-wide; excluding
-    it by name makes these tests order-independent by construction (review W-8).
+    """Run these tests against an EMPTY resolver registry, restored afterwards.
+
+    This file tests the SEAM — registration, savepoint isolation, the enforced
+    never-commit contract, failure surfacing — and never any particular
+    extension's resolver. Every resolver it cares about it registers itself, so
+    no package resolver belongs in the registry it exercises; pytest collection
+    imports the extension test modules first, which registers the real ones
+    process-wide.
+
+    IT USED TO EXCLUDE `similarity.annotate` BY NAME, and that is exactly the
+    enumeration this repository keeps relearning about: the list was correct
+    until `loc.capture` registered a second one, at which point four tests in
+    two files failed on a resolver they had never heard of. An empty snapshot
+    states the intent instead of listing today's members, and cannot rot.
 
     The pre-load is load-bearing since the runner started loading modules itself
     (Codex diff review): without it, the first run_pre_add_resolvers call in a
-    process that never imported similarity would register similarity.annotate into
-    THIS test's monkeypatched snapshot and discard it with the monkeypatch, leaving
-    the real registry permanently missing the resolver behind an already-set
-    modules-loaded flag."""
+    process that never imported the extensions would register them into THIS
+    test's monkeypatched snapshot and discard them with the monkeypatch, leaving
+    the real registry permanently empty behind an already-set modules-loaded
+    flag."""
     db._ensure_modules_loaded()
-    snapshot = [r for r in db._pre_add_resolvers if r.name != "similarity.annotate"]
-    monkeypatch.setattr(db, "_pre_add_resolvers", snapshot)
+    monkeypatch.setattr(db, "_pre_add_resolvers", [])
 
 
 def _obs(**over):

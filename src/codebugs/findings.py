@@ -6,6 +6,7 @@ import csv
 import dataclasses
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -901,6 +902,7 @@ def _add_one(
     promote_tags: bool = True,
     new_category: bool = False,
     gate_category: bool = True,
+    project_dir: str | None = None,
 ) -> AddOutcome:
     """One observation through the identity function, inside an OPEN transaction.
 
@@ -1070,6 +1072,19 @@ def _add_one(
                     "dedup_action": dedup_action,
                     "recurrence_of": recurrence_of,
                     "at": now,
+                    # The two keys BT-7 Р3 adds, and they travel together on
+                    # purpose. The observation carried neither the revision the
+                    # finding is reported against nor any statement of WHICH
+                    # WORKING TREE it is about, so a resolver that wants to read
+                    # code as of that revision had no way to ask. `project_dir`
+                    # is the caller's assertion about the tree; it is passed
+                    # through verbatim and NEVER defaulted to the process cwd
+                    # here, because a resolver that silently reads whatever tree
+                    # the process happens to stand in is the confidently-wrong
+                    # answer BT-7 spent a review round closing. A resolver with
+                    # no root fails closed instead.
+                    "reported_at_commit": reported_at_commit,
+                    "project_dir": project_dir,
                 },
                 forbidden=_RESERVED_META_KEYS,
             )
@@ -1213,6 +1228,7 @@ def add_finding(
     fingerprint: str | None = None,
     annotate: bool = True,
     new_category: bool = False,
+    project_dir: str | None = None,
 ) -> dict[str, Any]:
     """Record an observation. Returns the created OR matched finding as a dict.
 
@@ -1256,6 +1272,17 @@ def add_finding(
     (BT-4): a dedup bump never updates those columns — the occurrence ring
     (``meta.occurrences``) carries each later observation's values as evidence.
 
+    ``project_dir`` names the WORKING TREE this observation is about, for the
+    pre-add resolvers — nothing on this call path reads it otherwise, and it is
+    never stored. It exists because the observation literal could not say which
+    tree a finding's ``file`` and ``reported_at_commit`` are coordinates IN, so
+    a resolver wanting to read the code as of that revision (BT-7 Р3) had no way
+    to ask. It is deliberately NOT defaulted to the process cwd: a long-lived
+    server's cwd has nothing to do with the tracker a call writes to, so a
+    resolver reading whatever tree the process stands in would produce a
+    confidently wrong answer rather than an absent one. Omitted, resolvers that
+    need a tree fail closed and record why.
+
     The whole body runs in ``db.txn`` — the fingerprint lookup plus conditional
     write is a read-modify-write (CB-24). Do not restore a ``conn.commit()`` here:
     ``db.txn`` yields ``False`` under an ambient transaction, and committing then
@@ -1286,6 +1313,7 @@ def add_finding(
             fingerprint=fingerprint,
             annotate=annotate,
             new_category=new_category,
+            project_dir=project_dir,
         )
     return _finalize_add(outcome, committed=owned)
 
@@ -1802,6 +1830,7 @@ def batch_add_findings(
     findings: list[dict[str, Any]],
     *,
     new_category: bool = False,
+    project_dir: str | None = None,
 ) -> list[dict[str, Any]]:
     """Record multiple observations at once. Returns one result per input, in input
     order.
@@ -1874,6 +1903,7 @@ def batch_add_findings(
                     reported_at_ref=f.get("reported_at_ref"),
                     fingerprint=fingerprint,
                     new_category=new_category,
+                    project_dir=project_dir,
                 )
             )
     return [_finalize_add(outcome, committed=owned) for outcome in outcomes]
@@ -2883,6 +2913,30 @@ def normalize_categories(
     return report
 
 
+def _ambient_project_dir() -> str | None:
+    """This process's working directory — the tree an MCP `add` is about.
+
+    The MCP surface has no `project_dir` argument and deliberately does not gain
+    one here: adding it would move the wire golden, and this unit adds no tools.
+    So the server states the tree it is standing in, which is the SAME source it
+    has always used for `reported_at_commit` (`git rev-parse HEAD` with an
+    inherited cwd). Naming it once and passing it to both is what satisfies
+    BT-7 Р3's actual requirement — that the revision and the root come from ONE
+    source — and it is what makes the value an assertion by the caller rather
+    than something a resolver reached for on its own.
+
+    None when the directory has been deleted out from under a long-lived server
+    (CB-79); every consumer treats that as "no tree", never as "the tree here".
+
+    A near-twin of `provenance._ambient_cwd`, and NOT shared with it: provenance
+    imports findings, so the dependency cannot run the other way.
+    """
+    try:
+        return os.getcwd()
+    except OSError:
+        return None
+
+
 def register_tools(mcp, conn_factory) -> None:
     """Register finding-tracker tools on the given MCP server."""
     from codebugs import blockers
@@ -2982,8 +3036,9 @@ def register_tools(mcp, conn_factory) -> None:
                           meta.category_minted for later counting. Existing
                           categories never need this.
         """
+        project_dir = _ambient_project_dir()
         if reported_at_commit is None:
-            reported_at_commit = db.git_rev_parse("HEAD", silent=True)
+            reported_at_commit = db.git_rev_parse("HEAD", silent=True, cwd=project_dir)
         with conn_factory() as conn:
             return add_finding(
                 conn,
@@ -2998,6 +3053,7 @@ def register_tools(mcp, conn_factory) -> None:
                 reported_at_ref=reported_at_ref,
                 fingerprint=fingerprint,
                 new_category=new_category,
+                project_dir=project_dir,
             )
 
     @mcp.tool()
@@ -3042,10 +3098,11 @@ def register_tools(mcp, conn_factory) -> None:
                           does not hold yet (CB-60); the first member introducing
                           a category is stamped meta.category_minted.
         """
+        project_dir = _ambient_project_dir()
         default_commit = (
             reported_at_commit
             if reported_at_commit is not None
-            else db.git_rev_parse("HEAD", silent=True)
+            else db.git_rev_parse("HEAD", silent=True, cwd=project_dir)
         )
         enriched = []
         for f in findings:
@@ -3056,7 +3113,9 @@ def register_tools(mcp, conn_factory) -> None:
                 f["reported_at_ref"] = reported_at_ref
             enriched.append(f)
         with conn_factory() as conn:
-            return batch_add_findings(conn, enriched, new_category=new_category)
+            return batch_add_findings(
+                conn, enriched, new_category=new_category, project_dir=project_dir
+            )
 
     @mcp.tool()
     def update(
@@ -3460,6 +3519,9 @@ def register_cli(sub, commands) -> None:
                 meta=meta or None,
                 fingerprint=args.fingerprint,
                 new_category=args.new_category,
+                # `db.connect()` above walks up from the cwd, so the cwd is the
+                # tree this invocation is about — stated rather than reached for.
+                project_dir=_ambient_project_dir(),
             )
         except json.JSONDecodeError:
             # MUST stay ahead of the ValueError arm, which it subclasses — the
