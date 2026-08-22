@@ -382,3 +382,36 @@ class TestAClosedStdoutIsRefusedAtTheProcessEntry:
         a = self._closed_fd(project, "query", "--status", "open")
         b = self._closed_object(project, "query", "--status", "open")
         assert a == b == (self.EXPECTED, ""), f"closed_fd={a!r} closed_object={b!r}"
+
+    @pytest.mark.parametrize("neutralise", [False, True], ids=["without", "with"])
+    def test_premise_a_failed_shutdown_flush_rewrites_the_exit_status(self, tmp_path, neutralise):
+        """PREMISE, not a property of the gate — and the distinction is the whole
+        reason this test is worded this way.
+
+        `cli.run` sets `sys.stdout = None` before exiting, and the justification
+        is that interpreter finalization flushes the std files and rewrites the
+        process status to 120 when that flush fails. That mechanism is REAL and
+        measured here on both interpreters. What is NOT true is that the gate
+        needs it: at the moment `run` refuses, nothing has written to stdout, so
+        the buffer is empty, the flush performs no syscall and succeeds — a
+        mutant that deletes the line SURVIVES the four behavioural tests above,
+        on 3.13.3 and 3.14.4 alike. Measured, not assumed.
+
+        So the line is INSURANCE against a future in which something prints
+        before the gate, and this test pins the mechanism that would make it
+        matter rather than pretending the gate covers it. Saying so is cheaper
+        than a comment claiming coverage that no test can discriminate.
+        """
+        script = (
+            "import sys, os\n"
+            "sys.stdout.write('x' * 10)\n"  # buffered; no syscall yet
+            "os.close(1)\n"  # the descriptor the pending flush will use
+            + ("sys.stdout = None\n" if neutralise else "")
+            + f"sys.exit({self.EXPECTED})\n"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            cwd=str(tmp_path), env=_env(), timeout=60,
+        )
+        assert proc.returncode == (self.EXPECTED if neutralise else 120), proc.returncode

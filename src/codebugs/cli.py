@@ -345,13 +345,18 @@ def run() -> None:
         # discard its output — is the silent success CB-78 rejected, and on 3.14
         # it is what the interpreter already does on its own.
         #
-        # `sys.stdout = None` is not decoration and not tidiness. The
-        # interpreter flushes the std files during finalization, and when THAT
-        # fails it rewrites the process status to 120 — measured: it is where
-        # the 3.13 fd-closed cell's 120 came from. Exiting 141 and then letting
-        # finalization flush the very stream we just declared unusable would let
-        # the defect rewrite its own fix's exit code. None is the documented
-        # "nothing to flush" value and CPython's flush_std_files tests for it.
+        # `sys.stdout = None` is INSURANCE, and the honest scope matters more
+        # than the mechanism. The mechanism is real and measured on both
+        # interpreters: with content already buffered on a bad descriptor,
+        # finalization's flush of the std files fails and rewrites the process
+        # status 141 -> 120 (pinned by
+        # `test_premise_a_failed_shutdown_flush_rewrites_the_exit_status`).
+        # But it is NOT reachable from HERE — at this point nothing has written
+        # to stdout, so the buffer is empty and the flush succeeds. A mutant
+        # deleting this line SURVIVES every behavioural test in that class on
+        # 3.13.3 and 3.14.4. It stays because it costs one line and makes the
+        # exit code independent of whether anything ever prints before the gate;
+        # it does not stay because a test covers it.
         #
         # This is a process-global mutation, which is precisely why it lives
         # here and could not live in `main`: `main` is called in-process by
