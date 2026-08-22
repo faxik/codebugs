@@ -163,6 +163,99 @@ def main() -> None:
         sys.exit(5)
 
 
+# CB-134. The exit code for "the reader of my output is gone". CB-78 established
+# it as 128 + SIGPIPE for a dead PIPE; a stdout that is already closed is the
+# same event observed earlier, so it reports the same way rather than inventing a
+# second vocabulary for one condition. The literal is the Windows fallback only:
+# there is no SIGPIPE there, and a platform-specific number would make the
+# contract mean two things again, which is the whole defect this closes.
+_NO_READER_EXIT = (128 + signal.SIGPIPE) if hasattr(signal, "SIGPIPE") else 141
+
+
+def _stdout_is_usable() -> bool:
+    """Can this process write to stdout at all? A CHECK — it mutates nothing.
+
+    CB-134. A closed stdout is NOT a dead pipe: no write ever reaches the kernel,
+    so nothing raises SIGPIPE and `run`'s disposition never fires. What happened
+    instead was whatever the stdlib did that release, and it differed on every
+    axis. Measured on this repo's two interpreters, one mutating verb:
+
+        state                      3.13.3                     3.14.4
+        --------------------------------------------------------------------
+        sys.stdout.close()         rc 1, traceback, LANDED    rc 1, traceback, nothing
+        fd 1 closed at exec        rc 120, EBADF at the       rc 0, SILENT, LANDED
+                                   shutdown flush, LANDED
+
+    The 3.14 fd cell is the dangerous one and it is the newest: 3.14 sets
+    `sys.stdout` to None when fd 1 is invalid at startup, `print` is a no-op
+    against None, and argparse's colour probe short-circuits on
+    `hasattr(None, "fileno")` — so every verb runs, discards its entire output
+    and exits 0. That is the "silent exit 0" CB-78's ratification rejected by
+    name, reached by upgrading the interpreter rather than by changing any code
+    here.
+
+    THREE STATES, because one predicate cannot see all three (each was measured,
+    not reasoned):
+
+    1. `sys.stdout is None` — 3.14 with fd 1 closed at exec.
+    2. The OBJECT is closed — `sys.stdout.close()`. `fileno()` raises
+       `ValueError`, which is exactly what `_colorize.can_colorize` does NOT
+       catch (it guards only `OSError`), which is why 3.14 dies during parser
+       construction.
+    3. The wrapper is open over a descriptor that CANNOT BE WRITTEN — 3.13 with
+       fd 1 closed at exec, where `closed` is False and `fileno()` returns 1
+       quite happily. `fstat` does NOT see this and the first draft of this
+       function was wrong for exactly that reason: measured, CPython's own
+       startup opens a file onto fd 1 (the lowest free descriptor) — here
+       `/sys/kernel/mm/transparent_hugepage/enabled`, READ-ONLY — so fd 1 is a
+       perfectly valid open descriptor that reports mode 0o100644 and raises
+       EBADF on the first write. The descriptor's ACCESS MODE is the only local
+       evidence that discriminates it, so that is what is read.
+
+    A STREAM WITH NO DESCRIPTOR IS USABLE, and that direction matters more than
+    the refusals: `StringIO`, a pytest capture object and a pipe wrapper all
+    raise from `fileno()` while being perfectly writable. Failing closed there
+    would refuse ordinary runs, so the unknown resolves to "usable" — the
+    opposite of this repo's usual fail-closed default, because here the
+    conservative direction is to do the work, not to refuse it.
+
+    WHAT THIS DELIBERATELY DOES NOT CATCH, narrowed to what is actually true.
+    The fd-reuse case above is caught only while the reused descriptor is
+    read-only, which is what CPython's own startup happens to produce. If some
+    file opened for WRITING lands on fd 1, this returns True and the verb's
+    output is written into that file. Nothing local can discriminate it — the
+    descriptor is genuinely open, genuinely writable, and genuinely not stdout.
+    That is a platform fd-hygiene hazard, stated rather than papered over with a
+    guess; the remedy is not to close fd 1 and then exec something.
+    """
+    out = sys.stdout
+    if out is None:
+        return False
+    if getattr(out, "closed", False):
+        return False
+    try:
+        fd = out.fileno()
+    except (AttributeError, OSError, ValueError):
+        # No OS-level descriptor. `io.UnsupportedOperation` subclasses both
+        # OSError and ValueError, so it is covered by this tuple.
+        return True
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows
+        # No F_GETFL there. Fall back to mere existence: the read-only-reuse
+        # case this guards is a POSIX fd-allocation behaviour to begin with.
+        try:
+            os.fstat(fd)
+        except OSError:
+            return False
+        return True
+    try:
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    except OSError:
+        return False  # EBADF: the descriptor really is gone
+    return flags & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR)
+
+
 def run() -> None:
     """PROCESS entry point: restore POSIX SIGPIPE semantics, then run `main`.
 
@@ -209,6 +302,25 @@ def run() -> None:
 
     ``hasattr``: Windows has no ``SIGPIPE``.
 
+    CB-134 ADDED A SECOND JOB HERE, AND IT CHANGED BEHAVIOUR ON 3.13. The
+    disposition above covers a dead PIPE. It cannot cover a stdout that is
+    already CLOSED, because no write ever reaches the kernel and no signal is
+    ever raised — so that case fell through to whatever the stdlib did that
+    release, and the four measured cells disagreed on exit code, on whether a
+    raw traceback appeared, and on whether the write landed (the table is in
+    ``_stdout_is_usable``). ``run`` now REFUSES such a run at the entry, before
+    any work, with the same 141.
+
+    The price, because it is a real behaviour change and not a bug fix on 3.13:
+    a closed-object stdout there used to let the write LAND and then fail on
+    output, and now lands nothing. That is the point rather than a regression —
+    with the refusal ahead of the work there is no committed write left to
+    misreport, so the CB-15/CB-16 success-shaped lie is unrepresentable on this
+    path instead of merely being caught downstream. On 3.14 the change is
+    strictly a repair: the fd-closed spelling exited **0** in silence with the
+    write landed, which is the "silent exit 0" this card's own ratification
+    rejected by name.
+
     DEPLOYMENT CAVEAT, invisible in the diff: a console shim generated before this
     change imports ``main`` BY NAME, so an existing install keeps the old
     behaviour until ``pipx reinstall codebugs`` / ``pip install -e .`` regenerates
@@ -228,6 +340,25 @@ def run() -> None:
     """
     if hasattr(signal, "SIGPIPE"):
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    if not _stdout_is_usable():
+        # CB-134. Refuse BEFORE any work. The alternative — run the verb and
+        # discard its output — is the silent success CB-78 rejected, and on 3.14
+        # it is what the interpreter already does on its own.
+        #
+        # `sys.stdout = None` is not decoration and not tidiness. The
+        # interpreter flushes the std files during finalization, and when THAT
+        # fails it rewrites the process status to 120 — measured: it is where
+        # the 3.13 fd-closed cell's 120 came from. Exiting 141 and then letting
+        # finalization flush the very stream we just declared unusable would let
+        # the defect rewrite its own fix's exit code. None is the documented
+        # "nothing to flush" value and CPython's flush_std_files tests for it.
+        #
+        # This is a process-global mutation, which is precisely why it lives
+        # here and could not live in `main`: `main` is called in-process by
+        # three test modules, and the same reasoning that keeps `signal.signal`
+        # out of it keeps this out of it.
+        sys.stdout = None
+        sys.exit(_NO_READER_EXIT)
     main()
 
 
