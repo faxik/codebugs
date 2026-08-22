@@ -22,7 +22,12 @@ below hold the properties that make that better than the discipline it replaces:
     own files staged, and its generated message passes the LIVE commit-msg hook;
   * the test seam cannot write to a path at all (CB-138) — pointing its marker
     at the real registry has no effect, because the marker's value is never
-    used as a path any more, only as a boolean that gates one stderr line.
+    used as a path any more, only as a boolean that gates one stderr line;
+  * the seam is neutralised SYMMETRICALLY: a hostile ambient value for EITHER
+    of the two test variables reaches no ordinary mint, and deleting either
+    `env.pop` turns that test red. A requirement met in the code and not in a
+    pin is not met — until this test existed, one of the two `env.pop` calls
+    could be removed with the whole suite still green.
 
 Everything runs in a throwaway git repository with a fixture registry. The real
 registry is never read, written or committed by this file.
@@ -418,6 +423,52 @@ class TestSeamCannotWriteAnywhere:
         assert len(after.splitlines()) == len(before.splitlines()) + 1
 
 
+class TestSeamIsNeutralisedSymmetrically:
+    """`_env()` pops BOTH test variables, and nothing asserted that until now.
+
+    The seam has two halves — `CASCADE_MINT_TEST_MARKER` (one line on the
+    process's own stderr) and `CASCADE_MINT_TEST_DELAY` (a sleep inside the
+    lock). An ambient value for either one, exported into the shell days ago or
+    left behind by a previous probe, would silently change what every other
+    test in this file measures. `_env()` therefore clears both; this test is
+    what makes that a rule rather than a habit, and each half has its own
+    oracle, so deleting either `env.pop` turns it red on its own.
+
+    The DELAY oracle is deliberately NOT a timing measurement. The script runs
+    under `set -e`, so a non-numeric interval makes `sleep` fail and the mint
+    refuse outright: a leak is then an exit code, not a stopwatch reading. That
+    rests on a property of `sleep(1)` rather than of the code under test, so
+    the premise is pinned in the test rather than assumed.
+    """
+
+    def test_an_ambient_delay_and_marker_reach_no_ordinary_mint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        premise = subprocess.run(
+            ["sleep", "definitely-not-an-interval"], capture_output=True, text=True
+        )
+        assert premise.returncode != 0, (
+            "premise gone: sleep(1) accepted a non-numeric interval, so a leaked "
+            "CASCADE_MINT_TEST_DELAY would no longer be visible as a refusal"
+        )
+
+        monkeypatch.setenv("CASCADE_MINT_TEST_DELAY", "definitely-not-an-interval")
+        monkeypatch.setenv("CASCADE_MINT_TEST_MARKER", str(tmp_path / "should-never-be-touched"))
+
+        repo = _make_repo(tmp_path)
+        out = _mint(repo, "--prefix", CYRILLIC_TE, "--text", "(DIR-1) a new unit")
+
+        # A leaked DELAY: `sleep definitely-not-an-interval` fails under `set -e`,
+        # so the mint dies before appending anything.
+        assert out.returncode == 0, out.stderr
+        assert _registry(repo).splitlines()[-1] == f"- {CYRILLIC_TE}-9 — (DIR-1) a new unit"
+        # A leaked MARKER: the seam's handshake line on this process's stderr.
+        assert "CASCADE_MINT_TEST_MARKER" not in out.stderr, (
+            "the ambient marker reached the mint — the seam is not neutralised"
+        )
+        assert not (tmp_path / "should-never-be-touched").exists()
+
+
 class TestConcurrentMint:
     """§4.2 — the discriminating test, and the one the mutation probe targets.
 
@@ -477,18 +528,45 @@ class TestConcurrentMint:
         # over a broken gate. The line is written inside the lock, after the
         # number has been computed, so blocking on it is proof of the state
         # this test needs.
+        # ORDER IS LOAD-BEARING: DRAIN THE QUEUE FIRST, CONSULT `poll()` ONLY WHEN
+        # IT IS EMPTY. The handshake used to be a FILE — persistent state, so a
+        # child that wrote it and then exited still left the evidence lying about.
+        # It is an EVENT now, consumed from a `queue.Queue`, and a pause between
+        # the line arriving and the test reading it is ordinary scheduling. With
+        # the `poll()` check first, that pause made the test announce "the first
+        # mint exited before it computed an id" over a handshake that HAD
+        # happened: a false FAILURE, i.e. a flake, in a suite CI is about to
+        # start running for real.
+        #
+        # The trap in fixing it is trading that loud false failure for a quiet
+        # false PASS, which is strictly worse. If the child's death stopped being
+        # noticed at all, "the first mint never reached the window" would decay
+        # into a 60-second hang whose message no longer says what happened. So
+        # the exit is still noticed — just SECOND, and only after one more pass
+        # over everything `_pump` managed to enqueue before the pipe closed.
+        # Death before the window therefore still fails in about a second, with
+        # the child's own stderr in the message.
         deadline = time.monotonic() + 60
         handshake_seen = False
-        while time.monotonic() < deadline:
-            assert first.poll() is None, "the first mint exited before it computed an id"
+        first_exited = False
+        while not handshake_seen and time.monotonic() < deadline:
             try:
                 line = handshake_q.get(timeout=0.5)
             except queue.Empty:
+                if first_exited:
+                    break  # gone, and everything it wrote has been read — decide
+                if first.poll() is not None:
+                    # The child is gone, so its stderr closes and `_pump` ends;
+                    # join it, then take one more pass over what it enqueued.
+                    first_exited = True
+                    pump_thread.join(timeout=5)
                 continue
             if "CASCADE_MINT_TEST_MARKER" in line:
                 handshake_seen = True
-                break
-        assert handshake_seen, "the first mint never reached the window"
+        assert handshake_seen, (
+            "the first mint never reached the window; its stderr was: "
+            + "".join(stderr_lines[:])
+        )
 
         second = subprocess.Popen(
             ["bash", str(SCRIPT), "--prefix", CYRILLIC_TE, "--text", "(DIR-2) second"],
