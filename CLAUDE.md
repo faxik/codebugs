@@ -443,6 +443,27 @@ this paragraph overclaimed.**
 6. It needs **`fetch-depth: 0`**: with a shallow checkout the baseline commit is absent and
    `origin/main` may not exist, which would drop the audit back to `HEAD`. Stated at the checkout
    step, because the coupling was previously implicit.
+   **`ci.yml` needs the same key for a DIFFERENT reason, and that asymmetry is exactly why it was
+   missed for months (CB-139): here the history is read by the AUDIT step, there by the SUITE
+   itself.** Exactly one test in the whole suite reads this repository's real history —
+   `test_ci_workflow_asserts_the_first_parent_invariant`, which `cat-file`s the baseline above — so
+   under the default depth-1 checkout `ci.yml`'s `tests` job was red in CI **always** and green in
+   every local run, and a gate that cannot pass hides the regressions it exists to catch. The link
+   was understood for one workflow and missed for the other.
+   `test_ci_suite_job_checks_out_the_history_its_own_suite_reads` pins it, and each of its four
+   properties was earned rather than chosen. **Comments do not count**: the fix's own comment
+   carries the literal `fetch-depth: 0`, so a raw grep stays green after the key itself is deleted —
+   and the stripping is WHOLE-LINE only, so an inline `#` is TOLERATED by the matchers instead of
+   parsed, which is the honest version of that claim. **A file is not a composition**: two jobs, two
+   checkouts, so "somewhere in `ci.yml`" is satisfied by moving the key to `contracts`, leaving the
+   gate just as broken. **The key must be a `with:` INPUT and the explanation a COMMENT LINE**:
+   cross-model review defeated the first draft with a step whose multiline `name:` scalar contained
+   both strings — valid YAML, both assertions green, checkout still depth 1. **Exactly one checkout,
+   carrying no `if:`**: the same review defeated "the first checkout carries the key" with `if: ${{
+   false }}` on it followed by a second, bare checkout. NOT closed and named so it is not
+   rediscovered: a job-level `if:` switching the whole `tests` job off is the same shape, and this
+   test does not look at it. `contracts` stays shallow deliberately: it runs
+   `tests/test_cli_signals.py` and `tests/test_fsio.py`, neither of which reads history.
 
 **`.python-version` is the SINGLE SOURCE for the interpreter — of main, of every worktree and of
 CI — and `_guard_interpreter_matches_main` refuses to land work the two of them did not agree on
