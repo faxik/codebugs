@@ -1757,6 +1757,149 @@ class TestHarnessIntegrity:
             "an unexplained `fetch-depth: 0` gets deleted as dead weight"
         )
 
+    def test_ci_tests_job_cannot_report_success_without_running_its_steps(self) -> None:
+        """CB-142. `if:` on the checkout step is not the whole family.
+
+        The test immediately above closes ONE way to defeat the `tests` job
+        (a shallow checkout that makes its own suite unrunnable). GitHub's own
+        documented behaviour opens a WIDER family: it reports a job skipped by
+        a job-level `if:` as PASSING for required-status-check purposes — this
+        repository already states that fact about `main-invariants.yml` (that
+        workflow does not subscribe to `pull_request` for exactly this reason)
+        and never checked it for `ci.yml`'s `tests` job, which is the one
+        actually meant to become a required check.
+
+        THE PRIMITIVE, not a list of forms: job `tests` must not be able to
+        report SUCCESS without having run every one of its steps. Two known
+        carriers, both closed here:
+
+        * a job-level `if:` — the whole job is skipped and still counts green;
+        * `continue-on-error: true`, at job level OR on any single step — the
+          step (or every step) can fail outright and the job still reports
+          success. The key's PRESENCE is refused regardless of its value,
+          because `continue-on-error: ${{ <expression> }}` is exactly as
+          dangerous as a literal `true` and a value-only check would miss it.
+
+        A THIRD carrier surfaced while writing this test and is closed too: a
+        step-level `if:` on any of this job's five steps. A skipped step is
+        not a failed step, so `if: false` on the "Tests" step would let the
+        job finish green having never run pytest at all — the same "reports
+        success without running its steps" shape, one level down. This is
+        deliberately scoped to the STEPS THIS JOB ALREADY HAS (checkout,
+        setup-uv, interpreter pin, lint, tests): none of the five has any
+        legitimate reason to be conditional, unlike a job-level `if:` (which
+        this repo elsewhere refuses to ban outright, because some future job
+        legitimately needs one).
+
+        WHY THE EXTRACTION MUST BE FAIL-CLOSED, not merely correct today:
+        `pyyaml` is not a dependency here (measured — `import yaml` under
+        `--extra dev` raises `ModuleNotFoundError`), so this reads `ci.yml` by
+        slicing text on its two-space job-key indentation, exactly like the
+        CB-139 test above. That slice is brittle to reformatting BY
+        CONSTRUCTION, so the extraction itself must refuse to guess: it
+        requires the job key `tests:` to occur EXACTLY ONCE among the
+        top-level `jobs:` children (zero is "renamed out from under the
+        test", more than one is "cannot tell which block is real"), and it
+        asserts the extracted body is non-empty. A rename, an indent change,
+        or a moved job key therefore turns this test RED with a named
+        assertion failure — never green over an empty or wrong slice. This is
+        the test's own main subject, not incidental plumbing: a fix for
+        "gates that report green when they should not" that itself passes
+        vacuously on a reformatted file would be the same defect recreated
+        one layer up.
+
+        AVOIDING THE OTHER TRAP THIS REPO NAMES FOR ITSELF: neither this
+        assertion nor its own failure messages are grepped against — the
+        checks below are structural (parsed key names at a derived
+        indentation depth), not `"if:" in text` or `"continue-on-error" in
+        text` substring tests. A prose mention of either string anywhere in
+        this file's comments (this docstring included) cannot make the
+        mechanism it guards look present once it has been deleted, because
+        comment lines are stripped before any of this runs and the match is
+        never on raw text.
+        """
+
+        def job_block(text: str, name: str) -> str:
+            """The body of exactly one job, or a loud refusal — never a guess.
+
+            `text` must already have comment lines stripped.
+            """
+            _, _, body = text.partition("\njobs:")
+            assert body, "ci.yml declares no `jobs:` block"
+            bounds = list(re.finditer(r"^  ([A-Za-z_][\w-]*):[ \t]*$", body, re.M))
+            matches = [i for i, m in enumerate(bounds) if m.group(1) == name]
+            assert len(matches) == 1, (
+                f"found job `{name}` {len(matches)} time(s) in ci.yml's `jobs:` block "
+                f"(expected exactly one unambiguous occurrence); jobs seen: "
+                f"{[b.group(1) for b in bounds]} — this test cannot tell which block, "
+                "if any, is the real one, so it refuses rather than guess"
+            )
+            idx = matches[0]
+            start = bounds[idx].end()
+            end = bounds[idx + 1].start() if idx + 1 < len(bounds) else len(body)
+            block = body[start:end]
+            assert block.strip(), f"job `{name}` has an empty body in ci.yml"
+            return block
+
+        wf = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+        assert wf.exists(), "ci.yml is missing"
+        raw = wf.read_text()
+        code = "\n".join(ln for ln in raw.splitlines() if not ln.lstrip().startswith("#"))
+
+        block = job_block(code, "tests")
+
+        # Job-level keys (`runs-on:`, `steps:`, a hypothetical `if:` or
+        # `continue-on-error:`) all sit at one consistent indentation. Derive
+        # it from the block's own first non-blank line rather than hardcoding
+        # a column count, so a change to the FILE's overall indentation still
+        # gets a correct depth here (a change to `tests`'s OWN depth relative
+        # to `jobs:` is caught by job_block's two-space anchor above).
+        first_line = next(ln for ln in block.splitlines() if ln.strip())
+        base_indent = len(first_line) - len(first_line.lstrip(" "))
+        assert base_indent > 0, "job `tests`'s body is not indented under its key"
+        top_level_keys = re.findall(rf"^ {{{base_indent}}}([A-Za-z_-]+):", block, re.M)
+
+        assert "steps" in top_level_keys, "job `tests` declares no top-level `steps:` key"
+        assert "if" not in top_level_keys, (
+            "job `tests` carries a job-level `if:` — GitHub reports a job skipped by "
+            "`if:` as PASSING for required-status-check purposes, which switches this "
+            "gate off while it keeps reporting green. See CB-142."
+        )
+        assert "continue-on-error" not in top_level_keys, (
+            "job `tests` carries a job-level `continue-on-error:` — every one of its "
+            "steps can fail and the job still reports success. See CB-142."
+        )
+
+        # Split `steps:` into individual list items, the same way as the
+        # CB-139 test above, so a per-step key cannot hide inside one of them.
+        steps_m = re.search(rf"^ {{{base_indent}}}steps:[ \t]*$", block, re.M)
+        assert steps_m, "job `tests` declares a `steps:` key with no bare-mapping form found"
+        rest = block[steps_m.end() :]
+        items = list(re.finditer(r"^([ \t]*)- ", rest, re.M))
+        assert items, "job `tests` declares an empty `steps:` list"
+        step_indent = items[0].group(1)
+        top_items = [it for it in items if it.group(1) == step_indent]
+        steps = [
+            rest[it.start() : (top_items[i + 1].start() if i + 1 < len(top_items) else len(rest))]
+            for i, it in enumerate(top_items)
+        ]
+        assert len(steps) >= 5, (
+            f"job `tests` has {len(steps)} step(s); expected at least the 5 documented "
+            "ones (checkout, setup-uv, interpreter pin, lint, tests) — fewer means this "
+            "extraction is not seeing the whole list"
+        )
+
+        for i, step in enumerate(steps):
+            assert not re.search(r"^[ \t]*continue-on-error:", step, re.M), (
+                f"step {i} of job `tests` carries `continue-on-error:` — it can fail and "
+                "the job still reports success. See CB-142."
+            )
+            assert not re.search(r"^[ \t]*if:", step, re.M), (
+                f"step {i} of job `tests` carries `if:` — a skipped step is not a failed "
+                "step, so this step can be silently excluded from a run that still "
+                "reports success. See CB-142."
+            )
+
     def test_invariants_job_is_not_subscribed_to_pull_request(self) -> None:
         """A skipped job is reported as PASSING for required status checks.
 
