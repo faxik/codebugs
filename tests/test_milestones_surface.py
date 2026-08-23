@@ -31,6 +31,9 @@ EXPECTED_TOOL_NAMES = {
     "milestone_move_item",
     "milestone_set_status",
     "milestone_audit_query",
+    # CB-107: reconcile_all's own MCP surface, dry-run default preserved
+    # (apply=false unless the caller passes a literal JSON true).
+    "milestone_reconcile",
     # explicit @mcp.tool(name=...) — spec-canonical identifiers
     "triage_inbox",
     "triage_dismiss",
@@ -52,9 +55,10 @@ EXPECTED_CLI_SUBCOMMANDS = {
     "wip-status",
     "milestone-mark-branch",
     "milestone-mark-integrated",
-    # CB-26 repair tool. CLI-only on purpose: a one-time bulk repair does not
-    # justify a permanent MCP mutator, and the CLI is the curated interactive
-    # surface. It defaults to a dry run and needs --apply to write.
+    # CB-26 repair tool. Also reachable from MCP as `milestone_reconcile`
+    # since CB-107 -- this CLI verb's own contract (dry run by default,
+    # --apply to write) is unchanged; the MCP wrapper preserves the same
+    # apply=False default rather than replacing this surface.
     "milestone-reconcile",
 }
 
