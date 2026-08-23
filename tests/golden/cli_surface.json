@@ -1,0 +1,4760 @@
+{
+  "add": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "severity",
+        "help": "critical|high|medium|low",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "-s",
+          "--severity"
+        ],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "category",
+        "help": "Finding category",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "-c",
+          "--category"
+        ],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "file",
+        "help": "File path",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "-f",
+          "--file"
+        ],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "description",
+        "help": "Description",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "-d",
+          "--description"
+        ],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "lines",
+        "help": "Line range (stored in meta)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "-l",
+          "--lines"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "source",
+        "help": "Source (default: human)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--source"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "tags",
+        "help": "Comma-separated tags",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--tags"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "meta",
+        "help": "JSON metadata string",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--meta"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "fingerprint",
+        "help": "Stable identity token; same defect -> same fingerprint (dedup key)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--fingerprint"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "new_category",
+        "help": "Permit minting a category this tracker does not hold yet (CB-60)",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--new-category"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "anchor-recapture": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "finding_id",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--finding-id"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": "open",
+        "deprecated": false,
+        "dest": "status",
+        "help": "status filter; \"all\" widens to every status (default: open)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--status"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "category",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--category"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "file",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--file"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "repo",
+        "help": "repo dir the anchors resolve against (also locates .codebugs/). BT-7 refuses ambient cwd for the ANCHOR, so omitting it reports no_root rather than guessing a tree",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--repo"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": 10000,
+        "deprecated": false,
+        "dest": "limit",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--limit"
+        ],
+        "required": false,
+        "type": "int"
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "as_json",
+        "help": null,
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--json"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "apply",
+        "help": "write the rebuilt anchors (default: dry run)",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--apply"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "force_tombstone",
+        "help": "override a `loc: null` tombstone (\"do not recapture\"), which is otherwise left alone",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--force-tombstone"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "anchor-resolve": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "finding_id",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--finding-id"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": "open",
+        "deprecated": false,
+        "dest": "status",
+        "help": "status filter; \"all\" widens to every status (default: open)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--status"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "category",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--category"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "file",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--file"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "repo",
+        "help": "repo dir the anchors resolve against (also locates .codebugs/). BT-7 refuses ambient cwd for the ANCHOR, so omitting it reports no_root rather than guessing a tree",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--repo"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": 10000,
+        "deprecated": false,
+        "dest": "limit",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--limit"
+        ],
+        "required": false,
+        "type": "int"
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "as_json",
+        "help": null,
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--json"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "bench-delete": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "run_id",
+        "help": "Delete a specific run (e.g. BE-1)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--run-id"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "benchmark",
+        "help": "Delete all runs for a benchmark",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--benchmark"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "bench-import": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "file",
+        "help": "CSV or JSON file path",
+        "metavar": null,
+        "nargs": "?",
+        "option_strings": [],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "json_file",
+        "help": "JSON benchmark file (always treated as JSON)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--json-file"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "benchmark",
+        "help": "Benchmark name",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "-b",
+          "--benchmark"
+        ],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "date",
+        "help": "Run date (YYYY-MM-DD, default: today)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--date"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "tags",
+        "help": "Comma-separated tags",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--tags"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "meta",
+        "help": "JSON metadata string",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--meta"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "bench-list": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "benchmark",
+        "help": "List runs for this benchmark",
+        "metavar": null,
+        "nargs": "?",
+        "option_strings": [],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "last_n",
+        "help": "Last N runs",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--last-n"
+        ],
+        "required": false,
+        "type": "int"
+      }
+    ],
+    "has_handler": true
+  },
+  "bench-query": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "benchmark",
+        "help": "Benchmark name",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "runs",
+        "help": "Specific run IDs",
+        "metavar": null,
+        "nargs": "+",
+        "option_strings": [
+          "--runs"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "date_from",
+        "help": "Start date (YYYY-MM-DD)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--date-from"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "date_to",
+        "help": "End date (YYYY-MM-DD)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--date-to"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "metrics",
+        "help": "Comma-separated metric names",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--metrics"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "rows",
+        "help": "Comma-separated row labels",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--rows"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": [
+          "row",
+          "run"
+        ],
+        "const": null,
+        "default": "row",
+        "deprecated": false,
+        "dest": "group_by",
+        "help": "Pivot axis",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--group-by"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "last_n",
+        "help": "Last N runs only",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--last-n"
+        ],
+        "required": false,
+        "type": "int"
+      },
+      {
+        "choices": [
+          "json",
+          "csv"
+        ],
+        "const": null,
+        "default": "json",
+        "deprecated": false,
+        "dest": "format",
+        "help": "Output format",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--format"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "blockers-add": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "item_id",
+        "help": "The blocked entity (e.g. CB-5, FR-012)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "reason",
+        "help": "Why it's blocked",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "blocked_by",
+        "help": "Dependency entity",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--blocked-by"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": [
+          "entity_resolved",
+          "date",
+          "manual"
+        ],
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "trigger_type",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--trigger-type"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "trigger_at",
+        "help": "Date for date triggers",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--trigger-at"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "blockers-check": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "blockers-query": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "item_id",
+        "help": "Filter by blocked item",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--item-id"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "blocked_by",
+        "help": "Filter by dependency",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--blocked-by"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": [
+          "entity_resolved",
+          "date",
+          "manual"
+        ],
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "trigger_type",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--trigger-type"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "no_active_only",
+        "help": "Include satisfied/cancelled",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--no-active-only"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "blockers-resolve": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "blocker_id",
+        "help": "Blocker row ID",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": "int"
+      },
+      {
+        "choices": [
+          "cancel",
+          "resolve"
+        ],
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "action",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "categories": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "categories-normalize": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "apply",
+        "help": "Write the changes (without this the command only reports)",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--apply"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "fold_map",
+        "help": "JSON {\"stored spelling\": \"canonical_target\"}; omit to fold every spelling to its own normalized form",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--fold-map"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "json",
+        "help": "Print the raw report as JSON",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--json"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "claim": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "id",
+        "help": "Entity ID (CB-N, FR-N, NFR-N)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "holder",
+        "help": "Branch name, agent id, or person",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--holder"
+        ],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": [
+          "branch",
+          "agent",
+          "human"
+        ],
+        "const": null,
+        "default": "agent",
+        "deprecated": false,
+        "dest": "holder_kind",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--holder-kind"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "repo",
+        "help": "Absolute path of the repo owning the branch",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--repo"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "note",
+        "help": "Why it is claimed",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--note"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "no_project",
+        "help": "Do not move the entity's status",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--no-project"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "allow_terminal",
+        "help": "Claim even if resolved",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--allow-terminal"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "json",
+        "help": null,
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--json"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "claims": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "holder",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--holder"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "kind",
+        "help": "Entity kind: finding | requirement",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--kind"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": [
+          "branch",
+          "agent",
+          "human"
+        ],
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "holder_kind",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--holder-kind"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": [
+          "ids",
+          "table"
+        ],
+        "const": null,
+        "default": "table",
+        "deprecated": false,
+        "dest": "format",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--format"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "json",
+        "help": null,
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--json"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "export-csv": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "file",
+        "help": "Output file (default: codebugs_export.csv)",
+        "metavar": null,
+        "nargs": "?",
+        "option_strings": [],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "get": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "id",
+        "help": "Finding ID (e.g. CB-1383)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "grouping-citations": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "status",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--status"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "category",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--category"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": 3,
+        "deprecated": false,
+        "dest": "hub_degree",
+        "help": "degree above which a node is an anchor (default 3); 'none' disables hub splitting and returns the raw components",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--hub-degree"
+        ],
+        "required": false,
+        "type": "codebugs.grouping._hub_degree_arg"
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "component_limit",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--component-limit"
+        ],
+        "required": false,
+        "type": "int"
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "member_limit",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--member-limit"
+        ],
+        "required": false,
+        "type": "int"
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": 25,
+        "deprecated": false,
+        "dest": "anchor_limit",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--anchor-limit"
+        ],
+        "required": false,
+        "type": "int"
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": 50,
+        "deprecated": false,
+        "dest": "orphan_limit",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--orphan-limit"
+        ],
+        "required": false,
+        "type": "int"
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "as_json",
+        "help": null,
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--json"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "grouping-filing": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "status",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--status"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "category",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--category"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "lineage_limit",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--lineage-limit"
+        ],
+        "required": false,
+        "type": "int"
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "event_limit",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--event-limit"
+        ],
+        "required": false,
+        "type": "int"
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "as_json",
+        "help": null,
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--json"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "grouping-tags": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "status",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--status"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "category",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--category"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": 2,
+        "deprecated": false,
+        "dest": "min_pair_count",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--min-pair-count"
+        ],
+        "required": false,
+        "type": "int"
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "tag_limit",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--tag-limit"
+        ],
+        "required": false,
+        "type": "int"
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": 50,
+        "deprecated": false,
+        "dest": "pair_limit",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--pair-limit"
+        ],
+        "required": false,
+        "type": "int"
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "as_json",
+        "help": null,
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--json"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "import-csv": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "file",
+        "help": "CSV file path",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "init": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "directory",
+        "help": "Directory (default: the --tracker-root DIR if given, else cwd)",
+        "metavar": null,
+        "nargs": "?",
+        "option_strings": [],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "force",
+        "help": "Create even if an enclosing tracker already covers this directory",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--force"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "merge-abandon": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "session_id",
+        "help": "Session ID to abandon",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "merge-claims": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "session_id",
+        "help": "Session ID",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "merge-sessions": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "status",
+        "help": "Filter: active|merging|done|abandoned",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--status"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "merge-status": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "milestone-audit": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "milestone",
+        "help": "Filter by milestone slug",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--milestone"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "item",
+        "help": "Filter by item ref",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--item"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "actor",
+        "help": "Filter by actor",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--actor"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "limit",
+        "help": "Row limit (default 200)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--limit"
+        ],
+        "required": false,
+        "type": "int"
+      }
+    ],
+    "has_handler": true
+  },
+  "milestone-list": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "kind",
+        "help": "Filter by kind (release|stream)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--kind"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "state",
+        "help": "Filter by state",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--state"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "milestone-mark-branch": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "item_ref",
+        "help": "Item id (e.g. CB-1234)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "branch",
+        "help": "Git branch name holding the work",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "milestone-mark-integrated": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "item_ref",
+        "help": "Item id (e.g. CB-1234)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "commit",
+        "help": "Commit SHA where the work landed on main",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "milestone-reconcile": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "apply",
+        "help": "Actually write the changes (default: dry run)",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--apply"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "milestone-status": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "id",
+        "help": "Milestone slug (e.g. release/1.1)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "query": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "id",
+        "help": "Filter by ID (single CB-N or comma-separated list)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--id"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "status",
+        "help": "Filter by status",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--status"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "severity",
+        "help": "Filter by severity",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--severity",
+          "-s"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "category",
+        "help": "Filter by category",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--category",
+          "-c"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "file",
+        "help": "Filter by file (substring)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--file",
+          "-f"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "source",
+        "help": "Filter by source",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--source"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "fingerprint",
+        "help": "Filter by identity fingerprint (exact)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--fingerprint"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "group_by",
+        "help": "Group by: file|category|severity|status|source",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--group-by"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "limit",
+        "help": "Max results",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--limit"
+        ],
+        "required": false,
+        "type": "int"
+      }
+    ],
+    "has_handler": true
+  },
+  "recent": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "since",
+        "help": "Lower bound on updated_at, INCLUSIVE: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--since"
+        ],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "status",
+        "help": "Filter by status (aliases accepted); omit for every status",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--status"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "limit",
+        "help": "Max results (default 100)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--limit"
+        ],
+        "required": false,
+        "type": "int"
+      }
+    ],
+    "has_handler": true
+  },
+  "relations-query": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "entity_id",
+        "help": "Finding to look up",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--entity-id"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": [
+          "duplicate_of",
+          "split_from",
+          "follow_up_of",
+          "found_during",
+          "distinct_from",
+          "related_to"
+        ],
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "rel",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--rel"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "include_retracted",
+        "help": null,
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--include-retracted"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "relations-relate": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "src_id",
+        "help": "Source finding (LOSER for duplicate_of)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": [
+          "duplicate_of",
+          "split_from",
+          "follow_up_of",
+          "found_during",
+          "distinct_from",
+          "related_to"
+        ],
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "rel",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "dst_id",
+        "help": "Target finding (SURVIVOR for duplicate_of)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "source",
+        "help": "Who is asserting this",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--source"
+        ],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "note",
+        "help": "Optional reasoning",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--note"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "relations-unrelate": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "src_id",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": [
+          "duplicate_of",
+          "split_from",
+          "follow_up_of",
+          "found_during",
+          "distinct_from",
+          "related_to"
+        ],
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "rel",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "dst_id",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "retracted_by",
+        "help": "Who is retracting it",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--retracted-by"
+        ],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "reason",
+        "help": "Why",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--reason"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "release": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "id",
+        "help": "Entity ID",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "holder",
+        "help": "Must match the claiming holder",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--holder"
+        ],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": [
+          "branch",
+          "agent",
+          "human"
+        ],
+        "const": null,
+        "default": "agent",
+        "deprecated": false,
+        "dest": "holder_kind",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--holder-kind"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "repo",
+        "help": "Must match the claiming repo",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--repo"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "no_restore",
+        "help": "Leave the status as it is",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--no-restore"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": "explicit",
+        "deprecated": false,
+        "dest": "reason",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--reason"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "json",
+        "help": null,
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--json"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "reqs-add": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "id",
+        "help": "Requirement ID (e.g. FR-001)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "description",
+        "help": "Description",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "-d",
+          "--description"
+        ],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "section",
+        "help": "Section name",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--section"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "priority",
+        "help": "Must|Should|Could",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--priority"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "status",
+        "help": "Planned|Partial|Implemented|Verified|Superseded|Obsolete",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--status"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "source",
+        "help": "Source reference",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--source"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "test_coverage",
+        "help": "Test file name(s)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--test-coverage"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "tags",
+        "help": "Comma-separated tags",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--tags"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "reqs-export": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "file",
+        "help": "Output file (default: stdout)",
+        "metavar": null,
+        "nargs": "?",
+        "option_strings": [],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "reqs-get": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "id",
+        "help": "Requirement ID (e.g. FR-001)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "reqs-import": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "file",
+        "help": "Markdown file path",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "reqs-query": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "id",
+        "help": "Filter by ID (single FR-N or comma-separated list)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--id"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "status",
+        "help": "Filter by status",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--status"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "priority",
+        "help": "Filter by priority",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--priority"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "section",
+        "help": "Filter by section (substring)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--section"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "search",
+        "help": "Search in description/ID",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--search"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "group_by",
+        "help": "Group by: section|status|priority|source",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--group-by"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "limit",
+        "help": "Max results",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--limit"
+        ],
+        "required": false,
+        "type": "int"
+      }
+    ],
+    "has_handler": true
+  },
+  "reqs-stats": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "by",
+        "help": "Group by: status|priority|section|source",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--by"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "reqs-summary": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "reqs-update": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "id",
+        "help": "Requirement ID",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "status",
+        "help": "New status",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--status"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "description",
+        "help": "Updated description",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--description"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "priority",
+        "help": "Updated priority",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--priority"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "test_coverage",
+        "help": "Updated test coverage",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--test-coverage"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "notes",
+        "help": "Notes",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--notes"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "reqs-verify": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "checks",
+        "help": "Comma-separated: tests,ids,status (default: all)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--checks"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "project_dir",
+        "help": "Project root for test file checks",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--project-dir"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "resolve-trailers": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "range",
+        "help": "git rev range, e.g. BASE..HEAD",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--range"
+        ],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "repo",
+        "help": "repo dir (also locates .codebugs/); default cwd",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--repo"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "dry_run",
+        "help": "parse + report without writing",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--dry-run"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "restore-csv": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "file",
+        "help": "CSV file path",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "similarity-check": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "description",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--description"
+        ],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "category",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--category"
+        ],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "meta",
+        "help": "Observation meta as JSON \u2014 volatile values are stripped from the text before scoring, same as at file time; omitting it for a meta-carrying filer previews a DIFFERENT normalization",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--meta"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": 0.7,
+        "deprecated": false,
+        "dest": "threshold",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--threshold"
+        ],
+        "required": false,
+        "type": "float"
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": 5,
+        "deprecated": false,
+        "dest": "limit",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--limit"
+        ],
+        "required": false,
+        "type": "int"
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "as_json",
+        "help": null,
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--json"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "similarity-report": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": 0.7,
+        "deprecated": false,
+        "dest": "threshold",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--threshold"
+        ],
+        "required": false,
+        "type": "float"
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "category",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--category"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "status",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--status"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "family_limit",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--family-limit"
+        ],
+        "required": false,
+        "type": "int"
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "member_limit",
+        "help": null,
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--member-limit"
+        ],
+        "required": false,
+        "type": "int"
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "as_json",
+        "help": null,
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--json"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "stats": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "by",
+        "help": "Group by: severity|category|status|file|source",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--by"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "summary": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "sweep-add": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "sweep",
+        "help": "Sweep ID (SW-N) or name",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "items",
+        "help": "Items to add",
+        "metavar": null,
+        "nargs": "+",
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "tags",
+        "help": "Comma-separated tags",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--tags"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "sweep-archive": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "sweep",
+        "help": "Sweep ID (SW-N) or name",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "sweep-archive-items": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "sweep",
+        "help": "Sweep ID (SW-N) or name",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "items",
+        "help": "Specific items to archive (optional)",
+        "metavar": null,
+        "nargs": "*",
+        "option_strings": [],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "state",
+        "help": "Archive entries in this state",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--state"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "older_than",
+        "help": "Archive entries older than (e.g. 30d, 6m)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--older-than"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "reason",
+        "help": "Free-form reason recorded on archived entries",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--reason"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "sweep-create": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "name",
+        "help": "Optional sweep name",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--name"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "description",
+        "help": "Sweep description",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--description"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "batch_size",
+        "help": "Default batch size (default: 10)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--batch-size"
+        ],
+        "required": false,
+        "type": "int"
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "lifecycle",
+        "help": "Comma-separated lifecycle states (default: pending,done)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--lifecycle"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "terminal_states",
+        "help": "Comma-separated terminal states (default: done)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--terminal-states"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "sweep-list": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "all",
+        "help": "Include archived sweeps",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--all"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "sweep-list-items": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "sweep",
+        "help": "Sweep ID (SW-N) or name",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "state",
+        "help": "Filter by state",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--state"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "tag",
+        "help": "Filter by tag",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--tag"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "all",
+        "help": "Include archived entries",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--all"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "archived_only",
+        "help": "Show only archived entries",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--archived-only"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "limit",
+        "help": "Max entries to return",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--limit"
+        ],
+        "required": false,
+        "type": "int"
+      }
+    ],
+    "has_handler": true
+  },
+  "sweep-mark": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "sweep",
+        "help": "Sweep ID (SW-N) or name",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "items",
+        "help": "Items to mark",
+        "metavar": null,
+        "nargs": "+",
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "undo",
+        "help": "Map to first non-terminal state",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--undo"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "state",
+        "help": "Explicit target state (validated against lifecycle)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--state"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "sweep-next": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "sweep",
+        "help": "Sweep ID (SW-N) or name",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "limit",
+        "help": "Batch size override",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--limit"
+        ],
+        "required": false,
+        "type": "int"
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "tags",
+        "help": "Filter by tags (comma-separated)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--tags"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "sweep-status": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "sweep",
+        "help": "Sweep ID (SW-N) or name",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "triage-inbox": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "limit",
+        "help": "Row limit (default 50)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--limit"
+        ],
+        "required": false,
+        "type": "int"
+      }
+    ],
+    "has_handler": true
+  },
+  "update": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "id",
+        "help": "Finding ID",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "status",
+        "help": "New status",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--status"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "severity",
+        "help": "Re-triage: critical|high|medium|low",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--severity",
+          "-s"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "notes",
+        "help": "Notes (REPLACES the existing notes wholesale)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--notes"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "append_note",
+        "help": "Append a line, preserving the existing notes",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--append-note"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "where": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "who-holds": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "id",
+        "help": "Entity ID",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [],
+        "required": true,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "json",
+        "help": null,
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--json"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  },
+  "wip-status": {
+    "actions": [
+      {
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "agent",
+        "help": "Filter by agent id (default: all)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--agent"
+        ],
+        "required": false,
+        "type": null
+      }
+    ],
+    "has_handler": true
+  }
+}
