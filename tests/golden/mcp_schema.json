@@ -1016,6 +1016,23 @@
     "name": "codemerge_claim"
   },
   {
+    "description": "List all files a session has claimed, in claim order.\n\nArgs:\n    session_id: The merge session ID.\n",
+    "inputSchema": {
+      "properties": {
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "title": "codemerge_claimsArguments",
+      "type": "object"
+    },
+    "name": "codemerge_claims"
+  },
+  {
     "description": "Finish a merge session and release the lock.\n\nCall this after codemerge_merge() returned proceed=true; the session must\nbe in 'merging' state or this refuses in BOTH directions of `success`.\n\nArgs:\n    session_id: The merge session ID\n    success: True if the merge succeeded (status\u2192done). False if the git\n        merge/cherry-pick failed (status\u2192active): the lock is released and\n        the session stays alive so it can try again. False does NOT close\n        the session \u2014 use codemerge_abandon for that.\n",
     "inputSchema": {
       "properties": {
@@ -1060,6 +1077,28 @@
     "name": "codemerge_merge"
   },
   {
+    "description": "List merge sessions with claim counts.\n\nArgs:\n    status: Filter by status ('active', 'merging', 'done', 'abandoned').\n        Omit for all sessions.\n",
+    "inputSchema": {
+      "properties": {
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        }
+      },
+      "title": "codemerge_sessionsArguments",
+      "type": "object"
+    },
+    "name": "codemerge_sessions"
+  },
+  {
     "description": "Start a new merge session for a branch.\n\nArgs:\n    session_id: Unique identifier for this merge session\n    branch: Git branch name being merged\n    description: Human-readable description of the work\n    base_commit: Git commit SHA this branch diverged from\n    repo_root: Repo root path (default: cwd)\n    allow_restart: If True, reuse this session_id when its previous\n        session is finished \u2014 'abandoned' or 'done'. Restarting DELETES\n        that session's file claims, so re-claim anything you still need.\n        It does NOT restart a live one: starting over an 'active' or\n        'merging' session is an error whether or not this is set.\n",
     "inputSchema": {
       "properties": {
@@ -1100,6 +1139,15 @@
       "type": "object"
     },
     "name": "codemerge_start"
+  },
+  {
+    "description": "Dashboard summary: session counts by status, total active claims,\nand who (if anyone) holds the merge lock.",
+    "inputSchema": {
+      "properties": {},
+      "title": "codemerge_statusArguments",
+      "type": "object"
+    },
+    "name": "codemerge_status"
   },
   {
     "description": "Add items to a sweep. Atomic upsert: existing items have their\n`recurrence_count` bumped instead of being silently skipped, their\n`last_seen` updated, and their archive flag cleared (R5: re-detected\narchived items un-archive automatically).\n\nArgs:\n    sweep_ref: Sweep ID (SW-N) or name\n    items: Item identifiers to add\n    tags: Optional tags applied to this batch (overwrite on bump)\n\nReturns:\n    {sweep_id, added, recurrence_bumped, duplicates_skipped (alias)}\n",
@@ -2022,6 +2070,34 @@
       "type": "object"
     },
     "name": "milestone_move_item"
+  },
+  {
+    "description": "One-time repair (CB-107) for stream items whose source finding or\nrequirement resolved before the status-change hook existed (CB-26).\nThe hook keeps new resolutions in sync; this is the retroactive fix for\nrows it never saw.\n\nDRY RUN BY DEFAULT \u2014 without apply=true nothing is written, and the\nresponse still lists every candidate transition it WOULD make. This is\na bulk mutation, and CLAUDE.md is explicit that a repair tool which\nwrites by default is how it becomes an accident, so the dry-run default\nis load-bearing and this wrapper refuses to weaken it.\n\nArgs:\n    apply: Must be a literal JSON boolean. Defaults to false (dry run).\n        Rejected outright for any other JSON type (a string like\n        \"false\", a number, null) rather than coerced by truthiness \u2014\n        an MCP client sends JSON over the wire, and Python's bool(\"0\")\n        and bool(\"false\") are both True, which would silently turn a\n        client's intended dry run into a write (CB-82's class of bug).\n",
+    "inputSchema": {
+      "properties": {
+        "apply": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": false,
+          "title": "Apply"
+        }
+      },
+      "title": "milestone_reconcileArguments",
+      "type": "object"
+    },
+    "name": "milestone_reconcile"
   },
   {
     "description": "Set an item's status. Records done_commit if status is terminal.\n\nArgs:\n    item_ref: The item id (e.g. CB-5).\n    status: open / in_progress / done / deferred / dismissed.\n    commit: SHA where the work landed on main (recorded for terminal status).\n    reason: Optional audit reason.\n",
