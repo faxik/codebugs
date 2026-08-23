@@ -3017,6 +3017,191 @@ class TestCascadeMintGate:
             git(repo, "reset", "--hard")
 
 
+class TestCascadeMintGateDeletion:
+    """CB-145: DELETING an allocation line returns a SPENT number to circulation.
+
+    The multiset formula in the comment above `_cascade_mint_gate` — `new =
+    allocation ids(staged) - allocation ids(HEAD)` — is ONE-DIRECTIONAL: a
+    staged count below HEAD's clamps to nothing instead of going negative,
+    so the `_seen` loop (which iterated only `_salloc`) never even visited an
+    id whose last staged occurrence was gone. Deleting the allocation line
+    carrying the family's highest number therefore made `new` empty, `_newtotal`
+    stayed 0, and the gate returned 0 exactly as it does for a harmless edit or
+    a mention-only note. `max` is computed over every occurrence of a family
+    ANYWHERE IN HEAD, so lowering it by deleting the top occurrence means the
+    next `tools/cascade-mint.sh --dry-run` hands the same number back out —
+    the CB-137 collision, reachable by editing a file instead of racing one.
+
+    Measured before this fix, in a throwaway repo with the unmodified hook:
+    deleting the sole `Т-5` allocation line from a two-line registry
+    committed at rc 0, and the tool's own next `--dry-run` then printed
+    `Т-5` again. Every test below runs the REAL hook, like the rest of this
+    class — a structural test would look for a line, and the defect it would
+    have to find lives in what the code between two lines does NOT check.
+    """
+
+    # ---- must REFUSE (§4, items 1-4 of the brief) --------------------------
+
+    def test_deleting_the_last_allocation_line_is_refused(self, repo: Path) -> None:
+        """The exact shape CB-145 is about: the max-holding line goes."""
+        TestCascadeMintGate._arm(repo, "# reg\n- Т-4 — a\n- Т-5 — b\n")
+        path = repo / CASCADE_REGISTRY_REL
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("- Т-5 — b\n", ""),
+            encoding="utf-8",
+        )
+        result = TestCascadeMintGate._commit(repo)
+        assert result.returncode != 0, result.stdout
+        assert "removes an allocation line" in result.stderr, result.stderr
+        assert "Т-5" in result.stderr, result.stderr
+
+        # The defect this closes, made concrete: force the deletion through
+        # (the same escape hatch every other refusal in this gate has) and
+        # watch the allocator's OWN tool re-issue the number that deletion
+        # just freed. Before CB-145 the gate never reached the `--no-verify`
+        # step at all, because it did not refuse in the first place.
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "--no-verify", "-m", "forced deletion"],
+            check=True,
+            capture_output=True,
+        )
+        assert TestCascadeMintGate._dry_run(repo, "Т") == "Т-5"
+
+    def test_deleting_a_middle_allocation_line_is_refused(self, repo: Path) -> None:
+        """Not just the tail: the number stays spent wherever its line sits.
+
+        A gate that only compared the CURRENT max against a deletion at the
+        end would miss this — nothing about `max` changes when a middle line
+        goes, but the number the deleted line held is exactly as reissuable.
+        """
+        TestCascadeMintGate._arm(
+            repo, "# reg\n- Т-4 — a\n- Т-5 — b\n- Т-6 — c\n"
+        )
+        path = repo / CASCADE_REGISTRY_REL
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("- Т-5 — b\n", ""),
+            encoding="utf-8",
+        )
+        result = TestCascadeMintGate._commit(repo)
+        assert result.returncode != 0, result.stdout
+        assert "Т-5" in result.stderr, result.stderr
+
+    def test_deleting_a_line_of_a_different_family_is_refused(self, repo: Path) -> None:
+        """Per family, not special-cased to Т (§4 item 3 of the brief)."""
+        TestCascadeMintGate._arm(repo, "# reg\n- Т-4 — a\n- BT-9 — b\n")
+        path = repo / CASCADE_REGISTRY_REL
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("- BT-9 — b\n", ""),
+            encoding="utf-8",
+        )
+        result = TestCascadeMintGate._commit(repo)
+        assert result.returncode != 0, result.stdout
+        assert "BT-9" in result.stderr, result.stderr
+
+    def test_deleting_two_allocation_lines_at_once_is_refused(self, repo: Path) -> None:
+        """Two deletions in one commit still refuse (§4 item 4 of the brief).
+
+        The gate refuses on the FIRST id it finds with a lowered count, so
+        this does not need its own counting logic — it is a corollary of the
+        single-deletion check, not a new branch.
+        """
+        TestCascadeMintGate._arm(
+            repo, "# reg\n- Т-4 — a\n- Т-5 — b\n- Т-6 — c\n"
+        )
+        path = repo / CASCADE_REGISTRY_REL
+        text = path.read_text(encoding="utf-8")
+        text = text.replace("- Т-5 — b\n", "").replace("- Т-6 — c\n", "")
+        path.write_text(text, encoding="utf-8")
+        result = TestCascadeMintGate._commit(repo)
+        assert result.returncode != 0, result.stdout
+
+    # ---- must keep PASSING (§3 of the brief: a false refusal here is worse) --
+
+    def test_an_in_place_edit_still_passes(self, repo: Path) -> None:
+        """The discriminator is COUNT per id, unchanged by rewriting text
+        after the id — this is the case CB-145's form was chosen specifically
+        not to break (§2 of the brief)."""
+        TestCascadeMintGate._arm(repo, "# reg\n- Т-4 — unit, `OLD-BRIEF.md`\n")
+        path = repo / CASCADE_REGISTRY_REL
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("OLD-BRIEF.md", "NEW-BRIEF.md"),
+            encoding="utf-8",
+        )
+        assert TestCascadeMintGate._commit(repo).returncode == 0
+
+    def test_a_mention_only_note_still_passes(self, repo: Path) -> None:
+        """A note that MENTIONS a number is not scanned in "alloc" mode at
+        all, so it can never move either side of the comparison."""
+        TestCascadeMintGate._arm(repo, "# reg\n- Т-4 — a\n")
+        TestCascadeMintGate._append(
+            repo,
+            "- КОЛЛИЗИЯ: упом"
+            "инание Т-4 в заме"
+            "тке\n",
+        )
+        assert TestCascadeMintGate._commit(repo).returncode == 0
+
+    def test_an_ordinary_mint_still_passes(self, repo: Path) -> None:
+        """The real tool's own mint (§4 item 7 of the brief: run the tool, not
+        an imitation of it)."""
+        TestCascadeMintGate._arm(repo, "# reg\n- Т-4 — a\n")
+        result = subprocess.run(
+            ["bash", str(CASCADE_MINT), "--prefix", "Т", "--text", "ordinary mint"],
+            capture_output=True,
+            text=True,
+            cwd=str(repo),
+        )
+        assert result.returncode == 0, result.stderr
+        assert git(repo, "status", "--porcelain", "--untracked-files=no") == ""
+
+    def test_a_commit_not_touching_the_registry_is_unaffected(self, repo: Path) -> None:
+        """§4 item 8 of the brief."""
+        TestCascadeMintGate._arm(repo, "# reg\n- Т-4 — a\n")
+        (repo / ".claude" / "plans" / "unrelated-note.md").write_text("# n\n")
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "--", ".claude/plans/unrelated-note.md"],
+            check=True,
+        )
+        result = subprocess.run(
+            ["git", "-C", str(repo), "commit", "-m", "unrelated"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+
+    # ---- §4.9: the fix must not refuse a transition that really happened -----
+
+    def test_the_check_only_fires_on_a_lowered_count_not_on_any_edit(self, repo: Path) -> None:
+        """Direct pin on the discriminator, since §4.9's full-history replay
+        (run by hand against this fix — see the executor's record below) is
+        not itself encoded as a test: replaying every transition in
+        `.claude/plans/CASCADE-IDS.md`'s real history is a one-time oracle
+        check on THIS fix, not a standing property of an ever-growing corpus,
+        and the pre-existing refusals it surfaced (multi-line historical
+        mints that predate the gate itself) are independent of this branch —
+        confirmed by replaying the SAME history against the unmodified gate
+        and getting the identical refusal set. What IS a standing property,
+        and what this test pins instead, is the shape of the discriminator:
+        touching a line without changing any id's COUNT never trips the new
+        branch, no matter how much text around the id changes.
+        """
+        TestCascadeMintGate._arm(
+            repo,
+            "# reg\n- Т-4 — first text, `A.md`\n"
+            "- Т-5 — second text, `B.md`\n"
+            "- BT-1 — third text, `C.md`\n",
+        )
+        path = repo / CASCADE_REGISTRY_REL
+        text = path.read_text(encoding="utf-8")
+        text = (
+            text.replace("first text, `A.md`", "renamed, `A2.md`")
+            .replace("second text, `B.md`", "renamed, `B2.md`")
+            .replace("third text, `C.md`", "renamed, `C2.md`")
+        )
+        path.write_text(text, encoding="utf-8")
+        assert TestCascadeMintGate._commit(repo).returncode == 0
+
+
 class TestClaimsWiringStructure:
     """The scripts must reach the claims ledger, not flip a status field.
 
