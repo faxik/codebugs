@@ -2072,26 +2072,13 @@
     "name": "milestone_move_item"
   },
   {
-    "description": "One-time repair (CB-107) for stream items whose source finding or\nrequirement resolved before the status-change hook existed (CB-26).\nThe hook keeps new resolutions in sync; this is the retroactive fix for\nrows it never saw.\n\nDRY RUN BY DEFAULT \u2014 without apply=true nothing is written, and the\nresponse still lists every candidate transition it WOULD make. This is\na bulk mutation, and CLAUDE.md is explicit that a repair tool which\nwrites by default is how it becomes an accident, so the dry-run default\nis load-bearing and this wrapper refuses to weaken it.\n\nArgs:\n    apply: Must be a literal JSON boolean. Defaults to false (dry run).\n        Rejected outright for any other JSON type (a string like\n        \"false\", a number, null) rather than coerced by truthiness \u2014\n        an MCP client sends JSON over the wire, and Python's bool(\"0\")\n        and bool(\"false\") are both True, which would silently turn a\n        client's intended dry run into a write (CB-82's class of bug).\n",
+    "description": "One-time repair (CB-107) for stream items whose source finding or\nrequirement resolved before the status-change hook existed (CB-26).\nThe hook keeps new resolutions in sync; this is the retroactive fix for\nrows it never saw.\n\nDRY RUN BY DEFAULT \u2014 without apply=true nothing is written, and the\nresponse still lists every candidate transition it WOULD make. This is\na bulk mutation, and CLAUDE.md is explicit that a repair tool which\nwrites by default is how it becomes an accident, so the dry-run default\nis load-bearing and this wrapper refuses to weaken it.\n\nArgs:\n    apply: Must be a literal JSON boolean. Defaults to false (dry run).\n        Rejected outright for any other JSON type (a string like\n        \"false\", a number, null) rather than coerced by truthiness \u2014\n        an MCP client sends JSON over the wire, and Python's bool(\"0\")\n        and bool(\"false\") are both True, which would silently turn a\n        client's intended dry run into a write (CB-82's class of bug).\n        CB-151: strict typing refuses this at the pydantic boundary\n        before the tool body runs, closing the one hole the previous\n        union annotation + isinstance check left open (1.0/0.0 coerced\n        to a real bool before isinstance could see it).\n",
     "inputSchema": {
       "properties": {
         "apply": {
-          "anyOf": [
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "integer"
-            },
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": false,
-          "title": "Apply"
+          "title": "Apply",
+          "type": "boolean"
         }
       },
       "title": "milestone_reconcileArguments",

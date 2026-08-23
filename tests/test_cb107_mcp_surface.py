@@ -262,19 +262,33 @@ class TestMilestoneReconcileTool:
         assert result["candidates"] == 1
         assert self._item(root, "CB-1")["status"] == "done"
 
-    @pytest.mark.parametrize("bad_apply", ["false", "0", 0, 1, ""])
+    @pytest.mark.parametrize("bad_apply", ["false", "0", 0, 1, "", 1.0, 0.0])
     def test_non_bool_apply_is_refused_and_writes_nothing(self, root, bad_apply):
         """CB-82's class of bug: Python's bool("false") and bool("0") are both
         True, and an MCP client sends JSON, not Python literals. Every one of
-        these five values must be refused rather than coerced -- in
+        these values must be refused rather than coerced -- in
         particular `"false"` must NOT be silently accepted as a truthy
         dry-run confirmation, and `1`/`"1"`-shaped values must NOT be
-        silently accepted as `apply=True`."""
+        silently accepted as `apply=True`.
+
+        CB-151 added `1.0` and `0.0` to this list. They are the exact hole the
+        old `bool | int | str | None` union + isinstance check could not see:
+        pydantic's lax mode coerces a JSON float into a real `bool` BEFORE
+        isinstance ever runs, so `apply=1.0` used to pass this gate and
+        perform the write -- reproduced against the pre-fix tree before this
+        unit touched anything (see the L3 brief for CB-151). The refusal is
+        now raised by pydantic itself (`Annotated[bool, Field(strict=True)]`)
+        at the wire boundary, before the tool body runs at all, so the
+        message is pydantic's own rather than the removed hand-rolled
+        `ValueError` -- CB-151's own instruction is to fix the TEST here, not
+        weaken the mechanism, since the old hand-rolled check is now
+        unreachable dead code and was deleted along with the union
+        annotation that made it necessary."""
         self._stale_row(root, "CB-1")
         before = self._item(root, "CB-1")
         mcp = self._mcp(root)
 
-        with pytest.raises(ToolError, match="apply must be a JSON boolean"):
+        with pytest.raises(ToolError, match="Input should be a valid boolean"):
             _call(mcp, "milestone_reconcile", apply=bad_apply)
 
         after = self._item(root, "CB-1")
@@ -285,5 +299,5 @@ class TestMilestoneReconcileTool:
         keeps the True default False); it must not silently mean either."""
         self._stale_row(root, "CB-1")
         mcp = self._mcp(root)
-        with pytest.raises(ToolError, match="apply must be a JSON boolean"):
+        with pytest.raises(ToolError, match="Input should be a valid boolean"):
             _call(mcp, "milestone_reconcile", apply=None)

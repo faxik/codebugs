@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import Field
 
 from codebugs import db
 from codebugs.entities import EntityRef, entity_kind
@@ -680,7 +682,7 @@ def register_tools(mcp, conn_factory) -> None:
         item_id: str | None = None,
         blocked_by: str | None = None,
         trigger_type: str | None = None,
-        active_only: bool = True,
+        active_only: Annotated[bool, Field(strict=True)] = True,
     ) -> dict[str, Any]:
         """List blockers with filters. Each result includes computed satisfaction state.
 

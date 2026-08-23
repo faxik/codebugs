@@ -141,4 +141,141 @@ dry-run по умолчанию). Скажи это в возврате явно
 
 # ЗАПИСЬ ИСПОЛНИТЕЛЯ (уровень (3)) — данные, не вердикт
 
-<!-- заполняется на ветке; §7 «Эскалации» обязан появиться здесь отдельным заголовком -->
+## Что сделано
+
+**Ветка**: `fix/t52-cb-151-strict-bool-gates`, коммиты `9159dca` (основной фикс + ратчет) и
+`f2e5c8a` (ruff: неиспользуемый импорт `pytest` в тест-файле).
+
+**9 сайтов, 5 файлов, аннотация `Annotated[bool, Field(strict=True)]`:**
+
+    src/codebugs/milestones/__init__.py   milestone_reconcile.apply     (+ снят union и isinstance)
+    src/codebugs/milestones/__init__.py   _milestone_close.force
+    src/codebugs/claims.py                claims_claim.project
+    src/codebugs/claims.py                claims_claim.allow_terminal
+    src/codebugs/claims.py                claims_release.restore_status
+    src/codebugs/merge.py                 codemerge_start.allow_restart
+    src/codebugs/merge.py                 codemerge_finish.success
+    src/codebugs/blockers.py              blockers_query.active_only
+    src/codebugs/relations.py             relations_query.include_retracted
+
+`milestone_reconcile.apply` потерял union-аннотацию `bool | int | str | None` и рукописный
+`isinstance(apply, bool)`-отказ — оба стали мёртвым кодом, потому что pydantic отказывает раньше
+на границе. Это удаление защиты, которая перестала быть достижимой, а не ослабление: тело тула
+теперь начинается сразу с `with conn_factory() as conn:`.
+
+**Проба живого дефекта (§6), прогнана ДО правки исходников** (git status был чист на бранче):
+`milestone_reconcile(apply=1.0)` через настоящий `call_tool` на непустом кандидатном множестве
+(одна строка `CB-1`, `open`→`fixed`) вернула `{'applied': True, 'candidates': 1, ...}` и реально
+записала `status='done'` в `milestone_items`. Дефект был жив; починено — не «не было сломано».
+
+**Golden (`tests/golden/mcp_schema.json`) регенерирован, диф изолирован ровно к одному тулу.**
+`diff` до/после — 24 строки, ВСЕ внутри `milestone_reconcile`: (1) текст docstring (я добавил
+короткую заметку про CB-151 в `Args: apply:`), (2) схема самого `apply` — с
+`anyOf: [boolean, integer, string, null]` на `{"type": "boolean"}`. Это **не** дрейф: снять union
+и одновременно сохранить его в `anyOf`-схеме невозможно (pydantic кидает `RuntimeError` при
+попытке навесить `Field(strict=True)` прямо на `Union` — проверено `TypeAdapter` до правки), и сама
+карта требует убрать union (§4). Остальные 8 сайтов (уже объявленные простым `bool` до этой
+правки) — байт-в-байт идентичны, проверено построением двух настоящих `MCPServer` (`bool` vs
+`Annotated[bool, Field(strict=True)]`) и сравнением `list_tools()[0].input_schema` до самой
+правки исходников. Это НЕ регенерация «на всякий случай» (ловушка §5.4) — я понимаю ровно откуда
+взялась каждая из 24 строк диффа.
+
+**Ратчет — `tests/test_strict_bool_gates.py`, новый файл, 8 тестов.** Обходит
+`db.get_tool_providers(mode="all")` через лёгкий `_SignatureCapture` (стоит вместо настоящего
+`MCPServer` на этапе регистрации, записывает реальный Python-объект функции), НЕ перечисляет
+модули — структурно проверено (`test_ratchet_walks_the_registry_not_a_module_list`, парсит AST
+собственных импортов файла и требует, чтобы из `codebugs` был импортирован только `db`).
+`_is_strict_bool` — поведенческий оракул: строит настоящий `pydantic.TypeAdapter` на аннотации и
+проверяет тем же способом, каким сама карта диагностировала дефект (`TypeAdapter(...)
+.validate_python(...)` на пробниках `1.0, 0.0, 1, 0, 'true', 'false', '1', '0', ''`), а не
+парсит `FieldInfo.metadata` руками. Таблица исключений `DECLARED_EXCEPTIONS` — по образцу
+`SURFACE_GAPS`, каждая строка с причиной; отдельный тест отказывает на пустой причине, отдельный —
+на устаревшей строке (параметр уже строгий или больше не существует — таблица самоудаляющаяся).
+
+## Обновлённый существующий тест (названная правка, вне бюджета §5.5)
+
+`tests/test_cb107_mcp_surface.py::TestMilestoneReconcileTool` — по требованию §4: старый механизм
+кидал `ValueError` с текстом «apply must be a JSON boolean», новый — pydantic сам, на границе, с
+текстом «Input should be a valid boolean». Поправил `match=` в двух тестах
+(`test_non_bool_apply_is_refused_and_writes_nothing`, `test_apply_none_is_also_refused`) — это
+правка ТЕСТА под новый механизм отказа, а не ослабление проверки: assertion «ничего не записано»
+не тронут. Также добавил `1.0`/`0.0` в параметризацию пяти уже-существующих значений — это ровно
+два литерала, из-за которых карта заведена, и без них регрессия CB-151 могла бы вернуться незамеченной.
+
+## Мутанты (§6), прогнаны в копиях вне репозитория (`/tmp`, удалены после)
+
+Все три прогнаны с `PYTHONDONTWRITEBYTECODE=1` и очисткой `__pycache__` перед прогоном.
+
+1. **Снял строгость с одного объявленного параметра** (`claims_claim.allow_terminal` →
+   `bool` без `Field(strict=True)`, без строки в `DECLARED_EXCEPTIONS`). Ратчет —
+   `AssertionError: ... [('claims_claim', 'allow_terminal')]`, КРАСНЫЙ. Дополнительно прогнал
+   настоящий `call_tool("claims_claim", {"allow_terminal": 1.0, ...})` на терминальной сущности
+   (`status='fixed'`) — на мутанте `outcome: 'claimed'` (клейм прошёл поверх терминальной сущности,
+   ровно то, что `allow_terminal=False` обязано отказывать) — живая дыра, не косметика.
+2. **Убрал строку из таблицы исключений, не починив параметр** (удалил
+   `("categories_normalize", "apply")` из `DECLARED_EXCEPTIONS`, сам параметр не трогал). Ратчет —
+   `AssertionError: ... [('categories_normalize', 'apply')]`, КРАСНЫЙ.
+3. **Добавил новый bool-параметр без строгости** (синтетический `claims_who_holds(..., verbose:
+   bool = False)`). Ратчет — `AssertionError: ... [('claims_who_holds', 'verbose')]`, КРАСНЫЙ.
+
+## Числа сьюта и линта
+
+- `uv run --extra dev python -m pytest tests/ -q` — **2336 passed**, оба прогона (до и после
+  правки неиспользуемого импорта), 113–114 сек.
+- `uv run --extra dev ruff check src/ tests/` — **All checks passed** (после удаления
+  неиспользуемого `import pytest` в новом файле; до этого — 1 ошибка `F401`, зафиксирована
+  отдельным коммитом).
+- `tests/test_strict_bool_gates.py` отдельно — **8 passed**.
+
+## §7. ЭСКАЛАЦИИ
+
+**Триггер (в): замер популяции держателя DIR-1 неверен — 18, не 14.** Обходом реального registry
+(`db.get_tool_providers`, тот же путь, которым идёт настоящий сервер и генератор golden) я нашёл
+**4 дополнительных** bool-несущих параметра, которых нет ни в тексте карты, ни в брифе:
+
+    codesweep_mark.processed              sweep_surface.py:246
+    codesweep_list_items.include_archived sweep_surface.py:350
+    codesweep_list_items.archived_only    sweep_surface.py:351
+    codesweep_list.include_archived       sweep_surface.py:383
+
+**Почему замер держателя их не увидел, и это не случайность, а слепая зона метода.** `sweep.py`
+не содержит ни одного литерального `@mcp.tool` — его MCP-поверхность генерируется
+`codebugs.surfacegen.emit_tools()` из декларативного списка `SURFACE` в `sweep_surface.py`
+(`dict(name="processed", type=bool, default=True)` и три однотипных). AST-обход, ищущий синтаксис
+декоратора `@mcp.tool`, структурно не может увидеть тул, зарегистрированный через
+`surfacegen.emit_tools(mcp, conn_factory, SURFACE)` — там нет такого декоратора вообще. Мой ратчет
+нашёл их только потому, что обходит НЕ синтаксис, а реальный `db.get_tool_providers()` и реально
+вызывает `provider.register_fn(...)`, что и обнажает любую функцию, до которой добрался бы
+настоящий MCP-сервер, независимо от того, как она зарегистрирована.
+
+**Что я НЕ сделал и почему.** Я не чинил эти четыре параметра. Причины: (1) владение не названо
+ни в карте, ни в брифе — не факт, что это территория DIR-1 (мой бриф про `milestones/__init__.py,
+claims.py, merge.py` + два фильтра в `blockers.py/relations.py`, ни разу не упоминает `sweep.py`);
+(2) чинить их значило бы завести `sweep_surface.py` и, вероятно, `surfacegen.py` (нужен новый
+именованный элемент словаря аннотаций вроде существующих `OPT_TEXT`/`OPT_INT`, поскольку
+grammar-ограничение файла `sweep_surface.py` запрещает писать `Annotated[...]` прямо там — тот же
+приём, каким там уже объявлены `OPT_TEXT = str | None` и т.п. в `surfacegen.py`) — это ещё 2 файла
+сверх уже названного бюджета (я и так вышел за ≤4 на 5-й файл `relations.py`, что бриф
+предвидел и разрешил называть); (3) это ровно то решение, для которого в брифе назван слот
+эскалации (пункт «в»).
+
+**Что я сделал вместо этого.** Внёс все 4 параметра в `DECLARED_EXCEPTIONS` с причиной
+«population-measurement correction, ownership undetermined — escalated to the DIR-1 holder»,
+так что ратчет остаётся ЗЕЛЁНЫМ, но каждая строка явно называет, что решение не принято, а не
+спрятано. Таблица самоудаляющаяся: как только кто-то (DIR-1, DIR-2 или третье направление)
+сделает эти четыре параметра строгими, соответствующие строки надо убрать — тест
+`test_every_declared_exception_still_names_a_real_non_strict_bool_param` откажет, если строка
+останется рядом с уже-строгим параметром.
+
+**Вопрос держателю DIR-1**: чья это территория (`sweep.py`/`sweep_surface.py`/`surfacegen.py` — не
+упомянуты ни в этом брифе, ни, кажется, в брифе DIR-2 про `findings.py`/`loc.py`) и нужен ли
+отдельный юнит на эти 4 параметра плюс, возможно, на новый строгий элемент словаря в
+`surfacegen.py` для деклараций типа `type=bool`.
+
+Второй пункт §7 не сработал: **(a) golden сдвинулся**, но это ожидаемое, понятое и объяснённое
+следствие §4 (снятие union у `milestone_reconcile.apply` неизбежно меняет ЕГО схему — см. раздел
+«Что сделано» выше), а не «сделал что-то другое». Называю явно на случай, если держатель DIR-1
+хочет другую трактовку строгости «golden не двигается» применительно именно к этому параметру.
+
+**(б), (г) не сработали** — существующий тест починен без изменения смысла (только текст
+`match=`), ратчет построен без перечисления модулей.
