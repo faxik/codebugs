@@ -14,7 +14,11 @@ keys. Eleven are pinned here: `dest`, `option_strings`, `nargs`, `default`,
 `type`, `choices`, `required`, `help`, `metavar`, `const`, `deprecated`. The
 twelfth, `container`, is excluded — see `_EXCLUDED_ACTION_ATTRS` below for why
 that is a structural exclusion of one non-declarable key, not a curated
-allowlist of the other eleven.
+allowlist of the other eleven. A TWELFTH pinned key is added on top,
+`action_class` (`type(action).__name__`, not one of argparse's own attributes)
+— see `_serialize_action`'s docstring for the measured, non-contrived
+collision it closes: `action="append"` and the default `action="store"`
+produce byte-identical `vars()` whenever no other keyword differs.
 
 Pinning every declared keyword rather than naming a subset is what makes this
 snapshot catch `deprecated=True` (CB-148's measured symptom): a property
@@ -90,8 +94,24 @@ def _serialize_type(type_obj: Any) -> str | None:
 
 
 def _serialize_action(action: argparse.Action) -> dict[str, Any]:
-    """Every attribute `vars(action)` reports, minus the one structural exclusion."""
-    out: dict[str, Any] = {}
+    """Every attribute `vars(action)` reports, minus the one structural exclusion,
+    PLUS the action's own CLASS NAME under `action_class`.
+
+    Measured, not assumed: `action="append"` versus the default `store` action
+    produce BYTE-IDENTICAL `vars(action)` (minus `container`) whenever no other
+    keyword happens to differ — e.g. a plain `p.add_argument("--tags",
+    help="...")` versus the same call with `action="append"` added. That is the
+    CB-148 shape recurring inside this catcher's own remedy: `action=` is an
+    argparse keyword that passes through untranslated (`surfacegen.emit_cli`,
+    and every hand-written `register_cli`) and changes the user-visible surface
+    — a repeatable flag accumulating into a list instead of overwriting — while
+    being invisible to `vars(action)` alone, because argparse encodes `action=`
+    as which Action SUBCLASS gets constructed, not as an attribute on the
+    resulting instance. `type(action).__name__` is the one additional key that
+    closes it; it is not a second curated attribute list, because it is the
+    ONLY remaining discriminator `vars()` does not already expose.
+    """
+    out: dict[str, Any] = {"action_class": type(action).__name__}
     for key, value in vars(action).items():
         if key in _EXCLUDED_ACTION_ATTRS:
             continue

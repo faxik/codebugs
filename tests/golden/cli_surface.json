@@ -2,6 +2,7 @@
   "add": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -18,6 +19,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -34,6 +36,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -50,6 +53,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -66,6 +70,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -82,6 +87,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -98,6 +104,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -113,6 +120,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -128,6 +136,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -143,6 +152,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -158,6 +168,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -178,6 +189,7 @@
   "anchor-recapture": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -194,6 +206,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -209,6 +222,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": "open",
@@ -224,6 +238,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -239,6 +254,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -254,6 +270,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -269,6 +286,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": 10000,
@@ -284,6 +302,7 @@
         "type": "int"
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -299,6 +318,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -314,6 +334,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -334,6 +355,7 @@
   "anchor-resolve": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -350,6 +372,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -365,6 +388,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": "open",
@@ -380,6 +404,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -395,6 +420,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -410,6 +436,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -425,6 +452,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": 10000,
@@ -440,6 +468,7 @@
         "type": "int"
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -460,6 +489,7 @@
   "bench-delete": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -476,6 +506,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -491,6 +522,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -511,6 +543,7 @@
   "bench-import": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -527,6 +560,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -540,6 +574,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -555,6 +590,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -571,6 +607,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -586,6 +623,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -601,6 +639,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -621,6 +660,7 @@
   "bench-list": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -637,6 +677,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -650,6 +691,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -670,6 +712,7 @@
   "bench-query": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -686,6 +729,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -699,6 +743,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -714,6 +759,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -729,6 +775,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -744,6 +791,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -759,6 +807,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -774,6 +823,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": [
           "row",
           "run"
@@ -792,6 +842,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -807,6 +858,7 @@
         "type": "int"
       },
       {
+        "action_class": "_StoreAction",
         "choices": [
           "json",
           "csv"
@@ -830,6 +882,7 @@
   "blockers-add": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -846,6 +899,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -859,6 +913,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -872,6 +927,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -887,6 +943,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": [
           "entity_resolved",
           "date",
@@ -906,6 +963,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -926,6 +984,7 @@
   "blockers-check": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -947,6 +1006,7 @@
   "blockers-query": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -963,6 +1023,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -978,6 +1039,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -993,6 +1055,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": [
           "entity_resolved",
           "date",
@@ -1012,6 +1075,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -1032,6 +1096,7 @@
   "blockers-resolve": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -1048,6 +1113,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1061,6 +1127,7 @@
         "type": "int"
       },
       {
+        "action_class": "_StoreAction",
         "choices": [
           "cancel",
           "resolve"
@@ -1082,6 +1149,7 @@
   "categories": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -1103,6 +1171,7 @@
   "categories-normalize": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -1119,6 +1188,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -1134,6 +1204,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1149,6 +1220,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -1169,6 +1241,7 @@
   "claim": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -1185,6 +1258,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1198,6 +1272,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1213,6 +1288,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": [
           "branch",
           "agent",
@@ -1232,6 +1308,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1247,6 +1324,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1262,6 +1340,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -1277,6 +1356,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -1292,6 +1372,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -1312,6 +1393,7 @@
   "claims": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -1328,6 +1410,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1343,6 +1426,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1358,6 +1442,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": [
           "branch",
           "agent",
@@ -1377,6 +1462,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": [
           "ids",
           "table"
@@ -1395,6 +1481,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -1415,6 +1502,7 @@
   "export-csv": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -1431,6 +1519,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1449,6 +1538,7 @@
   "get": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -1465,6 +1555,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1483,6 +1574,7 @@
   "grouping-citations": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -1499,6 +1591,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1514,6 +1607,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1529,6 +1623,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": 3,
@@ -1544,6 +1639,7 @@
         "type": "codebugs.grouping._hub_degree_arg"
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1559,6 +1655,7 @@
         "type": "int"
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1574,6 +1671,7 @@
         "type": "int"
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": 25,
@@ -1589,6 +1687,7 @@
         "type": "int"
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": 50,
@@ -1604,6 +1703,7 @@
         "type": "int"
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -1624,6 +1724,7 @@
   "grouping-filing": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -1640,6 +1741,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1655,6 +1757,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1670,6 +1773,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1685,6 +1789,7 @@
         "type": "int"
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1700,6 +1805,7 @@
         "type": "int"
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -1720,6 +1826,7 @@
   "grouping-tags": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -1736,6 +1843,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1751,6 +1859,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1766,6 +1875,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": 2,
@@ -1781,6 +1891,7 @@
         "type": "int"
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1796,6 +1907,7 @@
         "type": "int"
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": 50,
@@ -1811,6 +1923,7 @@
         "type": "int"
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -1831,6 +1944,7 @@
   "import-csv": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -1847,6 +1961,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1865,6 +1980,7 @@
   "init": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -1881,6 +1997,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1894,6 +2011,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -1914,6 +2032,7 @@
   "merge-abandon": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -1930,6 +2049,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1948,6 +2068,7 @@
   "merge-claims": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -1964,6 +2085,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -1982,6 +2104,7 @@
   "merge-sessions": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -1998,6 +2121,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2018,6 +2142,7 @@
   "merge-status": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -2039,6 +2164,7 @@
   "milestone-audit": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -2055,6 +2181,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2070,6 +2197,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2085,6 +2213,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2100,6 +2229,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2120,6 +2250,7 @@
   "milestone-list": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -2136,6 +2267,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2151,6 +2283,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2171,6 +2304,7 @@
   "milestone-mark-branch": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -2187,6 +2321,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2200,6 +2335,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2218,6 +2354,7 @@
   "milestone-mark-integrated": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -2234,6 +2371,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2247,6 +2385,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2265,6 +2404,7 @@
   "milestone-reconcile": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -2281,6 +2421,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -2301,6 +2442,7 @@
   "milestone-status": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -2317,6 +2459,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2335,6 +2478,7 @@
   "query": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -2351,6 +2495,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2366,6 +2511,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2381,6 +2527,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2397,6 +2544,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2413,6 +2561,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2429,6 +2578,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2444,6 +2594,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2459,6 +2610,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2474,6 +2626,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2494,6 +2647,7 @@
   "recent": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -2510,6 +2664,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2525,6 +2680,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2540,6 +2696,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2560,6 +2717,7 @@
   "relations-query": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -2576,6 +2734,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2591,6 +2750,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": [
           "duplicate_of",
           "split_from",
@@ -2613,6 +2773,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -2633,6 +2794,7 @@
   "relations-relate": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -2649,6 +2811,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2662,6 +2825,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": [
           "duplicate_of",
           "split_from",
@@ -2682,6 +2846,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2695,6 +2860,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2710,6 +2876,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2730,6 +2897,7 @@
   "relations-unrelate": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -2746,6 +2914,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2759,6 +2928,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": [
           "duplicate_of",
           "split_from",
@@ -2779,6 +2949,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2792,6 +2963,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2807,6 +2979,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2827,6 +3000,7 @@
   "release": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -2843,6 +3017,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2856,6 +3031,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2871,6 +3047,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": [
           "branch",
           "agent",
@@ -2890,6 +3067,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2905,6 +3083,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -2920,6 +3099,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": "explicit",
@@ -2935,6 +3115,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -2955,6 +3136,7 @@
   "reqs-add": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -2971,6 +3153,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -2984,6 +3167,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3000,6 +3184,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3015,6 +3200,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3030,6 +3216,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3045,6 +3232,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3060,6 +3248,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3075,6 +3264,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3095,6 +3285,7 @@
   "reqs-export": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -3111,6 +3302,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3129,6 +3321,7 @@
   "reqs-get": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -3145,6 +3338,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3163,6 +3357,7 @@
   "reqs-import": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -3179,6 +3374,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3197,6 +3393,7 @@
   "reqs-query": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -3213,6 +3410,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3228,6 +3426,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3243,6 +3442,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3258,6 +3458,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3273,6 +3474,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3288,6 +3490,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3303,6 +3506,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3323,6 +3527,7 @@
   "reqs-stats": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -3339,6 +3544,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3359,6 +3565,7 @@
   "reqs-summary": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -3380,6 +3587,7 @@
   "reqs-update": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -3396,6 +3604,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3409,6 +3618,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3424,6 +3634,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3439,6 +3650,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3454,6 +3666,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3469,6 +3682,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3489,6 +3703,7 @@
   "reqs-verify": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -3505,6 +3720,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3520,6 +3736,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3540,6 +3757,7 @@
   "resolve-trailers": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -3556,6 +3774,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3571,6 +3790,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3586,6 +3806,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -3606,6 +3827,7 @@
   "restore-csv": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -3622,6 +3844,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3640,6 +3863,7 @@
   "similarity-check": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -3656,6 +3880,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3671,6 +3896,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3686,6 +3912,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3701,6 +3928,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": 0.7,
@@ -3716,6 +3944,7 @@
         "type": "float"
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": 5,
@@ -3731,6 +3960,7 @@
         "type": "int"
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -3751,6 +3981,7 @@
   "similarity-report": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -3767,6 +3998,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": 0.7,
@@ -3782,6 +4014,7 @@
         "type": "float"
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3797,6 +4030,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3812,6 +4046,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3827,6 +4062,7 @@
         "type": "int"
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3842,6 +4078,7 @@
         "type": "int"
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -3862,6 +4099,7 @@
   "stats": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -3878,6 +4116,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3898,6 +4137,7 @@
   "summary": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -3919,6 +4159,7 @@
   "sweep-add": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -3935,6 +4176,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3948,6 +4190,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3961,6 +4204,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -3981,6 +4225,7 @@
   "sweep-archive": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -3997,6 +4242,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4015,6 +4261,7 @@
   "sweep-archive-items": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -4031,6 +4278,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4044,6 +4292,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4057,6 +4306,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4072,6 +4322,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4087,6 +4338,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4107,6 +4359,7 @@
   "sweep-create": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -4123,6 +4376,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4138,6 +4392,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4153,6 +4408,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4168,6 +4424,7 @@
         "type": "int"
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4183,6 +4440,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4203,6 +4461,7 @@
   "sweep-list": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -4219,6 +4478,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -4239,6 +4499,7 @@
   "sweep-list-items": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -4255,6 +4516,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4268,6 +4530,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4283,6 +4546,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4298,6 +4562,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -4313,6 +4578,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -4328,6 +4594,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4348,6 +4615,7 @@
   "sweep-mark": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -4364,6 +4632,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4377,6 +4646,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4390,6 +4660,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -4405,6 +4676,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4425,6 +4697,7 @@
   "sweep-next": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -4441,6 +4714,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4454,6 +4728,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4469,6 +4744,7 @@
         "type": "int"
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4489,6 +4765,7 @@
   "sweep-status": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -4505,6 +4782,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4523,6 +4801,7 @@
   "triage-inbox": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -4539,6 +4818,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4559,6 +4839,7 @@
   "update": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -4575,6 +4856,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4588,6 +4870,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4603,6 +4886,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4619,6 +4903,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4634,6 +4919,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4654,6 +4940,7 @@
   "where": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -4675,6 +4962,7 @@
   "who-holds": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -4691,6 +4979,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
@@ -4704,6 +4993,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreTrueAction",
         "choices": null,
         "const": true,
         "default": false,
@@ -4724,6 +5014,7 @@
   "wip-status": {
     "actions": [
       {
+        "action_class": "_HelpAction",
         "choices": null,
         "const": null,
         "default": "==SUPPRESS==",
@@ -4740,6 +5031,7 @@
         "type": null
       },
       {
+        "action_class": "_StoreAction",
         "choices": null,
         "const": null,
         "default": null,
