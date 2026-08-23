@@ -490,6 +490,10 @@ class TestGeneratedCliSurface:
         _parser, sub, _commands = build_parser()
         listed_help = {p.dest: p.help for p in sub._choices_actions}
         assert sorted(listed_help) == VERB_NAMES
+        # The table must cover every verb. Without this, deleting a verb's
+        # entry silently stops checking its arguments while
+        # `test_exactly_nine_verbs` stays green off the separate literal.
+        assert sorted(CLI_CONTRACT) == VERB_NAMES
         for verb, (verb_help, rows) in CLI_CONTRACT.items():
             child = sub.choices[verb]
             assert listed_help[verb] == verb_help, verb
@@ -510,8 +514,40 @@ class TestGeneratedCliSurface:
                 for dest, opts, nargs, cls, default, text in rows
             ], verb
             for dest, *_rest in rows:
-                expected_int = (verb, dest) in INT_TYPED
-                assert (action_by_dest(child, dest).type is int) is expected_int, (verb, dest)
+                action = action_by_dest(child, dest)
+                assert action.type is (int if (verb, dest) in INT_TYPED else None), (verb, dest)
+
+    def test_no_verb_declares_a_keyword_the_contract_table_cannot_see(self):
+        """The table above enumerates six attributes; argparse has more, and
+        `emit_cli` passes every declared keyword through UNTRANSLATED.
+
+        So this is the composition check the table cannot be: it states the
+        PROPERTY that holds across the whole of `sweep`'s CLI — no option is
+        required, nothing restricts `choices`, nothing overrides `metavar`, and
+        `const` is whatever the action class implies — rather than adding four
+        more columns to 38 rows. Measured: without it, adding `required=True` to
+        one declared flag left the whole suite green while
+        `codebugs sweep-next SW-1` became unusable (exit 2), because the
+        keyword-forwarding test one method up CONFIRMS the mutation instead of
+        refusing it. If a future verb legitimately needs one of these, the
+        refusal is loud and the exception is written here, in the open.
+        """
+        _parser, sub, _commands = build_parser()
+        for verb in VERB_NAMES:
+            for action in sub.choices[verb]._actions:
+                if action.dest == "help":
+                    continue
+                where = (verb, action.dest)
+                if action.option_strings:
+                    # `required=` is declarable only on an OPTION; on a
+                    # positional argparse DERIVES it from `nargs` and refuses
+                    # the keyword outright, so asserting it there would pin
+                    # argparse's derivation rather than the declaration.
+                    assert action.required is False, where
+                assert action.choices is None, where
+                assert action.metavar is None, where
+                expected_const = True if type(action).__name__ == "_StoreTrueAction" else None
+                assert action.const is expected_const, where
 
     def test_every_declared_argparse_keyword_reaches_the_parser(self):
         _parser, sub, _commands = build_parser()
@@ -576,14 +612,30 @@ class TestHandlerBodiesRunWithTheirNamesResolved:
         run = lambda argv: self._run(monkeypatch, capsys, tmp_path, argv)  # noqa: E731
 
         assert "Created: SW-1 (t1)" in run(["sweep-create", "--name", "t1"])
-        assert "Added 2 new items" in run(["sweep-add", "t1", "a", "b", "--tags", "x,y"])
-        assert "a" in run(["sweep-next", "t1", "--limit", "5", "--tags", "x"])
+        # A SPACE after the comma, so `_parse_csv`'s `.strip()` is load-bearing:
+        # without it the second tag is " y" and the `--tags y` filter below
+        # returns nothing.
+        assert "Added 2 new items" in run(["sweep-add", "t1", "a", "b", "--tags", "x, y"])
+
+        # `--limit 1` on a two-item sweep: the assertion is the COUNT, because
+        # "some item appeared" cannot see `limit=args.limit` replaced by None.
+        listing = run(["sweep-next", "t1", "--limit", "1", "--tags", "y"])
+        assert "1 remaining" in listing
+        assert "a" in listing and "b" not in listing
+
         assert "state=done" in run(["sweep-mark", "t1", "a"])
         assert "1/2 processed" in run(["sweep-status", "t1"])
-        assert "b" in run(["sweep-list-items", "t1", "--all"])
+        assert "b" in run(["sweep-list-items", "t1"])
         assert "Archived 1 entries" in run(
             ["sweep-archive-items", "t1", "b", "--reason", "stale"]
         )
+        # AFTER the archive, so `--all` discriminates: without it the archived
+        # entry is hidden, and asserting `--all` on a sweep with nothing archived
+        # passes whether the flag is forwarded or not.
+        assert "b" not in run(["sweep-list-items", "t1"])
+        assert "b" in run(["sweep-list-items", "t1", "--all"])
+        assert "b" in run(["sweep-list-items", "t1", "--archived-only"])
+
         assert "SW-1" in run(["sweep-list", "--all"])
         assert "Archived: SW-1" in run(["sweep-archive", "t1"])
 
