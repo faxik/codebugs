@@ -1768,3 +1768,55 @@ class TestReadSideResiduals:
         # The denominator travels WITH the number, never left to the reader.
         assert "carry an anchor" in out
         assert "Dry run" in out
+
+
+class TestBlameInvocation:
+    """The blame argv, pinned STRUCTURALLY — and the reason is a measurement, not
+    a preference.
+
+    NO FIXTURE DISCRIMINATES `-C -C` FROM `-C` UNDER `--reverse`, and that is a
+    MEASURED RESULT rather than a gap in this file. Both flags were run against
+    a controlled split and four variants of it (two-commit split; split then
+    tracked rename; split then untracked copy+delete; destination created in a
+    commit that leaves the source untouched) and the output was BYTE-IDENTICAL
+    every time.
+
+    The structural reason, and it is specific to the direction of travel:
+    `-C -C`'s extra scope is copies out of files that the commit CREATING the
+    destination did not modify. Tracing a SOURCE file backwards, the source is
+    by construction modified in the commit that removed the lines, so ordinary
+    `-C` already covers it. The discriminator does exist — but only FORWARDS, on
+    the DESTINATION file (`-C` attributes the lifted block to the split commit,
+    `-C -C` to the original), and it cannot be turned round: reverse blame
+    refuses a path that does not exist at the start of the range
+    (`fatal: no such path split_out.py in <C1>`, rc 128) and does no rename or
+    copy detection across that boundary.
+
+    So these are TEMPLATE assertions, which is what this repository reaches for
+    when behaviour cannot tell two implementations apart — CB-41's rule verbatim
+    (a Python-sampled deadline still looks fresh unless real time passes, so the
+    test asserts the SQL), and the harness's guard-invocation tests are the same
+    shape. **Said plainly and NOT to be read as more than it is: this pins that
+    nobody removed the flag silently. It does NOT establish that `-C -C` buys
+    anything under `--reverse`, and the mutation probe's `-C -C` -> `-C` mutant
+    must NOT be reported as killed on the strength of it.** Whether the doubled
+    flag is justified in reverse mode at all is a question for the direction
+    holder against v6's own measurement record, not a decision this file makes.
+    """
+
+    def _blame_argv(self):
+        src = inspect.getsource(loc._channel_a)
+        return src[src.index("_git(") : src.index("budget,\n    )")]
+
+    def test_the_doubled_copy_flag_is_present(self):
+        assert self._blame_argv().count('"-C"') == 2
+
+    def test_quote_path_is_disabled(self):
+        argv = self._blame_argv()
+        assert '"core.quotePath=false"' in argv
+
+    def test_the_range_starts_at_the_anchored_commit_and_ends_at_head(self):
+        assert 'f"{anchor[\'commit\']}..HEAD"' in self._blame_argv()
+
+    def test_the_span_is_bounded_by_the_anchor(self):
+        assert 'f"{line},{end}"' in self._blame_argv()
