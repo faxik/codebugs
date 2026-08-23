@@ -776,18 +776,13 @@ class TestRegistrations:
         start = src.index('choices=["findings"')
         assert '"loc"' in src[start : src.index("]", start)]
 
-    def test_it_adds_no_mcp_tool_so_the_wire_golden_cannot_move(self):
-        """This unit registers no tools, and that is a scope statement.
-
-        `SERVER_NAMES` gaining an entry does not create a tool — the mode filter
-        simply returns an empty provider list — so the golden must be untouched.
-        Asserted here as well as by the golden test, because "the golden did not
-        move" is only reassuring if something says why it should not have.
+    def test_the_read_side_registers_the_cli_provider(self):
+        """Т-a deliberately registered NEITHER provider and pinned that as a
+        scope statement; Т-b is the unit that adds them, so the pin is inverted
+        rather than deleted — a registration nothing asserts is a registration
+        that can vanish in a refactor.
         """
-        names = [p.name for p in db.get_tool_providers()]
-        assert "loc" not in names
-        assert db.get_tool_providers(mode="loc") == []
-        assert db.get_cli_providers(mode="loc") == []
+        assert [p.name for p in db.get_cli_providers(mode="loc")] == ["loc"]
 
 
 class TestZeroSql:
@@ -842,3 +837,812 @@ def test_the_capture_resolver_is_registered_with_both_key_declarations():
     entry = registered["loc.capture"]
     assert entry.meta_keys == frozenset({"loc"})
     assert entry.updatable_keys == frozenset({"loc"})
+
+
+# ======================================================================================
+# BT-7 Т-b — the READ side: resolving a stored anchor to a line on HEAD.
+#
+# The set is deliberately two-sided. A resolver that answers `unknown` to
+# everything would pass every refusal test here, so the CONTROLS — an ordinary
+# live line resolving `current` through channel `git`, and a line pushed down by
+# an edit above it resolving `moved` with the NEW number — are what make the
+# refusal tests mean anything.
+# ======================================================================================
+
+
+def _rev(root, ref="HEAD"):
+    out = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", ref], check=True, capture_output=True
+    )
+    return out.stdout.decode().strip()
+
+
+def _commit(root, msg="c"):
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", msg)
+    return _rev(root)
+
+
+def _new_repo(tmp_path, name="r"):
+    root = tmp_path / name
+    root.mkdir(parents=True)
+    _git(tmp_path, "init", "-q", "-b", "main", str(root))
+    _git(root, "config", "user.email", "t@t")
+    _git(root, "config", "user.name", "t")
+    return root
+
+
+#: Twelve lines that are individually long enough to clear MIN_ANCHOR_CHARS and
+#: distinct enough that a wrong line number is visible in a failure message.
+def _body(prefix="ALPHA", n=12):
+    return "".join(f"{prefix}_VALUE_{i:02d} = compute_the_thing({i})\n" for i in range(1, n + 1))
+
+
+def _span_anchor(root, commit, path, line, end, **over):
+    """A well-formed anchor over `<commit>:<path>` lines `line..end`, built from git."""
+    blob = subprocess.run(
+        ["git", "-C", str(root), "cat-file", "blob", f"{commit}:{path}"],
+        check=True,
+        capture_output=True,
+    ).stdout.decode()
+    lines = blob.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    obj = {
+        "v": 2,
+        "repo": loc.repo_identity(str(root)),
+        "commit": commit,
+        "path": path,
+        "line": line,
+        "end": end,
+        "text": lines[line - 1 : end],
+        "norm": "v1",
+        "sites_dropped": 0,
+    }
+    obj.update(over)
+    return obj
+
+
+def _resolve(root, anchor):
+    return loc.resolve_anchor(
+        str(root), anchor, head=_rev(root), repo=loc.repo_identity(str(root))
+    )
+
+
+class TestAncestorGate:
+    """Step 0 of Р5, and the ONLY finding in the structural attack that breaks the
+    ORDINARY case rather than a rare one: in this repository every card is filed
+    on an unmerged branch."""
+
+    def test_a_card_filed_on_an_unmerged_branch_is_not_reported_lost(self, tmp_path):
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        _commit(root, "init")
+        # A REAL unmerged branch, not an imitation of one: the premise being
+        # guarded is a property of `blame --reverse` over a range whose left end
+        # is off the first-parent line, and a fabricated SHA would not exercise it.
+        _git(root, "checkout", "-q", "-b", "feat")
+        (root / "side.py").write_text("SIDE = 1\n")
+        branch_commit = _commit(root, "branch work")
+        _git(root, "checkout", "-q", "main")
+        (root / "other.py").write_text("OTHER = 1\n")
+        _commit(root, "main moves on")
+
+        anchor = _span_anchor(root, branch_commit, "mod.py", 4, 6)
+        # The premise itself, pinned: without the gate this is a SILENT false
+        # "lost" — rc 0, empty stderr, and an attribution that is not HEAD.
+        proc = subprocess.run(
+            ["git", "-C", str(root), "blame", "--reverse", "-p", "-L", "4,6",
+             f"{branch_commit}..HEAD", "--", "mod.py"],
+            capture_output=True,
+        )
+        assert proc.returncode == 0 and proc.stderr == b""
+        assert _rev(root) not in proc.stdout.decode()
+
+        got = _resolve(root, anchor)
+        assert got["status"] == "unknown"
+        assert got["reason"] == "commit_not_ancestor"
+        assert got["channel"] is None
+
+    def test_the_same_anchor_resolves_once_the_branch_is_merged(self, tmp_path):
+        """The state is TEMPORARY, which is the other half of the design's claim.
+
+        Without this, `commit_not_ancestor` could be implemented as a permanent
+        refusal and every test above would still pass.
+        """
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        _commit(root, "init")
+        _git(root, "checkout", "-q", "-b", "feat")
+        (root / "side.py").write_text("SIDE = 1\n")
+        branch_commit = _commit(root, "branch work")
+        _git(root, "checkout", "-q", "main")
+        _git(root, "merge", "--no-ff", "-q", "-m", "merge feat", "feat")
+
+        got = _resolve(root, _span_anchor(root, branch_commit, "mod.py", 4, 6))
+        assert got["status"] == "current"
+        assert got["channel"] == "git"
+
+
+class TestChannelAControls:
+    """The set would be one-sided without these: an implementation answering
+    `unknown` to everything passes every refusal test and fails only here."""
+
+    def test_an_ordinary_live_line_is_current_through_git(self, tmp_path):
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        first = _commit(root, "init")
+        (root / "unrelated.py").write_text("U = 1\n")
+        _commit(root, "unrelated")
+
+        got = _resolve(root, _span_anchor(root, first, "mod.py", 4, 6))
+        assert got["status"] == "current"
+        assert got["channel"] == "git"
+        assert (got["line"], got["end"]) == (4, 6)
+        assert got["path"] == "mod.py"
+        assert got["survived"] == "3/3"
+        assert got["resolved_against"]["head"] == _rev(root)
+
+    def test_a_line_pushed_down_by_an_edit_above_it_is_moved_with_the_new_number(
+        self, tmp_path
+    ):
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        first = _commit(root, "init")
+        (root / "mod.py").write_text("PREFIX_A = 1\nPREFIX_B = 2\n" + _body())
+        _commit(root, "two lines inserted at the top")
+
+        got = _resolve(root, _span_anchor(root, first, "mod.py", 4, 6))
+        assert got["status"] == "moved"
+        assert got["channel"] == "git"
+        # The whole point of the assertion: the NEW coordinate, not the old one.
+        # A parser that transposed porcelain's two line numbers under `--reverse`
+        # returns 4 here, and every fixture that does not shift its lines is blind
+        # to that, because the two numbers are equal when nothing moved.
+        assert (got["line"], got["end"]) == (6, 8)
+
+    def test_the_resolved_coordinate_really_holds_the_anchored_text(self, tmp_path):
+        """A coordinate nobody dereferences is not evidence that it is right."""
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        first = _commit(root, "init")
+        (root / "mod.py").write_text("PREFIX = 1\n" + _body())
+        _commit(root, "shift by one")
+
+        anchor = _span_anchor(root, first, "mod.py", 4, 6)
+        got = _resolve(root, anchor)
+        at_head = (root / "mod.py").read_text().split("\n")
+        assert at_head[got["line"] - 1 : got["end"]] == anchor["text"]
+
+
+class TestMovedFile:
+    """`moved_file` is a SEPARATE status, not `moved` with a different path: a
+    consumer must SEE that the code left the file it asked about, rather than
+    receive a line number in a file it never named."""
+
+    def test_code_lifted_into_another_file_resolves_there_with_moved_file(self, tmp_path):
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        first = _commit(root, "init")
+        # A span of FIVE. The design measured that a controlled split is not
+        # tracked on any span of three or fewer, so a two-line fixture would be
+        # green against a broken `-C -C` and prove nothing.
+        lines = _body().split("\n")
+        moved_out = lines[3:8]
+        (root / "mod.py").write_text("\n".join(lines[:3] + lines[8:]))
+        (root / "split_out.py").write_text("\n".join(moved_out) + "\n")
+        _commit(root, "lift five lines into split_out.py")
+
+        got = _resolve(root, _span_anchor(root, first, "mod.py", 4, 8))
+        assert got["status"] == "moved_file"
+        assert got["path"] == "split_out.py"
+        assert got["channel"] == "git"
+        assert got["survived"] == "5/5"
+
+    def test_a_plain_rename_also_resolves_to_the_new_path(self, tmp_path):
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        first = _commit(root, "init")
+        _git(root, "mv", "mod.py", "renamed.py")
+        _commit(root, "rename")
+
+        got = _resolve(root, _span_anchor(root, first, "mod.py", 4, 8))
+        assert got["status"] == "moved_file"
+        assert got["path"] == "renamed.py"
+
+
+class TestVerify:
+    """Р5 step 2, three outcomes SEPARATELY. The verify is not skippable, and it
+    reads the RESOLVED path — reading the RECORDED one is what produced the
+    design's phantom 'git is wrong 0.21% of the time', because it declares every
+    successful move a failure."""
+
+    def test_every_surviving_line_agreeing_yields_the_answer_and_the_ratio(self, tmp_path):
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        first = _commit(root, "init")
+        (root / "unrelated.py").write_text("U = 1\n")
+        _commit(root, "unrelated")
+
+        got = _resolve(root, _span_anchor(root, first, "mod.py", 3, 6))
+        assert got["status"] == "current"
+        assert got["survived"] == "4/4"
+
+    def test_a_partially_surviving_span_answers_and_says_so(self, tmp_path):
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        first = _commit(root, "init")
+        lines = _body().split("\n")
+        del lines[4]  # kill exactly one of the two anchored lines
+        (root / "mod.py").write_text("\n".join(lines))
+        _commit(root, "delete one anchored line")
+
+        got = _resolve(root, _span_anchor(root, first, "mod.py", 4, 5))
+        assert got["status"] in ("current", "moved")
+        assert got["survived"] == "1/2"
+
+    def test_no_surviving_line_is_lost(self, tmp_path):
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        first = _commit(root, "init")
+        lines = _body().split("\n")
+        del lines[3:6]
+        (root / "mod.py").write_text("\n".join(lines))
+        _commit(root, "delete the anchored span")
+
+        got = _resolve(root, _span_anchor(root, first, "mod.py", 4, 6))
+        assert got["status"] == "lost"
+        assert got["survived"] == "0/3"
+        assert got["channel"] == "git"
+
+    def test_a_surviving_line_whose_text_disagrees_is_verify_mismatch(self, tmp_path):
+        """Reachable because `updatable_keys` validates nothing: a hand-written
+        anchor can name a real span and carry text that was never there."""
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        first = _commit(root, "init")
+        (root / "unrelated.py").write_text("U = 1\n")
+        _commit(root, "unrelated")
+
+        anchor = _span_anchor(root, first, "mod.py", 4, 6)
+        anchor["text"] = [anchor["text"][0], "THIS_LINE_WAS_NEVER_THERE = 0", anchor["text"][2]]
+        got = _resolve(root, anchor)
+        assert got["status"] == "unknown"
+        assert got["reason"] == "verify_mismatch"
+        assert got["channel"] == "git"
+
+    def test_the_verify_reads_the_resolved_path_not_the_recorded_one(self, tmp_path):
+        """The single detail the design says was wrong in its own measuring rig.
+
+        After a move the RECORDED path may not even exist at HEAD; a verify that
+        reads it declares the move a failure. This asserts the successful answer,
+        and additionally that the recorded path really is gone — otherwise the
+        test could pass by accident on a repository where both files exist.
+        """
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        first = _commit(root, "init")
+        _git(root, "mv", "mod.py", "renamed.py")
+        _commit(root, "rename")
+
+        assert not (root / "mod.py").exists()
+        got = _resolve(root, _span_anchor(root, first, "mod.py", 4, 8))
+        assert got["status"] == "moved_file"
+        assert got["reason"] is None
+
+
+class TestNonAsciiPaths:
+    """`core.quotePath=false`. Porcelain C-quotes a non-ASCII path by DEFAULT,
+    and the path is what decides `moved_file` — so the default reports a move for
+    a file that never moved. This repository has paid for that same default three
+    times elsewhere (`_guard_conflict_markers`, the plan-note allowlist, the
+    commit-msg gate)."""
+
+    def test_a_file_with_a_non_ascii_name_stays_current(self, tmp_path):
+        root = _new_repo(tmp_path)
+        (root / "модуль.py").write_text(_body())
+        first = _commit(root, "init")
+        (root / "unrelated.py").write_text("U = 1\n")
+        _commit(root, "unrelated")
+
+        # The premise, so the mutation probe on this flag is not vacuous: with
+        # the default, git really does quote the name in porcelain output.
+        quoted = subprocess.run(
+            ["git", "-C", str(root), "blame", "--reverse", "-p", "-L", "4,6",
+             f"{first}..HEAD", "--", "модуль.py"],
+            capture_output=True,
+        ).stdout.decode()
+        assert 'filename "' in quoted, "premise gone: git no longer quotes by default"
+
+        got = _resolve(root, _span_anchor(root, first, "модуль.py", 4, 6))
+        assert got["status"] == "current"
+        assert got["path"] == "модуль.py"
+
+
+class TestChannelB:
+    """Secondary, and NOT redundant: it is the only thing that recovers a line
+    deleted and later restored byte-for-byte, which the core reads as lost
+    because the liveness test runs before the verify and can only reject."""
+
+    def test_it_answers_where_channel_a_cannot_and_the_channel_says_so(self, tmp_path):
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        first = _commit(root, "init")
+        lines = _body().split("\n")
+        kept = lines[:3] + lines[6:]
+        (root / "mod.py").write_text("\n".join(kept))
+        _commit(root, "delete the span")
+        (root / "mod.py").write_text(_body())  # restored byte for byte
+        _commit(root, "revert the deletion")
+
+        got = _resolve(root, _span_anchor(root, first, "mod.py", 4, 6))
+        assert got["status"] == "current"
+        assert got["channel"] == "content", "channel A must not be able to answer here"
+        assert (got["line"], got["end"]) == (4, 6)
+
+    def test_channel_b_is_refused_below_the_noise_floor(self, tmp_path):
+        """`MIN_ANCHOR_CHARS` is a noise floor, and below it a normalized span
+        matches almost anywhere — which would make a wrong answer this channel's
+        NORMAL output rather than its failure mode."""
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text("x = 1\ny = 2\nz = 3\nw = 4\n" * 4)
+        first = _commit(root, "init")
+        (root / "mod.py").write_text("A = 9\n" + "x = 1\ny = 2\nz = 3\nw = 4\n" * 4)
+        _commit(root, "shift")
+
+        anchor = _span_anchor(root, first, "mod.py", 2, 2)
+        assert loc._anchor_chars(anchor["text"]) < loc.MIN_ANCHOR_CHARS
+        got = _resolve(root, anchor)
+        assert got["channel"] != "content"
+
+
+class TestResolutionRefusals:
+    def test_an_anchor_from_another_tree_is_repo_mismatch(self, tmp_path):
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        first = _commit(root, "init")
+
+        got = _resolve(root, _span_anchor(root, first, "mod.py", 4, 6, repo="0" * 40))
+        assert got["status"] == "unknown"
+        assert got["reason"] == "repo_mismatch"
+        assert got["channel"] is None
+
+    def test_an_anchor_carrying_no_repo_at_all_fails_closed(self, tmp_path):
+        """Reachable: `read_anchor` does not require the field, and
+        `updatable_keys` validates nothing. Fail CLOSED — the field's only job is
+        to prevent a confidently wrong answer, so 'cannot check' is a refusal."""
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        first = _commit(root, "init")
+        anchor = _span_anchor(root, first, "mod.py", 4, 6)
+        del anchor["repo"]
+
+        got = _resolve(root, anchor)
+        assert got["reason"] == "repo_mismatch"
+
+    def test_a_commit_this_tree_does_not_have_is_commit_unreachable(self, tmp_path):
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        first = _commit(root, "init")
+        anchor = {**_span_anchor(root, first, "mod.py", 4, 6), "commit": "0" * 40}
+
+        got = _resolve(root, anchor)
+        assert got["status"] == "unknown"
+        assert got["reason"] == "commit_unreachable"
+
+
+class TestBatchSurface:
+    """`resolve_findings` — and the SUMMARY, which is a ratified demand counter
+    (the owner reads the `moved_file` frequency out of it), not a convenience."""
+
+    def _tracker(self, tmp_path, conn, *, anchors):
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        first = _commit(root, "init")
+        (root / "unrelated.py").write_text("U = 1\n")
+        _commit(root, "unrelated")
+        ids = []
+        for spec in anchors:
+            fid = findings.add_finding(
+                conn,
+                severity="low",
+                category="anchor_batch",
+                file="mod.py",
+                description=f"batch row {len(ids)} with a description long enough to be unique",
+                new_category=True,
+            )["id"]
+            value = spec if not callable(spec) else spec(root, first)
+            findings.update_finding(conn, fid, meta_update={"loc": value})
+            ids.append(fid)
+        return root, first, ids
+
+    def test_the_summary_denominator_is_anchored_rows_not_every_finding(
+        self, tmp_path, conn
+    ):
+        """The number goes to the owner, so it carries its predicate (К-5б).
+
+        Two findings with an anchor, two without one at all. `summary` must sum
+        to `anchored` — not to `total` — or the `moved_file` share is computed
+        against a population it does not describe.
+        """
+        root, first, _ids = self._tracker(
+            tmp_path,
+            conn,
+            anchors=[
+                lambda r, c: _span_anchor(r, c, "mod.py", 4, 6),
+                lambda r, c: _span_anchor(r, c, "mod.py", 7, 9),
+            ],
+        )
+        for i in range(2):
+            findings.add_finding(
+                conn,
+                severity="low",
+                category="anchor_batch",
+                file="mod.py",
+                description=f"row without any anchor at all number {i}",
+                annotate=False,  # no resolver runs, so no `loc` key is stamped
+            )
+
+        out = loc.resolve_findings(conn, category="anchor_batch", project_dir=str(root))
+        assert out["total"] == 4
+        assert out["anchored"] == 2
+        assert out["without_anchor"] == 2
+        assert len(out["results"]) == 2
+        assert sum(out["summary"].values()) == out["anchored"]
+        # Every status present with a zero, for the same reason each record's
+        # keys are unconditional: a missing bucket reads as "not evaluated".
+        assert set(out["summary"]) == set(loc.STATUSES)
+        assert out["summary"]["current"] == 2
+
+    def test_a_persisted_refusal_and_the_tombstone_are_anchored_rows(self, tmp_path, conn):
+        """They CARRY an anchor — that is what makes the lost-rate countable at
+        all (Р7). They land in `unknown` with the stored token."""
+        root, _first, _ids = self._tracker(
+            tmp_path,
+            conn,
+            anchors=[{"v": 2, "skipped": "no_grammar", "sites_dropped": 0}, None],
+        )
+        out = loc.resolve_findings(conn, category="anchor_batch", project_dir=str(root))
+        assert out["anchored"] == 2
+        assert out["summary"]["unknown"] == 2
+        reasons = sorted(r["anchor"]["reason"] for r in out["results"])
+        assert reasons == ["no_grammar", "retracted"]
+
+    def test_the_moved_file_count_is_readable_from_the_summary(self, tmp_path, conn):
+        """The sixth ratification in one assertion: the frequency of `moved_file`
+        in live data is what the owner turns into arithmetic."""
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        first = _commit(root, "init")
+        lines = _body().split("\n")
+        (root / "mod.py").write_text("\n".join(lines[:3] + lines[8:]))
+        (root / "split_out.py").write_text("\n".join(lines[3:8]) + "\n")
+        _commit(root, "lift")
+
+        fid = findings.add_finding(
+            conn,
+            severity="low",
+            category="anchor_batch",
+            file="mod.py",
+            description="a row whose code was lifted into another file entirely",
+            new_category=True,
+        )["id"]
+        findings.update_finding(
+            conn, fid, meta_update={"loc": _span_anchor(root, first, "mod.py", 4, 8)}
+        )
+
+        out = loc.resolve_findings(conn, category="anchor_batch", project_dir=str(root))
+        assert out["summary"]["moved_file"] == 1
+        assert out["anchored"] == 1
+
+    def test_an_absent_project_dir_refuses_rather_than_reading_an_ambient_tree(
+        self, tmp_path, conn
+    ):
+        """BT-7 Р3 refuses ambient cwd IN CAPITALS: resolving against whatever
+        tree the process stands in is the confidently-wrong answer."""
+        root, _first, _ids = self._tracker(
+            tmp_path, conn, anchors=[lambda r, c: _span_anchor(r, c, "mod.py", 4, 6)]
+        )
+        out = loc.resolve_findings(conn, category="anchor_batch", project_dir=None)
+        assert out["anchored"] == 1
+        assert out["results"][0]["anchor"]["reason"] == "no_root"
+
+    def test_the_all_sentinel_is_type_pinned(self, tmp_path, conn):
+        """A bare `status == "all"` is satisfied by `unittest.mock.ANY`, which
+        compares equal to everything (CB-25's trap, and group_report's fix)."""
+        from unittest import mock
+
+        root, _first, _ids = self._tracker(
+            tmp_path, conn, anchors=[lambda r, c: _span_anchor(r, c, "mod.py", 4, 6)]
+        )
+        with pytest.raises(ValueError):
+            loc.resolve_findings(conn, status=mock.ANY, project_dir=str(root))
+
+
+class TestReadSideInvariants:
+    """Р2's invariants are checked ON THE READ and a violation is `unknown(...)`,
+    NEVER an exception — because `restore_findings` stores meta verbatim and
+    `updatable_keys` validates nothing (§10 п.5), so a hand-assembled `loc` is a
+    reachable state, not a hypothetical."""
+
+    def _row(self, conn, value):
+        fid = findings.add_finding(
+            conn,
+            severity="low",
+            category="anchor_inv",
+            file="mod.py",
+            description="a row whose stored anchor is assembled by hand for this test",
+            new_category=True,
+        )["id"]
+        findings.update_finding(conn, fid, meta_update={"loc": value})
+        return fid
+
+    @pytest.mark.parametrize(
+        ("value", "reason"),
+        [
+            ({"v": 2, "commit": "zz", "path": "a.py", "line": 1, "end": 1, "text": ["x"]},
+             "invalid_anchor"),
+            ({"v": 2, "commit": "a" * 40, "path": "../out.py", "line": 1, "end": 1,
+              "text": ["x"]}, "invalid_anchor"),
+            ("not even an object", "invalid_anchor"),
+            ({"v": 99, "commit": "a" * 40, "path": "a.py", "line": 1, "end": 1,
+              "text": ["x"]}, "unsupported_anchor_version"),
+            (None, "retracted"),
+        ],
+    )
+    def test_garbage_written_through_meta_update_degrades_and_never_raises(
+        self, tmp_path, conn, value, reason
+    ):
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        _commit(root, "init")
+        self._row(conn, value)
+
+        out = loc.resolve_findings(conn, category="anchor_inv", project_dir=str(root))
+        assert out["anchored"] == 1
+        assert out["results"][0]["anchor"]["status"] == "unknown"
+        assert out["results"][0]["anchor"]["reason"] == reason
+
+    def test_a_row_whose_meta_column_does_not_parse_at_all_is_not_an_abort(
+        self, tmp_path, conn
+    ):
+        """One malformed column must not take a ten-thousand-row batch with it."""
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        first = _commit(root, "init")
+        good = self._row(conn, _span_anchor(root, first, "mod.py", 4, 6))
+        bad = findings.add_finding(
+            conn,
+            severity="low",
+            category="anchor_inv",
+            file="mod.py",
+            description="a row whose stored meta column will be corrupted directly",
+            annotate=False,
+        )["id"]
+        conn.execute("UPDATE findings SET meta = ? WHERE id = ?", ("{not json", bad))
+
+        out = loc.resolve_findings(conn, category="anchor_inv", project_dir=str(root))
+        assert out["total"] == 2
+        assert out["anchored"] == 1
+        assert out["results"][0]["finding_id"] == good
+
+
+class TestRecaptureFourPoints:
+    """§9 requires `anchor_recapture` to be SPECIFIED in four points, and
+    'specified' means: behaviour chosen, written into the docstring, and pinned
+    by a test. One test per point."""
+
+    def _tracked(self, tmp_path, conn, *, meta=None):
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        first = _commit(root, "init")
+        fid = findings.add_finding(
+            conn,
+            severity="low",
+            category="anchor_recap",
+            file="mod.py",
+            description="a row that the repair verb will rebuild the anchor of",
+            meta=meta if meta is not None else {"line": "4-6"},
+            reported_at_commit=first,
+            new_category=True,
+        )["id"]
+        return root, first, fid
+
+    def _stored(self, conn, fid):
+        return findings.get_finding(conn, fid)["meta"].get("loc")
+
+    # --- point 1: what runs inside a transaction -------------------------------------
+    def test_point1_the_git_capture_runs_with_no_transaction_open(self, tmp_path, conn):
+        """The split IS the answer: scan and capture outside, check-and-write
+        inside. Holding the lock across a batch of captures would exceed a
+        competing writer's `busy_timeout` after three rows, and `SQLITE_BUSY` is
+        not classified by `db._is_environmental` — that writer gets a raw
+        traceback, which §7.3 names as the cost to avoid."""
+        root, _first, fid = self._tracked(tmp_path, conn)
+        seen = []
+        real = loc.capture
+
+        def spy(observation):
+            seen.append(conn.in_transaction)
+            return real(observation)
+
+        loc.capture = spy
+        try:
+            loc.recapture_findings(
+                conn, finding_id=fid, project_dir=str(root), apply=True
+            )
+        finally:
+            loc.capture = real
+        assert seen and not any(seen), "capture must not run under the write lock"
+
+    def test_point1_the_check_and_the_write_share_one_transaction(self, tmp_path, conn):
+        """Structural, because behaviour cannot distinguish a CAS from a
+        check-then-act without real concurrency: the re-read and the write are
+        both inside one `db.txn`, which takes the write lock BEFORE the read."""
+        src = inspect.getsource(loc._apply_recapture)
+        body = src[src.index("with db.txn("):]
+        assert "anchor_candidates" in body
+        assert "update_finding" in body
+
+    # --- point 2: a failure never replaces a valid anchor -----------------------------
+    def test_point2_a_failed_capture_does_not_replace_a_valid_stored_anchor(
+        self, tmp_path, conn
+    ):
+        """The one point the design answers itself, and the one that must not be
+        got wrong: the refusal is usually about the ENVIRONMENT, while the anchor
+        it would destroy is still perfectly good in a clone that has the history."""
+        root, first, fid = self._tracked(tmp_path, conn)
+        good = _span_anchor(root, first, "mod.py", 4, 6)
+        findings.update_finding(conn, fid, meta_update={"loc": good})
+
+        # `project_dir=None` makes every capture refuse with `no_root` — an
+        # environmental refusal, exactly the shape this point exists for.
+        out = loc.recapture_findings(conn, finding_id=fid, project_dir=None, apply=True)
+        assert out["summary"]["kept"] == 1
+        assert out["results"][0]["outcome"] == "kept"
+        assert self._stored(conn, fid) == good, "the valid anchor was destroyed"
+
+    def test_point2_a_failed_capture_may_replace_a_stored_refusal(self, tmp_path, conn):
+        """The other side of the same rule: `kept` protects COORDINATES, not any
+        stored value. Without this, point 2 could be implemented as 'never write
+        on a refusal', which would freeze every refusal token forever."""
+        root, _first, fid = self._tracked(tmp_path, conn)
+        findings.update_finding(
+            conn, fid, meta_update={"loc": {"v": 2, "skipped": "no_grammar",
+                                            "sites_dropped": 0}}
+        )
+        out = loc.recapture_findings(conn, finding_id=fid, project_dir=None, apply=True)
+        assert out["results"][0]["outcome"] in ("updated", "unchanged")
+        assert self._stored(conn, fid)["skipped"] == "no_root"
+
+    # --- point 3: the tombstone --------------------------------------------------------
+    def test_point3_the_tombstone_is_left_alone_by_default(self, tmp_path, conn):
+        """`loc: null` means 'do not recapture' and is written BY HAND for that
+        purpose; a bulk repair sweeping it away silently would make the tombstone
+        unwritable in practice."""
+        root, _first, fid = self._tracked(tmp_path, conn)
+        findings.update_finding(conn, fid, meta_update={"loc": None})
+
+        out = loc.recapture_findings(conn, finding_id=fid, project_dir=str(root), apply=True)
+        assert out["results"][0]["outcome"] == "tombstoned"
+        assert self._stored(conn, fid) is None
+
+    def test_point3_an_explicit_flag_overrides_it(self, tmp_path, conn):
+        root, _first, fid = self._tracked(tmp_path, conn)
+        findings.update_finding(conn, fid, meta_update={"loc": None})
+
+        out = loc.recapture_findings(
+            conn, finding_id=fid, project_dir=str(root), apply=True, force_tombstone=True
+        )
+        assert out["results"][0]["outcome"] == "updated"
+        assert self._stored(conn, fid)["line"] == 4
+
+    # --- point 4: the version check ---------------------------------------------------
+    def test_point4_a_row_whose_anchor_moved_under_the_capture_is_left_alone(
+        self, tmp_path, conn
+    ):
+        """Single-threaded and therefore not timing-dependent: the competing
+        write is injected DURING the capture, which is exactly the window point 1
+        deliberately leaves outside the lock."""
+        root, first, fid = self._tracked(tmp_path, conn)
+        real = loc.capture
+
+        def racing(observation):
+            out = real(observation)
+            findings.update_finding(
+                conn, fid, meta_update={"loc": _span_anchor(root, first, "mod.py", 7, 9)}
+            )
+            return out
+
+        loc.capture = racing
+        try:
+            out = loc.recapture_findings(
+                conn, finding_id=fid, project_dir=str(root), apply=True
+            )
+        finally:
+            loc.capture = real
+        assert out["results"][0]["outcome"] == "stale"
+        # The OTHER writer's value survived — that is the whole point.
+        assert self._stored(conn, fid)["line"] == 7
+
+    def test_point4_compares_the_anchor_not_a_row_timestamp(self, tmp_path, conn):
+        """An unrelated write in the same window must not cost a repair."""
+        root, _first, fid = self._tracked(tmp_path, conn)
+        real = loc.capture
+
+        def racing(observation):
+            out = real(observation)
+            findings.update_finding(conn, fid, append_note="an unrelated note")
+            return out
+
+        loc.capture = racing
+        try:
+            out = loc.recapture_findings(
+                conn, finding_id=fid, project_dir=str(root), apply=True
+            )
+        finally:
+            loc.capture = real
+        assert out["results"][0]["outcome"] == "updated"
+
+    # --- the verb's own shape ----------------------------------------------------------
+    def test_it_is_a_dry_run_by_default(self, tmp_path, conn):
+        root, _first, fid = self._tracked(tmp_path, conn)
+        before = self._stored(conn, fid)
+        out = loc.recapture_findings(conn, finding_id=fid, project_dir=str(root))
+        assert out["applied"] is False
+        assert out["results"][0]["outcome"] == "would_update"
+        assert self._stored(conn, fid) == before
+
+    def test_a_repaired_anchor_is_what_capture_would_have_produced(self, tmp_path, conn):
+        """The repair BUILDS the object — Р4's whole point is that a human typing
+        JSON is not the sanctioned path — so it must be byte-identical to the
+        file-time one, not a second construction of the same shape."""
+        root, first, fid = self._tracked(tmp_path, conn)
+        findings.update_finding(conn, fid, meta_update={"loc": {"v": 2, "skipped": "timeout",
+                                                               "sites_dropped": 0}})
+        loc.recapture_findings(conn, finding_id=fid, project_dir=str(root), apply=True)
+        assert self._stored(conn, fid) == loc.capture(
+            {
+                "file": "mod.py",
+                "meta": {"line": "4-6"},
+                "reported_at_commit": first,
+                "project_dir": str(root),
+            }
+        )
+
+
+class TestReadSideRegistrations:
+    def test_the_cli_verbs_are_registered(self):
+        providers = {p.name for p in db.get_cli_providers()}
+        assert "loc" in providers
+        parser = _built_cli_parser()
+        assert "anchor-resolve" in parser
+        assert "anchor-recapture" in parser
+
+    def test_the_module_still_issues_no_sql(self):
+        """Restated for the read side because that is where the temptation is:
+        resolution reads finding ROWS, and the accessor for them lives in
+        `findings.py` by the `similarity_candidates` precedent. A single innocent
+        SELECT here would revoke the module's licence to exist."""
+        tree = ast.parse(inspect.getsource(loc))
+        called = {
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        assert not called & {"execute", "executemany", "executescript", "commit"}, called
+
+
+def _built_cli_parser():
+    """The subcommand names the CLI actually exposes, built through the real
+    registry rather than by reading source."""
+    import argparse
+
+    from codebugs import db as _db
+
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    commands = {}
+    for provider in _db.get_cli_providers():
+        provider.register_fn(sub, commands)
+    return set(commands)
