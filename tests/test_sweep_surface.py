@@ -223,6 +223,48 @@ class TestGeneratedMcpSurface:
         status = called(srv, "codesweep_status", {"sweep_ref": "t1"})
         assert status["total"] == 2 and status["remaining"] == 2
 
+    def test_EVERY_tool_reaches_ITS_OWN_domain_function(self, tracker):
+        """All nine, through a real `tools/call`, discriminated by result shape.
+
+        `calls=` is the one declared field that is BEHAVIOUR rather than
+        surface, so no surface comparison can see it wired to the wrong domain
+        function — the wire golden is byte-identical either way, and this is a
+        typo away in a file of nine near-identical blocks. Measured: with
+        `codesweep_list_items` rewired to `list_sweeps`, the whole suite stayed
+        green until this test existed. Each response's top-level key SET is
+        unique across the nine, so the key set is the discriminator.
+        """
+        srv = build_server(tracker)
+        expected = {
+            "codesweep_create": ["created_at", "default_batch_size", "description",
+                                 "lifecycle", "name", "status", "sweep_id",
+                                 "terminal_states", "transitions", "updated_at"],
+            "codesweep_add": ["added", "duplicates_skipped", "recurrence_bumped", "sweep_id"],
+            "codesweep_next": ["items", "remaining", "sweep_id"],
+            "codesweep_mark": ["state", "sweep_id", "updated"],
+            "codesweep_status": ["archived", "by_state", "by_tag", "default_batch_size",
+                                 "lifecycle", "name", "processed", "remaining", "status",
+                                 "sweep_id", "terminal_states", "total"],
+            "codesweep_list_items": ["items", "sweep_id"],
+            "codesweep_archive_items": ["archived", "sweep_id"],
+            "codesweep_list": ["sweeps"],
+            "codesweep_archive": ["status", "sweep_id"],
+        }
+        assert sorted(expected) == TOOL_NAMES
+        calls = [
+            ("codesweep_create", {"name": "t1"}),
+            ("codesweep_add", {"sweep_ref": "t1", "items": ["a", "b"]}),
+            ("codesweep_next", {"sweep_ref": "t1"}),
+            ("codesweep_mark", {"sweep_ref": "t1", "items": ["a"]}),
+            ("codesweep_status", {"sweep_ref": "t1"}),
+            ("codesweep_list_items", {"sweep_ref": "t1"}),
+            ("codesweep_archive_items", {"sweep_ref": "t1", "items": ["b"]}),
+            ("codesweep_list", {}),
+            ("codesweep_archive", {"sweep_ref": "t1"}),
+        ]
+        for name, arguments in calls:
+            assert sorted(called(srv, name, arguments)) == expected[name], name
+
     def test_EVERY_generated_body_forwards_EVERY_declared_parameter(self, tracker):
         """All nine tools, every parameter, by name, with declared defaults.
 
