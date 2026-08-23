@@ -57,8 +57,10 @@ from typing import Any
 # in the declaration file.
 OPT_TEXT = str | None
 OPT_INT = int | None
+TEXT_LIST = list[str]
 OPT_TEXT_LIST = list[str] | None
 OPT_OBJECT = dict[str, Any] | None
+OPT_TEXT_LIST_MAP = dict[str, list[str]] | None
 OPT_TEXT_OR_ARRAY = str | list | None
 
 #: Every tool in this package answers with a JSON object, so the return

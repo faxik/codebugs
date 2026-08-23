@@ -12,12 +12,15 @@ items without explicit `state` continue to behave as before.
 
 from __future__ import annotations
 
+import argparse
 import json
 import sqlite3
+import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from codebugs import db
+from codebugs import db, surfacegen
+from codebugs.fmt import format_table
 from codebugs.types import utc_now
 
 
@@ -822,461 +825,242 @@ from codebugs.db import register_schema, register_tool_provider, register_cli_pr
 register_schema("sweep", ensure_schema)
 
 
+# --- CLI handler bodies ----------------------------------------------------
+#
+# LOGIC ONLY. The name, the one-line help and the argument list of every verb
+# below live in `sweep_surface.py`; these functions decide what a call DOES and
+# describe nothing. They were closures inside `register_cli` until this change:
+# a declaration file has to NAME the body it wires, and a name that lives only
+# in another function's frame cannot be named from outside it. Nothing else
+# moved — every local they used to capture (`db`, `sys`, `argparse`,
+# `format_table`, the two comma-splitters) is a module-level name now, and the
+# bodies themselves are byte-identical apart from the dedent.
+
+
+def _parse_csv(value: str | None) -> list[str] | None:
+    return [t.strip() for t in value.split(",")] if value else None
+
+
+def _parse_tags(args: argparse.Namespace) -> list[str] | None:
+    return _parse_csv(args.tags)
+
+
+def _cmd_sweep_create(args: argparse.Namespace) -> None:
+    conn = db.connect()
+    kwargs: dict = {}
+    if args.name:
+        kwargs["name"] = args.name
+    if args.description:
+        kwargs["description"] = args.description
+    if args.batch_size:
+        kwargs["default_batch_size"] = args.batch_size
+    if args.lifecycle:
+        kwargs["lifecycle"] = _parse_csv(args.lifecycle)
+    if args.terminal_states:
+        kwargs["terminal_states"] = _parse_csv(args.terminal_states)
+    try:
+        result = create_sweep(conn, **kwargs)
+        print(f"Created: {result['sweep_id']}" + (f" ({result['name']})" if result["name"] else ""))
+        if result["lifecycle"] != ["pending", "done"]:
+            print(f"Lifecycle: {' -> '.join(result['lifecycle'])}")
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
+
+
+def _cmd_sweep_add(args: argparse.Namespace) -> None:
+    conn = db.connect()
+    try:
+        result = add_items(conn, args.sweep, args.items, tags=_parse_tags(args))
+        msg = f"Added {result['added']} new items"
+        if result["recurrence_bumped"]:
+            msg += f", bumped recurrence on {result['recurrence_bumped']}"
+        print(msg + ".")
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
+
+
+def _cmd_sweep_next(args: argparse.Namespace) -> None:
+    conn = db.connect()
+    try:
+        result = next_batch(conn, args.sweep, limit=args.limit, tags=_parse_tags(args))
+        if not result["items"]:
+            print("(no unprocessed items)")
+            return
+        data = [
+            {
+                "item": i["item"],
+                "state": i["state"],
+                "rec": str(i["recurrence_count"]),
+                "tags": ",".join(i["tags"]),
+            }
+            for i in result["items"]
+        ]
+        print(format_table(data, ["item", "state", "rec", "tags"], max_widths={"item": 60}))
+        print(f"\n{result['remaining']} remaining.")
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
+
+
+def _cmd_sweep_mark(args: argparse.Namespace) -> None:
+    conn = db.connect()
+    try:
+        result = mark_items(
+            conn, args.sweep, args.items,
+            processed=not args.undo, state=args.state,
+        )
+        print(f"Marked {result['updated']} items -> state={result['state']}.")
+    except (ValueError, KeyError) as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
+
+
+def _cmd_sweep_status(args: argparse.Namespace) -> None:
+    conn = db.connect()
+    try:
+        s = get_status(conn, args.sweep)
+        print(f"Sweep: {s['sweep_id']}" + (f" ({s['name']})" if s["name"] else ""))
+        print(f"Status: {s['status']}")
+        print(f"Lifecycle: {' -> '.join(s['lifecycle'])}")
+        print(f"Items:  {s['processed']}/{s['total']} processed, {s['remaining']} remaining")
+        if s["archived"]:
+            print(f"Archived: {s['archived']}")
+        if s["by_state"]:
+            print("\nBy state:")
+            for state, count in s["by_state"].items():
+                print(f"  {state:20s}  {count}")
+        if s["by_tag"]:
+            print("\nBy tag:")
+            for tag, counts in sorted(s["by_tag"].items()):
+                print(f"  {tag:20s}  {counts['processed']}/{counts['total']}")
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
+
+
+def _cmd_sweep_archive(args: argparse.Namespace) -> None:
+    conn = db.connect()
+    try:
+        result = archive_sweep(conn, args.sweep)
+        print(f"Archived: {result['sweep_id']}")
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
+
+
+def _cmd_sweep_archive_items(args: argparse.Namespace) -> None:
+    conn = db.connect()
+    try:
+        result = archive_items(
+            conn, args.sweep,
+            items=args.items or None,
+            where_status=args.state,
+            older_than=args.older_than,
+            reason=args.reason,
+        )
+        print(f"Archived {result['archived']} entries in {result['sweep_id']}.")
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
+
+
+def _cmd_sweep_list_items(args: argparse.Namespace) -> None:
+    conn = db.connect()
+    try:
+        result = list_items(
+            conn, args.sweep,
+            state=args.state, tag=args.tag,
+            include_archived=args.all,
+            archived_only=args.archived_only,
+            limit=args.limit,
+        )
+        if not result["items"]:
+            print("(no items)")
+            return
+        data = [
+            {
+                "item": i["item"],
+                "state": i["state"],
+                "rec": str(i["recurrence_count"]),
+                "archived": "y" if i["archived_at"] else "",
+                "tags": ",".join(i["tags"]),
+            }
+            for i in result["items"]
+        ]
+        print(format_table(
+            data,
+            ["item", "state", "rec", "archived", "tags"],
+            max_widths={"item": 60},
+        ))
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
+
+
+def _cmd_sweep_list(args: argparse.Namespace) -> None:
+    conn = db.connect()
+    try:
+        result = list_sweeps(conn, include_archived=args.all)
+        if not result["sweeps"]:
+            print("(no sweeps)")
+            return
+        data = [
+            {
+                "sweep_id": s["sweep_id"],
+                "name": s["name"] or "",
+                "status": s["status"],
+                "progress": f"{s['processed']}/{s['total']}",
+                "remaining": str(s["remaining"]),
+                "archived": str(s["archived"]),
+            }
+            for s in result["sweeps"]
+        ]
+        print(format_table(data, ["sweep_id", "name", "status", "progress", "remaining", "archived"]))
+    finally:
+        conn.close()
+
+
+# --- Registration ----------------------------------------------------------
+#
+# The declarations are imported at CALL time, not at module load: the
+# declaration file names the handlers above, so importing it at the top of this
+# module would be a cycle. By the time either function below runs, this module
+# is fully initialised.
+
+
 def register_tools(mcp, conn_factory) -> None:
     """Register sweep batch-iteration tools on the given MCP server."""
+    from codebugs.sweep_surface import SURFACE
 
-    @mcp.tool()
-    def codesweep_create(
-        name: str | None = None,
-        description: str = "",
-        default_batch_size: int = 10,
-        lifecycle: list[str] | None = None,
-        terminal_states: list[str] | None = None,
-        transitions: dict[str, list[str]] | None = None,
-    ) -> dict[str, Any]:
-        """Create a new sweep for batch iteration over items.
-
-        Args:
-            name: Optional human-readable name (must be unique)
-            description: What this sweep is for
-            default_batch_size: Default items per batch (default: 10)
-            lifecycle: Ordered list of allowed states (default ["pending","done"]).
-                For retro-style workflows: ["DETECTED","CONFIRMED","ESCALATED",
-                "POSTPONED","RESOLVED","DROPPED"].
-            terminal_states: States that count as "processed" (default ["done"]).
-            transitions: Optional dict[state, list[allowed_next_state]] for
-                DAG-constrained lifecycles. None = unconstrained transitions.
-        """
-        with conn_factory() as conn:
-            return create_sweep(
-                conn, name=name, description=description,
-                default_batch_size=default_batch_size,
-                lifecycle=lifecycle,
-                terminal_states=terminal_states,
-                transitions=transitions,
-            )
-
-    @mcp.tool()
-    def codesweep_add(
-        sweep_ref: str,
-        items: list[str],
-        tags: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """Add items to a sweep. Atomic upsert: existing items have their
-        `recurrence_count` bumped instead of being silently skipped, their
-        `last_seen` updated, and their archive flag cleared (R5: re-detected
-        archived items un-archive automatically).
-
-        Args:
-            sweep_ref: Sweep ID (SW-N) or name
-            items: Item identifiers to add
-            tags: Optional tags applied to this batch (overwrite on bump)
-
-        Returns:
-            {sweep_id, added, recurrence_bumped, duplicates_skipped (alias)}
-        """
-        with conn_factory() as conn:
-            return add_items(conn, sweep_ref, items, tags=tags)
-
-    @mcp.tool()
-    def codesweep_next(
-        sweep_ref: str,
-        limit: int | None = None,
-        tags: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """Get next batch of unprocessed (non-terminal, non-archived) items in
-        insertion order.
-
-        Args:
-            sweep_ref: Sweep ID (SW-N) or name
-            limit: Batch size (overrides sweep default)
-            tags: Filter to items matching any of these tags
-        """
-        with conn_factory() as conn:
-            return next_batch(conn, sweep_ref, limit=limit, tags=tags)
-
-    @mcp.tool()
-    def codesweep_mark(
-        sweep_ref: str,
-        items: list[str],
-        processed: bool = True,
-        state: str | None = None,
-    ) -> dict[str, Any]:
-        """Mark items by state transition.
-
-        Args:
-            sweep_ref: Sweep ID (SW-N) or name
-            items: Item identifiers to mark
-            processed: Legacy mode — True maps to first terminal state, False
-                to first non-terminal state. Ignored if `state` is set.
-            state: Explicit target state. Validated against the sweep's
-                `lifecycle` and `transitions` DAG (if declared).
-        """
-        with conn_factory() as conn:
-            return mark_items(
-                conn, sweep_ref, items, processed=processed, state=state
-            )
-
-    @mcp.tool()
-    def codesweep_status(
-        sweep_ref: str,
-    ) -> dict[str, Any]:
-        """Sweep overview — total/processed/remaining/archived counts, per-tag and
-        per-state breakdowns. Archived entries are excluded from total/processed/
-        remaining and reported separately as `archived`.
-
-        Args:
-            sweep_ref: Sweep ID (SW-N) or name
-        """
-        with conn_factory() as conn:
-            return get_status(conn, sweep_ref)
-
-    @mcp.tool()
-    def codesweep_archive(
-        sweep_ref: str,
-    ) -> dict[str, Any]:
-        """Archive a sweep. Archived sweeps are excluded from codesweep_list by default.
-
-        For entry-level archive, use `codesweep_archive_items`.
-
-        Args:
-            sweep_ref: Sweep ID (SW-N) or name
-        """
-        with conn_factory() as conn:
-            return archive_sweep(conn, sweep_ref)
-
-    @mcp.tool()
-    def codesweep_archive_items(
-        sweep_ref: str,
-        items: list[str] | None = None,
-        where_status: str | None = None,
-        older_than: str | None = None,
-        reason: str | None = None,
-    ) -> dict[str, Any]:
-        """Selectively archive entries within a sweep (soft-delete).
-
-        Archived entries are excluded from `codesweep_next`, `codesweep_status`
-        totals, and default `codesweep_list_items`. They remain matchable by
-        `codesweep_add` for recurrence detection — re-adding un-archives them
-        with `recurrence_count` carried forward (R5 invariant).
-
-        At least one filter is required.
-
-        Args:
-            sweep_ref: Sweep ID (SW-N) or name
-            items: Specific item identifiers to archive
-            where_status: Archive entries currently in this state
-            older_than: Duration spec — '30d', '2w', '6m', '1y'. Compares against
-                the entry's last activity timestamp.
-            reason: Free-form reason recorded on each archived entry
-        """
-        with conn_factory() as conn:
-            return archive_items(
-                conn, sweep_ref,
-                items=items, where_status=where_status,
-                older_than=older_than, reason=reason,
-            )
-
-    @mcp.tool()
-    def codesweep_list_items(
-        sweep_ref: str,
-        state: str | None = None,
-        tag: str | None = None,
-        include_archived: bool = False,
-        archived_only: bool = False,
-        limit: int | None = None,
-    ) -> dict[str, Any]:
-        """List items in a sweep with optional filters.
-
-        Args:
-            sweep_ref: Sweep ID (SW-N) or name
-            state: Filter to a specific state
-            tag: Filter to items having this tag
-            include_archived: Include archived entries alongside live ones
-            archived_only: Show only archived entries (overrides include_archived)
-            limit: Max number of entries to return
-        """
-        with conn_factory() as conn:
-            return list_items(
-                conn, sweep_ref,
-                state=state, tag=tag,
-                include_archived=include_archived,
-                archived_only=archived_only,
-                limit=limit,
-            )
-
-    @mcp.tool()
-    def codesweep_list(
-        include_archived: bool = False,
-    ) -> dict[str, Any]:
-        """List all sweeps with summary counts.
-
-        Args:
-            include_archived: Include archived sweeps (default: false)
-        """
-        with conn_factory() as conn:
-            return list_sweeps(conn, include_archived=include_archived)
+    surfacegen.emit_tools(mcp, conn_factory, SURFACE)
 
 
 register_tool_provider("sweep", register_tools)
 
 
-# --- CLI ---
-
 def register_cli(sub, commands) -> None:
     """Register sweep CLI subcommands."""
-    import argparse
-    import sys
-    from codebugs.fmt import format_table
+    from codebugs.sweep_surface import SURFACE
 
-    def _parse_csv(value: str | None) -> list[str] | None:
-        return [t.strip() for t in value.split(",")] if value else None
-
-    def _parse_tags(args: argparse.Namespace) -> list[str] | None:
-        return _parse_csv(args.tags)
-
-    def _cmd_sweep_create(args: argparse.Namespace) -> None:
-        conn = db.connect()
-        kwargs: dict = {}
-        if args.name:
-            kwargs["name"] = args.name
-        if args.description:
-            kwargs["description"] = args.description
-        if args.batch_size:
-            kwargs["default_batch_size"] = args.batch_size
-        if args.lifecycle:
-            kwargs["lifecycle"] = _parse_csv(args.lifecycle)
-        if args.terminal_states:
-            kwargs["terminal_states"] = _parse_csv(args.terminal_states)
-        try:
-            result = create_sweep(conn, **kwargs)
-            print(f"Created: {result['sweep_id']}" + (f" ({result['name']})" if result["name"] else ""))
-            if result["lifecycle"] != ["pending", "done"]:
-                print(f"Lifecycle: {' -> '.join(result['lifecycle'])}")
-        except ValueError as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
-        finally:
-            conn.close()
-
-    def _cmd_sweep_add(args: argparse.Namespace) -> None:
-        conn = db.connect()
-        try:
-            result = add_items(conn, args.sweep, args.items, tags=_parse_tags(args))
-            msg = f"Added {result['added']} new items"
-            if result["recurrence_bumped"]:
-                msg += f", bumped recurrence on {result['recurrence_bumped']}"
-            print(msg + ".")
-        except ValueError as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
-        finally:
-            conn.close()
-
-    def _cmd_sweep_next(args: argparse.Namespace) -> None:
-        conn = db.connect()
-        try:
-            result = next_batch(conn, args.sweep, limit=args.limit, tags=_parse_tags(args))
-            if not result["items"]:
-                print("(no unprocessed items)")
-                return
-            data = [
-                {
-                    "item": i["item"],
-                    "state": i["state"],
-                    "rec": str(i["recurrence_count"]),
-                    "tags": ",".join(i["tags"]),
-                }
-                for i in result["items"]
-            ]
-            print(format_table(data, ["item", "state", "rec", "tags"], max_widths={"item": 60}))
-            print(f"\n{result['remaining']} remaining.")
-        except ValueError as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
-        finally:
-            conn.close()
-
-    def _cmd_sweep_mark(args: argparse.Namespace) -> None:
-        conn = db.connect()
-        try:
-            result = mark_items(
-                conn, args.sweep, args.items,
-                processed=not args.undo, state=args.state,
-            )
-            print(f"Marked {result['updated']} items -> state={result['state']}.")
-        except (ValueError, KeyError) as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
-        finally:
-            conn.close()
-
-    def _cmd_sweep_status(args: argparse.Namespace) -> None:
-        conn = db.connect()
-        try:
-            s = get_status(conn, args.sweep)
-            print(f"Sweep: {s['sweep_id']}" + (f" ({s['name']})" if s["name"] else ""))
-            print(f"Status: {s['status']}")
-            print(f"Lifecycle: {' -> '.join(s['lifecycle'])}")
-            print(f"Items:  {s['processed']}/{s['total']} processed, {s['remaining']} remaining")
-            if s["archived"]:
-                print(f"Archived: {s['archived']}")
-            if s["by_state"]:
-                print("\nBy state:")
-                for state, count in s["by_state"].items():
-                    print(f"  {state:20s}  {count}")
-            if s["by_tag"]:
-                print("\nBy tag:")
-                for tag, counts in sorted(s["by_tag"].items()):
-                    print(f"  {tag:20s}  {counts['processed']}/{counts['total']}")
-        except ValueError as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
-        finally:
-            conn.close()
-
-    def _cmd_sweep_archive(args: argparse.Namespace) -> None:
-        conn = db.connect()
-        try:
-            result = archive_sweep(conn, args.sweep)
-            print(f"Archived: {result['sweep_id']}")
-        except ValueError as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
-        finally:
-            conn.close()
-
-    def _cmd_sweep_archive_items(args: argparse.Namespace) -> None:
-        conn = db.connect()
-        try:
-            result = archive_items(
-                conn, args.sweep,
-                items=args.items or None,
-                where_status=args.state,
-                older_than=args.older_than,
-                reason=args.reason,
-            )
-            print(f"Archived {result['archived']} entries in {result['sweep_id']}.")
-        except ValueError as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
-        finally:
-            conn.close()
-
-    def _cmd_sweep_list_items(args: argparse.Namespace) -> None:
-        conn = db.connect()
-        try:
-            result = list_items(
-                conn, args.sweep,
-                state=args.state, tag=args.tag,
-                include_archived=args.all,
-                archived_only=args.archived_only,
-                limit=args.limit,
-            )
-            if not result["items"]:
-                print("(no items)")
-                return
-            data = [
-                {
-                    "item": i["item"],
-                    "state": i["state"],
-                    "rec": str(i["recurrence_count"]),
-                    "archived": "y" if i["archived_at"] else "",
-                    "tags": ",".join(i["tags"]),
-                }
-                for i in result["items"]
-            ]
-            print(format_table(
-                data,
-                ["item", "state", "rec", "archived", "tags"],
-                max_widths={"item": 60},
-            ))
-        except ValueError as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
-        finally:
-            conn.close()
-
-    def _cmd_sweep_list(args: argparse.Namespace) -> None:
-        conn = db.connect()
-        try:
-            result = list_sweeps(conn, include_archived=args.all)
-            if not result["sweeps"]:
-                print("(no sweeps)")
-                return
-            data = [
-                {
-                    "sweep_id": s["sweep_id"],
-                    "name": s["name"] or "",
-                    "status": s["status"],
-                    "progress": f"{s['processed']}/{s['total']}",
-                    "remaining": str(s["remaining"]),
-                    "archived": str(s["archived"]),
-                }
-                for s in result["sweeps"]
-            ]
-            print(format_table(data, ["sweep_id", "name", "status", "progress", "remaining", "archived"]))
-        finally:
-            conn.close()
-
-    p = sub.add_parser("sweep-create", help="Create a new sweep")
-    p.add_argument("--name", help="Optional sweep name")
-    p.add_argument("--description", help="Sweep description")
-    p.add_argument("--batch-size", type=int, help="Default batch size (default: 10)")
-    p.add_argument("--lifecycle", help="Comma-separated lifecycle states (default: pending,done)")
-    p.add_argument("--terminal-states", help="Comma-separated terminal states (default: done)")
-
-    p = sub.add_parser("sweep-add", help="Add items to a sweep")
-    p.add_argument("sweep", help="Sweep ID (SW-N) or name")
-    p.add_argument("items", nargs="+", help="Items to add")
-    p.add_argument("--tags", help="Comma-separated tags")
-
-    p = sub.add_parser("sweep-next", help="Get next batch of unprocessed items")
-    p.add_argument("sweep", help="Sweep ID (SW-N) or name")
-    p.add_argument("--limit", type=int, help="Batch size override")
-    p.add_argument("--tags", help="Filter by tags (comma-separated)")
-
-    p = sub.add_parser("sweep-mark", help="Mark items as processed or transition state")
-    p.add_argument("sweep", help="Sweep ID (SW-N) or name")
-    p.add_argument("items", nargs="+", help="Items to mark")
-    p.add_argument("--undo", action="store_true", help="Map to first non-terminal state")
-    p.add_argument("--state", help="Explicit target state (validated against lifecycle)")
-
-    p = sub.add_parser("sweep-status", help="Sweep progress overview")
-    p.add_argument("sweep", help="Sweep ID (SW-N) or name")
-
-    p = sub.add_parser("sweep-archive", help="Archive an entire sweep")
-    p.add_argument("sweep", help="Sweep ID (SW-N) or name")
-
-    p = sub.add_parser("sweep-archive-items", help="Selectively archive entries (soft-delete)")
-    p.add_argument("sweep", help="Sweep ID (SW-N) or name")
-    p.add_argument("items", nargs="*", help="Specific items to archive (optional)")
-    p.add_argument("--state", help="Archive entries in this state")
-    p.add_argument("--older-than", help="Archive entries older than (e.g. 30d, 6m)")
-    p.add_argument("--reason", help="Free-form reason recorded on archived entries")
-
-    p = sub.add_parser("sweep-list-items", help="List entries in a sweep")
-    p.add_argument("sweep", help="Sweep ID (SW-N) or name")
-    p.add_argument("--state", help="Filter by state")
-    p.add_argument("--tag", help="Filter by tag")
-    p.add_argument("--all", action="store_true", help="Include archived entries")
-    p.add_argument("--archived-only", action="store_true", help="Show only archived entries")
-    p.add_argument("--limit", type=int, help="Max entries to return")
-
-    p = sub.add_parser("sweep-list", help="List sweeps")
-    p.add_argument("--all", action="store_true", help="Include archived sweeps")
-
-    commands.update({
-        "sweep-create": _cmd_sweep_create,
-        "sweep-add": _cmd_sweep_add,
-        "sweep-next": _cmd_sweep_next,
-        "sweep-mark": _cmd_sweep_mark,
-        "sweep-status": _cmd_sweep_status,
-        "sweep-archive": _cmd_sweep_archive,
-        "sweep-archive-items": _cmd_sweep_archive_items,
-        "sweep-list-items": _cmd_sweep_list_items,
-        "sweep-list": _cmd_sweep_list,
-    })
+    surfacegen.emit_cli(sub, commands, SURFACE)
 
 
 register_cli_provider("sweep", register_cli)
