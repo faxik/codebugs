@@ -100,6 +100,48 @@ def _register_builtins(sub, commands: dict) -> None:
     commands["where"] = _cmd_where
 
 
+def build_parser(mode: str = "all", pre_parser: argparse.ArgumentParser | None = None):
+    """Build the subparser tree through the SAME two primitives `main()` uses.
+
+    CB-146. This exists so the CLI-surface snapshot (`tests/cli_surface.py`) can
+    capture the real, wired parser without hand-assembling subparsers by calling
+    each domain's `register_cli` directly — that shortcut would miss a wiring
+    defect in `_register_builtins` or in the `db.get_cli_providers(mode=)` loop
+    itself, exactly the two things `main()` also depends on. `mode="all"` (the
+    default) is what an ordinary invocation with no `--mode` gets, and it walks
+    the CLI-provider REGISTRY rather than any hardcoded domain list, so a domain
+    that forgot to register — or one added tomorrow — changes what this returns
+    without this function naming it anywhere.
+
+    `pre_parser` is accepted so `main()` can pass its own `--mode`/`--tracker-root`
+    parser in as the parent (unchanged behaviour there). When omitted — the
+    snapshot's case — a bare `add_help=False` parser is used instead: those two
+    global flags don't affect which SUBPARSERS get built for a given `mode`, so
+    the snapshot has no reason to duplicate their declaration (which lives, once,
+    inside `main()` — see `tests/test_relations.py` and
+    `tests/test_grouping_surface.py`, which pin domain names appearing literally
+    inside `cli.main`'s own source and would break if that declaration moved).
+
+    Returns `(parser, sub, commands)`, exactly the three names `main()` used to
+    build inline.
+    """
+    if pre_parser is None:
+        pre_parser = argparse.ArgumentParser(add_help=False)
+    parser = argparse.ArgumentParser(
+        description="codebugs — AI-native code finding & requirements tracker",
+        prog="codebugs",
+        parents=[pre_parser],
+    )
+    sub = parser.add_subparsers(dest="command")
+    commands: dict = {}
+
+    _register_builtins(sub, commands)
+    for provider in db.get_cli_providers(mode=mode):
+        provider.register_fn(sub, commands)
+
+    return parser, sub, commands
+
+
 def main() -> None:
     """CLI entry point with mode-based command discovery."""
     pre_parser = argparse.ArgumentParser(add_help=False)
@@ -123,17 +165,7 @@ def main() -> None:
     # db.connect() with no arguments, so db is the only place that can honor it.
     db.set_tracker_root(pre_args.tracker_root)
 
-    parser = argparse.ArgumentParser(
-        description="codebugs — AI-native code finding & requirements tracker",
-        prog="codebugs",
-        parents=[pre_parser],
-    )
-    sub = parser.add_subparsers(dest="command")
-    commands: dict = {}
-
-    _register_builtins(sub, commands)
-    for provider in db.get_cli_providers(mode=pre_args.mode):
-        provider.register_fn(sub, commands)
+    parser, _sub, commands = build_parser(mode=pre_args.mode, pre_parser=pre_parser)
 
     args = parser.parse_args()
     if not args.command:
