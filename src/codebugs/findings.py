@@ -1995,14 +1995,42 @@ def _count_fingerprint_refusal(conn: sqlite3.Connection, finding_id: str) -> Non
     and it must not have a different value depending on what an unrelated caller
     did afterwards. So it is skipped, and the unit is lost — fail-open.
 
-    HONEST SCOPE, enumerated rather than assumed: that path has NO PRODUCER
-    today. All four callers of `update_finding` were read. The two that run
-    under an ambient transaction pass a TERMINAL status —
-    `milestones.triage_dismiss` passes the literal `"not_a_bug"`, and
-    `provenance.resolve_trailers` passes `"resolved"` or `None` from
-    `_VERB_ACTIONS` — while the refusal predicate fires only on nonlive→live.
-    The two that CAN pass a live status, the MCP `update` wrapper and the CLI
-    `update` handler, each open their own connection with no transaction open.
+    HONEST SCOPE, enumerated rather than assumed — and the enumeration is PINNED
+    BY A TEST, because the previous one rotted silently. `update_finding` has
+    FIVE call sites in `src/` today, and
+    `tests/test_findings.py::TestUpdateFindingCallSitesRatchet` counts them by
+    AST: a sixth turns the suite RED instead of quietly invalidating this
+    paragraph. That failure is not hypothetical. This text used to open "all
+    four callers of `update_finding` were read", and the fifth —
+    `loc._apply_recapture` — arrived by FORWARD MERGE from another branch after
+    that enumeration had been made, leaving a true conclusion standing on a
+    false reason. A premise established by ENUMERATION must be replayed after a
+    forward merge; a ratchet is what makes the merge do the replaying.
+
+    That path has NO PRODUCER today. The refusal predicate fires only on a
+    nonlive→live status change, so producing one needs a `status` argument
+    naming a LIVE status, issued under a transaction this function did not open.
+    Exactly TWO of the five run under an ambient transaction, and they miss for
+    two DIFFERENT reasons — do not collapse them into one clause, which is how
+    the last version of this paragraph became wrong:
+
+      * `milestones.triage_dismiss` passes the literal `status="not_a_bug"`, a
+        TERMINAL status. The predicate reads a status and finds the wrong
+        direction.
+      * `loc._apply_recapture` passes `meta_update={"loc": …}` and NO `status`
+        at all. The predicate has nothing to read.
+
+    The other THREE open their own connection with no transaction in progress,
+    so `conn.in_transaction` is False and this guard never skips anything: the
+    MCP `update` wrapper, the CLI `update` handler, and
+    `provenance.resolve_trailers`. Note that third one specifically, because the
+    previous version of this paragraph filed it under "ambient" and it is not —
+    `provenance.py` contains no `db.txn` at all, and its only caller is its own
+    CLI handler, which opens a fresh connection. So the correction here is not
+    only arithmetic: the CLASSIFICATION was wrong too. Both facts were MEASURED,
+    not reasoned — `conn.in_transaction` was sampled at every one of these sites
+    by driving each caller.
+
     So this is a guard for the day a producer appears, not a live route, and
     `tests/test_findings.py` builds that caller by hand to hold the line.
     """
@@ -3392,11 +3420,25 @@ def register_tools(mcp, conn_factory) -> None:
                       "P0" are refused.
             notes: REPLACES the notes wholesale, discarding whatever was there.
                    To add to an existing record without destroying it, use
-                   append_note instead.
+                   append_note instead. If meta_update also carries a "notes"
+                   key, the meta_update value is the one that lands — see
+                   meta_update for why that is deliberate.
             append_note: Appends a newline-joined line, preserving the prior notes.
                          This is the safe way to add evidence to a long-lived card.
             tags: Replace tags list
-            meta_update: Merge additional metadata keys
+            meta_update: Merge additional metadata keys. The three meta-writing
+                         arguments compose over ONE dict, in this order: notes
+                         replaces, append_note then extends that replacement,
+                         and meta_update merges LAST. So passing both notes=
+                         and meta_update={"notes": ...} in a single call is
+                         neither an error nor a refusal — meta_update wins the
+                         collision, on every key it names. That precedence is
+                         deliberate rather than incidental: meta_update names
+                         the storage key directly, which makes it the repair
+                         path for keys no other argument can reach
+                         (similar_to, category_minted, fingerprint_refusals),
+                         and a stamp no argument could overwrite would be an
+                         unrepairable one.
             reported_at_ref: Update version/tag label (e.g. "v2.1.0"). This is
                              the SANCTIONED manual mutation of an
                              observation-frozen column (BT-4): observations

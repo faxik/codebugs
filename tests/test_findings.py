@@ -1,9 +1,11 @@
 """Tests for the findings domain — CRUD, query, stats, migrations."""
 
+import ast
 import csv
 import json
 import os
 import re
+import pathlib
 import sqlite3
 import subprocess
 import sys
@@ -14,6 +16,7 @@ import pytest
 from codebugs import db, findings
 from codebugs.types import (
     FINDING_STATUSES,
+    FINDING_TERMINAL,
     FINDING_STATUS_ALIASES,
     SEVERITIES,
     resolve_finding_status,
@@ -3323,3 +3326,122 @@ class TestFingerprintRefusalIsCountable:
         assert findings.query_findings(
             conn, meta_key=findings.REFUSAL_COUNT_META_KEY
         )["findings"] == []
+
+
+def _update_finding_call_sites() -> list[tuple[str, str, int, frozenset[str]]]:
+    """Every `update_finding(...)` CALL in `src/codebugs/`, by AST.
+
+    Returns `(module, enclosing function, lineno, keyword names)` per site.
+    AST rather than text search is the point: this package's docstrings mention
+    ``update_finding(meta_update=)`` several times, and `tests/test_fsio.py::
+    TestWriteCallSitesRatchet` records that the first, grep-shaped version of
+    that ratchet matched its own prose. A parser cannot make that mistake.
+    """
+    pkg = pathlib.Path(findings.__file__).parent
+    sites: list[tuple[str, str, int, frozenset[str]]] = []
+
+    def called_name(node: ast.Call) -> str | None:
+        func = node.func
+        if isinstance(func, ast.Name):
+            return func.id
+        if isinstance(func, ast.Attribute):
+            return func.attr
+        return None
+
+    def descend(node: ast.AST, module: str, scope: str) -> None:
+        # The NEAREST enclosing function, so the two surface handlers report as
+        # `update` / `_cmd_update` and not as the `register_*` frames they nest in.
+        for child in ast.iter_child_nodes(node):
+            inner = (
+                child.name
+                if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef)
+                else scope
+            )
+            if isinstance(child, ast.Call) and called_name(child) == "update_finding":
+                sites.append((
+                    module,
+                    scope,
+                    child.lineno,
+                    frozenset(kw.arg for kw in child.keywords if kw.arg),
+                ))
+            descend(child, module, inner)
+
+    for path in sorted(pkg.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        descend(tree, str(path.relative_to(pkg)), "<module>")
+    return sites
+
+
+class TestUpdateFindingCallSitesRatchet:
+    """The caller enumeration behind `_count_fingerprint_refusal` is PINNED (CB-131).
+
+    That docstring argues "this skip path has no producer today" from a reading of
+    every caller. An enumeration is the letter of a rule, and this repository's
+    recurring lesson is that the letter goes stale: the previous version said "all
+    four callers of `update_finding` were read" while there were FIVE. The fifth,
+    `loc._apply_recapture`, arrived by FORWARD MERGE from a sibling branch AFTER the
+    enumeration was made — the conclusion survived, its stated reason did not, and a
+    green suite certified the false reason all the way to review.
+
+    So the enumeration is mechanised: a new, moved, or renamed call site turns this
+    RED, which forces the reasoning to be replayed instead of silently inherited.
+    That is the mechanism, not the reminder — prose is the wrong enforcement layer
+    for a premise whose defining property is that a merge can invalidate it without
+    touching the file that states it.
+    """
+
+    def test_the_count_and_the_locations_are_exactly_the_five_that_were_read(self):
+        located = sorted((module, func) for module, func, _, _ in _update_finding_call_sites())
+        expected = sorted([
+            ("findings.py", "update"),                    # MCP wrapper — own connection
+            ("findings.py", "_cmd_update"),               # CLI handler — own connection
+            ("loc.py", "_apply_recapture"),               # AMBIENT — passes no status
+            ("milestones/triage.py", "triage_dismiss"),   # AMBIENT — terminal status
+            ("provenance.py", "resolve_trailers"),        # NOT ambient (measured)
+        ])
+        assert located == expected, (
+            "the `update_finding` caller set moved. `_count_fingerprint_refusal`'s "
+            "docstring reasons over exactly these five sites — replay that reasoning "
+            f"against the new set, correct the docstring, then this test. Found: {located}"
+        )
+
+    def test_neither_ambient_caller_can_request_a_live_status(self):
+        """The two REASONS, mechanised — they differ, and that is the trap.
+
+        `triage_dismiss` passes a status and it is terminal; `_apply_recapture`
+        passes no status at all. Collapsing them into one clause ("both pass a
+        terminal status") is precisely how the previous docstring became wrong,
+        so each is pinned on its own property.
+        """
+        by_func = {func: kwargs for _, func, _, kwargs in _update_finding_call_sites()}
+
+        assert "status" not in by_func["_apply_recapture"], (
+            "`loc._apply_recapture` runs under the caller's `db.txn` and now names a "
+            "`status`. The refusal predicate needs one, so this is a candidate "
+            "producer for the skip path — re-read _count_fingerprint_refusal."
+        )
+        assert "status" in by_func["triage_dismiss"]
+
+        source = pathlib.Path(findings.__file__).parent / "milestones" / "triage.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        statuses = [
+            kw.value.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name | ast.Attribute)
+            and (
+                node.func.id
+                if isinstance(node.func, ast.Name)
+                else node.func.attr
+            ) == "update_finding"
+            for kw in node.keywords
+            if kw.arg == "status"
+            and isinstance(kw.value, ast.Constant)
+            and isinstance(kw.value.value, str)
+        ]
+        assert statuses == ["not_a_bug"], statuses
+        assert set(statuses) <= FINDING_TERMINAL, (
+            "`milestones.triage_dismiss` runs under an ambient transaction and no "
+            "longer passes a literal TERMINAL status; a live one would make it a "
+            "producer for the skip path documented on _count_fingerprint_refusal."
+        )
