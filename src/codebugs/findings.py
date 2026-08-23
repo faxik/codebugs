@@ -2025,11 +2025,15 @@ def _count_fingerprint_refusal(conn: sqlite3.Connection, finding_id: str) -> Non
     MCP `update` wrapper, the CLI `update` handler, and
     `provenance.resolve_trailers`. Note that third one specifically, because the
     previous version of this paragraph filed it under "ambient" and it is not —
-    `provenance.py` contains no `db.txn` at all, and its only caller is its own
-    CLI handler, which opens a fresh connection. So the correction here is not
-    only arithmetic: the CLASSIFICATION was wrong too. Both facts were MEASURED,
-    not reasoned — `conn.in_transaction` was sampled at every one of these sites
-    by driving each caller.
+    `provenance.py` contains no `db.txn` ANYWHERE, so nothing in that module can
+    be the frame that opens one; an ambient caller would have to arrive from
+    outside it, and the only caller today is its own CLI handler, which opens a
+    fresh connection. State it in that order deliberately: the durable half is
+    the module property, the caller list is an enumeration, and an enumeration
+    is exactly what went stale here. So the correction is not only arithmetic —
+    the CLASSIFICATION was wrong too. Both facts were MEASURED, not reasoned:
+    `conn.in_transaction` was sampled at every one of these sites by driving
+    each caller.
 
     So this is a guard for the day a producer appears, not a live route, and
     `tests/test_findings.py` builds that caller by hand to hold the line.
