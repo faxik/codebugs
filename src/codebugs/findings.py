@@ -305,7 +305,38 @@ def _validate_meta_keys(meta: dict[str, Any] | None, *, updating: bool = False) 
 # caller-supplied it would spoof that count, but an unrepairable stamp is the CB-26
 # shape, so update(meta_update=) may rewrite a false one — unlike _RESERVED_META_KEYS,
 # which are refused on both paths.
-_ADD_ONLY_RESERVED_META_KEYS = frozenset({"category_minted"})
+#
+# BT-8 joins it: `fingerprint_refusals` is likewise the machinery's own output —
+# a caller supplying it at filing time would spoof a number that goes to the
+# owner — and likewise repairable, because an unrepairable stamp is the CB-26
+# shape. Being ADD-only is also what makes `import_findings` drop it (the import
+# strips this whole union): a peer tracker's refusal count is not this tracker's
+# demand signal.
+_ADD_ONLY_RESERVED_META_KEYS = frozenset({"category_minted", "fingerprint_refusals"})
+
+# BT-8 (ratified 2026-08-22, seventh ratification): the dedup fork is LEFT AS IT
+# IS and its refusals are COUNTED — policy by measured demand, the same move the
+# `moved_file` counter makes. This unit builds EXACTLY that: no merge policy, no
+# `merged` status, no fingerprint backfill. CB-46 stays open, waiting on data
+# rather than on code.
+#
+# PUBLIC because the key IS the read surface. The number is read with
+# `query(meta_key="fingerprint_refusals")` on both the MCP and the CLI side —
+# no new tool and no new verb — so the name has to be something a caller can
+# spell, and something a test can pin without re-typing a literal.
+#
+# WHAT THE NUMBER MEANS, and it must travel with the number (K-5b): it counts
+# REFUSAL EVENTS, not distinct people and not distinct intentions. One caller
+# retrying in a loop inflates it by one per attempt. It is a demand signal for
+# "somebody wanted THIS decided card back in play while a live recurrence held
+# its fingerprint", and it is a lower bound on nothing and an upper bound on
+# nothing — read it as evidence that the fork is being hit, not as a headcount.
+REFUSAL_COUNT_META_KEY = "fingerprint_refusals"
+
+# Bound as a PARAMETER, never interpolated: `json_set`/`json_extract` take the
+# path as a value, so this needs neither identifier validation nor an S608
+# suppression -- there is no interpolated SQL here to suppress.
+_REFUSAL_COUNT_JSON_PATH = f"$.{REFUSAL_COUNT_META_KEY}"
 
 # Every `codebugs add` FLAG that writes into `meta`, paired with the meta key it
 # writes and the spelling a caller types. `_cmd_add` reads this tuple twice — once
@@ -1909,6 +1940,80 @@ def batch_add_findings(
     return [_finalize_add(outcome, committed=owned) for outcome in outcomes]
 
 
+def _bump_refusal_count(conn: sqlite3.Connection, finding_id: str) -> None:
+    """`meta.fingerprint_refusals += 1` on *finding_id*, in its own transaction.
+
+    ONE STATEMENT, so this is not an instance of the CB-24 read-modify-write
+    hazard: there is no Python-side read to go stale between the read and the
+    write, exactly as `SET n = n + 1` is already exempt.
+
+    `updated_at` is deliberately NOT touched. CB-123 ratified `recent` as a
+    reader over that column with the stated caveat that a last TOUCH is not a
+    closure; a touch that changed nothing a reader of the card can see would
+    make that reader LIER rather than more accurate. A refusal changes no
+    content of the card — it changes only how often the card was wanted back.
+
+    A stored value of the wrong TYPE (a hand-repaired string, say) is coerced by
+    SQLite's arithmetic and the count restarts from 1. That is the accepted cost
+    of the key staying repairable; the alternative is an unrepairable stamp,
+    which is the CB-26 shape this repository has twice chosen against.
+    """
+    with db.txn(conn):
+        conn.execute(
+            "UPDATE findings SET meta = json_set(meta, ?, "
+            "COALESCE(json_extract(meta, ?), 0) + 1) WHERE id = ?",
+            (_REFUSAL_COUNT_JSON_PATH, _REFUSAL_COUNT_JSON_PATH, finding_id),
+        )
+
+
+def _count_fingerprint_refusal(conn: sqlite3.Connection, finding_id: str) -> None:
+    """Record one refusal event. Fail-OPEN, and never in the caller's transaction.
+
+    TWO RULES, and the direction of each is the whole design.
+
+    **The counter is fail-open; the refusal is fail-closed.** Losing one unit of
+    statistics is acceptable, a caller not receiving its `ValueError` never is.
+    So every failure here is swallowed and logged — the `run_status_change_hooks`
+    precedent — and NEVER the other way round. The split into two functions is
+    what makes that testable: this one owns the swallow, `_bump_refusal_count`
+    owns the write, so a test can break the write and watch the refusal still
+    arrive intact.
+
+    **Under a caller's open transaction the counter is SKIPPED**, and the reason
+    is one step narrower than the obvious one — measured, because the first draft
+    of this docstring overstated it. `update_finding` may run inside someone
+    else's transaction. A naive "write it in its own COMMITTED transaction" there
+    would commit the CALLER'S unrelated work, verbatim CB-40, where assigning
+    `isolation_level` silently committed an ambient transaction — but
+    `_bump_refusal_count` goes through `db.txn`, which is reentrant and commits
+    nothing under an ambient transaction, so that specific defect is already
+    unreachable. What actually happens without this guard is that the count JOINS
+    the stranger's transaction and shares its fate: measured, a caller that
+    swallows the `ValueError` and commits carries the count out with it, while a
+    caller that aborts destroys it. Neither is this function's decision to make.
+    A statistic must not be a write inside a unit of work nobody asked to extend,
+    and it must not have a different value depending on what an unrelated caller
+    did afterwards. So it is skipped, and the unit is lost — fail-open.
+
+    HONEST SCOPE, enumerated rather than assumed: that path has NO PRODUCER
+    today. All four callers of `update_finding` were read. The two that run
+    under an ambient transaction pass a TERMINAL status —
+    `milestones.triage_dismiss` passes the literal `"not_a_bug"`, and
+    `provenance.resolve_trailers` passes `"resolved"` or `None` from
+    `_VERB_ACTIONS` — while the refusal predicate fires only on nonlive→live.
+    The two that CAN pass a live status, the MCP `update` wrapper and the CLI
+    `update` handler, each open their own connection with no transaction open.
+    So this is a guard for the day a producer appears, not a live route, and
+    `tests/test_findings.py` builds that caller by hand to hold the line.
+    """
+    if conn.in_transaction:
+        return
+    try:
+        _bump_refusal_count(conn, finding_id)
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"[fingerprint-refusal counter failed for {finding_id}] {e}\n")
+
+
 def update_finding(
     conn: sqlite3.Connection,
     finding_id: str,
@@ -1964,6 +2069,31 @@ def update_finding(
     2026-08-20) — later observations' sources live only in the occurrence ring.
     ``reported_at_commit`` stays immutable after insert, as above.
 
+    **The fingerprint refusal is COUNTED (BT-8, ratified 2026-08-22).** Re-triaging
+    a decided card back to a live status while a live recurrence holds its
+    fingerprint still raises `ValueError` naming the blocking row — unchanged, and
+    that is constraint one. What is new is that each such event increments
+    `meta.fingerprint_refusals` ON THE REFUSED CARD, readable through the existing
+    surface as `query(meta_key="fingerprint_refusals")`. No new tool, no new verb.
+
+    The number is a DEMAND SIGNAL for the merge policy CB-46 is blocked on — the
+    ratified decision was to leave the fork as it is and count, exactly as
+    `moved_file` is counted. Read it with its predicate attached: it counts
+    REFUSAL EVENTS, not distinct people and not distinct intentions, so one
+    caller retrying in a loop inflates it by one per attempt.
+
+    Three properties, each of which the implementation is shaped by. The count is
+    written AFTER this frame's transaction, because a write inside it would be
+    rolled back by the very `raise` it is recording. It is fail-OPEN — a counter
+    that cannot be written is swallowed and logged, and the caller still receives
+    its `ValueError` unchanged. And it is SKIPPED under an ambient transaction,
+    where committing it would commit the caller's unrelated work (CB-40); that
+    path has no producer today, and `_count_fingerprint_refusal` enumerates why.
+
+    `updated_at` deliberately does not move: a refusal changes no content of the
+    card, and CB-123's `recent` reader is already carrying the caveat that a last
+    touch is not a closure.
+
     Read those as the CURRENT contract with its reason, not as a verdict that
     they can never become mutable: CB-21 asks whether ``description`` and
     ``file`` should be, and that question is open. What is closed is leaving
@@ -1996,6 +2126,7 @@ def update_finding(
         # the ValueError/KeyError contract, unclassifiable by db.is_contention (code
         # 19, not 5/6), and uncaught by every CLI handler. Pre-check inside this
         # transaction and name the blocking row instead.
+        refusal: str | None = None
         if (
             status is not None
             and status in LIVE_STATUSES
@@ -2004,81 +2135,101 @@ def update_finding(
         ):
             live = _live_row_by_fingerprint(conn, row["fingerprint"], exclude_id=finding_id)
             if live is not None:
-                raise ValueError(
+                # BT-8. The refusal is now COUNTED, and the counting is what forces
+                # this shape. A write placed here would be invisible BY
+                # CONSTRUCTION: raising inside `db.txn` rolls the transaction back
+                # and takes the count with it. So the refusal MESSAGE is built here,
+                # inside the write lock where the check-then-act window is closed,
+                # and it is raised AFTER the block. This path writes nothing, so it
+                # has nothing to undo and simply commits an empty transaction —
+                # exactly the shape CB-40 ratified when it deleted the last two raw
+                # `BEGIN IMMEDIATE` sites, and the reason the `TxnAbort` sentinel it
+                # rejected is not needed here either.
+                refusal = (
                     f"cannot set {finding_id} to {status}: its fingerprint is held by "
                     f"live finding {live['id']} (resolve or close that one first)"
                 )
 
-        updates = []
-        params: list[Any] = []
+        if refusal is None:
+            updates = []
+            params: list[Any] = []
 
-        if status is not None:
-            updates.append("status = ?")
-            params.append(status)
+            if status is not None:
+                updates.append("status = ?")
+                params.append(status)
 
-        # A plain column, appended exactly once to the shared `updates` list — it must
-        # never grow a second `severity = ?` the way `meta` once did (CB-16).
-        if severity is not None:
-            updates.append("severity = ?")
-            params.append(severity)
+            # A plain column, appended exactly once to the shared `updates` list — it must
+            # never grow a second `severity = ?` the way `meta` once did (CB-16).
+            if severity is not None:
+                updates.append("severity = ?")
+                params.append(severity)
 
-        if tags is not None:
-            updates.append("tags = ?")
-            params.append(json.dumps(tags))
+            if tags is not None:
+                updates.append("tags = ?")
+                params.append(json.dumps(tags))
 
-        # One dict, one `meta = ?`. See the docstring for the ordering contract.
-        #
-        # Parsed lazily so that an update touching no meta argument still reaches its
-        # own SQL: the column carries no json_valid constraint, and building the dict
-        # unconditionally would abort a plain status write on a malformed legacy row.
-        # This does NOT make such a call succeed — the row_to_dict conversion at the
-        # return still raises. It only keeps the write itself from being skipped.
-        #
-        # The condition must list every meta-writing argument below it. A new argument
-        # added to the block but not to this guard becomes a silent no-op on its own,
-        # while working whenever some other meta argument happens to be present.
-        if notes is not None or append_note is not None or meta_update is not None:
-            new_meta = json.loads(row["meta"])
+            # One dict, one `meta = ?`. See the docstring for the ordering contract.
+            #
+            # Parsed lazily so that an update touching no meta argument still reaches its
+            # own SQL: the column carries no json_valid constraint, and building the dict
+            # unconditionally would abort a plain status write on a malformed legacy row.
+            # This does NOT make such a call succeed — the row_to_dict conversion at the
+            # return still raises. It only keeps the write itself from being skipped.
+            #
+            # The condition must list every meta-writing argument below it. A new argument
+            # added to the block but not to this guard becomes a silent no-op on its own,
+            # while working whenever some other meta argument happens to be present.
+            if notes is not None or append_note is not None or meta_update is not None:
+                new_meta = json.loads(row["meta"])
 
-            if notes is not None:
-                new_meta["notes"] = notes
+                if notes is not None:
+                    new_meta["notes"] = notes
 
-            if append_note is not None:
-                prior = new_meta.get("notes")
-                new_meta["notes"] = f"{prior}\n{append_note}" if prior else append_note
+                if append_note is not None:
+                    prior = new_meta.get("notes")
+                    new_meta["notes"] = f"{prior}\n{append_note}" if prior else append_note
 
-            if meta_update is not None:
-                new_meta.update(meta_update)
+                if meta_update is not None:
+                    new_meta.update(meta_update)
 
-            updates.append("meta = ?")
-            params.append(json.dumps(new_meta))
+                updates.append("meta = ?")
+                params.append(json.dumps(new_meta))
 
-        if reported_at_ref is not None:
-            updates.append("reported_at_ref = ?")
-            params.append(reported_at_ref)
+            if reported_at_ref is not None:
+                updates.append("reported_at_ref = ?")
+                params.append(reported_at_ref)
 
-        # The no-op path still holds the write lock for the length of one SELECT.
-        # Deriving "will this write?" from the arguments beforehand would duplicate
-        # the argument list — the same fragility the lazy meta guard above warns
-        # about — so correctness wins over the microseconds.
-        if not updates:
-            final_row = row
-        else:
-            updates.append("updated_at = ?")
-            params.append(utc_now())
-            params.append(finding_id)
+            # The no-op path still holds the write lock for the length of one SELECT.
+            # Deriving "will this write?" from the arguments beforehand would duplicate
+            # the argument list — the same fragility the lazy meta guard above warns
+            # about — so correctness wins over the microseconds.
+            if not updates:
+                final_row = row
+            else:
+                updates.append("updated_at = ?")
+                params.append(utc_now())
+                params.append(finding_id)
 
-            old_status = row["status"]
-            cur = conn.execute(f"UPDATE findings SET {', '.join(updates)} WHERE id = ?", params)
-            # Fire iff the write actually changed the row. `status` is already canonical
-            # via resolve_finding_status above, so an alias does not read as a change.
-            # Hooks run inside this transaction, before it commits, so a status change
-            # and its side-effects (e.g. auto-releasing a claim) land atomically.
-            if status is not None and cur.rowcount == 1 and status != old_status:
-                db.run_status_change_hooks(conn, finding_id, old_status, status)
-            final_row = conn.execute(
-                "SELECT * FROM findings WHERE id = ?", (finding_id,)
-            ).fetchone()
+                old_status = row["status"]
+                cur = conn.execute(f"UPDATE findings SET {', '.join(updates)} WHERE id = ?", params)
+                # Fire iff the write actually changed the row. `status` is already canonical
+                # via resolve_finding_status above, so an alias does not read as a change.
+                # Hooks run inside this transaction, before it commits, so a status change
+                # and its side-effects (e.g. auto-releasing a claim) land atomically.
+                if status is not None and cur.rowcount == 1 and status != old_status:
+                    db.run_status_change_hooks(conn, finding_id, old_status, status)
+                final_row = conn.execute(
+                    "SELECT * FROM findings WHERE id = ?", (finding_id,)
+                ).fetchone()
+
+    # BT-8. Counted, then raised — in that order and OUTSIDE the transaction above,
+    # which is the only place the count can outlive the refusal. `_count_fingerprint_refusal`
+    # is fail-open and skips itself under an ambient transaction; the refusal that
+    # follows it is fail-closed and unconditional, and a counter that threw has
+    # already been swallowed by the time this line runs.
+    if refusal is not None:
+        _count_fingerprint_refusal(conn, finding_id)
+        raise ValueError(refusal)
 
     # Converted OUTSIDE the block, and that placement is load-bearing. `row_to_dict`
     # raises json.JSONDecodeError on a row whose stored meta is malformed; raised
@@ -3000,6 +3151,43 @@ def _ambient_project_dir() -> str | None:
         return None
 
 
+def _ambient_head(project_dir: str | None) -> str | None:
+    """The revision the tree at *project_dir* is standing on, or None (CB-144).
+
+    THE ONE PLACE this capture is spelled. It used to be spelled twice, both
+    times inside `register_tools` — once in `add`, once in `batch_add` — and the
+    CLI handler, which is the other filing surface, simply did not spell it at
+    all. A card filed by `codebugs add` therefore carried `reported_at_commit =
+    NULL` forever, and BT-7's ratified location anchor is keyed on that frozen
+    commit: reverse blame starts there, and the content channel reads the anchor
+    text out of the object store AT that revision. So the anchor's coverage
+    ceiling was set by the FILING SURFACE rather than by the mechanism.
+
+    Collapsing the two copies into one function rather than adding a third is
+    the whole shape of the fix. A rule expressed as an enumeration gets fixed at
+    the sites someone enumerated, and this repository's recurring lesson is that
+    the population is always larger than the list — the CLI handler WAS the item
+    nobody had enumerated.
+
+    WHAT THIS DELIBERATELY IS NOT: a default inside `add_finding`. The obvious
+    "make the state unrepresentable" move is a REGRESSION here, and both paths
+    that prove it are ratified. `import_findings` folds in another tracker's
+    rows — an import is not an observation (CB-51), which is exactly why it
+    already passes `annotate=False`, `escalate=False` and `promote_tags=False`
+    — so stamping the LOCAL HEAD onto a foreign row would be a confidently wrong
+    answer rather than a missing one. `restore_findings` (CB-97) is a raw INSERT
+    whose contract is to return a row BYTE FOR BYTE, and `None` is one of the
+    values it must be able to restore. Neither is reachable from here BY
+    CONSTRUCTION: this is called only by the two MCP wrappers and the CLI
+    handler, never by the domain function they all call.
+
+    `silent=True`, so a tree git cannot answer for leaves the column NULL. An
+    invented revision would be worse than the absence it replaces — the anchor
+    would then resolve against a commit the card was never filed at.
+    """
+    return db.git_rev_parse("HEAD", silent=True, cwd=project_dir)
+
+
 def register_tools(mcp, conn_factory) -> None:
     """Register finding-tracker tools on the given MCP server."""
     from codebugs import blockers
@@ -3101,7 +3289,7 @@ def register_tools(mcp, conn_factory) -> None:
         """
         project_dir = _ambient_project_dir()
         if reported_at_commit is None:
-            reported_at_commit = db.git_rev_parse("HEAD", silent=True, cwd=project_dir)
+            reported_at_commit = _ambient_head(project_dir)
         with conn_factory() as conn:
             return add_finding(
                 conn,
@@ -3165,7 +3353,7 @@ def register_tools(mcp, conn_factory) -> None:
         default_commit = (
             reported_at_commit
             if reported_at_commit is not None
-            else db.git_rev_parse("HEAD", silent=True, cwd=project_dir)
+            else _ambient_head(project_dir)
         )
         enriched = []
         for f in findings:
@@ -3570,6 +3758,12 @@ def register_cli(sub, commands) -> None:
         conn = db.connect()
         tags = [t.strip() for t in args.tags.split(",")] if args.tags else []
 
+        # CB-144. ONE resolution of the tree, feeding both the root and the
+        # revision, because BT-7 Р3 requires those two to come from a single
+        # source — a card anchored against a revision from one tree and a path
+        # from another is anchored against nothing.
+        project_dir = _ambient_project_dir()
+
         try:
             result = add_finding(
                 conn,
@@ -3584,7 +3778,14 @@ def register_cli(sub, commands) -> None:
                 new_category=args.new_category,
                 # `db.connect()` above walks up from the cwd, so the cwd is the
                 # tree this invocation is about — stated rather than reached for.
-                project_dir=_ambient_project_dir(),
+                project_dir=project_dir,
+                # CB-144. The CLI is a FILING SURFACE like the two MCP wrappers,
+                # and it captured nothing, so every CLI-filed card was
+                # structurally unanchorable. Unconditional because there is no
+                # argument to omit: `--commit` is NOT added here on purpose —
+                # that is CB-6's already-named surface gap, and adding it would
+                # mix two axes and disturb the update-parity gate.
+                reported_at_commit=_ambient_head(project_dir),
             )
         except json.JSONDecodeError:
             # MUST stay ahead of the ValueError arm, which it subclasses — the

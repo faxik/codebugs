@@ -2906,3 +2906,420 @@ class TestAddMetaRefusalsAndEmptyFlags:
         monkeypatch.setattr(sys, "argv", self._argv(tmp_project, []))
         with pytest.raises(json.JSONDecodeError):
             cli.main()
+
+
+# ---------------------------------------------------------------------------
+# CB-144 + BT-8 (unit T-41)
+# ---------------------------------------------------------------------------
+
+
+def _git_repo_with_one_commit(path: str) -> str:
+    """Make `path` a real repository with one commit; return that commit's SHA.
+
+    A real repo rather than a stubbed `git_rev_parse`: the defect lives in the
+    seam between the CLI parser, the handler and the ambient tree, and a stub
+    for the very call that was missing cannot see a missing call.
+    """
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+        "GIT_CONFIG_GLOBAL": os.path.join(path, ".gitconfig-absent"),
+        "GIT_CONFIG_SYSTEM": os.path.join(path, ".gitconfig-absent"),
+    }
+    subprocess.run(["git", "init", "-q", path], check=True, env=env)
+    with open(os.path.join(path, "seed.txt"), "w") as fh:
+        fh.write("seed\n")
+    subprocess.run(["git", "-C", path, "add", "seed.txt"], check=True, env=env)
+    subprocess.run(["git", "-C", path, "commit", "-qm", "seed"], check=True, env=env)
+    return subprocess.check_output(
+        ["git", "-C", path, "rev-parse", "HEAD"], encoding="utf-8", env=env
+    ).strip()
+
+
+class TestCliAddCapturesTheRevisionItWasFiledAt:
+    """CB-144. A card filed through `codebugs add` carried `reported_at_commit =
+    NULL` forever: HEAD auto-capture lived ONLY in the two MCP wrappers, and
+    `_cmd_add` never mentioned the column. That is why the card is `high` rather
+    than `medium` — BT-7's ratified location anchor is keyed on the frozen
+    commit (reverse blame starts there, and the content channel reads the anchor
+    text out of the object store AT that revision), so a card with no commit is
+    unanchorable by EITHER channel. The anchor's coverage ceiling was therefore
+    set by the FILING SURFACE rather than by the mechanism.
+
+    The card's own premise about the fix is WRONG and was corrected before this
+    was written: it says "the domain default is `git_rev_parse("HEAD")` only
+    when the argument is omitted at the DOMAIN layer". There is no such domain
+    default — `add_finding` never calls `git_rev_parse` and stores what it is
+    handed, `None` included. So the fix could not be "reach the domain path";
+    the domain path does not exist.
+
+    These call `cli.main()` IN PROCESS, like the CB-129 tests above and for the
+    same reason: the defect is in the seam between the parser and the handler.
+    """
+
+    def _add_via_cli(self, tmp_project, monkeypatch, description="a cli-filed defect"):
+        from codebugs import cli
+
+        monkeypatch.setattr(
+            sys, "argv",
+            [
+                "codebugs", "--tracker-root", tmp_project, "add",
+                "-s", "low", "-c", "cli_capture", "-f", "f.py",
+                "-d", description, "--new-category",
+            ],
+        )
+        cli.main()
+
+    def _only_row(self, tmp_project):
+        conn = db.connect(tmp_project)
+        try:
+            rows = findings.query_findings(conn)["findings"]
+            assert len(rows) == 1, rows
+            return rows[0]
+        finally:
+            conn.close()
+
+    def test_a_cli_filed_card_carries_the_head_it_was_filed_at(
+        self, tmp_project, monkeypatch
+    ):
+        head = _git_repo_with_one_commit(tmp_project)
+        monkeypatch.chdir(tmp_project)
+        self._add_via_cli(tmp_project, monkeypatch)
+        assert self._only_row(tmp_project)["reported_at_commit"] == head
+
+    def test_outside_a_repository_the_column_stays_null_rather_than_lying(
+        self, tmp_project, monkeypatch
+    ):
+        """The capture is `silent=True`: git being unable to answer must leave
+        the column NULL, exactly as the MCP wrappers already behave. A capture
+        that invented a value would be worse than the absence it replaces."""
+        monkeypatch.chdir(tmp_project)  # tmp_project is NOT a git repository here
+        self._add_via_cli(tmp_project, monkeypatch)
+        assert self._only_row(tmp_project)["reported_at_commit"] is None
+
+    def test_the_mcp_add_wrapper_captures_exactly_what_it_captured_before(
+        self, tmp_project, monkeypatch
+    ):
+        """Control case, and the §2.5 invariance proof: routing the MCP wrapper
+        through the shared helper must capture the SAME value at the SAME moment.
+        This test passes before AND after the fix, deliberately — it pins
+        behaviour the change preserves, which is why the name says so."""
+        head = _git_repo_with_one_commit(tmp_project)
+        monkeypatch.chdir(tmp_project)
+        conn = db.connect(tmp_project)
+        try:
+            tools = _findings_mcp_tools(conn)
+            res = tools["add"](
+                severity="low", category="mcp_capture", file="f.py",
+                description="an mcp-filed defect", new_category=True,
+            )
+            assert res["reported_at_commit"] == head
+        finally:
+            conn.close()
+
+    def test_the_mcp_batch_add_wrapper_is_unchanged_too(self, tmp_project, monkeypatch):
+        """Second control. `batch_add` carried its own copy of the same two
+        lines; collapsing both copies into one helper must not move either."""
+        head = _git_repo_with_one_commit(tmp_project)
+        monkeypatch.chdir(tmp_project)
+        conn = db.connect(tmp_project)
+        try:
+            tools = _findings_mcp_tools(conn)
+            res = tools["batch_add"](
+                findings=[{
+                    "severity": "low", "category": "mcp_capture", "file": "f.py",
+                    "description": "a batch-filed defect",
+                }],
+                new_category=True,
+            )
+            assert len(res) == 1, res
+            row = findings.query_findings(conn)["findings"][0]
+            assert row["reported_at_commit"] == head
+        finally:
+            conn.close()
+
+    def test_an_import_never_acquires_the_local_head(self, tmp_project, monkeypatch):
+        """The trap that DEFINES the shape of this fix (§2.3). An import is not
+        an observation (CB-51) — that is why it already passes `annotate=False`,
+        `escalate=False` and `promote_tags=False`. Stamping the LOCAL HEAD onto a
+        row that came from someone ELSE's tracker would be a confidently wrong
+        answer, so the obvious "make the state unrepresentable" move — capture
+        inside `add_finding` — is a regression here, not a hardening."""
+        _git_repo_with_one_commit(tmp_project)
+        monkeypatch.chdir(tmp_project)
+        conn = db.connect(tmp_project)
+        try:
+            report = findings.import_findings(conn, [{
+                "id": "CB-9001", "severity": "low", "category": "foreign",
+                "file": "peer.py", "description": "a peer tracker's row",
+            }])
+            assert report.imported == 1, report
+            row = findings.query_findings(conn)["findings"][0]
+            assert row["reported_at_commit"] is None
+        finally:
+            conn.close()
+
+    def test_a_restore_never_acquires_the_local_head(self, tmp_project, monkeypatch):
+        """Second half of the same trap. `restore_findings` (CB-97) exists to put
+        a row back BYTE FOR BYTE, its own `reported_at_commit` included — and
+        `None` is one of the values it must be able to restore."""
+        _git_repo_with_one_commit(tmp_project)
+        monkeypatch.chdir(tmp_project)
+        conn = db.connect(tmp_project)
+        try:
+            row = {c: None for c in findings._RESTORE_COLUMNS}
+            row.update({
+                "id": "CB-4242", "severity": "low", "category": "restored",
+                "file": "old.py", "status": "fixed", "description": "restored row",
+                "source": "human", "tags": "[]", "meta": "{}",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z", "occurrence_count": 1,
+            })
+            report = findings.restore_findings(conn, [row])
+            assert report.restored == 1, report
+            stored = conn.execute(
+                "SELECT reported_at_commit FROM findings WHERE id = 'CB-4242'"
+            ).fetchone()
+            assert stored["reported_at_commit"] is None
+        finally:
+            conn.close()
+
+
+def _refusal_pair(conn):
+    """A `wont_fix` card and the LIVE recurrence twin that holds its fingerprint.
+
+    Built by the identity machinery itself rather than by hand: a hit on a
+    `wont_fix` row files a NEW row (decision stays decided, CB-43), and that new
+    row derives the SAME `auto:v1` fingerprint from the same inputs. Re-triaging
+    the decided card back to a live status is therefore exactly the state the
+    pre-check in `update_finding` exists to refuse.
+    """
+    text = "the very same defect, observed twice"
+    a = findings.add_finding(conn, severity="low", category="fp_fork", file="f.py",
+                             description=text, new_category=True)
+    findings.update_finding(conn, a["id"], status="wont_fix")
+    b = findings.add_finding(conn, severity="low", category="fp_fork", file="f.py",
+                             description=text)
+    assert a["id"] != b["id"], "expected a recurrence row, not a bump"
+    return a["id"], b["id"]
+
+
+class TestFingerprintRefusalIsCountable:
+    """BT-8, the single mechanical unit of the ratified decision: the dedup fork
+    is LEFT AS IT IS and its refusals are COUNTED. Policy by measured demand —
+    the same move the `moved_file` counter makes. No merge policy is built here,
+    no `merged` status, no fingerprint backfill; CB-46 stays open, waiting on
+    data rather than on code.
+
+    The refusal being counted is `update_finding`'s pre-check: re-triaging a
+    decided card back to a live status while a live recurrence already holds its
+    fingerprint. Without that pre-check the write would hit
+    `ux_findings_fingerprint_live` and surface as a raw `IntegrityError` —
+    outside the module's `ValueError`/`KeyError` contract.
+    """
+
+    def test_the_refusal_still_names_the_blocking_card(self, conn):
+        """Constraint 1: a refusal stays a refusal. Same exception type, same
+        message, still naming the row that blocks. Passes before AND after —
+        it pins what the counter must not be allowed to change."""
+        a_id, b_id = _refusal_pair(conn)
+        with pytest.raises(ValueError) as exc:
+            findings.update_finding(conn, a_id, status="open")
+        assert "its fingerprint is held by" in str(exc.value)
+        assert b_id in str(exc.value)
+
+    def test_two_refusals_in_a_row_count_two(self, conn):
+        """CONSTRAINT 2, and the central trap of this unit. A counter written
+        inside `with db.txn(conn):` is invisible BY CONSTRUCTION — the `raise`
+        rolls the transaction back and takes the count with it. So the assertion
+        is not "a row was written" but "after two refusals the count is 2",
+        read AFTER the exception has left the frame."""
+        a_id, _ = _refusal_pair(conn)
+        for _ in range(2):
+            with pytest.raises(ValueError):
+                findings.update_finding(conn, a_id, status="open")
+        stored = findings.get_finding(conn, a_id)
+        assert stored["meta"].get(findings.REFUSAL_COUNT_META_KEY) == 2
+
+    def test_the_count_is_readable_through_the_existing_query_surface(self, conn):
+        """Constraint 4: `query(meta_key=…)`. No new MCP tool and no new CLI
+        verb — the wire golden must not move by a single byte, because DIR-1's
+        surface-generator pilot is measuring byte-equality of that file right
+        now and a stray tool would corrupt someone else's measurement."""
+        a_id, b_id = _refusal_pair(conn)
+        with pytest.raises(ValueError):
+            findings.update_finding(conn, a_id, status="open")
+        hits = findings.query_findings(
+            conn, meta_key=findings.REFUSAL_COUNT_META_KEY
+        )["findings"]
+        assert [r["id"] for r in hits] == [a_id], hits
+        # The stamp lands on the REFUSED card, not on the blocking one: the demand
+        # this number answers is "somebody wanted THIS card back in play".
+        assert findings.get_finding(conn, b_id)["meta"].get(
+            findings.REFUSAL_COUNT_META_KEY
+        ) is None
+
+    def test_a_broken_counter_never_masks_or_softens_the_refusal(
+        self, conn, monkeypatch, capsys
+    ):
+        """Constraint 3. The counter is fail-OPEN (losing one unit of statistics
+        is acceptable); the refusal is fail-CLOSED (never). Swallow and log, in
+        that direction and never the other — the `run_status_change_hooks`
+        precedent."""
+        a_id, b_id = _refusal_pair(conn)
+
+        def boom(*_a, **_k):
+            raise sqlite3.OperationalError("disk I/O error")
+
+        monkeypatch.setattr(findings, "_bump_refusal_count", boom)
+        with pytest.raises(ValueError) as exc:
+            findings.update_finding(conn, a_id, status="open")
+        assert "its fingerprint is held by" in str(exc.value)
+        assert b_id in str(exc.value)
+        assert "disk I/O error" in capsys.readouterr().err
+
+    def test_an_ambient_transaction_that_commits_still_carries_no_count(
+        self, tmp_project
+    ):
+        """CONSTRAINT 5, and the fixture here had to be chosen by measurement.
+
+        `update_finding` may run inside a caller's open transaction, where
+        `db.txn` yields False and commits nothing. On that path the counter is
+        SKIPPED: statistics must never ride along inside a stranger's unit of
+        work, whose fate they would then share and whose commit they would be
+        part of. Fail-open for the counter, always.
+
+        THE DISCRIMINATING CALLER IS ONE THAT COMMITS, and the first version of
+        this test used one that rolls back — where it could not fail. Measured
+        against a mutant with the `conn.in_transaction` guard deleted: with a
+        rolling-back caller the count is lost either way (the caller's own frame
+        undoes it), so the test passed on the mutant; with a caller that swallows
+        the `ValueError` and commits, the unguarded write LANDS, count = 1. Only
+        the second shape sees the guard at all.
+
+        Honest scope, enumerated rather than assumed: this path has NO PRODUCER
+        today. All four callers of `update_finding` were read. The two that run
+        under an ambient transaction pass a TERMINAL status
+        (`milestones.triage_dismiss` → the literal `"not_a_bug"`;
+        `provenance.resolve_trailers` → `"resolved"`/`None` out of
+        `_VERB_ACTIONS`), and the refusal predicate fires only on nonlive→live;
+        the two that CAN pass a live status — the MCP `update` wrapper and the
+        CLI `update` handler — each open their own connection with no
+        transaction open. So this builds the caller by hand: it is the guard for
+        the day one appears, not a reproduction of a live route.
+        """
+        conn = db.connect(tmp_project)
+        observer = db.connect(tmp_project)
+        try:
+            a_id, b_id = _refusal_pair(conn)
+            with db.txn(conn):
+                conn.execute(
+                    "UPDATE findings SET severity = 'high' WHERE id = ?", (b_id,)
+                )
+                with pytest.raises(ValueError):
+                    findings.update_finding(conn, a_id, status="open")
+                # ...and the caller carries on and COMMITS its own work.
+            seen = observer.execute(
+                "SELECT severity FROM findings WHERE id = ?", (b_id,)
+            ).fetchone()
+            assert seen["severity"] == "high", "the caller's own work must still land"
+            assert findings.query_findings(
+                observer, meta_key=findings.REFUSAL_COUNT_META_KEY
+            )["findings"] == [], "the count must not have ridden along on that commit"
+        finally:
+            conn.close()
+            observer.close()
+
+    def test_an_ambient_transaction_that_aborts_commits_nothing_foreign(
+        self, tmp_project
+    ):
+        """The other half, and it PASSES ON BOTH SIDES of the guard by design —
+        said so in the name's neighbourhood rather than left to look broken. It
+        pins that letting the refusal escape a caller's transaction destroys the
+        caller's work and nothing else: the counter never forces a commit, so
+        `db.txn`'s reentrancy is what makes CB-40's actual defect
+        (`isolation_level` committing an ambient transaction) unreachable here.
+        """
+        conn = db.connect(tmp_project)
+        observer = db.connect(tmp_project)
+        try:
+            a_id, b_id = _refusal_pair(conn)
+            with pytest.raises(ValueError):
+                with db.txn(conn):
+                    conn.execute(
+                        "UPDATE findings SET severity = 'high' WHERE id = ?", (b_id,)
+                    )
+                    findings.update_finding(conn, a_id, status="open")
+            seen = observer.execute(
+                "SELECT severity FROM findings WHERE id = ?", (b_id,)
+            ).fetchone()
+            assert seen["severity"] == "low"
+            assert findings.query_findings(
+                observer, meta_key=findings.REFUSAL_COUNT_META_KEY
+            )["findings"] == []
+        finally:
+            conn.close()
+            observer.close()
+
+    def test_the_refusal_does_not_move_updated_at(self, conn):
+        """Constraint 6. CB-123 ratified `recent` as a reader over `updated_at`
+        with the stated caveat that a last TOUCH is not a closure. A touch that
+        changed nothing a reader of the card can see would make that reader
+        LIER, not more accurate, so the counter deliberately leaves the column
+        alone."""
+        a_id, _ = _refusal_pair(conn)
+        before = findings.get_finding(conn, a_id)["updated_at"]
+        with pytest.raises(ValueError):
+            findings.update_finding(conn, a_id, status="open")
+        assert findings.get_finding(conn, a_id)["updated_at"] == before
+
+    def test_an_ordinary_update_stamps_nothing(self, conn):
+        """Control. The counter must be invisible on every path that does not
+        refuse — including a terminal→live re-triage that legitimately succeeds
+        because nothing holds the fingerprint."""
+        solo = findings.add_finding(conn, severity="low", category="fp_fork",
+                                    file="g.py", description="a lonely defect",
+                                    new_category=True)
+        findings.update_finding(conn, solo["id"], status="wont_fix")
+        reopened = findings.update_finding(conn, solo["id"], status="open")
+        assert reopened["status"] == "open"
+        assert findings.REFUSAL_COUNT_META_KEY not in reopened["meta"]
+        assert findings.query_findings(
+            conn, meta_key=findings.REFUSAL_COUNT_META_KEY
+        )["findings"] == []
+
+    def test_the_key_is_reserved_on_add_and_repairable_on_update(self, conn):
+        """The `category_minted` precedent, chosen for the same two reasons: the
+        key is the machinery's OUTPUT, so a caller supplying it at filing time
+        would spoof a number that goes to the owner; and a permanently
+        unrepairable stamp is the CB-26 shape, so `update(meta_update=)` must be
+        able to rewrite a wrong one."""
+        with pytest.raises(ValueError) as exc:
+            findings.add_finding(
+                conn, severity="low", category="fp_fork", file="h.py",
+                description="spoofing the count", new_category=True,
+                meta={findings.REFUSAL_COUNT_META_KEY: 99},
+            )
+        assert findings.REFUSAL_COUNT_META_KEY in str(exc.value)
+
+        a_id, _ = _refusal_pair(conn)
+        with pytest.raises(ValueError):
+            findings.update_finding(conn, a_id, status="open")
+        repaired = findings.update_finding(
+            conn, a_id, meta_update={findings.REFUSAL_COUNT_META_KEY: 0}
+        )
+        assert repaired["meta"][findings.REFUSAL_COUNT_META_KEY] == 0
+
+    def test_an_imported_row_does_not_carry_a_peers_count(self, conn):
+        """The add-only reservation is also what strips the key on import: a
+        peer tracker's refusal count is not this tracker's demand signal."""
+        report = findings.import_findings(conn, [{
+            "id": "CB-9002", "severity": "low", "category": "foreign",
+            "file": "peer.py", "description": "a peer row carrying a count",
+            "meta": json.dumps({findings.REFUSAL_COUNT_META_KEY: 17}),
+        }])
+        assert report.imported == 1, report
+        assert findings.query_findings(
+            conn, meta_key=findings.REFUSAL_COUNT_META_KEY
+        )["findings"] == []

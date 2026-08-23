@@ -6,7 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`codebugs add` now records the revision the card was filed at (CB-144).** A card
+  filed from the CLI used to store `reported_at_commit = NULL` forever: the automatic
+  HEAD capture existed only in the MCP `add` / `batch_add` tools, and the CLI handler
+  did not reach it. The consequence was not cosmetic — the location anchor is keyed on
+  that frozen commit, so a CLI-filed card could not be anchored by any channel, and the
+  ceiling on anchor coverage was set by which surface you happened to file from.
+  `codebugs add` now captures `git rev-parse HEAD` in the directory you run it in,
+  exactly as the MCP tools already did; outside a repository the column stays NULL
+  rather than acquiring an invented value. **Nothing else changed**: `import-csv` still
+  never stamps the local HEAD onto another tracker's rows, and `restore` still puts back
+  whatever the export carried, `NULL` included. There is still no `--commit` flag —
+  supplying one by hand is a separate, already-tracked gap (CB-6).
+
 ### Added
+- **The "fingerprint is held by a live card" refusal is now countable (BT-8).** When you
+  re-open a `wont_fix` / `not_a_bug` card whose fingerprint a live recurrence already
+  holds, the refusal is unchanged — same error, still naming the card that blocks you.
+  What is new is that each refusal increments `meta.fingerprint_refusals` on the card
+  you tried to re-open, so `query(meta_key="fingerprint_refusals")` lists the cards
+  people keep trying to bring back, and how often. No new command and no new tool.
+
+  **That read is MCP-side today.** The CLI `query` verb exposes no `--meta-key` — it
+  never has, for this key or for `category_minted` and `similar_to` before it — so from
+  a shell the number is reachable only through the MCP tool. That is a pre-existing gap
+  in the query surface (the CB-6 axis), left alone here deliberately rather than widened
+  in passing.
+
+  **Read the number with its predicate attached**: it counts refusal EVENTS, not people
+  and not intentions — a script retrying in a loop adds one per attempt. It exists to
+  measure whether the dedup fork is actually being hit often enough to justify a merge
+  policy, which is the question CB-46 is waiting on. The count is deliberately best-
+  effort: if it cannot be written, your refusal still arrives unchanged, and it is
+  skipped entirely when `update` is called from inside another operation's transaction,
+  because recording a statistic must never commit somebody else's unfinished work. The
+  key is yours to correct with `update --meta-update`, and it cannot be pre-set when
+  filing a card. Re-opening a card does **not** count as a touch: `updated_at` does not
+  move, so `codebugs recent` is unaffected.
+
 - **`grouping.py` is now exposed — three MCP tools and three CLI verbs (CB-127).**
   `citation_report`, `tag_report` and `filing_report` shipped (see the
   "`grouping.py` — the three grouping axes the tracker stored but could not query"
