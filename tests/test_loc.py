@@ -1657,3 +1657,114 @@ def _built_cli_parser():
     for provider in _db.get_cli_providers():
         provider.register_fn(sub, commands)
     return set(commands)
+
+
+class TestReadSideResiduals:
+    """Three defects the end-to-end read of this unit's own artifact found, each
+    of which every test above was blind to. They are pinned rather than merely
+    fixed, because all three are the shape where a wrong answer looks like a
+    right one."""
+
+    def test_a_blame_that_could_not_run_is_not_reported_as_lost(self, tmp_path):
+        """A path that did not exist at the anchored revision makes `blame` exit
+        non-zero. Reporting that as `lost` is a claim about the CODE derived from
+        a failure to LOOK — the same "guard reporting clean because it could not
+        look" shape this repository has recorded three times."""
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        first = _commit(root, "init")
+        (root / "later.py").write_text(_body("BETA"))
+        _commit(root, "a file that did not exist at `first`")
+
+        anchor = _span_anchor(root, _rev(root), "later.py", 4, 6)
+        anchor["commit"] = first  # coordinates claimed for a revision without it
+        # Channel B must ALSO be unable to answer, or it legitimately rescues the
+        # call and the classifier under test never runs. (It did on the first
+        # draft of this test — the recorded path exists at HEAD and held the
+        # text, so B answered `current`, which is the correct behaviour and made
+        # the fixture, not the code, wrong.)
+        anchor["text"] = [
+            "THIS_TEXT_IS_NOWHERE_IN_THE_TREE_AT_ALL = 1",
+            "NEITHER_IS_THIS_SECOND_LINE_OF_IT = 2",
+            "NOR_THIS_THIRD_ONE = 3",
+        ]
+
+        got = _resolve(root, anchor)
+        assert got["status"] == "unknown"
+        assert got["reason"] == "path_absent_at_commit"
+        assert got["status"] != "lost"
+
+    def test_a_forced_tombstone_is_not_destroyed_by_a_failed_recapture(
+        self, tmp_path, conn
+    ):
+        """`force_tombstone` says "recapture this one", NOT "destroy the
+        instruction if the recapture fails". Writing a refusal object over
+        `loc: null` is strictly worse than leaving it: the tombstone means
+        "never recapture", while a refusal object is something the very next
+        UNFORCED run would happily overwrite — so the failure would quietly undo
+        a deliberate decision one run later."""
+        root = _new_repo(tmp_path)
+        (root / "mod.py").write_text(_body())
+        first = _commit(root, "init")
+        fid = findings.add_finding(
+            conn,
+            severity="low",
+            category="anchor_recap",
+            file="mod.py",
+            description="a row whose tombstone must survive a failed forced recapture",
+            meta={"line": "4-6"},
+            reported_at_commit=first,
+            new_category=True,
+        )["id"]
+        findings.update_finding(conn, fid, meta_update={"loc": None})
+
+        out = loc.recapture_findings(
+            conn, finding_id=fid, project_dir=None, apply=True, force_tombstone=True
+        )
+        assert out["results"][0]["outcome"] == "kept"
+        assert findings.get_finding(conn, fid)["meta"]["loc"] is None
+
+    def test_the_cli_verbs_actually_render(self, tmp_path, monkeypatch, capsys):
+        """`fmt.format_table` takes a list of DICTS keyed by column name, and the
+        first draft of both handlers passed lists of values — an AttributeError
+        on the first row. No domain test could see it: the handlers are closures
+        registered into the parser, so only running the verb executes them."""
+        import sys as _sys
+
+        from codebugs import cli
+
+        project = tmp_path / "proj"
+        project.mkdir()
+        project = str(project)
+        db.init_project(project)
+        root = _new_repo(tmp_path, name="proj_repo")
+        (root / "mod.py").write_text(_body())
+        first = _commit(root, "init")
+        c = db.connect(project)
+        fid = findings.add_finding(
+            c,
+            severity="low",
+            category="anchor_cli",
+            file="mod.py",
+            description="a row rendered by the CLI verb in this test",
+            new_category=True,
+        )["id"]
+        findings.update_finding(
+            c, fid, meta_update={"loc": _span_anchor(root, first, "mod.py", 4, 6)}
+        )
+        c.close()
+
+        for argv in (
+            ["codebugs", "--tracker-root", project, "anchor-resolve",
+             "--status", "all", "--repo", str(root)],
+            ["codebugs", "--tracker-root", project, "anchor-recapture",
+             "--status", "all", "--repo", str(root)],
+        ):
+            monkeypatch.setattr(_sys, "argv", argv)
+            cli.main()
+        out = capsys.readouterr().out
+        assert fid in out
+        assert "current" in out
+        # The denominator travels WITH the number, never left to the reader.
+        assert "carry an anchor" in out
+        assert "Dry run" in out

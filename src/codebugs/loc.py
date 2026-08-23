@@ -1097,12 +1097,18 @@ def resolve_anchor(
             return fallback
         if answer is not None:
             return answer
-        return _record(
-            "lost",
-            path=anchor["path"],
-            channel="git",
-            resolved_against=_resolved_against(root, head, anchor["path"]),
-        )
+        # Channel A did not RUN — blame itself exited non-zero. Reporting that as
+        # `lost` would be a claim about the CODE made from a failure to look,
+        # which is the "guard reporting clean because it could not look" shape
+        # this repository has now recorded three times. Ask the object store what
+        # is actually wrong and let `read_blob`'s own classifier answer; its
+        # default for an unrecognized message is deliberately the token that
+        # claims the least.
+        try:
+            read_blob(root, anchor["commit"], anchor["path"], budget)
+        except _Refused as refused:
+            return _record("unknown", path=anchor["path"], reason=refused.token)
+        return _record("unknown", path=anchor["path"], reason="internal_error")
     except subprocess.TimeoutExpired:
         return _record("unknown", path=anchor["path"], reason="timeout")
     except (subprocess.SubprocessError, OSError):
@@ -1336,7 +1342,13 @@ def recapture_findings(
                     "project_dir": project_dir,
                 }
             )
-            had_anchor = read_anchor(stored)[0] is not None
+            # The tombstone counts as something worth protecting, not just a
+            # valid anchor. `force_tombstone` says "recapture this one", not
+            # "destroy the instruction if the recapture fails" — and a refusal
+            # object written over `loc: null` is worse than leaving it, because
+            # the tombstone means "never recapture" while a refusal object is
+            # something the very next unforced run would happily overwrite.
+            had_anchor = stored is None or read_anchor(stored)[0] is not None
             if "skipped" in fresh and had_anchor:
                 outcome = "kept"  # point 2
             elif fresh == stored:
@@ -1481,23 +1493,20 @@ def register_cli(sub, commands) -> None:
         if args.as_json:
             print(_json.dumps(result, indent=2))
             return
+        cols = ["ID", "STATUS", "CHANNEL", "PATH", "LINE", "REASON", "SURVIVED"]
         rows = [
-            [
-                r["finding_id"],
-                r["anchor"]["status"],
-                r["anchor"]["channel"] or "-",
-                r["anchor"]["path"] or "-",
-                str(r["anchor"]["line"] or "-"),
-                r["anchor"]["reason"] or "-",
-                r["anchor"]["survived"] or "-",
-            ]
+            {
+                "ID": r["finding_id"],
+                "STATUS": r["anchor"]["status"],
+                "CHANNEL": r["anchor"]["channel"] or "-",
+                "PATH": r["anchor"]["path"] or "-",
+                "LINE": r["anchor"]["line"] if r["anchor"]["line"] is not None else "-",
+                "REASON": r["anchor"]["reason"] or "-",
+                "SURVIVED": r["anchor"]["survived"] or "-",
+            }
             for r in result["results"]
         ]
-        print(
-            format_table(
-                rows, ["ID", "STATUS", "CHANNEL", "PATH", "LINE", "REASON", "SURVIVED"]
-            )
-        )
+        print(format_table(rows, cols))
         counts = ", ".join(f"{k}={v}" for k, v in result["summary"].items())
         print(f"\n{counts}")
         # The denominator is printed with the number, never left to the reader:
@@ -1540,7 +1549,10 @@ def register_cli(sub, commands) -> None:
         if args.as_json:
             print(_json.dumps(result, indent=2))
             return
-        rows = [[r["finding_id"], r["outcome"], r["reason"] or "-"] for r in result["results"]]
+        rows = [
+            {"ID": r["finding_id"], "OUTCOME": r["outcome"], "REASON": r["reason"] or "-"}
+            for r in result["results"]
+        ]
         print(format_table(rows, ["ID", "OUTCOME", "REASON"]))
         counts = ", ".join(f"{k}={v}" for k, v in result["summary"].items())
         print(f"\n{counts}")
