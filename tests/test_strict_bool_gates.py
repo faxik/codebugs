@@ -62,7 +62,6 @@ import inspect
 import typing
 
 import pydantic
-import pytest
 
 from codebugs import db
 
