@@ -1567,6 +1567,124 @@ def register_cli(sub, commands) -> None:
     )
 
 
+# --- MCP ------------------------------------------------------------------------------
+
+
+def register_tools(mcp, conn_factory) -> None:
+    """Register the two anchor MCP tools.
+
+    NAMING, because it is an exception and this repository records those rather
+    than letting them look like drift: the module is `loc` and the tools are
+    `anchor_*`. The prefix names the OBJECT the tools operate on, which is what
+    BT-7 §9 specifies them as and what the design and every review round called
+    them. A `loc_` prefix would match the file name and match nothing a reader
+    of the design has ever seen.
+    """
+
+    @mcp.tool()
+    def anchor_resolve(
+        finding_id: str | None = None,
+        status: str | None = "open",
+        category: str | None = None,
+        file: str | None = None,
+        project_dir: str | None = None,
+        limit: int = 10000,
+    ) -> dict[str, Any]:
+        """Resolve stored location anchors to their current lines on HEAD.
+
+        Each anchored finding gets a record: `status` (current / moved /
+        moved_file / lost / ambiguous / unknown), the coordinate, the `channel`
+        that produced it ("git" for reverse blame, "content" for the secondary
+        text channel), a `reason` token when there is no answer, and
+        `survived` as "<n>/<m>" when part of a span outlived the rest.
+
+        `moved_file` is a status of its own, not `moved` with a different path:
+        the code left the file the finding names, and a consumer must see that
+        rather than receive a line number in a file it never asked about.
+
+        THE SUMMARY'S DENOMINATOR IS `anchored`, NOT `total`. `anchored` counts
+        the rows that CARRY an anchor (a persisted refusal and the tombstone
+        included); rows filed before anchors existed carry none and are counted
+        in `without_anchor` instead. So a `moved_file` share is
+        `summary["moved_file"] / anchored`; computing it against `total` is a
+        share of a population the number does not describe.
+
+        Args:
+            finding_id: Resolve one finding instead of a population
+            status: Status filter; "all" widens to every status (default: open)
+            category: Restrict to one category
+            file: Restrict to one file (the finding's `file` column)
+            project_dir: The repository the anchors resolve against. Omitting it
+                reports `no_root` rather than reading whatever tree the server
+                process happens to stand in — a long-lived server's cwd has
+                nothing to do with the tracker a call is about
+            limit: Maximum findings examined (default 10000)
+        """
+        with conn_factory() as conn:
+            return resolve_findings(
+                conn,
+                finding_id=finding_id,
+                status=status,
+                category=category,
+                file=file,
+                project_dir=project_dir,
+                limit=limit,
+            )
+
+    @mcp.tool()
+    def anchor_recapture(
+        finding_id: str | None = None,
+        status: str | None = "open",
+        category: str | None = None,
+        file: str | None = None,
+        project_dir: str | None = None,
+        apply: bool = False,
+        force_tombstone: bool = False,
+        limit: int = 10000,
+    ) -> dict[str, Any]:
+        """Rebuild stored location anchors from the git object store. DRY RUN by default.
+
+        The sanctioned repair path: `meta.loc` is writable through
+        `update_finding(meta_update=)` and NOTHING validates it there, so a
+        hand-assembled object is accepted at the write and read back as
+        `unknown(invalid_anchor)`. This verb builds the object itself, from the
+        same capture the file-time resolver uses.
+
+        Four behaviours are specified rather than incidental. A FAILED capture
+        never replaces a valid stored anchor (outcome `kept`) — the refusal is
+        usually about the environment, and the anchor it would destroy is still
+        good in a clone that has the history. The `loc: null` tombstone ("do not
+        recapture") is left alone unless `force_tombstone` says otherwise. The
+        git work runs outside any transaction, and only the version check and
+        the write share one — so a row whose anchor changed while the capture
+        ran is reported `stale` and left to the other writer.
+
+        Args:
+            finding_id: Repair one finding instead of a population
+            status: Status filter; "all" widens to every status (default: open)
+            category: Restrict to one category
+            file: Restrict to one file (the finding's `file` column)
+            project_dir: The repository to capture from. Omitting it makes every
+                capture refuse with `no_root`, which by the rule above leaves
+                every valid anchor untouched
+            apply: Write the rebuilt anchors (default: report only)
+            force_tombstone: Overwrite a `loc: null` tombstone
+            limit: Maximum findings examined (default 10000)
+        """
+        with conn_factory() as conn:
+            return recapture_findings(
+                conn,
+                finding_id=finding_id,
+                status=status,
+                category=category,
+                file=file,
+                project_dir=project_dir,
+                apply=apply,
+                force_tombstone=force_tombstone,
+                limit=limit,
+            )
+
+
 # --- registration ---------------------------------------------------------------------
 
 
@@ -1594,4 +1712,5 @@ db.register_pre_add_resolver(
     updatable_keys=("loc",),
 )
 
+db.register_tool_provider("loc", register_tools)
 db.register_cli_provider("loc", register_cli)

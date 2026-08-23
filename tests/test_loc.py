@@ -24,6 +24,7 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import pathlib
 import sqlite3
 import subprocess
 import threading
@@ -775,6 +776,26 @@ class TestRegistrations:
         src = inspect.getsource(cli)
         start = src.index('choices=["findings"')
         assert '"loc"' in src[start : src.index("]", start)]
+
+    def test_the_read_side_registers_the_mcp_provider(self):
+        """Т-a pinned that `loc` registered NEITHER provider, as a scope
+        statement — `SERVER_NAMES` gaining an entry does not create a tool, so
+        the golden could not move. Т-b is the unit that adds both, so the pin is
+        INVERTED rather than deleted: a registration nothing asserts is a
+        registration a refactor can drop silently, and the wire golden would
+        then move in the quiet direction.
+        """
+        assert [p.name for p in db.get_tool_providers(mode="loc")] == ["loc"]
+
+    def test_the_two_anchor_tools_reach_the_wire(self):
+        """Named explicitly, because the golden is a whole-file snapshot and a
+        reader of a 160-line diff should not have to infer which two tools it is
+        about."""
+        golden = json.loads(
+            (pathlib.Path(__file__).parent / "golden" / "mcp_schema.json").read_text()
+        )
+        names = {t["name"] for t in golden}
+        assert {"anchor_resolve", "anchor_recapture"} <= names
 
     def test_the_read_side_registers_the_cli_provider(self):
         """Т-a deliberately registered NEITHER provider and pinned that as a
