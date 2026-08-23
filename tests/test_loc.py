@@ -1157,6 +1157,17 @@ class TestNonAsciiPaths:
         got = _resolve(root, _span_anchor(root, first, "модуль.py", 4, 6))
         assert got["status"] == "current"
         assert got["path"] == "модуль.py"
+        # ASSERTING THE CHANNEL IS THE WHOLE TEST, and the first draft did not.
+        # Found by the mutation probe, not by review: with the flag removed,
+        # channel A receives a C-quoted path, fails its verify — correctly — and
+        # then CHANNEL B SILENTLY RESCUES THE ANSWER with an identical `current`.
+        # A test reading only the status therefore cannot see a broken channel A
+        # at all. The two channels agreeing is the design's own measured property
+        # (133 of 133), which is exactly what makes the fallback a mask for this
+        # class of defect; every channel-A test in this file asserts its channel
+        # for that reason.
+        assert got["channel"] == "git"
+        assert got["survived"] == "3/3"
 
 
 class TestChannelB:
