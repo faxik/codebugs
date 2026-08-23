@@ -753,9 +753,20 @@ def register_tools(mcp, conn_factory):
             priority: Updated priority: must, should, could
             section: Updated section name
             test_coverage: Updated test file reference
-            notes: Notes (stored in meta.notes)
+            notes: Notes (stored in meta.notes). REPLACES the stored notes
+                   wholesale. If meta_update also carries a "notes" key, the
+                   meta_update value is the one that lands — see meta_update.
             tags: Replace tags
-            meta_update: Merge metadata keys
+            meta_update: Merge metadata keys. notes and meta_update compose over
+                         ONE dict: notes replaces first, meta_update merges
+                         LAST. So passing both notes= and
+                         meta_update={"notes": ...} in a single call is neither
+                         an error nor a refusal — meta_update wins the
+                         collision, on every key it names. That precedence is
+                         deliberate: meta_update names the storage key directly,
+                         so it is the repair path for a key no other argument
+                         can write. Unlike the findings `update` tool there is
+                         no append_note here, so there is no third writer.
         """
         from codebugs import blockers
 
