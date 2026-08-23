@@ -33,6 +33,8 @@ uncountable without it.
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import subprocess
 import threading
@@ -61,6 +63,14 @@ NORM_VERSION = "v1"
 #: moves (73.0/60.3% at 3 against 73.0/60.6% at 5) — the extra lines buy the
 #: ABILITY TO SEE A MOVE, not a percentage.
 MAX_ANCHOR_LINES = 5
+
+#: Lines of context on EACH side that channel B uses to tell two identical
+#: candidates apart (Р6). It is not a field of the anchor and never becomes one:
+#: context is free BY PLACE — both sides of the comparison are read out of the
+#: object store at resolution time, the original from the anchor's own revision
+#: and the candidates from HEAD — so storing it would be a second representation
+#: of a fact the object already implies, which Р2 removed the hashes for.
+CONTEXT_LINES = 8
 
 #: Size bound on the stored text, measured as `len("\n".join(text).encode())`.
 #: This is a bound on the RECORD, not on access: access is bounded by git
@@ -680,6 +690,871 @@ def read_anchor(value: Any) -> tuple[dict[str, Any] | None, str | None]:
     return value, None
 
 
+# --- read side: resolving an anchor to a line on HEAD (Р5) ----------------------------
+
+#: The statuses a resolution can answer with (Р5), CLOSED exactly like `REASONS`.
+#: The two are DIFFERENT AXES and the design says so: `status` answers "where is
+#: this line now", `reason` answers "why is there no answer". A reader that
+#: collapses them gets `unknown` for both a repository mismatch and a line that
+#: was genuinely deleted, which are opposite facts.
+STATUSES: tuple[str, ...] = ("current", "moved", "moved_file", "lost", "ambiguous", "unknown")
+
+#: `<sha> <line-at-HEAD> <line-in-the-anchored-revision> [<count>]`. Порcelain
+#: inverts its two line numbers under `--reverse` (П3), and getting them the
+#: wrong way round is silent: on an unshifted file the two are EQUAL, so every
+#: test whose fixture does not move the lines passes either way.
+_BLAME_HEADER = re.compile(r"^([0-9a-f]{40}) (\d+) (\d+)(?: (\d+))?$")
+
+
+def _record(
+    status: str,
+    *,
+    path: str | None = None,
+    line: int | None = None,
+    end: int | None = None,
+    channel: str | None = None,
+    reason: str | None = None,
+    survived: str | None = None,
+    resolved_against: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """One resolution record. EVERY key is present; `None` is a normal answer.
+
+    The unconditional-keys rule is this package's, not this module's: it is
+    `claims._response`'s fifteen common keys and BT-5's `attention` block, where
+    `[]` means "evaluated, nothing fired" and never "there is no such channel".
+    A key that appears only sometimes teaches a reader to test for its presence,
+    and presence then silently encodes a second fact.
+
+    `channel` names THE MECHANISM THAT PRODUCED THIS RECORD, which is a slightly
+    wider promise than "the channel that found the line" and is deliberate:
+    `lost` carries `"git"` because reverse blame is what proved the lines are
+    gone, `ambiguous` carries `"content"` because channel B is the only one that
+    can produce it, and a record refused by a gate before any trace ran carries
+    `None`. So `channel is None` means "nothing was traced", which is exactly the
+    distinction a reader needs and which "the channel that answered" would lose.
+
+    `survived` is `"<n>/<m>"` — how many of the anchor's `m` lines reverse blame
+    found alive. Р5 mandates the number on a partially surviving span; it is a
+    key here rather than a conditional extra for the reason above.
+    """
+    if status not in STATUSES:  # RAISE, never assert: `-O` strips assert
+        raise ValueError(f"resolution status {status!r} is not in STATUSES")
+    if reason is not None and reason not in REASONS:
+        raise ValueError(f"resolution reason {reason!r} is not in REASONS")
+    return {
+        "status": status,
+        "path": path,
+        "line": line,
+        "end": end,
+        "channel": channel,
+        "reason": reason,
+        "survived": survived,
+        "resolved_against": resolved_against,
+    }
+
+
+def _resolved_against(root: str, head: str | None, path: str | None) -> dict[str, Any]:
+    """§7.5's evidence record — EVIDENCE, never proof, and the doc says so.
+
+    `root` and `head` are what the answer was computed against; the coordinate
+    is only meaningful in that pair. `mtime_ns` and `size` describe the file ON
+    DISK at the resolved path, and they are here for a reason that survived the
+    move to the object store: resolution reads git, but the human who receives a
+    line number opens the WORKING TREE, so the one thing a reader cannot see
+    from `head` alone is whether the file in front of them still matches it.
+    Both are `None` when the path does not exist on disk — a `moved_file` answer
+    into a path the checkout does not have is not an error, and `os.stat` is not
+    allowed to turn a good answer into an exception.
+    """
+    mtime_ns: int | None = None
+    size: int | None = None
+    if path:
+        try:
+            st = os.stat(os.path.join(root, path))
+        except OSError:  # absent, unreadable parent, a path this checkout lacks
+            pass
+        else:
+            mtime_ns, size = st.st_mtime_ns, st.st_size
+    return {
+        "root": root,
+        "head": head,
+        "path": path,
+        "mtime_ns": mtime_ns,
+        "size": size,
+    }
+
+
+def _blob_lines(root: str, rev: str, rel: str, budget: _Budget) -> list[str] | None:
+    """`<rev>:<rel>` as a list of lines, or None when it is not a readable text blob.
+
+    Shares `read_blob` with capture rather than re-deriving it, so the read side
+    cannot drift from the write side about what "the file at a revision" means —
+    including the `cat-file blob` / `git show` distinction that keeps a DIRECTORY
+    from being read as source text.
+    """
+    try:
+        data = read_blob(root, rev, rel, budget)
+    except _Refused:
+        return None
+    if b"\0" in data:
+        return None
+    try:
+        content = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    lines = content.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()  # a trailing newline terminates the last line, it is not one
+    return lines
+
+
+def _parse_reverse_blame(out: bytes) -> list[tuple[str, int, int, str | None]]:
+    """Porcelain into `[(sha, line-at-HEAD, line-in-the-anchored-revision, path)]`.
+
+    Two properties of the format that the parser has to know and that are easy
+    to get silently wrong:
+
+    * The two line numbers are INVERTED under `--reverse` (П3), so field two is
+      the line in the LATEST revision. On a file whose lines never shifted the
+      two are equal, which is why a fixture that only edits in place cannot tell
+      a correct parser from a transposed one.
+    * `--porcelain` suppresses commit metadata it has already emitted, so a
+      `filename` record may be absent from an entry. It is memoized per sha —
+      and `--line-porcelain` is NOT used instead, because the memo is the same
+      three lines and the ratified command is `-p`.
+
+    A `filename` seen inside an entry always wins over the memo, which is what
+    keeps a split (two lines of one span ending in two different files under the
+    same HEAD sha) from being flattened onto whichever path arrived first.
+    """
+    entries: list[tuple[str, int, int, str | None]] = []
+    memo: dict[str, str] = {}
+    header: tuple[str, int, int] | None = None
+    filename: str | None = None
+    for raw in out.decode("utf-8", "replace").split("\n"):
+        if header is None:
+            m = _BLAME_HEADER.match(raw)
+            if m:
+                header, filename = (m.group(1), int(m.group(2)), int(m.group(3))), None
+            continue
+        if raw.startswith("filename "):
+            filename = raw[len("filename ") :]
+        elif raw.startswith("\t"):
+            sha, head_line, src_line = header
+            if filename is not None:
+                memo[sha] = filename
+            entries.append((sha, head_line, src_line, filename or memo.get(sha)))
+            header, filename = None, None
+    return entries
+
+
+def _channel_a(
+    root: str,
+    anchor: dict[str, Any],
+    *,
+    head: str,
+    budget: _Budget,
+) -> dict[str, Any] | None:
+    """Reverse blame plus the MANDATORY verify. `None` means "A did not answer".
+
+    Three details are load-bearing and each one has a measured reason behind it:
+
+    * **`-C -C`, not `-C`.** On live history `-C` follows one move and `-C -C`
+      follows two. The design ratified the doubled flag because that is what
+      gives `moved_file` a producer at all.
+    * **`-c core.quotePath=false`.** Porcelain C-quotes a non-ASCII path by
+      default, and the path is what this function compares against the anchor's
+      to decide `moved_file` — so the default would report a move for every
+      non-ASCII filename that never moved. This repository has now paid for that
+      same default three times elsewhere.
+    * **The verify reads the RESOLVED path, never the recorded one.** This is
+      the single detail whose inversion produced the design's phantom "git is
+      wrong 0.21% of the time": checking a moved line against the path it moved
+      FROM declares every successful move a failure. Corrected, git was right
+      537 times out of 537, byte for byte.
+    """
+    line, end = anchor["line"], anchor["end"]
+    span = end - line + 1
+    rc, out, _ = _git(
+        root,
+        [
+            "-c",
+            "core.quotePath=false",
+            "blame",
+            "--reverse",
+            "-p",
+            "-C",
+            "-C",
+            "-L",
+            f"{line},{end}",
+            f"{anchor['commit']}..HEAD",
+            "--",
+            anchor["path"],
+        ],
+        budget,
+    )
+    if rc != 0:
+        return None
+
+    alive = [e for e in _parse_reverse_blame(out) if e[0] == head and e[3]]
+    if not alive:
+        return _record(
+            "lost",
+            path=anchor["path"],
+            channel="git",
+            survived=f"0/{span}",
+            resolved_against=_resolved_against(root, head, anchor["path"]),
+        )
+
+    # The verify, per surviving line, against the file it actually landed in.
+    # A split puts one span into two files, so the blobs are fetched per path.
+    blobs: dict[str, list[str] | None] = {}
+    matched: list[tuple[str, int]] = []
+    for _sha, head_line, src_line, path in alive:
+        assert path is not None  # filtered above; narrows the type for the reader
+        if path not in blobs:
+            blobs[path] = _blob_lines(root, "HEAD", path, budget)
+        current = blobs[path]
+        idx = src_line - line
+        if current is None or not 0 <= idx < len(anchor["text"]):
+            return _record(
+                "unknown",
+                path=path,
+                channel="git",
+                reason="verify_mismatch",
+                survived=f"{len(alive)}/{span}",
+                resolved_against=_resolved_against(root, head, path),
+            )
+        if not 1 <= head_line <= len(current) or current[head_line - 1] != anchor["text"][idx]:
+            return _record(
+                "unknown",
+                path=path,
+                channel="git",
+                reason="verify_mismatch",
+                survived=f"{len(alive)}/{span}",
+                resolved_against=_resolved_against(root, head, path),
+            )
+        matched.append((path, head_line))
+
+    # Every surviving line verified. The answer is reported in the file the
+    # FIRST surviving line landed in; when a split scattered the span across two
+    # files, `survived` is what tells the reader the span is no longer whole.
+    where = matched[0][0]
+    here = [n for p, n in matched if p == where]
+    status = "moved_file" if where != anchor["path"] else ("moved" if min(here) != line else "current")
+    return _record(
+        status,
+        path=where,
+        line=min(here),
+        end=max(here),
+        channel="git",
+        survived=f"{len(alive)}/{span}",
+        resolved_against=_resolved_against(root, head, where),
+    )
+
+
+def _context(lines: Sequence[str], line: int, end: int) -> tuple[list[tuple[int, str]], ...]:
+    """The normalized `CONTEXT_LINES` above and below a 1-based inclusive span."""
+    before = lines[max(0, line - 1 - CONTEXT_LINES) : line - 1]
+    after = lines[end : end + CONTEXT_LINES]
+    return normalize_lines(before), normalize_lines(after)
+
+
+def _channel_b(
+    root: str,
+    anchor: dict[str, Any],
+    *,
+    head: str,
+    budget: _Budget,
+) -> dict[str, Any] | None:
+    """The content channel: find the normalized anchor text in `HEAD:<recorded path>`.
+
+    Secondary by measurement, not by taste: it resolves nothing the core cannot
+    on this tracker's corpus and 6.7 points more on the larger one, and — the
+    reason it is not redundant — it is the ONLY thing that recovers a line
+    deleted and later restored byte-for-byte, which the core reads as lost
+    because the liveness test runs before the verify and can only reject.
+
+    It searches the RECORDED path, so it can never answer `moved_file`; a move
+    into another file is the core's to see. Short anchors are refused outright
+    rather than searched: `MIN_ANCHOR_CHARS` is a noise floor, and below it a
+    normalized span matches almost everywhere, which would turn a silent wrong
+    answer into this channel's normal output.
+    """
+    if _anchor_chars(anchor["text"]) < MIN_ANCHOR_CHARS:
+        return None
+    lines = _blob_lines(root, "HEAD", anchor["path"], budget)
+    if lines is None:
+        return None
+    want = normalize_lines(anchor["text"])
+    n = len(want)
+    if n == 0 or n > len(lines):
+        return None
+    normalized = normalize_lines(lines)
+    hits = [i for i in range(len(normalized) - n + 1) if normalized[i : i + n] == want]
+    if not hits:
+        return None
+
+    if len(hits) > 1:
+        # Disambiguate by context. BOTH sides are read at resolution time — the
+        # original out of the anchor's own revision, the candidates out of HEAD —
+        # which is why the object stores no context and Р2 is not widened.
+        origin = _blob_lines(root, anchor["commit"], anchor["path"], budget)
+        scored: list[tuple[int, int]] = []
+        if origin is not None:
+            before, after = _context(origin, anchor["line"], anchor["end"])
+            for i in hits:
+                cand_before, cand_after = _context(lines, i + 1, i + n)
+                score = sum(1 for x in cand_before if x in before)
+                score += sum(1 for x in cand_after if x in after)
+                scored.append((score, i))
+        best = sorted(scored, reverse=True)
+        if not best or (len(best) > 1 and best[0][0] == best[1][0]):
+            return _record(
+                "ambiguous",
+                path=anchor["path"],
+                channel="content",
+                resolved_against=_resolved_against(root, head, anchor["path"]),
+            )
+        hits = [best[0][1]]
+
+    at = hits[0] + 1
+    return _record(
+        "current" if at == anchor["line"] else "moved",
+        path=anchor["path"],
+        line=at,
+        end=at + n - 1,
+        channel="content",
+        resolved_against=_resolved_against(root, head, anchor["path"]),
+    )
+
+
+def resolve_anchor(
+    root: str,
+    anchor: dict[str, Any],
+    *,
+    head: str,
+    repo: str | None,
+    budget: _Budget | None = None,
+) -> dict[str, Any]:
+    """One VALIDATED anchor into a coordinate on HEAD. NEVER raises for a git failure.
+
+    The cascade is Р5 and its ORDER is the design, not an implementation detail:
+
+    0. **The ancestor gate, before any trace.** `git blame --reverse` over a
+       range whose left end is not an ancestor of HEAD exits 0, writes nothing to
+       stderr, and attributes the line to the branch commit — so the liveness
+       test reads a live line as deleted. In THIS repository every card is filed
+       on an unmerged branch, so without the gate the ordinary case is a silent
+       false "lost". The answer is `unknown(commit_not_ancestor)`, and it is a
+       TEMPORARY state that the branch's merge clears.
+    1. Channel A — reverse blame.
+    2. The verify, which is NOT skippable and reads the resolved path.
+    3. Channel B, only if A did not answer.
+    4. Otherwise the refusal A produced.
+
+    The repository gate runs before all of it, because it is the only guard
+    against a CONFIDENTLY WRONG answer rather than a missing one: a card can
+    carry a commit from one tree and be resolved in another, and the verify
+    cannot see that by construction, since it re-reads the tree the blame
+    walked. An anchor carrying no `repo` at all — reachable, because
+    `updatable_keys` validates nothing — fails the gate rather than skipping it.
+
+    **Named honestly, because the number is in the design and belongs at the
+    call site too: the verify rejects a gross error, it does not prove the
+    answer.** Half the correctly resolved lines in this tracker (50%, and 35% in
+    the larger corpus) carry text that is not unique inside its own file at HEAD,
+    so on those the verify would also pass at a wrong line number.
+    """
+    budget = budget or _Budget()
+    stored_repo = anchor.get("repo")
+    if not isinstance(stored_repo, str) or repo is None or stored_repo != repo:
+        return _record("unknown", path=anchor["path"], reason="repo_mismatch")
+
+    try:
+        commit = _resolve_commit(root, anchor.get("commit"), budget)
+    except _Refused as refused:
+        token = refused.token
+        if token == "commit_unreachable":
+            rc, out, _ = _git(root, ["rev-parse", "--is-shallow-repository"], budget)
+            if rc == 0 and out.strip() == b"true":
+                token = "shallow_history"
+        return _record("unknown", path=anchor["path"], reason=token)
+    except subprocess.TimeoutExpired:
+        return _record("unknown", path=anchor["path"], reason="timeout")
+
+    anchor = {**anchor, "commit": commit}
+    try:
+        rc, _out, _err = _git(root, ["merge-base", "--is-ancestor", commit, "HEAD"], budget)
+        if rc != 0:
+            return _record("unknown", path=anchor["path"], reason="commit_not_ancestor")
+
+        answer = _channel_a(root, anchor, head=head, budget=budget)
+        if answer is not None and answer["status"] not in ("lost", "unknown"):
+            return answer
+        fallback = _channel_b(root, anchor, head=head, budget=budget)
+        if fallback is not None:
+            return fallback
+        if answer is not None:
+            return answer
+        return _record(
+            "lost",
+            path=anchor["path"],
+            channel="git",
+            resolved_against=_resolved_against(root, head, anchor["path"]),
+        )
+    except subprocess.TimeoutExpired:
+        return _record("unknown", path=anchor["path"], reason="timeout")
+    except (subprocess.SubprocessError, OSError):
+        return _record("unknown", path=anchor["path"], reason="internal_error")
+
+
+# --- read side: the batch surface -----------------------------------------------------
+
+
+def _stored_loc(row: dict[str, Any]) -> tuple[bool, Any]:
+    """`(the row carries an anchor key, its stored value)` from a raw candidate row.
+
+    Reads `meta_json` as the STORED STRING (CB-24 consequence 4) and tolerates a
+    `meta` that does not parse at all: a batch over ten thousand rows must not be
+    aborted by one row's malformed column, and "carries no anchor" is the honest
+    reading of meta nobody can read.
+    """
+    try:
+        meta = json.loads(row.get("meta_json") or "{}")
+    except (TypeError, ValueError):
+        return False, None
+    if not isinstance(meta, dict) or "loc" not in meta:
+        return False, None
+    return True, meta["loc"]
+
+
+def resolve_findings(
+    conn: Any,
+    *,
+    finding_id: str | None = None,
+    status: str | None = "open",
+    category: str | None = None,
+    file: str | None = None,
+    project_dir: str | None = None,
+    limit: int | None = 10000,
+) -> dict[str, Any]:
+    """Resolve every stored anchor in a population to a coordinate on HEAD.
+
+    THE DENOMINATOR, said before anything else, because this summary is a
+    RATIFIED DEMAND COUNTER and not a convenience. The owner reads the frequency
+    of `moved_file` out of it to decide whether a sanctioned identity re-key is
+    worth building, so the number must be a share of something it is actually a
+    share of:
+
+    * `total` — rows the FILTERS matched.
+    * `anchored` — of those, the rows that CARRY an anchor key (`meta.loc`
+      present, a persisted refusal object and the `null` tombstone included).
+      Anchors exist only on findings filed since BT-7 landed, so on a live
+      tracker this is a small fraction of `total`.
+    * `results` — one record per anchored row, and nothing else. A row with no
+      anchor has nothing to resolve and gets no record.
+    * `summary` — status counts over `results`. It sums to `anchored`, NEVER to
+      `total`, so `summary["moved_file"] / anchored` is the ratified figure and
+      `/ total` is a share of a population the number does not describe.
+    * `without_anchor` — `total - anchored`, present so the arithmetic closes in
+      the response instead of in the reader's head.
+
+    Every status in the closed vocabulary appears in `summary` with a count of
+    zero when nothing landed there, for the same reason each record's keys are
+    unconditional: a missing bucket reads as "not evaluated".
+
+    The default population is `open`, matching `provenance.check_findings`, and
+    the sentinel `"all"` widens it, matching `similarity.group_report`. Both
+    precedents are in this package; the sentinel is compared type-first, because
+    a bare `== "all"` is satisfied by `unittest.mock.ANY` (CB-25).
+
+    `project_dir` is REQUIRED in effect: BT-7 Р3 refuses ambient cwd in capitals,
+    and a resolution against whatever tree the process happens to stand in is the
+    confidently-wrong answer this design spends its whole budget avoiding. An
+    unresolvable root is reported once, as `unknown(no_root)`/`unknown(no_repo)`
+    on every record, rather than raised — the caller asked about findings, and
+    the findings are still there.
+    """
+    from codebugs import findings
+
+    widen = isinstance(status, str) and status == "all"
+    rows = findings.anchor_candidates(
+        conn,
+        finding_id=finding_id,
+        status=None if widen else status,
+        category=category,
+        file=file,
+        limit=limit,
+    )
+
+    results: list[dict[str, Any]] = []
+    summary = dict.fromkeys(STATUSES, 0)
+    anchored = 0
+
+    root = worktree_root(project_dir=project_dir) if project_dir else None
+    head: str | None = None
+    repo: str | None = None
+    if root is not None:
+        budget = _Budget()
+        rc, out, _ = _git(root, ["rev-parse", "--verify", "HEAD^{commit}"], budget)
+        head = out.decode("ascii", "replace").strip() if rc == 0 else None
+        repo = repo_identity(root, budget)
+
+    for row in rows:
+        present, value = _stored_loc(row)
+        if not present:
+            continue
+        anchored += 1
+        anchor, reason = read_anchor(value)
+        if anchor is None:
+            record = _record("unknown", path=row.get("file"), reason=reason)
+        elif project_dir is None or root is None:
+            record = _record(
+                "unknown",
+                path=anchor["path"],
+                reason="no_root" if project_dir is None else "no_repo",
+            )
+        elif head is None:
+            record = _record("unknown", path=anchor["path"], reason="no_repo")
+        else:
+            record = resolve_anchor(root, anchor, head=head, repo=repo, budget=_Budget())
+        summary[record["status"]] += 1
+        results.append({"finding_id": row["id"], "file": row.get("file"), "anchor": record})
+
+    return {
+        "results": results,
+        "total": len(rows),
+        "anchored": anchored,
+        "without_anchor": len(rows) - anchored,
+        "summary": summary,
+    }
+
+
+# --- read side: the sanctioned repair path (Р4) ---------------------------------------
+
+#: What `recapture_findings` did to one row. CLOSED, and every outcome is a
+#: decision the four specified points make explicitly rather than a fall-through.
+RECAPTURE_OUTCOMES: tuple[str, ...] = (
+    "updated",
+    "would_update",
+    "unchanged",
+    "kept",
+    "tombstoned",
+    "stale",
+)
+
+
+def recapture_findings(
+    conn: Any,
+    *,
+    finding_id: str | None = None,
+    status: str | None = "open",
+    category: str | None = None,
+    file: str | None = None,
+    project_dir: str | None = None,
+    apply: bool = False,
+    force_tombstone: bool = False,
+    limit: int | None = 10000,
+) -> dict[str, Any]:
+    """Rebuild stored anchors from the git object store — the SANCTIONED repair (Р4).
+
+    WHY THE VERB EXISTS AT ALL. `updatable_keys=("loc",)` opens `meta.loc` on the
+    update path and validates NOTHING, so a hand-assembled object is accepted at
+    the write and read back as `unknown(invalid_anchor)`. That is deliberate — an
+    annotation nobody can repair is the CB-26 shape — but it means the repair has
+    to be a verb that BUILDS the object, not a human typing JSON. This is that
+    verb, and it shares `capture` with the resolver seam, so a repaired anchor is
+    byte-identical to one the file-time path would have produced.
+
+    DRY RUN BY DEFAULT, like `findings.normalize_categories`: without
+    `apply=True` no transaction is opened at all.
+
+    **The four points §9 requires to be SPECIFIED — behaviour chosen, written
+    down, and pinned by a test — and the answer to each:**
+
+    1. **Does it read inside a transaction? Split, and the split is the answer.**
+       The population scan and the git capture run with NO transaction open, and
+       only the version check and the write share one `db.txn`. Doing it the
+       other way is not a style choice: capture spends up to `CAPTURE_BUDGET_S`
+       per row in subprocesses, so holding the write lock across a batch would
+       blow past the competing writer's `busy_timeout=5000` after three rows —
+       and `SQLITE_BUSY` is not in `db._is_environmental`, so that writer gets a
+       raw traceback. Keeping the git work outside the lock and the check-and-
+       write inside it makes point 4 a real compare-and-swap instead of a
+       check-then-act with a two-second window.
+    2. **Does a FAILED capture replace a valid stored anchor? No.** This is the
+       one point the design answers itself. When the new capture is a refusal
+       object and the stored anchor still holds coordinates, nothing is written
+       and the outcome is `kept`. A repair that can destroy what it was called to
+       repair is worse than no repair: the refusal is usually about the
+       ENVIRONMENT (a commit this clone lacks, a shallow history), and the
+       anchor it would overwrite is still perfectly good in a clone that has the
+       history.
+    3. **Does it override the tombstone? Only on an explicit flag.** `loc: null`
+       means "do not recapture" and is written by hand for exactly that purpose,
+       so a bulk repair sweeping it away silently would make the tombstone
+       unwritable in practice. Default outcome is `tombstoned`;
+       `force_tombstone=True` is a typed statement of intent.
+    4. **Does it check the row's version before overwriting? Yes** — inside the
+       transaction from point 1, against the stored `meta.loc` this run scanned.
+       A row whose anchor changed while the capture ran is left alone and
+       reported `stale`, because the other writer is the one holding fresher
+       information. The comparison is on the anchor VALUE, not on a row
+       timestamp: an unrelated status write in the same window must not cost a
+       repair.
+    """
+    from codebugs import findings
+
+    widen = isinstance(status, str) and status == "all"
+    rows = findings.anchor_candidates(
+        conn,
+        finding_id=finding_id,
+        status=None if widen else status,
+        category=category,
+        file=file,
+        limit=limit,
+    )
+
+    results: list[dict[str, Any]] = []
+    summary = dict.fromkeys(RECAPTURE_OUTCOMES, 0)
+
+    for row in rows:
+        present, stored = _stored_loc(row)
+        if not present:
+            continue
+        if stored is None and not force_tombstone:
+            outcome, fresh = "tombstoned", None
+        else:
+            # OUTSIDE any transaction — see point 1. `capture` builds the same
+            # object the resolver seam would, from the same observation shape.
+            fresh = capture(
+                {
+                    "file": row.get("file"),
+                    "meta": _parsed_meta(row),
+                    "reported_at_commit": row.get("reported_at_commit"),
+                    "project_dir": project_dir,
+                }
+            )
+            had_anchor = read_anchor(stored)[0] is not None
+            if "skipped" in fresh and had_anchor:
+                outcome = "kept"  # point 2
+            elif fresh == stored:
+                outcome = "unchanged"
+            elif not apply:
+                outcome = "would_update"
+            else:
+                outcome = _apply_recapture(conn, row["id"], stored=stored, fresh=fresh)
+
+        summary[outcome] += 1
+        results.append(
+            {
+                "finding_id": row["id"],
+                "outcome": outcome,
+                "reason": (fresh or {}).get("skipped"),
+            }
+        )
+
+    return {
+        "results": results,
+        "total": len(rows),
+        "applied": apply,
+        "summary": summary,
+    }
+
+
+def _parsed_meta(row: dict[str, Any]) -> dict[str, Any]:
+    """The row's stored meta as a dict, or `{}` when it does not parse.
+
+    A row whose meta is unreadable has no grammar to capture from, so `capture`
+    refuses it with `no_grammar` — which is the honest token and, crucially, one
+    that leaves a valid stored anchor untouched by point 2.
+    """
+    try:
+        meta = json.loads(row.get("meta_json") or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _apply_recapture(
+    conn: Any, finding_id: str, *, stored: Any, fresh: dict[str, Any]
+) -> str:
+    """Point 4: compare-and-swap the anchor inside ONE transaction.
+
+    `db.txn` takes the write lock BEFORE the re-read, which is the whole
+    difference between this and a check-then-act — the same argument CB-24 makes
+    for `update_finding`'s own body. `update_finding`'s `db.txn` is reentrant and
+    yields False under this one, so the check and the write commit together.
+
+    This module still issues ZERO SQL, which is its licence to exist: it composes
+    a `db` transaction primitive with two `findings`-owned operations. No
+    statement is written here.
+    """
+    from codebugs import findings
+
+    with db.txn(conn):
+        current = findings.anchor_candidates(conn, finding_id=finding_id, limit=1)
+        if not current:
+            return "stale"  # the row went away under us
+        present, now = _stored_loc(current[0])
+        if not present or now != stored:
+            return "stale"
+        findings.update_finding(conn, finding_id, meta_update={"loc": fresh})
+    return "updated"
+
+
+# --- CLI ------------------------------------------------------------------------------
+
+
+def register_cli(sub, commands) -> None:
+    """Register the two anchor CLI verbs.
+
+    The capture resolver registers at module import and is unaffected by
+    `--mode`; this only gates which VERBS are exposed.
+    """
+    import json as _json
+    import sys
+
+    from codebugs.fmt import format_table
+
+    p_res = sub.add_parser(
+        "anchor-resolve", help="Resolve stored location anchors to lines on HEAD"
+    )
+    p_rec = sub.add_parser(
+        "anchor-recapture", help="Rebuild stored location anchors (dry run by default)"
+    )
+    for p in (p_res, p_rec):
+        p.add_argument("--finding-id", default=None, dest="finding_id")
+        p.add_argument(
+            "--status",
+            default="open",
+            help='status filter; "all" widens to every status (default: open)',
+        )
+        p.add_argument("--category", default=None)
+        p.add_argument("--file", default=None)
+        p.add_argument(
+            "--repo",
+            default=None,
+            help="repo dir the anchors resolve against (also locates .codebugs/). "
+            "BT-7 refuses ambient cwd for the ANCHOR, so omitting it reports "
+            "no_root rather than guessing a tree",
+        )
+        p.add_argument("--limit", type=int, default=10000)
+        p.add_argument("--json", action="store_true", dest="as_json")
+    p_rec.add_argument(
+        "--apply", action="store_true", help="write the rebuilt anchors (default: dry run)"
+    )
+    p_rec.add_argument(
+        "--force-tombstone",
+        action="store_true",
+        dest="force_tombstone",
+        help='override a `loc: null` tombstone ("do not recapture"), which is '
+        "otherwise left alone",
+    )
+
+    def _cmd_anchor_resolve(args) -> None:
+        conn = db.connect()
+        # No JSONDecodeError-first arm, and that is a statement about this path
+        # rather than an omission: nothing here converts a stored row through
+        # `db.row_to_dict`. `anchor_candidates` hands back `meta_json` as the
+        # stored string and `_stored_loc` tolerates a column that does not parse,
+        # so the hazard the arm guards against is structurally unreachable —
+        # asserting it would claim a risk that does not exist (similarity's
+        # precedent, and the inverse of `_cmd_update`'s).
+        try:
+            result = resolve_findings(
+                conn,
+                finding_id=args.finding_id,
+                status=args.status,
+                category=args.category,
+                file=args.file,
+                project_dir=args.repo,
+                limit=args.limit,
+            )
+        except (KeyError, ValueError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        finally:
+            conn.close()
+
+        if args.as_json:
+            print(_json.dumps(result, indent=2))
+            return
+        rows = [
+            [
+                r["finding_id"],
+                r["anchor"]["status"],
+                r["anchor"]["channel"] or "-",
+                r["anchor"]["path"] or "-",
+                str(r["anchor"]["line"] or "-"),
+                r["anchor"]["reason"] or "-",
+                r["anchor"]["survived"] or "-",
+            ]
+            for r in result["results"]
+        ]
+        print(
+            format_table(
+                rows, ["ID", "STATUS", "CHANNEL", "PATH", "LINE", "REASON", "SURVIVED"]
+            )
+        )
+        counts = ", ".join(f"{k}={v}" for k, v in result["summary"].items())
+        print(f"\n{counts}")
+        # The denominator is printed with the number, never left to the reader:
+        # the moved_file share is of ANCHORED rows, and `total` is a different
+        # population entirely (resolve_findings' docstring carries the rule).
+        print(
+            f"{result['anchored']} of {result['total']} findings carry an anchor "
+            f"({result['without_anchor']} do not); the counts above are over the "
+            f"{result['anchored']} anchored."
+        )
+
+    def _cmd_anchor_recapture(args) -> None:
+        conn = db.connect()
+        try:
+            result = recapture_findings(
+                conn,
+                finding_id=args.finding_id,
+                status=args.status,
+                category=args.category,
+                file=args.file,
+                project_dir=args.repo,
+                apply=args.apply,
+                force_tombstone=args.force_tombstone,
+                limit=args.limit,
+            )
+        # JSONDecodeError BEFORE ValueError, and here the hazard is real: on
+        # `--apply` this path reaches `update_finding`, which converts the
+        # mutated row AFTER its transaction commits, so a row with malformed
+        # stored `meta`/`tags` raises from a write that HAS ALREADY LANDED.
+        # Reporting that through the input-validation arm is the CB-15/CB-16 lie.
+        except _json.JSONDecodeError:
+            conn.close()
+            raise
+        except (KeyError, ValueError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            conn.close()
+            sys.exit(1)
+        conn.close()
+
+        if args.as_json:
+            print(_json.dumps(result, indent=2))
+            return
+        rows = [[r["finding_id"], r["outcome"], r["reason"] or "-"] for r in result["results"]]
+        print(format_table(rows, ["ID", "OUTCOME", "REASON"]))
+        counts = ", ".join(f"{k}={v}" for k, v in result["summary"].items())
+        print(f"\n{counts}")
+        if not args.apply:
+            print("Dry run — nothing was written. Pass --apply to write.")
+
+    commands.update(
+        {
+            "anchor-resolve": _cmd_anchor_resolve,
+            "anchor-recapture": _cmd_anchor_recapture,
+        }
+    )
+
+
 # --- registration ---------------------------------------------------------------------
 
 
@@ -706,3 +1581,5 @@ db.register_pre_add_resolver(
     meta_keys=("loc",),
     updatable_keys=("loc",),
 )
+
+db.register_cli_provider("loc", register_cli)
