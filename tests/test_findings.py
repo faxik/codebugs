@@ -3179,23 +3179,67 @@ class TestFingerprintRefusalIsCountable:
         assert b_id in str(exc.value)
         assert "disk I/O error" in capsys.readouterr().err
 
-    def test_an_ambient_transaction_skips_the_counter_and_commits_nothing_foreign(
+    def test_an_ambient_transaction_that_commits_still_carries_no_count(
         self, tmp_project
     ):
-        """Constraint 5. `update_finding` may run inside a caller's open
-        transaction, where `db.txn` yields False and commits nothing. Writing the
-        counter in its own committed transaction there would commit the CALLER's
-        unrelated work — verbatim CB-40. So on that path the counter is skipped.
+        """CONSTRAINT 5, and the fixture here had to be chosen by measurement.
+
+        `update_finding` may run inside a caller's open transaction, where
+        `db.txn` yields False and commits nothing. On that path the counter is
+        SKIPPED: statistics must never ride along inside a stranger's unit of
+        work, whose fate they would then share and whose commit they would be
+        part of. Fail-open for the counter, always.
+
+        THE DISCRIMINATING CALLER IS ONE THAT COMMITS, and the first version of
+        this test used one that rolls back — where it could not fail. Measured
+        against a mutant with the `conn.in_transaction` guard deleted: with a
+        rolling-back caller the count is lost either way (the caller's own frame
+        undoes it), so the test passed on the mutant; with a caller that swallows
+        the `ValueError` and commits, the unguarded write LANDS, count = 1. Only
+        the second shape sees the guard at all.
 
         Honest scope, enumerated rather than assumed: this path has NO PRODUCER
-        today. The two callers that run under an ambient transaction pass a
-        TERMINAL status (`milestones.triage_dismiss` → `not_a_bug`;
-        `provenance.resolve_trailers` → `resolved`/`None`), and the refusal
-        predicate fires only on nonlive→live, while the two callers that CAN pass
-        a live status (the MCP `update` wrapper and the CLI `update` handler)
-        each open their own connection with no transaction open. This test
-        therefore builds the caller by hand: it is the guard for the day one
-        appears, not a reproduction of a live route.
+        today. All four callers of `update_finding` were read. The two that run
+        under an ambient transaction pass a TERMINAL status
+        (`milestones.triage_dismiss` → the literal `"not_a_bug"`;
+        `provenance.resolve_trailers` → `"resolved"`/`None` out of
+        `_VERB_ACTIONS`), and the refusal predicate fires only on nonlive→live;
+        the two that CAN pass a live status — the MCP `update` wrapper and the
+        CLI `update` handler — each open their own connection with no
+        transaction open. So this builds the caller by hand: it is the guard for
+        the day one appears, not a reproduction of a live route.
+        """
+        conn = db.connect(tmp_project)
+        observer = db.connect(tmp_project)
+        try:
+            a_id, b_id = _refusal_pair(conn)
+            with db.txn(conn):
+                conn.execute(
+                    "UPDATE findings SET severity = 'high' WHERE id = ?", (b_id,)
+                )
+                with pytest.raises(ValueError):
+                    findings.update_finding(conn, a_id, status="open")
+                # ...and the caller carries on and COMMITS its own work.
+            seen = observer.execute(
+                "SELECT severity FROM findings WHERE id = ?", (b_id,)
+            ).fetchone()
+            assert seen["severity"] == "high", "the caller's own work must still land"
+            assert findings.query_findings(
+                observer, meta_key=findings.REFUSAL_COUNT_META_KEY
+            )["findings"] == [], "the count must not have ridden along on that commit"
+        finally:
+            conn.close()
+            observer.close()
+
+    def test_an_ambient_transaction_that_aborts_commits_nothing_foreign(
+        self, tmp_project
+    ):
+        """The other half, and it PASSES ON BOTH SIDES of the guard by design —
+        said so in the name's neighbourhood rather than left to look broken. It
+        pins that letting the refusal escape a caller's transaction destroys the
+        caller's work and nothing else: the counter never forces a commit, so
+        `db.txn`'s reentrancy is what makes CB-40's actual defect
+        (`isolation_level` committing an ambient transaction) unreachable here.
         """
         conn = db.connect(tmp_project)
         observer = db.connect(tmp_project)
@@ -3207,8 +3251,6 @@ class TestFingerprintRefusalIsCountable:
                         "UPDATE findings SET severity = 'high' WHERE id = ?", (b_id,)
                     )
                     findings.update_finding(conn, a_id, status="open")
-            # The caller's own frame rolled its work back; nothing of it may have
-            # been committed on the way past by a counter write.
             seen = observer.execute(
                 "SELECT severity FROM findings WHERE id = ?", (b_id,)
             ).fetchone()

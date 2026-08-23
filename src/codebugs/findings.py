@@ -1979,12 +1979,21 @@ def _count_fingerprint_refusal(conn: sqlite3.Connection, finding_id: str) -> Non
     owns the write, so a test can break the write and watch the refusal still
     arrive intact.
 
-    **Under a caller's open transaction the counter is SKIPPED, and says so.**
-    `update_finding` may run inside someone else's transaction, where `db.txn`
-    yields False and commits nothing. Writing the count "in its own committed
-    transaction" there would commit the CALLER'S unrelated work — verbatim
-    CB-40, where assigning `isolation_level` silently committed an ambient
-    transaction. Statistics are never worth that.
+    **Under a caller's open transaction the counter is SKIPPED**, and the reason
+    is one step narrower than the obvious one — measured, because the first draft
+    of this docstring overstated it. `update_finding` may run inside someone
+    else's transaction. A naive "write it in its own COMMITTED transaction" there
+    would commit the CALLER'S unrelated work, verbatim CB-40, where assigning
+    `isolation_level` silently committed an ambient transaction — but
+    `_bump_refusal_count` goes through `db.txn`, which is reentrant and commits
+    nothing under an ambient transaction, so that specific defect is already
+    unreachable. What actually happens without this guard is that the count JOINS
+    the stranger's transaction and shares its fate: measured, a caller that
+    swallows the `ValueError` and commits carries the count out with it, while a
+    caller that aborts destroys it. Neither is this function's decision to make.
+    A statistic must not be a write inside a unit of work nobody asked to extend,
+    and it must not have a different value depending on what an unrelated caller
+    did afterwards. So it is skipped, and the unit is lost — fail-open.
 
     HONEST SCOPE, enumerated rather than assumed: that path has NO PRODUCER
     today. All four callers of `update_finding` were read. The two that run
