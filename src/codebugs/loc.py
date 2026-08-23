@@ -859,9 +859,16 @@ def _channel_a(
 
     Three details are load-bearing and each one has a measured reason behind it:
 
-    * **`-C -C`, not `-C`.** On live history `-C` follows one move and `-C -C`
-      follows two. The design ratified the doubled flag because that is what
-      gives `moved_file` a producer at all.
+    * **A SINGLE `-C`, and this is a correction of the ratified letter made on a
+      MEASUREMENT — see `TestBlameInvocation` and `TestQuotedCodeLimit`.** v6
+      ratified `-C -C` on "live history: `-C` follows one move, `-C -C` follows
+      two". Re-measured over autosorter's whole eligible population (134 rows,
+      402 blame calls, ancestor gate applied): NEITHER half reproduces. `-C`
+      yields 0 `moved_file` candidates and `-C -C` yields 1 — and that one is a
+      FALSE POSITIVE, a line of `server.py` quoted verbatim as an example inside
+      a markdown plan, which `-C -C` followed into the document while `-C` and
+      `-M -C` traced it correctly. `-M -C` is still refused, because the design's
+      controlled experiment showed it loses a split that `-C` catches.
     * **`-c core.quotePath=false`.** Porcelain C-quotes a non-ASCII path by
       default, and the path is what this function compares against the anchor's
       to decide `moved_file` — so the default would report a move for every
@@ -883,7 +890,6 @@ def _channel_a(
             "blame",
             "--reverse",
             "-p",
-            "-C",
             "-C",
             "-L",
             f"{line},{end}",

@@ -1792,45 +1792,45 @@ class TestReadSideResiduals:
 
 
 class TestBlameInvocation:
-    """The blame argv, pinned STRUCTURALLY — and the reason is a measurement, not
-    a preference.
+    """The blame argv, pinned STRUCTURALLY.
 
-    NO FIXTURE DISCRIMINATES `-C -C` FROM `-C` UNDER `--reverse`, and that is a
-    MEASURED RESULT rather than a gap in this file. Both flags were run against
-    a controlled split and four variants of it (two-commit split; split then
-    tracked rename; split then untracked copy+delete; destination created in a
-    commit that leaves the source untouched) and the output was BYTE-IDENTICAL
-    every time.
+    THE COPY FLAG IS A SINGLE `-C`, and that is a correction of v6's ratified
+    letter made by the direction holder on a MEASUREMENT of the whole eligible
+    population of autosorter (134 rows, 402 blame calls, ancestor gate applied).
+    v6 ratified `-C -C` on "on live history `-C` follows one move and `-C -C`
+    follows two". Neither half reproduces: `-C` yields 0 `moved_file` candidates
+    and `-C -C` yields 1, and that one is a FALSE POSITIVE — a line of
+    `server.py` quoted verbatim as an example inside a markdown plan, which
+    `-C -C` followed into the document while `-C` and `-M -C` traced it
+    correctly. `-M -C` stays refused: the design's controlled experiment showed
+    it loses a split that `-C` catches.
 
-    The structural reason, and it is specific to the direction of travel:
-    `-C -C`'s extra scope is copies out of files that the commit CREATING the
-    destination did not modify. Tracing a SOURCE file backwards, the source is
-    by construction modified in the commit that removed the lines, so ordinary
-    `-C` already covers it. The discriminator does exist — but only FORWARDS, on
-    the DESTINATION file (`-C` attributes the lifted block to the split commit,
-    `-C -C` to the original), and it cannot be turned round: reverse blame
-    refuses a path that does not exist at the start of the range
-    (`fatal: no such path split_out.py in <C1>`, rc 128) and does no rename or
-    copy detection across that boundary.
-
-    So these are TEMPLATE assertions, which is what this repository reaches for
-    when behaviour cannot tell two implementations apart — CB-41's rule verbatim
-    (a Python-sampled deadline still looks fresh unless real time passes, so the
+    These are TEMPLATE assertions, which is what this repository reaches for when
+    behaviour cannot tell two implementations apart — CB-41's rule verbatim (a
+    Python-sampled deadline still looks fresh unless real time passes, so the
     test asserts the SQL), and the harness's guard-invocation tests are the same
-    shape. **Said plainly and NOT to be read as more than it is: this pins that
-    nobody removed the flag silently. It does NOT establish that `-C -C` buys
-    anything under `--reverse`, and the mutation probe's `-C -C` -> `-C` mutant
-    must NOT be reported as killed on the strength of it.** Whether the doubled
-    flag is justified in reverse mode at all is a question for the direction
-    holder against v6's own measurement record, not a decision this file makes.
+    shape. Said plainly and not to be read as more: these pin that nobody
+    changed the flag silently. On CONSTRUCTED fixtures `-C` and `-C -C` were
+    byte-identical on all five shapes tried, so the mutation probe has no
+    behavioural discriminator for the flag in either direction and must not
+    report one as killed on the strength of these.
     """
 
     def _blame_argv(self):
         src = inspect.getsource(loc._channel_a)
         return src[src.index("_git(") : src.index("budget,\n    )")]
 
-    def test_the_doubled_copy_flag_is_present(self):
-        assert self._blame_argv().count('"-C"') == 2
+    def test_the_copy_flag_is_single(self):
+        """Exactly one, in BOTH directions: dropping it loses moves outright
+        (measured: with no `-C` the trace stops at the source commit), and
+        doubling it is what dragged an anchor into a document that merely quoted
+        the code."""
+        assert self._blame_argv().count('"-C"') == 1
+
+    def test_rename_detection_is_not_added(self):
+        """`-M -C` is refused by the design's controlled experiment — it loses a
+        split that `-C` catches — so its absence is a decision, not an oversight."""
+        assert '"-M"' not in self._blame_argv()
 
     def test_quote_path_is_disabled(self):
         argv = self._blame_argv()
@@ -1841,3 +1841,68 @@ class TestBlameInvocation:
 
     def test_the_span_is_bounded_by_the_anchor(self):
         assert 'f"{line},{end}"' in self._blame_argv()
+
+
+class TestQuotedCodeLimit:
+    """A KNOWN LIMIT, pinned so that the day it stops reproducing someone
+    re-reads this instead of trusting stale prose — the shape `TestKnownLimits`
+    uses in the worktree harness.
+
+    THE LIMIT: when a line is deleted from its file in the same commit that
+    creates a file quoting it VERBATIM, reverse blame follows the anchor into the
+    QUOTING FILE and attributes it to HEAD. The resolver then answers
+    `moved_file` naming a document, which is a CONFIDENTLY WRONG answer — the
+    kind this whole design spends its budget avoiding.
+
+    TWO THINGS MAKE IT WORTH A TEST RATHER THAN A COMMENT.
+
+    First, THE MANDATORY VERIFY DOES NOT CATCH IT. A verbatim quote is
+    byte-identical to the stored text, so the verify passes and the wrong
+    coordinate is handed to the consumer with full confidence. That is precisely
+    the class the verify was introduced for, and it walks through it.
+
+    Second, THE PRODUCER IS SYSTEMATIC AND IT IS OUR OWN PROCESS: the planning
+    cascade writes plan notes that quote code verbatim, continuously, so every
+    such quotation is a candidate to capture an anchor.
+
+    AND IT SURVIVES THE FLAG CHANGE — measured here, which is why this test
+    exists at all rather than being closed by that change. Moving from `-C -C`
+    to a single `-C` removed the one instance observed on autosorter's corpus; it
+    does NOT remove the class. Both flag settings drag the anchor into `b.md` on
+    this fixture, identically. Closing the class needs something the cascade does
+    not have today — a destination filter, or treating a non-source destination
+    as `ambiguous` — and that is a decision for the design, not for this unit.
+    """
+
+    def test_an_anchor_is_dragged_into_a_file_that_merely_quotes_the_code(
+        self, tmp_path
+    ):
+        root = _new_repo(tmp_path)
+        (root / "a.py").write_text(_body())
+        first = _commit(root, "C1")
+        lines = _body().split("\n")
+        # ONE commit: the doc quotes the block verbatim AND the source loses it.
+        (root / "b.md").write_text("# Notes\n\nExample:\n\n" + "\n".join(lines[3:8]) + "\n")
+        (root / "a.py").write_text("\n".join(lines[:3] + lines[8:]))
+        _commit(root, "C2: quote into the doc and delete from the source")
+
+        got = _resolve(root, _span_anchor(root, first, "a.py", 4, 8))
+        assert got["status"] == "moved_file"
+        assert got["path"] == "b.md", "the limit stopped reproducing — re-read this class"
+        assert got["reason"] is None, "the verify passed on a verbatim quote"
+        assert got["survived"] == "5/5"
+
+    def test_the_stored_text_really_is_byte_identical_to_the_quote(self, tmp_path):
+        """The premise the limit rests on, pinned separately: it is not that the
+        verify is weak here, it is that there is nothing for it to object to."""
+        root = _new_repo(tmp_path)
+        (root / "a.py").write_text(_body())
+        first = _commit(root, "C1")
+        lines = _body().split("\n")
+        (root / "b.md").write_text("# Notes\n\nExample:\n\n" + "\n".join(lines[3:8]) + "\n")
+        (root / "a.py").write_text("\n".join(lines[:3] + lines[8:]))
+        _commit(root, "C2")
+
+        anchor = _span_anchor(root, first, "a.py", 4, 8)
+        at_head = (root / "b.md").read_text().split("\n")
+        assert at_head[4:9] == anchor["text"]
