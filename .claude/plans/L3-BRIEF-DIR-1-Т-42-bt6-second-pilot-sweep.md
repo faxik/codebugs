@@ -418,17 +418,22 @@ rc 0
 
 ## Манифест
 
-`git diff --name-only 4ed8aa02..HEAD` — **четыре** файла, ровно бюджет ≤4, пятой правки нет:
+`git diff --name-only 4ed8aa02..HEAD` — **пять** файлов; из них четыре и есть бюджет ≤4 брифа,
+а пятый — этот самый бриф, и он **назван, а не молчалив**:
 
 ```
 src/codebugs/surfacegen.py      (ΔG, production, посчитан)
 src/codebugs/sweep.py           (снятие обвязки, production, посчитан)
 src/codebugs/sweep_surface.py   (декларации, production, посчитан)
 tests/test_sweep_surface.py     (ОДИН тест-файл, не production, в Δcode не входит)
+.claude/plans/L3-BRIEF-DIR-1-Т-42-bt6-second-pilot-sweep.md   ← ПЯТЫЙ, НАЗВАННЫЙ:
+                                 эта запись, которую §8 брифа предписывает положить на ветку
 ```
 
-Все четыре — `.py`. **Ни одного не-`.py` файла**; сайдкара нет. Список посчитанных
-`--sloc` файлов = список production-файлов диффа, сверено.
+Четыре первых — `.py`; пятый — заметка плана, не код и не источник поверхности. **Ни одного
+не-`.py` файла, из которого строится поверхность**; сайдкара нет. Список посчитанных `--sloc`
+файлов = список production-файлов диффа, сверено. Единственный не-`.py` файл ветки — этот бриф,
+и его роль названа.
 
 Не тронуты (проверено `git diff --stat` по каждому, вывод пуст): `server.py`, `cli.py`, `types.py`,
 `tests/golden/mcp_schema.json`, `tests/test_bench.py`, `tests/test_bench_surface.py`,
