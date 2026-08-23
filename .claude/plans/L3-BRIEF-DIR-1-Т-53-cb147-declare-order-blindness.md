@@ -110,4 +110,76 @@
 
 # ЗАПИСЬ ИСПОЛНИТЕЛЯ (уровень (3)) — данные, не вердикт
 
-<!-- заполняется на ветке; §6 «Эскалации» обязан появиться здесь отдельным заголовком -->
+## Эскалации
+
+Пусто. Ни один из трёх триггеров §6 не сработал:
+
+- **(а)** Замер держателя направления воспроизведён самостоятельно, независимо: `tests/golden/mcp_schema.json`
+  для `codesweep_create` даёт `properties` в порядке
+  `default_batch_size, description, lifecycle, name, terminal_states, transitions` (строго алфавитный),
+  тогда как `sweep.create_sweep` в `src/codebugs/sweep.py:160-169` объявляет их
+  `name, description, default_batch_size, lifecycle, terminal_states, transitions`. Сплошной прогон
+  по всем 83 тулам голдена подтвердил: у каждого `properties`-список равен своему `sorted()`
+  (тест `test_golden_properties_are_alphabetically_sorted` формализует именно это). Премиса верна.
+- **(б)** Решения (c) неверным не считаю — три причины §2 (JSON-объект не гарантирует порядок членов
+  по спецификации; MCP вызывает по имени; `sort_keys=True` в дампере намеренно ради стабильности)
+  самостоятельны и достаточны каждая по отдельности.
+- **(в)** Влияния порядка `properties` на что-либо, кроме позиционной сигнатуры сгенерированного
+  Python-callable, не обнаружено. Проверено измерением (см. «Мутанты» ниже): перестановка двух
+  ПАРАМЕТРОВ в декларации `codesweep_create` (`src/codebugs/sweep_surface.py:164-172`, поле `params=`)
+  не заваливает ни `test_schema_matches_golden`, ни новый тест сортированности, ни остальные 2327
+  тестов пакета.
+
+## Что построено
+
+Ровно два пункта §3, оба в `tests/test_boundary.py`, класс `TestMcpWireSchema`:
+
+1. Докстринг `test_schema_matches_golden` расширен объявлением слепоты к порядку ключей
+   `inputSchema.properties` — измерение (пример `codesweep_create`), а не рассуждение; названа
+   причина (`sort_keys=True` уничтожает порядок при записи голдена), названы три причины решения (c)
+   из §2, названа асимметрия с CLI-снимком Т-51.
+2. Новый тест `test_golden_properties_are_alphabetically_sorted` (сразу после
+   `test_golden_is_already_normalized`): проходит по всем записям голдена, утверждает
+   `list(properties.keys()) == sorted(...)` на каждой, отдельно считает и утверждает непустоту
+   популяции тулов С параметрами (77 из 83 — остальные 6 названы поимённо в докстринге теста, чтобы
+   «пусто → true» не читалось как покрытие).
+
+`tests/dump_schema.py` и сам механизм сравнения (`collect_tool_schemas`, JSON-парсинг в
+`test_schema_matches_golden`) не тронуты — как и требует §3.
+
+## Мутанты — воспроизведены все четыре пункта §5, все на КОПИЯХ вне репозитория
+
+Копии делались через `cp -r` из worktree в scratchpad (`/tmp/claude-1000/.../cb147-mutants/wt-copy*`),
+включая собственный `.venv`; после проверки удалены.
+
+- **КРАСНЕЕТ, снятие `sort_keys=True` + регенерация:** `sed -i 's/, sort_keys=True//'
+  tests/dump_schema.py`, затем `PYTHONPATH=src uv run --extra dev python tests/dump_schema.py >
+  tests/golden/mcp_schema.json`. `test_golden_properties_are_alphabetically_sorted` падает на первой
+  же записи (`add`), сообщение теста называет обе возможные причины и указывает вернуться к докстрингу.
+- **КРАСНЕЕТ, ручная перестановка двух ключей в голден-файле:** взял чистую копию, у тула `add`
+  переставил местами первые два ключа `properties` (`severity`↔`category`) через `OrderedDict`,
+  переписал `tests/golden/mcp_schema.json`. Тот же тест падает тем же способом (assert на
+  `props == sorted(props)`).
+- **ПРОХОДИТ, нетронутое дерево:** `uv run --extra dev python -m pytest tests/test_boundary.py -q`
+  → `11 passed` (11, а не 2, потому что в файле есть и другие тестовые классы; все 11 из
+  `TestMcpWireSchema`/соседей зелёные, включая новый).
+- **ПРОХОДИТ, перестановка двух ПАРАМЕТРОВ в сигнатуре тула:** в
+  `src/codebugs/sweep_surface.py:166-168` (декларация `codesweep_create`) поменял местами элементы
+  `params=[dict(name="name", ...), dict(name="description", ...), ...]` на
+  `dict(name="description", ...), dict(name="name", ...)`. `uv run --extra dev python -m pytest
+  tests/test_boundary.py -q` → `11 passed` без изменений — это и есть измеренное доказательство
+  объявленной слепоты, а не голословное утверждение.
+
+## Верификация целого дерева (не только `test_boundary.py`)
+
+В самом worktree (не в копиях-мутантах), нетронутое дерево, после коммита изменений:
+
+- `uv run --extra dev python -m pytest tests/ -q` → `2327 passed in 108.05s`.
+- `uv run --extra dev ruff check src/ tests/` → `All checks passed!`.
+
+## Коммит
+
+`68fa26d` — "docs+test(cb-147): declare golden's blindness to properties key order",
+на ветке `fix/t53-cb-147-declare-order-blindness`, единственный файл `tests/test_boundary.py`
+(+76 строк, чистое добавление — ни `dump_schema.py`, ни `mcp_schema.json`, ни сам механизм сравнения
+не менялись).
