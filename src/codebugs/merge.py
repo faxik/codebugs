@@ -770,6 +770,40 @@ def register_tools(mcp, conn_factory) -> None:
         with conn_factory() as conn:
             return abandon_session(conn, session_id)
 
+    # --- Read-only introspection (CB-107) ---
+    # Until these three, an MCP client could start, claim, merge and finish a
+    # session but could not see what was actually happening: whose session held
+    # the lock, or what its own claims were. Thin wrappers over the same
+    # functions the CLI has always called (merge-sessions/-status/-claims).
+
+    @mcp.tool()
+    def codemerge_sessions(status: str | None = None) -> list[dict[str, Any]]:
+        """List merge sessions with claim counts.
+
+        Args:
+            status: Filter by status ('active', 'merging', 'done', 'abandoned').
+                Omit for all sessions.
+        """
+        with conn_factory() as conn:
+            return get_sessions(conn, status=status)
+
+    @mcp.tool()
+    def codemerge_status() -> dict[str, Any]:
+        """Dashboard summary: session counts by status, total active claims,
+        and who (if anyone) holds the merge lock."""
+        with conn_factory() as conn:
+            return get_status(conn)
+
+    @mcp.tool()
+    def codemerge_claims(session_id: str) -> list[dict[str, Any]]:
+        """List all files a session has claimed, in claim order.
+
+        Args:
+            session_id: The merge session ID.
+        """
+        with conn_factory() as conn:
+            return get_claims(conn, session_id)
+
 
 register_tool_provider("merge", register_tools)
 
