@@ -106,6 +106,166 @@
     "name": "add"
   },
   {
+    "description": "Rebuild stored location anchors from the git object store. DRY RUN by default.\n\nThe sanctioned repair path: `meta.loc` is writable through\n`update_finding(meta_update=)` and NOTHING validates it there, so a\nhand-assembled object is accepted at the write and read back as\n`unknown(invalid_anchor)`. This verb builds the object itself, from the\nsame capture the file-time resolver uses.\n\nFour behaviours are specified rather than incidental. A FAILED capture\nnever replaces a valid stored anchor (outcome `kept`) \u2014 the refusal is\nusually about the environment, and the anchor it would destroy is still\ngood in a clone that has the history. The `loc: null` tombstone (\"do not\nrecapture\") is left alone unless `force_tombstone` says otherwise. The\ngit work runs outside any transaction, and only the version check and\nthe write share one \u2014 so a row whose anchor changed while the capture\nran is reported `stale` and left to the other writer.\n\nArgs:\n    finding_id: Repair one finding instead of a population\n    status: Status filter; \"all\" widens to every status (default: open)\n    category: Restrict to one category\n    file: Restrict to one file (the finding's `file` column)\n    project_dir: The repository to capture from. Omitting it makes every\n        capture refuse with `no_root`, which by the rule above leaves\n        every valid anchor untouched\n    apply: Write the rebuilt anchors (default: report only)\n    force_tombstone: Overwrite a `loc: null` tombstone\n    limit: Maximum findings examined (default 10000)\n",
+    "inputSchema": {
+      "properties": {
+        "apply": {
+          "default": false,
+          "title": "Apply",
+          "type": "boolean"
+        },
+        "category": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Category"
+        },
+        "file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File"
+        },
+        "finding_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Finding Id"
+        },
+        "force_tombstone": {
+          "default": false,
+          "title": "Force Tombstone",
+          "type": "boolean"
+        },
+        "limit": {
+          "default": 10000,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "project_dir": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project Dir"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "open",
+          "title": "Status"
+        }
+      },
+      "title": "anchor_recaptureArguments",
+      "type": "object"
+    },
+    "name": "anchor_recapture"
+  },
+  {
+    "description": "Resolve stored location anchors to their current lines on HEAD.\n\nEach anchored finding gets a record: `status` (current / moved /\nmoved_file / lost / ambiguous / unknown), the coordinate, the `channel`\nthat produced it (\"git\" for reverse blame, \"content\" for the secondary\ntext channel), a `reason` token when there is no answer, and\n`survived` as \"<n>/<m>\" when part of a span outlived the rest.\n\n`moved_file` is a status of its own, not `moved` with a different path:\nthe code left the file the finding names, and a consumer must see that\nrather than receive a line number in a file it never asked about.\n\nTHE SUMMARY'S DENOMINATOR IS `anchored`, NOT `total`. `anchored` counts\nthe rows that CARRY an anchor (a persisted refusal and the tombstone\nincluded); rows filed before anchors existed carry none and are counted\nin `without_anchor` instead. So a `moved_file` share is\n`summary[\"moved_file\"] / anchored`; computing it against `total` is a\nshare of a population the number does not describe.\n\nArgs:\n    finding_id: Resolve one finding instead of a population\n    status: Status filter; \"all\" widens to every status (default: open)\n    category: Restrict to one category\n    file: Restrict to one file (the finding's `file` column)\n    project_dir: The repository the anchors resolve against. Omitting it\n        reports `no_root` rather than reading whatever tree the server\n        process happens to stand in \u2014 a long-lived server's cwd has\n        nothing to do with the tracker a call is about\n    limit: Maximum findings examined (default 10000)\n",
+    "inputSchema": {
+      "properties": {
+        "category": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Category"
+        },
+        "file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File"
+        },
+        "finding_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Finding Id"
+        },
+        "limit": {
+          "default": 10000,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "project_dir": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project Dir"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "open",
+          "title": "Status"
+        }
+      },
+      "title": "anchor_resolveArguments",
+      "type": "object"
+    },
+    "name": "anchor_resolve"
+  },
+  {
     "description": "Record multiple finding observations at once (deduplicated by fingerprint).\n\nMembers are deduplicated exactly like `add` \u2014 including against each other,\nso two members sharing a fingerprint yield one insert plus one bump. One\nresult per input, in input order. Unknown member keys are refused.\n\nEach result carries the same discriminators `add` returns, and the same\nfour `dedup_action` values: \"created\", \"bumped\", \"reopened\" and\n\"recurrence_of_closed\", the last of which reports `was_new: true` because\nit files a NEW row linked to a dismissed twin via `meta.recurrence_of`.\n\nEach result also carries its OWN `attention` list \u2014 always present, often\nempty, never shared between members. Two record forms exist, in this\norder and at most once each:\n`{signal: severity_escalated, from, to}` on the `bumped` and `reopened`\nbranches, meaning that member's observation raised the stored finding's\nseverity; and `{signal: category_divergence, observed, stored}` on every\nbranch with a matched row (`bumped`, `reopened`, and the recurrence\nbranch, where the comparison is against the dismissed twin), meaning that\nmember does not NAME the matched finding's category. Both category sides\nare normalized, so a difference of spelling is not a signal; a stored\ncategory that is not text is skipped rather than raising.\n\nArgs:\n    findings: List of finding objects, each with keys:\n        severity, category, file, description, and optionally:\n        source, tags, meta, reported_at_commit, reported_at_ref, fingerprint\n    reported_at_commit: Default commit SHA for all findings (auto-detected if omitted).\n                        Per-finding values override this.\n    reported_at_ref: Default version label for all findings.\n                     Per-finding values override this.\n    new_category: Batch-wide permission to MINT categories the tracker\n                  does not hold yet (CB-60); the first member introducing\n                  a category is stamped meta.category_minted.\n",
     "inputSchema": {
       "properties": {

@@ -2384,6 +2384,69 @@ def grouping_candidates(
     return [dict(r) for r in rows]
 
 
+def anchor_candidates(
+    conn: sqlite3.Connection,
+    *,
+    finding_id: str | None = None,
+    status: str | None = None,
+    category: str | None = None,
+    file: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Candidate records for a location-anchor pass (loc.py, BT-7 Т-b).
+
+    The sanctioned read surface for ``loc.py``, and a third sibling of
+    ``similarity_candidates``/``grouping_candidates`` rather than a widening of
+    either: ``loc`` needs neither ``description`` nor ``tags`` and DOES need
+    ``reported_at_commit``, which neither sibling carries. The module-ownership
+    rule is the reason all three exist — no module outside this one may SELECT
+    from ``findings``, and ``loc.py`` is a zero-SQL extension whose licence to
+    exist is exactly that it never does.
+
+    ``meta_json`` is the STORED STRING and is never parsed here (CB-24
+    consequence 4). That is load-bearing for this caller specifically: the whole
+    read side of BT-7 is built to degrade rather than raise on a stored object
+    it does not like, and a row whose ``meta`` does not even parse must reach
+    the caller as a row it can report on, not as a ``JSONDecodeError`` that
+    aborts a batch of ten thousand.
+
+    Ordered ``created_at, id`` so a pass over the result is deterministic
+    despite whole-second timestamps. ``status``/``category``/``file`` are
+    FILTERS in this package's convention (``None`` and ``""`` mean "no filter");
+    the DEFAULT population — findings carry no anchor until one is captured, so
+    "no filter" is rarely what a caller wants — is chosen by the caller, not
+    here. ``finding_id`` restricts to one row and does NOT raise for an unknown
+    id: an accessor reports what is there, and the KeyError contract belongs to
+    ``get_finding``.
+    """
+    conditions: list[str] = []
+    params: list[Any] = []
+    if is_text_filter_active(finding_id):
+        conditions.append("id = ?")
+        params.append(finding_id)
+    if is_text_filter_active(category):
+        conditions.append("category = ?")
+        params.append(category)
+    if is_text_filter_active(file):
+        conditions.append("file = ?")
+        params.append(file)
+    if is_vocabulary_filter_active(status):
+        conditions.append("status = ?")
+        params.append(resolve_finding_status(status))
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    limit_sql = ""
+    if limit is not None:
+        limit_sql = "LIMIT ?"
+        params.append(limit)
+    rows = conn.execute(
+        f"SELECT id, category, file, status, created_at, reported_at_commit, "
+        f"meta AS meta_json FROM findings {where} "
+        f"ORDER BY created_at ASC, id ASC {limit_sql}",  # noqa: S608
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_finding(conn: sqlite3.Connection, finding_id: str) -> dict[str, Any]:
     """Fetch a single finding by ID. Raises KeyError if not found."""
     row = conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
