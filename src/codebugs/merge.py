@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import Field
 
 from codebugs import db
 from codebugs.types import MERGE_STATUSES, is_vocabulary_filter_active, utc_now
@@ -632,7 +634,7 @@ def register_tools(mcp, conn_factory) -> None:
         description: str = "",
         base_commit: str = "",
         repo_root: str = "",
-        allow_restart: bool = False,
+        allow_restart: Annotated[bool, Field(strict=True)] = False,
     ) -> dict[str, Any]:
         """Start a new merge session for a branch.
 
@@ -721,7 +723,7 @@ def register_tools(mcp, conn_factory) -> None:
     @mcp.tool()
     def codemerge_finish(
         session_id: str,
-        success: bool = True,
+        success: Annotated[bool, Field(strict=True)] = True,
     ) -> dict[str, Any]:
         """Finish a merge session and release the lock.
 

@@ -12,7 +12,9 @@ surface and owns MCP/CLI registration so the wire names stay frozen.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import Field
 
 from codebugs.milestones._schema import (  # noqa: F401
     AUTO_ROUTER_ACTOR,
@@ -346,7 +348,9 @@ def register_tools(mcp, conn_factory) -> None:
             return get_wip_status(conn, agent_id=agent_id)
 
     @mcp.tool()
-    def milestone_reconcile(apply: bool | int | str | None = False) -> dict[str, Any]:
+    def milestone_reconcile(
+        apply: Annotated[bool, Field(strict=True)] = False,
+    ) -> dict[str, Any]:
         """One-time repair (CB-107) for stream items whose source finding or
         requirement resolved before the status-change hook existed (CB-26).
         The hook keeps new resolutions in sync; this is the retroactive fix for
@@ -365,12 +369,11 @@ def register_tools(mcp, conn_factory) -> None:
                 an MCP client sends JSON over the wire, and Python's bool("0")
                 and bool("false") are both True, which would silently turn a
                 client's intended dry run into a write (CB-82's class of bug).
+                CB-151: strict typing refuses this at the pydantic boundary
+                before the tool body runs, closing the one hole the previous
+                union annotation + isinstance check left open (1.0/0.0 coerced
+                to a real bool before isinstance could see it).
         """
-        if not isinstance(apply, bool):
-            raise ValueError(
-                "apply must be a JSON boolean (true or false), not "
-                f"{type(apply).__name__} {apply!r}"
-            )
         with conn_factory() as conn:
             return reconcile_all(conn, apply=apply)
 
@@ -405,7 +408,7 @@ def register_tools(mcp, conn_factory) -> None:
     @mcp.tool(name="milestone_close")
     def _milestone_close(
         id: str,
-        force: bool = False,
+        force: Annotated[bool, Field(strict=True)] = False,
         reason: str = "",
     ) -> dict[str, Any]:
         """Close a release milestone. Refuses if items are unfinished, on a
