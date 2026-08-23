@@ -321,6 +321,22 @@ fi
 #   * more than one     -> refused: the tool mints one id per run. The count is
 #                          ACROSS families, not within one.
 #
+# THE MIRROR DIRECTION IS REFUSED TOO (CB-145). The formula above is
+# ONE-DIRECTIONAL: it only ever grows, because a staged count below HEAD's
+# clamps to nothing rather than going negative. Before CB-145 that made a
+# DELETED allocation line indistinguishable from an edit or a mention — the
+# `new empty` bucket above accepted all three. But a deletion returns a SPENT
+# number to circulation exactly as surely as skipping an annulled line would
+# (two paragraphs up): `max` is computed over every occurrence in HEAD, so
+# removing the occurrence with the highest number lowers `max`, and the next
+# mint reissues it. So this gate also computes the reverse multiset,
+# `allocation ids(HEAD) - allocation ids(staged)`, per family, and refuses
+# outright the moment ANY id's staged count is lower than HEAD's — before the
+# `new empty -> return 0` shortcut above can ever fire, since that shortcut is
+# exactly the state a deletion-only commit produces. An in-place edit and a
+# mention-only note both leave every id's count UNCHANGED on both sides, so
+# neither trips this; only a real drop in COUNT does.
+#
 # `max` is taken over EVERY id of the family, prose mentions and ANNULLED LINES
 # included, because that is the population the tool reads. A gate that were
 # cleverer than the tool and skipped an annulled line would disagree with it on
@@ -527,9 +543,27 @@ _cascade_mint_gate() {
         _salloc=$(_cascade_scan_or_refuse "${_alt}" "${_staged}" alloc "the staged" "${_label}")
         _halloc=$(_cascade_scan_or_refuse "${_alt}" "${_head}" alloc "HEAD's" "${_label}")
 
-        # MULTISET difference: an id already in the registry that acquires a
-        # SECOND allocation line is exactly collisions #2 and #3, so counting is
-        # what makes this gate see them.
+        # MULTISET difference over the UNION of ids on both sides (CB-145).
+        # Iterating _salloc alone (as this loop did before CB-145) can only
+        # ever find an id whose STAGED count is higher than HEAD's — a mint or
+        # a second allocation line. An id whose allocation line was DELETED
+        # never appears in _salloc at all once its last occurrence is gone, so
+        # that walk is structurally blind to a deletion: staged - HEAD is
+        # empty, _newtotal stays 0, and the gate returns 0 further down having
+        # never looked at the one thing that changed. Folding in _halloc's own
+        # ids restores it to the comparison even when staged has zero of them.
+        #
+        # An id already in the registry that acquires a SECOND allocation line
+        # (_cs > _ch) is exactly collisions #2 and #3; an id that LOSES one
+        # (_cs < _ch) is CB-145: the allocator's own `max` is taken over every
+        # occurrence in HEAD, so a number stays SPENT only as long as its
+        # allocation line survives, and deleting the line — the last one for
+        # that id, or one buried in the middle, either way — lets the next
+        # mint hand the same number out again. Neither branch fires on an
+        # in-place EDIT (the id's count is unchanged on both sides) or on a
+        # note that only MENTIONS a number (mode "alloc" never counted it to
+        # begin with), which is what keeps this from re-litigating the
+        # false-refusal cases the gate already had to solve.
         _seen=""
         while IFS= read -r _n || [[ -n "${_n}" ]]; do
             [[ -z "${_n}" ]] && continue
@@ -537,6 +571,18 @@ _cascade_mint_gate() {
             _seen="${_seen}|${_n}|"
             _cs=$(_cascade_count "${_n}" "${_salloc}")
             _ch=$(_cascade_count "${_n}" "${_halloc}")
+            if (( _cs < _ch )); then
+                _cascade_refuse \
+                    "this commit removes an allocation line for" \
+                    "'${_label}-${_n}' (${_ch} in HEAD's registry, only ${_cs}" \
+                    "staged)." \
+                    "An allocated number stays SPENT forever: the allocator's" \
+                    "own max is computed over every occurrence in HEAD, so" \
+                    "deleting its allocation line would let the next mint hand" \
+                    "'${_label}-${_n}' out a second time. Edit the line in" \
+                    "place, or add a note mentioning the number instead — do" \
+                    "not remove an allocation line."
+            fi
             if (( _cs > _ch )); then
                 _newtotal=$((_newtotal + _cs - _ch))
                 _display="${_display}${_label}-${_n} "
@@ -544,7 +590,7 @@ _cascade_mint_gate() {
                 _pending_label="${_label}"
                 _pending_id="${_n}"
             fi
-        done <<< "${_salloc}"
+        done <<< "$(printf '%s\n%s' "${_salloc}" "${_halloc}")"
     done
 
     if (( _newtotal == 0 )); then
