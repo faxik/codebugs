@@ -3371,6 +3371,22 @@ def register_tools(mcp, conn_factory) -> None:
         is skipped rather than raising. A newly created finding matched nothing,
         so it emits neither record.
 
+        `stripped_meta_keys` is a top-level list, ALWAYS present and often
+        empty, following the same discipline as `attention`: `[]` means
+        "checked, nothing to strip", never "no such channel". A `meta` key
+        that is identity machinery OUTPUT (e.g. `occurrences`, `recurrence_of`,
+        `category_minted`) is stripped from what gets stored rather than
+        refused, so a caller that copies a fetched card's `meta` forward
+        (`get` -> modify -> `add`) can tell, from this response alone, which
+        of its own keys silently did not land. `resolver_errors` is the one
+        exception: it reports a FAILURE state, not machinery input, so it is
+        REFUSED outright rather than stripped, on this path exactly as on
+        `update`'s `meta_update`. This is the ADD-side contract only — CSV
+        import strips the same dynamic reserved union but silently, with no
+        equivalent response key (a decided, separate contract, CB-51), and
+        `update`'s `meta_update` still refuses every reserved key rather than
+        stripping any of them.
+
         Args:
             severity: critical, high, medium, or low (case-insensitive, no aliases)
             category: Finding category (e.g. tz_naive_datetime, n_plus_one, missing_validation).
@@ -3461,6 +3477,16 @@ def register_tools(mcp, conn_factory) -> None:
         member does not NAME the matched finding's category. Both category sides
         are normalized, so a difference of spelling is not a signal; a stored
         category that is not text is skipped rather than raising.
+
+        Each result also carries its OWN `stripped_meta_keys` list — always
+        present, often empty, never shared between members — following the
+        same discipline: a `meta` key that is identity machinery OUTPUT (e.g.
+        `occurrences`, `recurrence_of`, `category_minted`) is stripped from
+        what gets stored rather than refused, and reported here so a caller
+        forwarding a fetched card's `meta` can tell which of its own keys
+        silently did not land. `resolver_errors` is refused outright instead
+        (a FAILURE state, not machinery input), on this path exactly as on
+        `add`.
 
         Args:
             findings: List of finding objects, each with keys:
