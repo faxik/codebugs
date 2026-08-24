@@ -434,3 +434,75 @@ class TestAttentionOverTheWire:
         assert res.structured_content["dedup_action"] == "bumped"
         assert res.structured_content["attention"] == [diverged]
         assert json.loads(res.content[0].text)["attention"] == [diverged]
+
+
+class TestStrippedMetaKeysOverTheWire:
+    """CB-160: `stripped_meta_keys` follows the `attention` discipline (BT-5) —
+    present UNCONDITIONALLY on every `add`/`batch_add` response — but until
+    this class nothing exercised it at the WIRE. The golden cannot gate a
+    response-shape key for the same reason `TestAttentionOverTheWire` names:
+    no `outputSchema` is snapshotted and the live schema carries
+    `additionalProperties: True`. Measured: dropping the key in the `add`/
+    `batch_add` MCP wrapper (never touching the domain layer, where ~14
+    existing tests would catch it) left the full suite green before this
+    class existed.
+    """
+
+    def _call(self, mcp, name, arguments):
+        async def go():
+            return await mcp.call_tool(name, arguments)
+
+        return asyncio.run(go())
+
+    def _member(self, description, meta=None):
+        member = {
+            "severity": "low",
+            "category": "bug",
+            "file": "a.py",
+            "description": description,
+        }
+        if meta is not None:
+            member["meta"] = meta
+        return member
+
+    def test_add_carries_stripped_meta_keys_in_both_wire_forms(self, tracker):
+        mcp, _ = _server_with_middleware(tracker)
+        res = self._call(mcp, "add", {**self._member("ordinary add"), "new_category": True})
+
+        assert res.structured_content["stripped_meta_keys"] == []
+        assert json.loads(res.content[0].text)["stripped_meta_keys"] == []
+
+    def test_add_reports_a_stripped_key_in_both_wire_forms(self, tracker):
+        mcp, _ = _server_with_middleware(tracker)
+        res = self._call(
+            mcp,
+            "add",
+            {
+                **self._member("meta carries a reserved key", meta={"occurrences": 1}),
+                "new_category": True,
+            },
+        )
+
+        assert res.structured_content["stripped_meta_keys"] == ["occurrences"]
+        assert json.loads(res.content[0].text)["stripped_meta_keys"] == ["occurrences"]
+        assert "occurrences" not in res.structured_content["meta"]
+
+    def test_batch_add_carries_stripped_meta_keys_in_both_wire_forms(self, tracker):
+        mcp, _ = _server_with_middleware(tracker)
+        res = self._call(
+            mcp,
+            "batch_add",
+            {
+                "findings": [
+                    self._member("plain member, nothing to strip"),
+                    self._member("member with a reserved key", meta={"occurrences": 1}),
+                ],
+                "new_category": True,
+            },
+        )
+
+        members = res.structured_content["result"]
+        assert members[0]["stripped_meta_keys"] == []
+        assert members[1]["stripped_meta_keys"] == ["occurrences"]
+        assert json.loads(res.content[0].text)["stripped_meta_keys"] == []
+        assert json.loads(res.content[1].text)["stripped_meta_keys"] == ["occurrences"]
