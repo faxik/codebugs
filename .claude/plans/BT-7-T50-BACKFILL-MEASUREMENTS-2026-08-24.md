@@ -305,3 +305,189 @@ autosorter
    AFTER      272 / 3355 =  8.11%
    gained     272 rows =  8.11 percentage points
 ```
+
+---
+
+## 5. Оракул §8 — мутанты, и почему числа Т-43 сохранились
+
+Каждый мутант применяется к `src/codebugs/loc.py`, прогоняется сьют, источник
+восстанавливается. Скрипт вложен ниже; его вывод — следом, дословно.
+
+| мутант | падает тестов (весь файл) | из них в `TestRecaptureFourPoints` |
+|---|---|---|
+| §3-1 арм тумбстоуна снова ключуется на `stored is None` | **9** | 0 |
+| §3-2 точка 2 применена к безъякорной строке | **2** | 0 |
+| §8-2 `include_unanchored` включён по умолчанию | **2** | 0 |
+| §8-3 backfill пишет без `apply=True` | **5** | 0 |
+| §8-5 CAS сравнивает только значение, не состояние | **1** | 0 |
+| Т-43: точка 2 снята целиком | **3** | **1** |
+| Т-43: CAS точки 4 снят целиком | **2** | **1** |
+
+**Ни один мутант не выжил.**
+
+**Про числа Т-43 — они не «сохранились как 2 и 1», они сохранились ПОИМЁННО, и это
+сильнее.** Приёмка Т-43 мерила «снятие т.2 → 2 failed, снятие CAS т.4 → 1 failed».
+Сегодня оба её теста падают ровно как падали:
+
+- т.2 снята → падают `test_point2_a_failed_capture_does_not_replace_a_valid_stored_anchor`
+  и `test_a_forced_tombstone_is_not_destroyed_by_a_failed_recapture` — те самые два
+  (второй живёт в `TestReadSideResiduals`, поэтому в колонке класса виден только один);
+  третий упавший — мой новый, добавленный, а не заместивший.
+- CAS снят → падает `test_point4_a_row_whose_anchor_moved_under_the_capture_is_left_alone` —
+  та самая одна; второй упавший мой.
+
+То есть защита не ослаблена ни в одной точке и в обеих строго расширена. Считать
+здесь надо имена, а не суммы: сумма выросла, и по одной сумме нельзя отличить
+«добавили тест» от «заменили тест».
+
+### Скрипт мутантов
+
+```python
+"""T-50 oracle S8: apply each mutant, run the suite, revert. Reports counts only."""
+import io, subprocess, sys
+
+P = "src/codebugs/loc.py"
+SRC = io.open(P, encoding="utf-8").read()
+
+ABSENT_ARM = '''        elif state == ANCHOR_ABSENT:'''
+TOMB_ARM_START = '''        elif stored is None and not force_tombstone:'''
+
+def mut_absent_arm_after_tombstone(s):
+    """S3 defect 1: the tombstone arm keyed on `stored is None` alone, so it
+    swallows every unanchored row. Reproduced by ordering it first."""
+    i = s.index(ABSENT_ARM)
+    j = s.index(TOMB_ARM_START)
+    k = s.index("        else:\n            fresh = _fresh_capture(row, project_dir)\n            # The tombstone", j)
+    absent_block, tomb_block = s[i:j], s[j:k]
+    return s[:i] + tomb_block + absent_block + s[k:]
+
+def mut_point2_on_absent(s):
+    """S3 defect 2: `had_anchor = stored is None or ...` makes point 2 protect an
+    anchor that does not exist -- the refusal comes back `kept`, token lost."""
+    old = '''            if not apply:
+                outcome = "would_backfill"'''
+    new = '''            if "skipped" in fresh and (stored is None or read_anchor(stored)[0] is not None):
+                outcome = "kept"
+            elif not apply:
+                outcome = "would_backfill"'''
+    assert s.count(old) == 1
+    return s.replace(old, new)
+
+def mut_default_on(s):
+    old = "    include_unanchored: bool = False,\n    limit: int | None = 10000,"
+    assert s.count(old) == 1
+    return s.replace(old, "    include_unanchored: bool = True,\n    limit: int | None = 10000,")
+
+def mut_apply_gate(s):
+    old = '''            if not apply:
+                outcome = "would_backfill"
+            else:'''
+    new = '''            if False:
+                outcome = "would_backfill"
+            else:'''
+    assert s.count(old) == 1
+    return s.replace(old, new)
+
+def mut_value_only_cas(s):
+    old = "        if state_now != was_state or now != stored:"
+    assert s.count(old) == 1
+    return s.replace(old, "        if now != stored:")
+
+def mut_drop_point2(s):
+    """T-43's own mutant: point 2 removed entirely."""
+    old = '''            if "skipped" in fresh and had_anchor:
+                outcome = "kept"  # point 2
+            elif fresh == stored:'''
+    new = '''            if fresh == stored:'''
+    assert s.count(old) == 1
+    return s.replace(old, new)
+
+def mut_drop_cas(s):
+    """T-43's own mutant: the point-4 compare-and-swap removed entirely."""
+    old = "        if state_now != was_state or now != stored:\n            return \"stale\"\n"
+    assert s.count(old) == 1
+    return s.replace(old, "")
+
+MUTANTS = [
+    ("S3-1  tombstone arm keyed on `stored is None`", mut_absent_arm_after_tombstone),
+    ("S3-2  point 2 applied to an unanchored row", mut_point2_on_absent),
+    ("S8-2  include_unanchored defaults to True", mut_default_on),
+    ("S8-3  backfill writes without apply=True", mut_apply_gate),
+    ("S8-5  CAS compares the value only, not the state", mut_value_only_cas),
+    ("T-43  point 2 removed", mut_drop_point2),
+    ("T-43  point-4 CAS removed", mut_drop_cas),
+]
+
+def run(node=None):
+    a = ["uv", "run", "--extra", "dev", "python", "-m", "pytest", "tests/test_loc.py", "-q"]
+    if node:
+        a += ["-k", node]
+    r = subprocess.run(a, capture_output=True, text=True)
+    tail = [ln for ln in r.stdout.strip().splitlines() if "passed" in ln or "failed" in ln or "error" in ln]
+    return tail[-1] if tail else "NO SUMMARY"
+
+def names(node=None):
+    a = ["uv", "run", "--extra", "dev", "python", "-m", "pytest", "tests/test_loc.py", "-q", "--tb=no", "-rf"]
+    if node:
+        a += ["-k", node]
+    r = subprocess.run(a, capture_output=True, text=True)
+    return sorted({ln.split("::")[-1].split()[0] for ln in r.stdout.splitlines() if ln.startswith("FAILED")})
+
+print("BASELINE (whole file):", run())
+print("BASELINE (TestRecaptureFourPoints):", run("TestRecaptureFourPoints"))
+print()
+for label, fn in MUTANTS:
+    try:
+        io.open(P, "w", encoding="utf-8").write(fn(SRC))
+        whole = run()
+        four = run("TestRecaptureFourPoints")
+        failed = names()
+        print(f"{label}\n    whole file: {whole}\n    TestRecaptureFourPoints: {four}\n    failing: {', '.join(failed) or 'NONE  <-- MUTANT SURVIVED'}\n")
+    finally:
+        io.open(P, "w", encoding="utf-8").write(SRC)
+print("restored:", run())
+```
+
+### Вывод, дословно
+
+```
+BASELINE (whole file): 141 passed in 2.57s
+BASELINE (TestRecaptureFourPoints): 10 passed, 131 deselected in 0.20s
+
+S3-1  tombstone arm keyed on `stored is None`
+    whole file: 9 failed, 132 passed in 2.73s
+    TestRecaptureFourPoints: 10 passed, 131 deselected in 0.19s
+    failing: test_a_backfilled_anchor_equals_what_the_file_time_seam_would_stamp, test_a_dry_run_backfill_opens_no_write_transaction_at_all, test_a_refused_backfill_is_recorded_with_its_token_never_kept, test_a_refused_backfill_stores_the_refusal_object_under_apply, test_an_absent_key_and_a_tombstone_get_different_outcomes_in_one_pass, test_apply_writes_the_anchor_and_the_row_gains_coordinates, test_include_unanchored_takes_them_and_reports_its_own_token, test_point4_a_row_that_acquired_a_tombstone_under_the_capture_is_stale, test_the_cli_verb_exposes_the_flag_and_forwards_it
+
+S3-2  point 2 applied to an unanchored row
+    whole file: 2 failed, 139 passed in 2.64s
+    TestRecaptureFourPoints: 10 passed, 131 deselected in 0.19s
+    failing: test_a_refused_backfill_is_recorded_with_its_token_never_kept, test_a_refused_backfill_stores_the_refusal_object_under_apply
+
+S8-2  include_unanchored defaults to True
+    whole file: 2 failed, 139 passed in 2.37s
+    TestRecaptureFourPoints: 10 passed, 131 deselected in 0.17s
+    failing: test_include_unanchored_is_off_by_default, test_the_default_cannot_see_a_row_that_never_carried_an_anchor
+
+S8-3  backfill writes without apply=True
+    whole file: 5 failed, 136 passed in 2.61s
+    TestRecaptureFourPoints: 10 passed, 131 deselected in 0.16s
+    failing: test_a_dry_run_backfill_opens_no_write_transaction_at_all, test_a_refused_backfill_is_recorded_with_its_token_never_kept, test_an_absent_key_and_a_tombstone_get_different_outcomes_in_one_pass, test_include_unanchored_takes_them_and_reports_its_own_token, test_the_cli_verb_exposes_the_flag_and_forwards_it
+
+S8-5  CAS compares the value only, not the state
+    whole file: 1 failed, 140 passed in 2.24s
+    TestRecaptureFourPoints: 10 passed, 131 deselected in 0.16s
+    failing: test_point4_a_row_that_acquired_a_tombstone_under_the_capture_is_stale
+
+T-43  point 2 removed
+    whole file: 3 failed, 138 passed in 2.41s
+    TestRecaptureFourPoints: 1 failed, 9 passed, 131 deselected in 0.19s
+    failing: test_a_forced_tombstone_is_not_destroyed_by_a_failed_recapture, test_a_refused_backfill_is_recorded_with_its_token_never_kept, test_point2_a_failed_capture_does_not_replace_a_valid_stored_anchor
+
+T-43  point-4 CAS removed
+    whole file: 2 failed, 139 passed in 2.52s
+    TestRecaptureFourPoints: 1 failed, 9 passed, 131 deselected in 0.20s
+    failing: test_point4_a_row_that_acquired_a_tombstone_under_the_capture_is_stale, test_point4_a_row_whose_anchor_moved_under_the_capture_is_left_alone
+
+restored: 141 passed in 2.43s
+```
