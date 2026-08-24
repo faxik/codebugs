@@ -815,7 +815,6 @@ register_tool_provider("merge", register_tools)
 def register_cli(sub, commands) -> None:
     """Register merge CLI subcommands."""
     import argparse
-    import sys
     from codebugs.fmt import format_table
 
     def _cmd_merge_sessions(args: argparse.Namespace) -> None:
@@ -858,13 +857,13 @@ def register_cli(sub, commands) -> None:
         print(f"Lock holder:        {s['lock_holder'] or '(none)'}")
 
     def _cmd_merge_abandon(args: argparse.Namespace) -> None:
+        from codebugs.cli import domain_errors
+
         conn = db.connect()
         try:
-            result = abandon_session(conn, args.session_id)
-            print(f"Abandoned: {result['session_id']}")
-        except (KeyError, ValueError) as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
+            with domain_errors():
+                result = abandon_session(conn, args.session_id)
+                print(f"Abandoned: {result['session_id']}")
         finally:
             conn.close()
 
