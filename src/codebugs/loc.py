@@ -1622,6 +1622,19 @@ def register_cli(sub, commands) -> None:
         help='override a `loc: null` tombstone ("do not recapture"), which is '
         "otherwise left alone",
     )
+    # A SEPARATE flag from --force-tombstone, deliberately. This one widens the
+    # POPULATION (rows that never carried an anchor); that one overrides an
+    # INSTRUCTION (`loc: null`). One flag for both would make "take the rows
+    # nobody anchored" the way to erase tombstones.
+    p_rec.add_argument(
+        "--include-unanchored",
+        action="store_true",
+        dest="include_unanchored",
+        help="also take rows whose meta carries no `loc` key at all — the "
+        "backfill population, skipped by default. Does NOT touch a `loc: null` "
+        "tombstone (that is --force-tombstone) and is still a dry run without "
+        "--apply",
+    )
 
     def _cmd_anchor_resolve(args) -> None:
         conn = db.connect()
@@ -1688,6 +1701,7 @@ def register_cli(sub, commands) -> None:
                 project_dir=args.repo,
                 apply=args.apply,
                 force_tombstone=args.force_tombstone,
+                include_unanchored=args.include_unanchored,
                 limit=args.limit,
             )
         # JSONDecodeError BEFORE ValueError, and here the hazard is real: on
@@ -1798,6 +1812,7 @@ def register_tools(mcp, conn_factory) -> None:
         project_dir: str | None = None,
         apply: bool = False,
         force_tombstone: bool = False,
+        include_unanchored: bool = False,
         limit: int = 10000,
     ) -> dict[str, Any]:
         """Rebuild stored location anchors from the git object store. DRY RUN by default.
@@ -1817,6 +1832,15 @@ def register_tools(mcp, conn_factory) -> None:
         the write share one — so a row whose anchor changed while the capture
         ran is reported `stale` and left to the other writer.
 
+        `include_unanchored` widens the POPULATION to rows that never carried an
+        anchor at all — every finding filed before the capture seam landed, since
+        capture runs only when a genuine new finding is filed. They report
+        `would_backfill`/`backfilled`, never folded into `would_update`/`updated`:
+        "acquired an anchor for the first time" is the number this exists to
+        produce. It is NOT `force_tombstone` (a `loc: null` tombstone is a key
+        that is present and null, and this flag never touches it) and it is NOT a
+        fingerprint backfill — nothing here reads or writes that column.
+
         Args:
             finding_id: Repair one finding instead of a population
             status: Status filter; "all" widens to every status (default: open)
@@ -1827,6 +1851,9 @@ def register_tools(mcp, conn_factory) -> None:
                 every valid anchor untouched
             apply: Write the rebuilt anchors (default: report only)
             force_tombstone: Overwrite a `loc: null` tombstone
+            include_unanchored: Also take rows carrying no `loc` key at all (the
+                backfill population). Leaves tombstones alone; still a dry run
+                unless `apply` is set
             limit: Maximum findings examined (default 10000)
         """
         with conn_factory() as conn:
@@ -1839,6 +1866,7 @@ def register_tools(mcp, conn_factory) -> None:
                 project_dir=project_dir,
                 apply=apply,
                 force_tombstone=force_tombstone,
+                include_unanchored=include_unanchored,
                 limit=limit,
             )
 
