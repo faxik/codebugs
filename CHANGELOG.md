@@ -21,6 +21,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   supplying one by hand is a separate, already-tracked gap (CB-6).
 
 ### Added
+- **`anchor-recapture` can now take rows that never carried a location anchor at all
+  (BT-7).** Anchor capture happens only when a genuinely new finding is filed, so every
+  card filed before that landed carries no anchor — and the repair pass could not reach
+  them: it skipped any row without one before it ever looked. `--include-unanchored` on
+  the CLI verb, `include_unanchored` on the MCP tool, widens the population to exactly
+  those rows. They are reported under their own outcome, `would_backfill` / `backfilled`,
+  and deliberately **not** folded into `would_update` / `updated`: "how many cards
+  acquired an anchor for the first time" is the number this exists to produce, and added
+  to "how many anchors were refreshed" it stops answering.
+
+  **Applying it stays a decision you make by hand.** As before, and as with the category
+  retro-fold, the pass is a **dry run by default** — without `--apply` no write
+  transaction is opened at all. This change ships the ability to see the number, not a
+  migration that runs itself. Nothing has been applied to any tracker.
+
+  **Three things it deliberately is not.** It is not a fingerprint backfill — a
+  fingerprint is a card's identity and re-keying is a separate, negotiated operation;
+  nothing here reads or writes that column. It is not `--force-tombstone`: a `loc: null`
+  tombstone means "do not recapture", it is a value someone wrote on purpose, and this
+  flag never touches it — merging the two would have made "take the rows nobody anchored"
+  the way to erase tombstones. And it does not weaken the existing guarantees: a failed
+  capture still never replaces a valid stored anchor, and a row whose anchor changed
+  while the pass was reading git is still left to whoever wrote it.
+
+  **A row whose `meta` column does not parse is counted, not touched** — reported as
+  `unreadable_meta`, because writing an anchor into it would rewrite a column the pass
+  could not read, and "eleven rows I refused to touch" is a different answer from
+  "nothing to report".
+
 - **The "fingerprint is held by a live card" refusal is now countable (BT-8).** When you
   re-open a `wont_fix` / `not_a_bug` card whose fingerprint a live recurrence already
   holds, the refusal is unchanged — same error, still naming the card that blocks you.

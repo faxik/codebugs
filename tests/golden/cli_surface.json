@@ -348,6 +348,22 @@
         ],
         "required": false,
         "type": null
+      },
+      {
+        "action_class": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "include_unanchored",
+        "help": "also take rows whose meta carries no `loc` key at all \u2014 the backfill population, skipped by default. Does NOT touch a `loc: null` tombstone (that is --force-tombstone) and is still a dry run without --apply",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--include-unanchored"
+        ],
+        "required": false,
+        "type": null
       }
     ],
     "has_handler": true

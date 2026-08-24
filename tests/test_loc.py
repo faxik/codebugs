@@ -1906,3 +1906,424 @@ class TestQuotedCodeLimit:
         anchor = _span_anchor(root, first, "a.py", 4, 8)
         at_head = (root / "b.md").read_text().split("\n")
         assert at_head[4:9] == anchor["text"]
+
+
+# --- the backfill population (BT-7 Т-c) -----------------------------------------------
+
+
+class TestBackfillPopulation:
+    """`include_unanchored` — the population the repair verb could not reach.
+
+    Anchor capture fires only in the resolver seam of a genuine new finding
+    (`finding_id is None and annotate`), so every row filed before that seam
+    landed carries no `loc` key at all, and `recapture_findings` skipped exactly
+    those rows before it ever captured. The measured gap on this tracker is in
+    the arithmetic note on the branch.
+
+    THE TRAP THESE TESTS EXIST FOR. `_stored_loc` collapsed two states into one
+    `None`: a key that is ABSENT (never anchored — this population) and a key
+    that is PRESENT and null (the `loc: null` tombstone, "do not recapture").
+    Two downstream predicates keyed on `stored is None`, and both would have lied
+    the moment the population widened — the first classifying every unanchored
+    row as `tombstoned` (a pass that reports zeros and calls it success), the
+    second setting `had_anchor=True` so point 2 would "protect" an anchor that
+    does not exist and report `kept` instead of an honest refusal token. A test
+    in which the absent key and the tombstone behave the SAME is vacuous here:
+    both the fixed and the broken code pass it. Hence one test per predicate,
+    and both put the two states in ONE pass.
+    """
+
+    def _repo(self, tmp_path, name="backfill_repo"):
+        root = _new_repo(tmp_path, name=name)
+        (root / "mod.py").write_text(_body())
+        return root, _commit(root, "init")
+
+    def _unanchored(self, conn, commit, *, fid, meta=None, file="mod.py"):
+        """A row exactly as it looked before the capture seam landed.
+
+        An explicit `finding_id` is an assertion of identity and bypasses the
+        whole observation machinery — dedup, the pre-add resolvers, the category
+        gate — so nothing stamps `meta.loc`. That is not a trick for the test: it
+        is the same predicate that left the real population unanchored.
+        """
+        findings.add_finding(
+            conn,
+            finding_id=fid,
+            severity="low",
+            category="anchor_backfill",
+            file=file,
+            description=f"a row filed before the capture seam landed ({fid})",
+            meta={"line": "4-6"} if meta is None else meta,
+            reported_at_commit=commit,
+        )
+        return fid
+
+    def _anchored(self, conn, commit, *, meta=None, project_dir=None):
+        """A row filed the ordinary way: the resolver stamps `meta.loc`."""
+        return findings.add_finding(
+            conn,
+            severity="low",
+            category="anchor_backfill",
+            file="mod.py",
+            description="a row filed AFTER the capture seam landed, with an anchor",
+            meta={"line": "4-6"} if meta is None else meta,
+            reported_at_commit=commit,
+            project_dir=project_dir,
+            new_category=True,
+        )["id"]
+
+    def _meta(self, conn, fid):
+        return findings.get_finding(conn, fid)["meta"]
+
+    # --- the gap, and that the default still declines to close it --------------------
+
+    def test_the_default_cannot_see_a_row_that_never_carried_an_anchor(
+        self, tmp_path, conn
+    ):
+        """The gap this unit exists for, and the guarantee the default keeps.
+
+        Widening the population had to be OPT-IN: `anchor-recapture` is the
+        sanctioned repair path and a caller who typed no new flag must get
+        today's behaviour, byte for byte.
+        """
+        root, first = self._repo(tmp_path)
+        anchored = self._anchored(conn, first, project_dir=str(root))
+        self._unanchored(conn, first, fid="PRE-1")
+        self._unanchored(conn, first, fid="PRE-2")
+
+        out = loc.recapture_findings(conn, status="all", project_dir=str(root))
+        assert out["total"] == 3, "the scan sees every row"
+        assert [r["finding_id"] for r in out["results"]] == [anchored], (
+            "the unanchored rows are not reachable without the flag"
+        )
+        assert out["summary"]["would_backfill"] == 0
+
+    def test_include_unanchored_takes_them_and_reports_its_own_token(
+        self, tmp_path, conn
+    ):
+        """`would_backfill` is NEVER folded into `would_update`. "How many rows
+        acquired an anchor for the first time" is the number the unit produces,
+        and added to "how many anchors were refreshed" it stops answering."""
+        root, first = self._repo(tmp_path)
+        self._anchored(conn, first, project_dir=str(root))
+        self._unanchored(conn, first, fid="PRE-1")
+        self._unanchored(conn, first, fid="PRE-2")
+
+        out = loc.recapture_findings(
+            conn, status="all", project_dir=str(root), include_unanchored=True
+        )
+        assert out["summary"]["would_backfill"] == 2
+        assert {
+            r["finding_id"] for r in out["results"] if r["outcome"] == "would_backfill"
+        } == {"PRE-1", "PRE-2"}
+        assert out["summary"]["tombstoned"] == 0, "an absent key is not a tombstone"
+
+    # --- §3 predicate 1: absent key vs tombstone ------------------------------------
+
+    def test_an_absent_key_and_a_tombstone_get_different_outcomes_in_one_pass(
+        self, tmp_path, conn
+    ):
+        """THE DISCRIMINATOR. Keyed on `stored is None` alone, the tombstone arm
+        swallows the whole backfill population and the pass reports zeros as
+        success — a gate that cannot fire, inside the unit built to fire it.
+
+        Both rows are in ONE pass on purpose: a test with only the absent key
+        cannot tell the fixed code from code that simply removed the tombstone
+        arm, and a test with only the tombstone never exercises the new state.
+        """
+        root, first = self._repo(tmp_path)
+        tomb = self._anchored(conn, first, project_dir=str(root))
+        findings.update_finding(conn, tomb, meta_update={"loc": None})
+        self._unanchored(conn, first, fid="PRE-1")
+
+        out = loc.recapture_findings(
+            conn, status="all", project_dir=str(root), include_unanchored=True
+        )
+        by_id = {r["finding_id"]: r["outcome"] for r in out["results"]}
+        assert by_id[tomb] == "tombstoned"
+        assert by_id["PRE-1"] == "would_backfill"
+        assert by_id[tomb] != by_id["PRE-1"], "the two states must not collapse"
+
+    def test_include_unanchored_does_not_override_the_tombstone(self, tmp_path, conn):
+        """Two flags, two questions. `include_unanchored` widens the POPULATION;
+        `force_tombstone` overrides an INSTRUCTION. Merged into one flag, "take
+        the rows nobody ever anchored" would become the way to erase a tombstone,
+        which is a different question with a different answer."""
+        root, first = self._repo(tmp_path)
+        tomb = self._anchored(conn, first, project_dir=str(root))
+        findings.update_finding(conn, tomb, meta_update={"loc": None})
+
+        out = loc.recapture_findings(
+            conn,
+            status="all",
+            project_dir=str(root),
+            include_unanchored=True,
+            apply=True,
+        )
+        assert out["results"][0]["outcome"] == "tombstoned"
+        assert self._meta(conn, tomb)["loc"] is None, "the instruction survived"
+
+    # --- §3 predicate 2: point 2 has nothing to protect on an unanchored row ---------
+
+    def test_a_refused_backfill_is_recorded_with_its_token_never_kept(
+        self, tmp_path, conn
+    ):
+        """`had_anchor = stored is None or ...` made point 2 "protect" an anchor
+        that does not exist: the row came back `kept`, which claims a valid
+        stored anchor was defended, and the Р8 token saying WHY coverage was not
+        gained never reached the caller. That token is the most valuable number
+        the arithmetic produces, so losing it silently is the expensive failure.
+
+        `project_dir=None` forces `no_root`, an environmental refusal — the exact
+        shape point 2 exists for on an ANCHORED row.
+        """
+        root, first = self._repo(tmp_path)
+        good = self._anchored(conn, first, project_dir=str(root))
+        self._unanchored(conn, first, fid="PRE-1")
+
+        out = loc.recapture_findings(
+            conn, status="all", project_dir=None, include_unanchored=True
+        )
+        by_id = {r["finding_id"]: r for r in out["results"]}
+        assert by_id["PRE-1"]["outcome"] == "would_backfill"
+        assert by_id["PRE-1"]["reason"] == "no_root", "the Р8 token reaches the caller"
+        # ...while point 2 is untouched where it DOES apply.
+        assert by_id[good]["outcome"] == "kept"
+
+    def test_a_refused_backfill_stores_the_refusal_object_under_apply(
+        self, tmp_path, conn
+    ):
+        """A refusal object is the honest record for a row that has none — and it
+        is byte-shaped like what the file-time resolver stamps on a new finding,
+        so the very next run can overwrite it once the environment can answer."""
+        root, first = self._repo(tmp_path)
+        self._unanchored(conn, first, fid="PRE-1")
+
+        out = loc.recapture_findings(
+            conn, status="all", project_dir=None, include_unanchored=True, apply=True
+        )
+        assert out["results"][0]["outcome"] == "backfilled"
+        stored = self._meta(conn, "PRE-1")["loc"]
+        assert stored["skipped"] == "no_root"
+        assert set(stored) == {"v", "skipped", "sites_dropped"}
+
+    # --- the write, and that it is the same anchor the seam would have made ----------
+
+    def test_apply_writes_the_anchor_and_the_row_gains_coordinates(
+        self, tmp_path, conn
+    ):
+        root, first = self._repo(tmp_path)
+        self._unanchored(conn, first, fid="PRE-1")
+        assert "loc" not in self._meta(conn, "PRE-1")
+
+        out = loc.recapture_findings(
+            conn,
+            status="all",
+            project_dir=str(root),
+            include_unanchored=True,
+            apply=True,
+        )
+        assert out["summary"]["backfilled"] == 1
+        assert out["summary"]["would_backfill"] == 0
+        stored = self._meta(conn, "PRE-1")["loc"]
+        assert "skipped" not in stored, stored
+        assert stored["commit"] == first
+
+    def test_a_backfilled_anchor_equals_what_the_file_time_seam_would_stamp(
+        self, tmp_path, conn
+    ):
+        """The whole argument for backfilling rather than re-filing: everything
+        the capture needs is already in the row, so the result is not an
+        approximation of the seam's output — it IS the seam's output. Pinned
+        because the two branches share `_fresh_capture` precisely so they cannot
+        drift into capturing from different observation shapes."""
+        root, first = self._repo(tmp_path)
+        live = self._anchored(conn, first, project_dir=str(root))
+        self._unanchored(conn, first, fid="PRE-1")
+
+        loc.recapture_findings(
+            conn,
+            status="all",
+            project_dir=str(root),
+            include_unanchored=True,
+            apply=True,
+        )
+        assert self._meta(conn, "PRE-1")["loc"] == self._meta(conn, live)["loc"]
+
+    # --- the dry-run gate ------------------------------------------------------------
+
+    def test_a_dry_run_backfill_opens_no_write_transaction_at_all(
+        self, tmp_path, conn, monkeypatch
+    ):
+        """`findings.normalize_categories` is the precedent (CB-61): without
+        `apply=True` no transaction is opened AT ALL, not merely no row written.
+        Asserting only "nothing changed" would pass against code that opens a
+        write transaction and rolls it back, which holds the write lock across
+        the whole pass for nothing."""
+        root, first = self._repo(tmp_path)
+        self._unanchored(conn, first, fid="PRE-1")
+
+        def forbidden(*a, **kw):
+            raise AssertionError("a dry run must not open a write transaction")
+
+        monkeypatch.setattr(loc.db, "txn", forbidden)
+        out = loc.recapture_findings(
+            conn, status="all", project_dir=str(root), include_unanchored=True
+        )
+        assert out["summary"]["would_backfill"] == 1
+        assert "loc" not in self._meta(conn, "PRE-1")
+
+    def test_include_unanchored_is_off_by_default(self, tmp_path, conn):
+        """The default is the compatibility guarantee, so it is pinned as a
+        DEFAULT and not only as behaviour: a mutant that flips it to True must
+        turn this red on the signature as well as on the pass."""
+        assert (
+            inspect.signature(loc.recapture_findings).parameters[
+                "include_unanchored"
+            ].default
+            is False
+        )
+        root, first = self._repo(tmp_path)
+        self._unanchored(conn, first, fid="PRE-1")
+        out = loc.recapture_findings(conn, status="all", project_dir=str(root))
+        assert out["results"] == []
+
+    def test_a_truthy_string_does_not_turn_a_write_flag_on(self, tmp_path, conn):
+        """CB-82: on a write path "not supplied" is `None`, never truthiness. All
+        three bools gate a WRITE — applying at all, overriding a tombstone,
+        widening the population — so `include_unanchored="false"` must refuse
+        rather than quietly evaluate true. Validated as ONE rule over the three,
+        because a per-argument guard is an enumeration the next bool would have
+        to re-acquire.
+
+        The LIST is derived from the signature and deliberately not written out
+        here (К-10). A hand-written triple is the same enumeration the guard
+        exists to avoid, one level up: the fourth bool added to this function
+        would silently fall outside it and this test would keep passing while
+        the hole it describes was open."""
+        params = inspect.signature(loc.recapture_findings).parameters
+        flags = [n for n, p in params.items() if isinstance(p.default, bool)]
+        assert set(flags) >= {"apply", "force_tombstone", "include_unanchored"}
+        for name in flags:
+            for value in ("false", "0", 1, []):
+                with pytest.raises(ValueError, match=name):
+                    loc.recapture_findings(conn, **{name: value})
+
+    # --- the rows that are in the population but are not candidates ------------------
+
+    def test_a_row_whose_meta_does_not_parse_is_counted_not_backfilled(
+        self, tmp_path, conn
+    ):
+        """It LOOKS unanchored from outside, so it is in the population — but
+        writing an anchor into it would rewrite a column this process could not
+        read. Counted rather than skipped in silence: "nothing to report" and
+        "eleven rows I refused to touch" are different answers, and only the
+        second tells the owner why coverage stopped where it did."""
+        root, first = self._repo(tmp_path)
+        self._unanchored(conn, first, fid="PRE-1")
+        conn.execute("UPDATE findings SET meta = ? WHERE id = ?", ("{not json", "PRE-1"))
+        conn.commit()
+
+        out = loc.recapture_findings(
+            conn,
+            status="all",
+            project_dir=str(root),
+            include_unanchored=True,
+            apply=True,
+        )
+        assert out["results"][0]["outcome"] == "unreadable_meta"
+        assert out["summary"]["would_backfill"] == 0
+        assert out["summary"]["backfilled"] == 0
+        row = conn.execute("SELECT meta FROM findings WHERE id = 'PRE-1'").fetchone()[0]
+        assert row == "{not json", "the column we could not read was not rewritten"
+
+    # --- point 4, read for a population that did not exist when it was written -------
+
+    def test_point4_a_row_that_acquired_a_tombstone_under_the_capture_is_stale(
+        self, tmp_path, conn
+    ):
+        """The compare-and-swap had to start comparing the anchor's STATE, not
+        only its value. Scanned as absent and tombstoned mid-capture, the row has
+        `now == stored` (both `None`) — so a value-only CAS writes straight
+        through the one instruction it was told never to touch. This is the
+        cheapest fixture that discriminates, and no value-based one can."""
+        root, first = self._repo(tmp_path)
+        self._unanchored(conn, first, fid="PRE-1")
+        real = loc.capture
+
+        def spy(observation):
+            findings.update_finding(conn, "PRE-1", meta_update={"loc": None})
+            return real(observation)
+
+        loc.capture = spy
+        try:
+            out = loc.recapture_findings(
+                conn,
+                status="all",
+                project_dir=str(root),
+                include_unanchored=True,
+                apply=True,
+            )
+        finally:
+            loc.capture = real
+        assert out["results"][0]["outcome"] == "stale"
+        assert self._meta(conn, "PRE-1")["loc"] is None, "the tombstone survived"
+
+    def test_the_new_tokens_are_in_the_closed_outcome_vocabulary(self):
+        """`summary` is `dict.fromkeys(RECAPTURE_OUTCOMES, 0)`, so a token that
+        is not declared there grows a key by accident on the first row that hits
+        it — and a caller reading a zero cannot tell "evaluated, none" from "this
+        pass has no such channel"."""
+        for token in ("would_backfill", "backfilled", "unreadable_meta"):
+            assert token in loc.RECAPTURE_OUTCOMES
+
+    # --- the surfaces: a capability nothing can reach is half a unit -----------------
+
+    def test_the_mcp_tool_declares_the_flag_to_its_clients(self):
+        """Read off the real `inputSchema` a client is served, not off the Python
+        signature: the schema is what an MCP caller can actually see, and
+        `install_strict_arguments` refuses any argument a tool does not declare —
+        so an undeclared parameter is not merely invisible, it is unusable."""
+        from tests._mcp_schema import collect_tool_schemas
+
+        tool = next(
+            t for t in collect_tool_schemas() if t["name"] == "anchor_recapture"
+        )
+        props = tool["inputSchema"]["properties"]
+        assert "include_unanchored" in props
+        assert props["include_unanchored"].get("default") is False
+        assert "force_tombstone" in props, "the two flags stay separate on the wire"
+
+    def test_the_cli_verb_exposes_the_flag_and_forwards_it(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """End to end through `cli.main`, because the handler is a closure
+        registered into the parser: only running the verb executes it, and a flag
+        declared on the parser but dropped on the call to `recapture_findings` is
+        exactly the failure `argparse` cannot catch."""
+        import sys as _sys
+
+        from codebugs import cli
+
+        project = tmp_path / "proj"
+        project.mkdir()
+        project = str(project)
+        db.init_project(project)
+        root, first = self._repo(tmp_path, name="cli_backfill_repo")
+        c = db.connect(project)
+        self._unanchored(c, first, fid="PRE-1")
+        c.close()
+
+        base = ["codebugs", "--tracker-root", project, "anchor-recapture",
+                "--status", "all", "--repo", str(root)]
+        monkeypatch.setattr(_sys, "argv", base)
+        cli.main()
+        without = capsys.readouterr().out
+        assert "PRE-1" not in without, "the default still declines the population"
+
+        monkeypatch.setattr(_sys, "argv", [*base, "--include-unanchored"])
+        cli.main()
+        with_flag = capsys.readouterr().out
+        assert "PRE-1" in with_flag
+        assert "would_backfill=1" in with_flag
+        assert "Dry run" in with_flag, "still a dry run without --apply"
