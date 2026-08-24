@@ -846,6 +846,47 @@ class TestRetriageCliContract:
         )
 
 
+class TestDomainErrorsOrderingPin:
+    """Direct pin for ``cli.domain_errors()``'s arm ORDER — CB-159.
+
+    Every CLI handler that touches a domain call routes it through
+    ``with domain_errors():`` (``cli.py``), and its two ``except`` arms must
+    stay in this order: ``json.JSONDecodeError`` re-raises unchanged FIRST,
+    and only then does a plain ``(ValueError, KeyError)`` arm print one line
+    and ``sys.exit(1)``. Reversing or collapsing the two loses the
+    distinction, because ``json.JSONDecodeError`` **is** a ``ValueError``
+    subclass — see ``domain_errors``'s own docstring and CLAUDE.md's Error
+    handling section.
+
+    ``TestRetriageCliContract::test_a_committed_write_is_never_reported_as_bad_input``
+    (above) already exercises this end to end, through the real ``update``
+    CLI verb and a corrupted database — it is a genuine pin, not vacuous
+    (confirmed by running the CB-159 mutant against it directly: removing the
+    ``except json.JSONDecodeError: raise`` arm turns exactly that test red,
+    5 of the class's 6 tests still pass). This class adds a second, MINIMAL
+    pin that exercises ``domain_errors()`` in isolation — no subprocess, no
+    database, no corrupted row — so a reader diagnosing an ordering
+    regression has one test that names the mechanism directly rather than
+    inferring it from a CLI round-trip.
+    """
+
+    def test_json_decode_error_propagates_unmodified(self):
+        from codebugs.cli import domain_errors
+
+        with pytest.raises(json.JSONDecodeError):
+            with domain_errors():
+                json.loads("{not json")
+
+    def test_plain_value_error_is_caught_and_exits_1(self, capsys):
+        from codebugs.cli import domain_errors
+
+        with pytest.raises(SystemExit) as exc:
+            with domain_errors(prefix="codebugs: "):
+                raise ValueError("bad input")
+        assert exc.value.code == 1
+        assert "codebugs: bad input" in capsys.readouterr().err
+
+
 class TestResolveStatus:
     def test_canonical_passthrough(self):
         for s in FINDING_STATUSES:
