@@ -446,7 +446,6 @@ def register_tools(mcp, conn_factory) -> None:
 def register_cli(sub, commands) -> None:
     """Register milestones CLI subcommands (flat domain-action pattern)."""
     import argparse
-    import sys
 
     from codebugs.fmt import format_table
 
@@ -473,13 +472,12 @@ def register_cli(sub, commands) -> None:
         print(format_table(data, ["id", "kind", "state", "target", "description"]))
 
     def _cmd_milestone_status(args: argparse.Namespace) -> None:
+        from codebugs.cli import domain_errors
         from codebugs.db import connect
         conn = connect()
         try:
-            status = get_milestone_status(conn, id=args.id)
-        except KeyError as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
+            with domain_errors():
+                status = get_milestone_status(conn, id=args.id)
         finally:
             conn.close()
         m = status["milestone"]
@@ -518,7 +516,9 @@ def register_cli(sub, commands) -> None:
                 milestone_id=args.milestone or None,
                 item_ref=args.item or None,
                 actor=args.actor or None,
-                limit=args.limit or 200,
+                # CB-124: `or 200` silently turned `--limit 0` into 200 rows.
+                # `argparse` gives None only when the flag is absent.
+                limit=args.limit if args.limit is not None else 200,
             )
         finally:
             conn.close()
@@ -560,7 +560,9 @@ def register_cli(sub, commands) -> None:
         from codebugs.db import connect
         conn = connect()
         try:
-            rows = triage_inbox(conn, limit=args.limit or 50)
+            # CB-124: `or 50` silently turned `--limit 0` into 50 rows.
+            # `argparse` gives None only when the flag is absent.
+            rows = triage_inbox(conn, limit=args.limit if args.limit is not None else 50)
         finally:
             conn.close()
         if not rows:
@@ -607,32 +609,27 @@ def register_cli(sub, commands) -> None:
     p.add_argument("--agent", help="Filter by agent id (default: all)")
 
     def _cmd_milestone_mark_branch(args: argparse.Namespace) -> None:
+        from codebugs.cli import domain_errors
         from codebugs.db import connect
         conn = connect()
         try:
-            item = mark_branch_only(
-                conn, item_ref=args.item_ref, branch_name=args.branch,
-            )
-        except KeyError as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
+            with domain_errors():
+                item = mark_branch_only(
+                    conn, item_ref=args.item_ref, branch_name=args.branch,
+                )
         finally:
             conn.close()
         print(f"branch-only: {item['item_ref']} @ {args.branch}")
 
     def _cmd_milestone_mark_integrated(args: argparse.Namespace) -> None:
+        from codebugs.cli import domain_errors
         from codebugs.db import connect
         conn = connect()
         try:
-            item = mark_integrated(
-                conn, item_ref=args.item_ref, commit=args.commit,
-            )
-        except KeyError as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
-        except ValueError as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
+            with domain_errors():
+                item = mark_integrated(
+                    conn, item_ref=args.item_ref, commit=args.commit,
+                )
         finally:
             conn.close()
         print(f"integrated: {item['item_ref']} @ {item['done_commit']}")
