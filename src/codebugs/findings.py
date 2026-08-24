@@ -2767,6 +2767,15 @@ def query_findings(
             f"SELECT {group_by} as group_key, COUNT(*) as count FROM findings {where} GROUP BY {group_by} ORDER BY count DESC",
             params,
         ).fetchall()
+        if resolve_anchors:
+            # CB-28: forward where a path exists, refuse only where none could.
+            # A grouped result has no rows to annotate, so nothing here can
+            # honour the argument, and ignoring it would return a success
+            # payload with the caller's request discarded.
+            raise ValueError(
+                "resolve_anchors is not available with group_by: a grouped result "
+                "carries counts, not findings, so there is nothing to annotate"
+            )
         return {"grouped": True, "group_by": group_by, "groups": [dict(r) for r in rows]}
 
     count = conn.execute(f"SELECT COUNT(*) as c FROM findings {where}", params).fetchone()["c"]
@@ -2919,13 +2928,24 @@ def recent_findings(
         f"SELECT * FROM findings {where} ORDER BY updated_at DESC, rowid DESC LIMIT ? OFFSET ?",
         [*params, limit, offset],
     ).fetchall()
+    found = [db.row_to_dict(r) for r in rows]
+    # The anchor summary is carried here too, and CHEAPLY — never resolved, and
+    # with no flag to turn resolution on. Two reasons, and the first is this
+    # package's own doctrine: `recent` returns the same rows from the same table
+    # through the same surface as `query`, so a key present on one and absent on
+    # the other teaches a reader to test for presence, at which point presence
+    # encodes a second fact (review found the asymmetry). The second is that
+    # `recent` answers "what changed", not "where is it" — a caller who wants
+    # coordinates has `get` for one card and `query(resolve_anchors=True)` for a
+    # page, and a third resolving surface would be a third place to keep honest.
+    _enrich_read(found, conn, resolve=False, project_dir=None)
     return {
         "total": count,
         "limit": limit,
         "offset": offset,
         "since": since_value,
         "status": status_value,
-        "findings": [db.row_to_dict(r) for r in rows],
+        "findings": found,
     }
 
 
@@ -4158,7 +4178,14 @@ def register_cli(sub, commands) -> None:
                 format_table(
                     data,
                     columns,
-                    max_widths={"description": 50, "file": 40, "category": 20},
+                    # The narrower widths are the COST of the extra column and
+                    # must not be paid by a caller who did not ask for it —
+                    # review caught this applying to every `codebugs query`.
+                    max_widths=(
+                        {"description": 50, "file": 40, "category": 20}
+                        if args.resolve_anchors
+                        else {"description": 60, "file": 40, "category": 25}
+                    ),
                 )
             )
             print(f"\n{result['total']} finding(s) total.")
@@ -4585,8 +4612,12 @@ def register_cli(sub, commands) -> None:
         ),
     )
     p.add_argument(
-        "--repo",
-        help="Repository to resolve anchors against (default: the tracker's own directory)",
+        "--anchor-repo",
+        dest="repo",
+        help=(
+            "Repository to resolve location anchors against (default: the tracker's own "
+            "directory). See `get --anchor-repo` for why this is not spelled --repo"
+        ),
     )
 
     p = sub.add_parser(
@@ -4633,8 +4664,13 @@ def register_cli(sub, commands) -> None:
         ),
     )
     p.add_argument(
-        "--repo",
-        help="Repository to resolve the anchor against (default: the tracker's own directory)",
+        "--anchor-repo",
+        dest="repo",
+        help=(
+            "Repository to resolve the location anchor against (default: the tracker's own "
+            "directory). NOT --repo: that name already means 'and also locate .codebugs/' "
+            "on this CLI's provenance verbs, and one flag with two meanings is a trap"
+        ),
     )
 
     p = sub.add_parser("stats", help="Cross-tabulated summary")

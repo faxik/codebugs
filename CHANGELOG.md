@@ -39,7 +39,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   whose capture LOOKED and had nothing to grab — on a live tracker that is the majority
   of the anchored population, so it matters that it is free too.
 
-  **The summary distinguishes four answers a reader needs to keep apart**, where before
+  **The summary distinguishes the answers a reader needs to keep apart**, where before
   there was one absent key: `absent` (no anchor was ever captured), `retracted` (the
   `loc: null` tombstone — someone said "do not anchor this"), `refused` (capture looked
   and found nothing to anchor to, with the token saying why), and `anchored`, which
@@ -52,14 +52,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   two answer neighbouring questions and are more useful together than apart: `file_status`
   says what became of the FILE, the anchor says where the reported LINES are now.
 
-  Under all of this is a new registry in `db.py`, `register_read_enricher` — the sixth of
+  Under all of this is a new registry in `db.py`, `register_read_enricher` — a member of
   its family and the first READING one, so it carries none of the writing seams'
   transaction machinery. `loc` registers itself into it, exactly as `similarity` registers
   into the pre-add resolver seam, and core never learns an extension's vocabulary. An
   enricher that fails cannot take down the read it was decorating, and its failure is
   reported IN THE RESPONSE (`{"state": "unavailable", "error": …}`) rather than only on
   stderr — a silently missing key would be indistinguishable from "this card has no
-  anchor", which is the exact conflation this whole design exists to end.
+  anchor", which is the exact conflation this whole design exists to end. That stamp is
+  built by the extension itself, so it has the SAME shape as a real summary — a narrower
+  failure object would make every consumer special-case exactly the path meant to be
+  survivable.
+
+  `recent` carries the summary too, always unresolved and with no flag: it answers "what
+  changed", not "where is it", and a key present on `query` but absent on `recent` would
+  teach a reader to test for presence. `query(group_by=…, resolve_anchors=True)` is
+  REFUSED rather than silently ignored — a grouped result carries counts, not findings,
+  so nothing there could honour the argument (CB-28).
 
 - **`anchor-recapture` can now take rows that never carried a location anchor at all
   (BT-7).** Anchor capture happens only when a genuinely new finding is filed, so every

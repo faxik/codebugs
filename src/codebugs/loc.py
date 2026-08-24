@@ -1165,15 +1165,24 @@ def _anchor_state(row: dict[str, Any]) -> tuple[str, Any]:
             return ANCHOR_UNREADABLE, None
     else:
         # An ordinary read path hands a row through `db.row_to_dict`, which has
-        # already parsed the column — so `ANCHOR_UNREADABLE` is unreachable from
-        # there BY CONSTRUCTION, because a malformed column raises inside
-        # `row_to_dict` before this function is ever called. Reading the parsed
+        # already parsed the column, so a column that does not PARSE raises
+        # there and never reaches this branch. `ANCHOR_UNREADABLE` is still
+        # reachable from here and an earlier draft of this comment claimed
+        # otherwise: `meta` holding a valid JSON scalar or array (`"a string"`,
+        # `[1, 2]`, `123`) parses fine and simply is not an object, which is a
+        # different fact from "does not parse" and is why the branch below tests
+        # the TYPE rather than trusting the parse. Reading the parsed
         # value here rather than re-serialising it is the point: two spellings
         # of "what counts as an anchor" is one drift away from the read side and
         # the repair side disagreeing about the same row.
-        meta = row.get("meta")
-        if meta is None:
-            meta = {}
+        # `row.get("meta", {})` and NOT `row.get("meta") or {}`: a stored JSON
+        # `null` parses to Python `None`, and mapping that to `{}` would call it
+        # "carries no anchor" while the `meta_json` branch above calls the same
+        # bytes `unreadable`. A default reached only when the KEY is missing
+        # keeps the two branches answering identically — the drift this
+        # docstring warns about, found by review inside the paragraph warning
+        # about it.
+        meta = row.get("meta", {})
     if not isinstance(meta, dict):
         return ANCHOR_UNREADABLE, None
     if "loc" not in meta:
@@ -1205,21 +1214,45 @@ class _Context(NamedTuple):
     root: str | None
     head: str | None
     repo: str | None
+    reason: str | None = None
 
 
 def _resolution_context(project_dir: str | None) -> _Context:
     """The per-tree half of a resolution. Costs up to three git calls, or none.
 
-    `project_dir is None` short-circuits before any process is spawned: BT-7 Р3
-    refuses ambient cwd, so there is nothing to look at and nothing to pay for.
+    An EMPTY `project_dir` short-circuits before any process is spawned, exactly
+    as `None` does: BT-7 Р3 refuses ambient cwd, so there is nothing to look at
+    and nothing to pay for, and both spellings mean "not supplied" on a write-ish
+    argument (CB-82). `reason` carries which of the two it was, so `_resolve_one`
+    reports `no_root` for both instead of calling an empty string a repository
+    that could not be identified.
+
+    **NEVER RAISES, and that had to be said in code rather than assumed.** `_git`
+    raises `TimeoutExpired` when the shared budget is spent, and `subprocess.run`
+    raises `OSError` of its own (EMFILE, ENOMEM, a git that is not executable —
+    CB-79's family). `resolve_anchor` converts all three into a record; this
+    function is a NEW subprocess site and review found it was the one place in
+    the module that did not. The cost of the omission was not local: the context
+    is built once for a whole PAGE, so one infrastructure hiccup escaped through
+    `summarize_rows` into the enricher's guard and rewrote every row's summary as
+    `unavailable` — including rows carrying no anchor at all, whose correct
+    answer needs no git and cannot be wrong. Degrading here keeps the failure
+    where it belongs: on the rows that actually asked for a resolution.
     """
     root = worktree_root(project_dir=project_dir) if project_dir else None
     if root is None:
-        return _Context(project_dir, None, None, None)
+        return _Context(
+            project_dir, None, None, None, "no_root" if not project_dir else "no_repo"
+        )
     budget = _Budget()
-    rc, out, _ = _git(root, ["rev-parse", "--verify", "HEAD^{commit}"], budget)
-    head = out.decode("ascii", "replace").strip() if rc == 0 else None
-    return _Context(project_dir, root, head, repo_identity(root, budget))
+    try:
+        rc, out, _ = _git(root, ["rev-parse", "--verify", "HEAD^{commit}"], budget)
+        head = out.decode("ascii", "replace").strip() if rc == 0 else None
+        return _Context(project_dir, root, head, repo_identity(root, budget))
+    except subprocess.TimeoutExpired:
+        return _Context(project_dir, root, None, None, "timeout")
+    except (subprocess.SubprocessError, OSError):
+        return _Context(project_dir, root, None, None, "internal_error")
 
 
 def _resolve_one(anchor: dict[str, Any], *, ctx: _Context) -> dict[str, Any]:
@@ -1230,14 +1263,8 @@ def _resolve_one(anchor: dict[str, Any], *, ctx: _Context) -> dict[str, Any]:
     spellings of one decision, and the two would answer differently the first
     time either learned something.
     """
-    if ctx.root is None:
-        return _record(
-            "unknown",
-            path=anchor["path"],
-            reason="no_root" if ctx.project_dir is None else "no_repo",
-        )
-    if ctx.head is None:
-        return _record("unknown", path=anchor["path"], reason="no_repo")
+    if ctx.root is None or ctx.head is None:
+        return _record("unknown", path=anchor["path"], reason=ctx.reason or "no_repo")
     return resolve_anchor(ctx.root, anchor, head=ctx.head, repo=ctx.repo, budget=_Budget())
 
 
@@ -1350,6 +1377,15 @@ SUMMARY_KEY = "anchor"
 #:                  anchored state (136 of 158 rows here), so it must read as an
 #:                  answer and not as a defect.
 #: * `anchored`   — real coordinates. THE ONLY STATE THAT MAY REACH GIT.
+#: * `unavailable` — the enricher itself did not produce an answer for this
+#:                  row. NOT a fact about the card, which is why it is a state
+#:                  and not a silence: the seam guarantees the key, and a reader
+#:                  must be able to tell "we could not look" from "there is
+#:                  nothing there". `db.run_read_enrichers` builds it through
+#:                  `unavailable_summary`, so it carries the SAME ten keys as
+#:                  every other summary — a two-key failure object would crash
+#:                  every consumer written against the documented shape, on
+#:                  exactly the path the seam exists to make survivable (review).
 SUMMARY_STATES: tuple[str, ...] = (
     "absent",
     "unreadable",
@@ -1357,6 +1393,7 @@ SUMMARY_STATES: tuple[str, ...] = (
     "retracted",
     "refused",
     "anchored",
+    "unavailable",
 )
 
 #: `read_anchor` reasons that mean "the object is broken" rather than "capture
@@ -1403,6 +1440,18 @@ def _summary(
         "end": resolution["end"] if resolution else None,
         "resolution": resolution,
     }
+
+
+def unavailable_summary(error: str | None) -> dict[str, Any]:
+    """The summary for a row this extension could not answer for.
+
+    Registered with the seam so `db.py` can stamp it without learning a single
+    one of this module's key names — the same reason `meta_keys` is declared by
+    the pre-add resolver rather than known by the runner.
+    """
+    summary = _summary("unavailable")
+    summary["error"] = error
+    return summary
 
 
 def classify_row(row: dict[str, Any]) -> tuple[str, dict[str, Any] | None, str | None]:
@@ -1491,7 +1540,13 @@ def enrich_findings(
     module's tables. The rows arrive already read.
     """
     del conn  # zero-SQL extension; the seam's signature requires the parameter
-    for row, summary in zip(rows, summarize_rows(rows, resolve=resolve, project_dir=project_dir)):
+    # `strict=True`: a length mismatch would truncate SILENTLY and the tail rows
+    # would then be filled with `unavailable` by the runner — a logic bug in this
+    # module reported to the reader as an infrastructure failure. Raising routes
+    # it into the seam's visible-failure path instead, which is what that path is
+    # for.
+    summaries = summarize_rows(rows, resolve=resolve, project_dir=project_dir)
+    for row, summary in zip(rows, summaries, strict=True):
         row[SUMMARY_KEY] = summary
 
 
@@ -2117,7 +2172,9 @@ db.register_pre_add_resolver(
     updatable_keys=("loc",),
 )
 
-db.register_read_enricher("loc.anchor", enrich_findings, key=SUMMARY_KEY)
+db.register_read_enricher(
+    "loc.anchor", enrich_findings, key=SUMMARY_KEY, fallback=unavailable_summary
+)
 
 db.register_tool_provider("loc", register_tools)
 db.register_cli_provider("loc", register_cli)

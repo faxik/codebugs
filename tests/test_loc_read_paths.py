@@ -405,6 +405,25 @@ class TestTheStatesAreNotCollapsed:
         assert anchor["state"] == "invalid"
         assert anchor["reason"] == "invalid_anchor"
 
+    def test_a_meta_column_that_parses_but_is_not_an_object_is_unreadable(self):
+        """Review falsified the docstring that used to sit above this branch:
+        `"a string"`, `[1, 2]` and `123` all PARSE, so `row_to_dict` does not
+        raise and the parsed branch is reached with a non-object. It is a
+        different fact from "carries no anchor" and must not read as one.
+        """
+        assert loc.classify_row({"meta": "a string"})[0] == "unreadable"
+        assert loc.classify_row({"meta": [1, 2]})[0] == "unreadable"
+        assert loc.classify_row({"meta": 123})[0] == "unreadable"
+
+    def test_the_two_column_shapes_agree_on_a_stored_json_null(self):
+        """The drift the reader's own docstring warns about: `meta` holding the
+        JSON literal `null` must not be `unreadable` through one branch and
+        `absent` through the other."""
+        assert loc.classify_row({"meta_json": "null"})[0] == "unreadable"
+        assert loc.classify_row({"meta": None})[0] == "unreadable"
+        # A row that carries no meta key at all is a different thing again.
+        assert loc.classify_row({})[0] == "absent"
+
     def test_every_state_in_the_closed_vocabulary_is_reachable_from_a_row(self):
         """`unreadable` is reachable only from a RAW row (the batch surface), and
         saying so here is what stops it being quietly dropped from the
@@ -423,6 +442,10 @@ class TestTheStatesAreNotCollapsed:
             "retracted",
             "refused",
             "anchored",
+            # Not produced by `classify_row` — it is the SEAM's answer for a row
+            # the extension could not answer for, and it belongs in the closed
+            # vocabulary precisely so a reader can tell it from a silence.
+            "unavailable",
         }
 
     def test_moved_file_is_none_and_never_false_when_nothing_was_checked(self, tracker):
@@ -444,7 +467,9 @@ class TestTheSeamFailsVisiblyAndNeverFatally:
     def _replace(monkeypatch, fn):
         entry = next(e for e in db._read_enrichers if e.name == "loc.anchor")
         monkeypatch.setattr(
-            db, "_read_enrichers", [db.ReadEnricher(entry.name, fn, entry.key)]
+            db,
+            "_read_enrichers",
+            [db.ReadEnricher(entry.name, fn, entry.key, entry.fallback)],
         )
 
     def test_an_enricher_that_raises_does_not_take_down_the_read(self, tracker, monkeypatch):
@@ -477,7 +502,18 @@ class TestTheSeamFailsVisiblyAndNeverFatally:
         anchor = findings.get_finding(conn, fid)["anchor"]
         assert anchor["state"] == "unavailable"
         assert "RuntimeError" in anchor["error"]
-        assert anchor["state"] not in loc.SUMMARY_STATES
+        # And it is a SUMMARY, not a second narrower object. An earlier draft
+        # asserted the opposite — that `unavailable` sat OUTSIDE the closed
+        # vocabulary — and review measured what that cost: the two-key dict made
+        # every consumer written against the documented ten-key shape raise
+        # `KeyError` on exactly the path this seam exists to make survivable.
+        assert anchor["state"] in loc.SUMMARY_STATES
+        assert set(anchor) == {
+            "state", "reason", "stored_path", "resolved", "loc_status",
+            "moved_file", "path", "line", "end", "resolution", "error",
+        }
+        assert anchor["resolved"] is False
+        assert anchor["moved_file"] is None
 
     def test_an_enricher_that_silently_skips_a_row_is_caught_too(self, tracker, monkeypatch):
         """A pass that returns normally without writing the key is the same lie
@@ -489,6 +525,7 @@ class TestTheSeamFailsVisiblyAndNeverFatally:
         anchor = findings.get_finding(conn, fid)["anchor"]
         assert anchor["state"] == "unavailable"
         assert "no summary" in anchor["error"]
+        assert anchor["loc_status"] is None
 
     def test_unregistering_the_extension_removes_the_summary_and_the_read_survives(
         self, tracker, monkeypatch
@@ -503,6 +540,55 @@ class TestTheSeamFailsVisiblyAndNeverFatally:
         assert "anchor" not in card
         assert card["id"] == fid
 
+    def test_a_per_tree_git_failure_does_not_rewrite_rows_that_asked_for_nothing(
+        self, tracker, monkeypatch
+    ):
+        """Review's finding, and the worst one it found: the tree context is
+        built ONCE for a whole page, so an unguarded failure there escaped into
+        the enricher's guard and stamped `unavailable` on EVERY row — including
+        rows carrying no anchor, whose correct answer needs no git and therefore
+        cannot be wrong. That is this design's own conflation, arriving through
+        the failure path.
+        """
+        import subprocess as sp
+
+        root, conn = tracker
+        anchored = _anchored(conn, root)[0]
+        bare = _anchored(conn, root)[0]
+        _strip_key(conn, bare)
+
+        def explode(root, args, budget):
+            raise sp.TimeoutExpired(cmd="git", timeout=2.0)
+
+        monkeypatch.setattr(loc, "_repo_ids", {})
+        monkeypatch.setattr(loc, "_git", explode)
+        page = findings.query_findings(conn, resolve_anchors=True, limit=100)
+        by_id = {f["id"]: f["anchor"] for f in page["findings"]}
+
+        # The row that asked for nothing keeps its real answer.
+        assert by_id[bare]["state"] == "absent"
+        assert by_id[bare]["reason"] is None
+        # The row that did ask gets a degraded RESOLUTION, not a degraded row.
+        assert by_id[anchored]["state"] == "anchored"
+        assert by_id[anchored]["loc_status"] == "unknown"
+        assert by_id[anchored]["reason"] == "timeout"
+
+    def test_an_os_level_failure_degrades_the_same_way(self, tracker, monkeypatch):
+        """`subprocess.run` raises `OSError` of its own — a git that is not
+        executable, EMFILE, ENOMEM. CB-79's family, and the reason the guard
+        catches the tree and not one errno."""
+        root, conn = tracker
+        fid = _anchored(conn, root)[0]
+
+        def explode(root, args, budget):
+            raise PermissionError("git is not executable")
+
+        monkeypatch.setattr(loc, "_repo_ids", {})
+        monkeypatch.setattr(loc, "_git", explode)
+        anchor = findings.get_finding(conn, fid)["anchor"]
+        assert anchor["state"] == "anchored"
+        assert anchor["reason"] == "internal_error"
+
     def test_registering_the_same_name_with_a_different_body_is_refused(self):
         """CB-15's shape at the seam level: a second implementation that never
         runs while its author believes it registered."""
@@ -515,8 +601,24 @@ class TestTheSeamFailsVisiblyAndNeverFatally:
 
     def test_re_registering_the_identical_contract_is_a_no_op(self):
         before = len(db._read_enrichers)
-        db.register_read_enricher("loc.anchor", loc.enrich_findings, key=loc.SUMMARY_KEY)
+        db.register_read_enricher(
+            "loc.anchor",
+            loc.enrich_findings,
+            key=loc.SUMMARY_KEY,
+            fallback=loc.unavailable_summary,
+        )
         assert len(db._read_enrichers) == before
+
+    def test_a_changed_fallback_is_a_changed_contract(self):
+        """The fallback decides what a reader sees when everything else failed,
+        so a silently replaced one is the same CB-15 shape as a replaced body."""
+        with pytest.raises(ValueError, match="never run"):
+            db.register_read_enricher(
+                "loc.anchor",
+                loc.enrich_findings,
+                key=loc.SUMMARY_KEY,
+                fallback=lambda error: {"state": "unavailable", "error": error},
+            )
 
     def test_the_seam_is_read_only_and_declares_it(self):
         """It writes nothing, so it inherits none of the writing seams'

@@ -1607,11 +1607,11 @@
         "default": null,
         "deprecated": false,
         "dest": "repo",
-        "help": "Repository to resolve the anchor against (default: the tracker's own directory)",
+        "help": "Repository to resolve the location anchor against (default: the tracker's own directory). NOT --repo: that name already means 'and also locate .codebugs/' on this CLI's provenance verbs, and one flag with two meanings is a trap",
         "metavar": null,
         "nargs": null,
         "option_strings": [
-          "--repo"
+          "--anchor-repo"
         ],
         "required": false,
         "type": null
@@ -2712,11 +2712,11 @@
         "default": null,
         "deprecated": false,
         "dest": "repo",
-        "help": "Repository to resolve anchors against (default: the tracker's own directory)",
+        "help": "Repository to resolve location anchors against (default: the tracker's own directory). See `get --anchor-repo` for why this is not spelled --repo",
         "metavar": null,
         "nargs": null,
         "option_strings": [
-          "--repo"
+          "--anchor-repo"
         ],
         "required": false,
         "type": null

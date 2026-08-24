@@ -483,12 +483,24 @@ class ReadEnricher:
     name: str
     fn: Callable[..., None]
     key: str
+    fallback: Callable[[str | None], dict[str, Any]] | None
 
 
 _read_enrichers: list[ReadEnricher] = []
 
 
-def register_read_enricher(name: str, fn: Callable[..., None], *, key: str) -> None:
+def _bare_unavailable(error: str | None) -> dict[str, Any]:
+    """The last-resort failure stamp for an enricher that declared no shape."""
+    return {"state": "unavailable", "error": error}
+
+
+def register_read_enricher(
+    name: str,
+    fn: Callable[..., None],
+    *,
+    key: str,
+    fallback: Callable[[str | None], dict[str, Any]] | None = None,
+) -> None:
     """Register an enricher for the ordinary finding read paths.
 
     `fn(conn, rows, *, resolve, project_dir)` annotates `rows` IN PLACE, writing
@@ -497,6 +509,16 @@ def register_read_enricher(name: str, fn: Callable[..., None], *, key: str) -> N
     still produce a summary, only a cheaper one — the cost asymmetry between
     `get` and `query` is the caller's decision to make, not the enricher's.
 
+    `fallback(error)` builds this enricher's summary for a row it could not
+    answer for, and it is DECLARED here for the same reason `key` is: the runner
+    must be able to stamp a failure in the extension's own vocabulary without
+    knowing a single one of its field names. Omitting it gets a two-key
+    `{"state": "unavailable", "error": …}`, which is honest but is a DIFFERENT
+    SHAPE from whatever the enricher normally writes — and review measured what
+    that costs: every consumer written against the documented summary raises
+    `KeyError` on exactly the path this seam exists to make survivable. An
+    enricher whose summary has a fixed key set should supply one.
+
     Same name-keyed discipline as its sibling registries so module re-import
     is a no-op, and the same refusal on a same-name re-registration that changes
     the CONTRACT (`fn` or `key`): a silently ignored implementation that never
@@ -504,7 +526,7 @@ def register_read_enricher(name: str, fn: Callable[..., None], *, key: str) -> N
     """
     for existing in _read_enrichers:
         if existing.name == name:
-            if existing.fn is not fn or existing.key != key:
+            if existing.fn is not fn or existing.key != key or existing.fallback is not fallback:
                 raise ValueError(
                     f"read enricher {name!r} already registered with a different "
                     f"function or key; a silently ignored implementation would never run"
@@ -515,7 +537,7 @@ def register_read_enricher(name: str, fn: Callable[..., None], *, key: str) -> N
             raise ValueError(
                 f"read-enricher key {key!r} already declared by enricher {existing.name!r}"
             )
-    _read_enrichers.append(ReadEnricher(name, fn, key))
+    _read_enrichers.append(ReadEnricher(name, fn, key, fallback))
 
 
 def run_read_enrichers(
@@ -537,8 +559,10 @@ def run_read_enrichers(
     "this row carries no anchor", and telling those two apart is the entire
     reason this seam exists. So the runner GUARANTEES the enricher's declared
     key is present on every row after the pass, and fills any it did not get
-    with `{"state": "unavailable", "error": <what went wrong>}`. stderr keeps its
-    line as the immediate channel; the response is the durable one.
+    through the enricher's own declared `fallback`, so the failure stamp has the
+    same SHAPE as a real summary rather than being a second, narrower object a
+    consumer must special-case. stderr keeps its line as the immediate channel;
+    the response is the durable one.
 
     `_ensure_modules_loaded()` first, for the pre-add resolver's reason: which
     extensions are registered must not depend on which modules this process
@@ -552,12 +576,16 @@ def run_read_enrichers(
         except Exception as e:  # noqa: BLE001 — a read must survive its decoration
             error = f"{type(e).__name__}: {e}"[:500]
             sys.stderr.write(f"[read enricher '{enricher.name}' failed] {e}\n")
+        build = enricher.fallback or _bare_unavailable
         for row in rows:
-            if enricher.key not in row:
-                row[enricher.key] = {
-                    "state": "unavailable",
-                    "error": error or "enricher produced no summary for this row",
-                }
+            if enricher.key in row:
+                continue
+            reason = error or "enricher produced no summary for this row"
+            try:
+                row[enricher.key] = build(reason)
+            except Exception as e:  # noqa: BLE001 — the guard may not have a guard
+                sys.stderr.write(f"[read enricher '{enricher.name}' fallback failed] {e}\n")
+                row[enricher.key] = _bare_unavailable(reason)
 
 
 def connection_root(conn: sqlite3.Connection) -> str | None:

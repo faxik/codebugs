@@ -664,6 +664,25 @@ def _effective_commit(f: dict[str, Any]) -> Any:
     return f.get("reported_at_commit")
 
 
+def _anchor_root(cwd: str | None) -> str | None:
+    """The tree this function's ANCHOR half must speak about.
+
+    Deliberately `cwd` — what `file_status` already resolves against — and NOT
+    the package's usual read-path default of `db.connection_root`. The two are
+    the same tree in the ordinary case, and when they are not, mixing them puts
+    two repositories in ONE record: review reproduced `file_status: unknown`
+    computed in the ambient cwd sitting beside `anchor: current` computed in the
+    tracker's own repository, with only the nested `resolved_against.root`
+    disclosing the split. A record that answers about one tree is worth more
+    than a record whose halves are each individually defensible, and the anchor
+    half fails CLOSED on a wrong tree anyway — the stored `repo` identity turns
+    it into `unknown(repo_mismatch)` rather than a confident wrong answer, which
+    is exactly the guard BT-7 Р3's ambient-cwd refusal exists to substitute for
+    where no such identity is available.
+    """
+    return cwd
+
+
 def check_findings(
     conn: sqlite3.Connection,
     project_dir: str | None = None,
@@ -716,7 +735,7 @@ def check_findings(
         narrowed = findings.query_findings(
             conn,
             resolve_anchors=resolve_anchors,
-            project_dir=project_dir,
+            project_dir=_anchor_root(cwd),
             id=finding_id,
             status=status if types.is_vocabulary_filter_active(status) else None,
             category=category,
@@ -739,12 +758,7 @@ def check_findings(
         result = findings.query_findings(
             conn,
             resolve_anchors=resolve_anchors,
-            # The RAW argument, not `cwd`: when it is None the root falls
-            # through to `db.connection_root`, so every read path in the
-            # package resolves anchors against one coordinate rather than each
-            # inventing its own. `cwd` here is deliberately ambient and BT-7 Р3
-            # refuses ambient for anchors.
-            project_dir=project_dir,
+            project_dir=_anchor_root(cwd),
             **query_kwargs,
         )
         findings_list = result["findings"]
