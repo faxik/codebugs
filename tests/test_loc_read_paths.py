@@ -201,6 +201,15 @@ class _GitCounter:
         """
         return sum(1 for c in self.calls if list(c[: len(argv)]) == list(argv))
 
+    def containing(self, token: str) -> int:
+        """Calls carrying `token` ANYWHERE in argv.
+
+        Needed because `blame` is invoked as `-c core.quotePath=false blame …`,
+        so a prefix test for it can never match and would be a pin that is green
+        against every possible implementation.
+        """
+        return sum(1 for c in self.calls if token in c)
+
 
 @pytest.fixture()
 def counter(monkeypatch):
@@ -730,3 +739,54 @@ class TestTheCliVerbsForwardTheFlag:
         assert counter.n > 0
         assert "loc" in resolved.split("\n")[0]
         assert "current" in resolved
+
+
+# --- 6. staleness_check, the conditional half of the unit ------------------------------
+
+
+class TestStalenessCarriesTheAnchorToo:
+    """§5's condition was MET, so the path was built rather than deferred.
+
+    `check_findings` already reads its rows through `findings.query_findings`,
+    so the summary arrives through the same seam and no new inter-module
+    dependency was introduced — which mattered, because `loc` imports
+    `provenance` and the reverse import would be a cycle.
+    """
+
+    def test_a_record_says_what_became_of_the_file_and_where_the_lines_went(self, tracker):
+        from codebugs import provenance
+
+        root, conn = tracker
+        fid = _file(
+            conn,
+            root,
+            meta={"line": 4},
+            description="a staleness question about a card whose file is about to move",
+        )
+        _git(root, "mv", "f.py", "renamed.py")
+        _git(root, "commit", "-qm", "move")
+
+        report = provenance.check_findings(conn, str(root), resolve_anchors=True)
+        record = next(r for r in report["findings"] if r["finding_id"] == fid)
+        # The two answer NEIGHBOURING questions, which is the reason to carry both.
+        assert record["file_status"] in ("renamed", "deleted", "modified")
+        assert record["anchor"]["loc_status"] == "moved_file"
+        assert record["anchor"]["path"] == "renamed.py"
+
+    def test_the_cheap_half_is_there_without_the_flag(self, tracker, counter):
+        from codebugs import provenance
+
+        root, conn = tracker
+        _anchored(conn, root, n=2)
+        counter.calls.clear()
+        report = provenance.check_findings(conn, str(root))
+        # `file_status` spends git of its own, so this is NOT a zero-cost claim;
+        # what it pins is that no ANCHOR resolution happened.
+        assert counter.containing("blame") == 0, counter.calls
+        # The counter's own sanity: a resolving run DOES reach blame, so the
+        # zero above is a fact about the flag and not about the matcher.
+        counter.calls.clear()
+        provenance.check_findings(conn, str(root), resolve_anchors=True)
+        assert counter.containing("blame") > 0, counter.calls
+        assert all(r["anchor"]["state"] == "anchored" for r in report["findings"])
+        assert all(r["anchor"]["resolved"] is False for r in report["findings"])

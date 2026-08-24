@@ -8,7 +8,9 @@ import sqlite3
 import stat
 import subprocess
 import sys
-from typing import Any, NamedTuple
+from typing import Annotated, Any, NamedTuple
+
+from pydantic import Field
 
 from codebugs import db, findings, types
 
@@ -670,6 +672,7 @@ def check_findings(
     status: str | None = None,
     category: str | None = None,
     file: str | None = None,
+    resolve_anchors: bool = False,
 ) -> dict[str, Any]:
     """Batched staleness check across findings. Caches per (file, checked commit).
 
@@ -680,6 +683,20 @@ def check_findings(
     `reported_at_commit` stays the first report.
 
     Filters forward to findings.query_findings; default status is 'open'.
+
+    Each record also carries the finding's ``anchor`` summary, which answers a
+    NEIGHBOURING question rather than the same one: ``file_status`` says what
+    happened to the FILE, the anchor says where the reported LINES are now. A
+    ``renamed`` file plus ``loc_status: moved_file`` is one story; a ``renamed``
+    file whose anchor is ``lost`` is a different one.
+
+    That summary arrives through the read-enricher seam because this function
+    already reads its rows through ``findings.query_findings`` — no new
+    inter-module dependency was needed, which is the condition under which this
+    path was in scope at all (``loc`` imports ``provenance``, so the reverse
+    import would be a cycle). ``resolve_anchors`` is OFF by default: this query
+    permits ten thousand rows and already spends git per file, so the resolution
+    is opt-in exactly as it is on ``query``.
     """
     cwd = project_dir or _ambient_cwd()
 
@@ -693,6 +710,8 @@ def check_findings(
         findings.get_finding(conn, finding_id)  # raises KeyError on an unknown id
         narrowed = findings.query_findings(
             conn,
+            resolve_anchors=resolve_anchors,
+            project_dir=project_dir,
             id=finding_id,
             status=status if types.is_vocabulary_filter_active(status) else None,
             category=category,
@@ -712,7 +731,17 @@ def check_findings(
             query_kwargs["category"] = category
         if file:
             query_kwargs["file"] = file
-        result = findings.query_findings(conn, **query_kwargs)
+        result = findings.query_findings(
+            conn,
+            resolve_anchors=resolve_anchors,
+            # The RAW argument, not `cwd`: when it is None the root falls
+            # through to `db.connection_root`, so every read path in the
+            # package resolves anchors against one coordinate rather than each
+            # inventing its own. `cwd` here is deliberately ambient and BT-7 Р3
+            # refuses ambient for anchors.
+            project_dir=project_dir,
+            **query_kwargs,
+        )
         findings_list = result["findings"]
 
     current_head = db.git_rev_parse("HEAD", silent=True, cwd=cwd)
@@ -752,6 +781,11 @@ def check_findings(
                 "reported_at_commit": f.get("reported_at_commit"),
                 "checked_commit": effective,
                 "current_head": current_head,
+                # Present unconditionally while an enricher is registered, `None`
+                # otherwise — the same rule the summary itself follows, because a
+                # key that appears only sometimes teaches a reader to test for
+                # presence and presence then encodes a second fact.
+                "anchor": f.get("anchor"),
             }
         )
 
@@ -881,6 +915,7 @@ def register_tools(mcp, conn_factory) -> None:
         status: str | None = None,
         category: str | None = None,
         file: str | None = None,
+        resolve_anchors: Annotated[bool, Field(strict=True)] = False,
     ) -> dict[str, Any]:
         """Check if findings are stale by comparing against git history.
 
@@ -908,10 +943,22 @@ def register_tools(mcp, conn_factory) -> None:
             status: Filter by finding status (default: open)
             category: Filter by category
             file: Filter by file path (substring match)
+            resolve_anchors: Also resolve each finding's location anchor against
+                    HEAD, so a record says where the reported LINES are now and
+                    not only what became of the file. OFF by default: this query
+                    permits ten thousand rows and already spends git per file.
+                    Every record carries the cheap half of the summary either
+                    way — whether the card has an anchor at all.
         """
         with conn_factory() as conn:
             return check_findings(
-                conn, None, finding_id=finding_id, status=status, category=category, file=file
+                conn,
+                None,
+                finding_id=finding_id,
+                status=status,
+                category=category,
+                file=file,
+                resolve_anchors=resolve_anchors,
             )
 
 
