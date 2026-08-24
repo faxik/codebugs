@@ -468,9 +468,12 @@ def run_pre_add_resolvers(
 class ReadEnricher:
     """A registered read enricher: annotates rows a domain read is about to return.
 
-    The SIXTH member of this file's registry family and deliberately the first
-    READING one, so half the older contract does not apply and copying it would
-    be cargo. It writes nothing, so there is no transaction to be inside, no
+    A member of this file's registry family and deliberately the first READING
+    one, so half the older contract does not apply and copying it would be
+    cargo. (No ordinal here on purpose: the brief that specified this seam said
+    "five registries" above a list of six, which is this repository's own lesson
+    about counts in prose arriving on the very sentence that introduces the
+    seventh one. `tests/test_registry.py` is where a count belongs.) It writes nothing, so there is no transaction to be inside, no
     savepoint, no nonce and no never-commit rule to enforce. What it does share
     with `PreAddResolver` is the shape that keeps core ignorant of an
     extension's vocabulary: `key` is DECLARED at registration exactly as
@@ -495,7 +498,7 @@ def register_read_enricher(name: str, fn: Callable[..., None], *, key: str) -> N
     still produce a summary, only a cheaper one — the cost asymmetry between
     `get` and `query` is the caller's decision to make, not the enricher's.
 
-    Same name-keyed discipline as the other five registries so module re-import
+    Same name-keyed discipline as its sibling registries so module re-import
     is a no-op, and the same refusal on a same-name re-registration that changes
     the CONTRACT (`fn` or `key`): a silently ignored implementation that never
     runs while its author believes it registered is CB-15's failure shape.
