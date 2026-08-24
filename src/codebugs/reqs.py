@@ -15,6 +15,7 @@ from codebugs.types import (
     resolve_priority,
     resolve_requirement_status,
     utc_now,
+    validate_batch_payload,
 )
 
 
@@ -137,7 +138,15 @@ def batch_add_requirements(
     conn: sqlite3.Connection,
     requirements: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Add multiple requirements. Returns list of created requirements."""
+    """Add multiple requirements. Returns list of created requirements.
+
+    Raises ``ValueError`` (this package's contract for invalid input) if
+    ``requirements`` is not a list of objects — CB-80. Checked BEFORE anything
+    is read from a member: a ``str`` payload is iterable, so a check that only
+    tests each iterated element would still walk its CHARACTERS rather than
+    stop at the boundary; see ``types.validate_batch_payload``.
+    """
+    requirements = validate_batch_payload(requirements, label="requirements")
     now = utc_now()
     ids = []
     for r in requirements:
