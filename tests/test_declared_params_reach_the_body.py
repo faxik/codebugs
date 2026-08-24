@@ -52,14 +52,23 @@ contains none today.
 
 `_call_arg_names` is the stronger RATCHET and it is the one that needs
 `ASSEMBLED_BY_THE_WRAPPER` below, because §3 of this unit's brief is right: not
-every parameter is OBLIGED to reach the domain call. Five do not, all because the
-wrapper ASSEMBLES the value into a different argument. A parameter merely
-RENAMED at the boundary (`cap = capacity or {...}`) still satisfies the ratchet,
-because the ratchet asks whether the value reaches a call at all and not whether
-it kept its name -- the naive "passed as `name=name`" predicate has 22 violations
-here, nearly all of them parameters passed POSITIONALLY, and declaring 22 rows of
-amnesty for a spelling difference would make the table exactly the place defects
-hide. That measurement is why the middle predicate is the one that earns a table.
+every parameter is OBLIGED to reach the domain call. Four do not, all because the
+wrapper ASSEMBLES the value into a different argument -- a payload it rebuilds, a
+dict it fills in.
+
+It resolves ONE local rebinding, which is what keeps a pure RENAME out of the
+table: `cap = capacity or {...}` followed by `capacity=cap` satisfies the ratchet
+with no row at all. That is not a convenience. A ratchet that demands a declared
+exception for a rename is friction carrying no information, and this repository's
+own lesson is that such a gate gets turned off by the first person it obstructs --
+so the cheap, common, provably-fine shape must pass silently and only the shapes
+where forwarding is genuinely invisible at the boundary should cost a line of
+prose. Two hops, a subscript store or a loop target still cost one.
+
+The naive alternative -- "passed as `name=name`" -- was measured and REJECTED: it
+has 22 violations here, nearly all of them parameters passed POSITIONALLY, and
+declaring 22 rows of amnesty for a difference of spelling would make the table
+exactly the place defects hide.
 
 WHAT `surfacegen` CONTRIBUTES, and why it is not 13 more rows. An emitted tool's
 body is `calls(conn, **bound.arguments)` or `manual(conn_factory, **bound.arguments)`
@@ -122,13 +131,6 @@ ASSEMBLED_BY_THE_WRAPPER: dict[tuple[str, str], str] = {
         "CB-157: assembled into the `meta` dict (`meta['linked_frs']`), which "
         "is what `add_milestone_item` receives. `pull_next` eligibility reads "
         "it back out of meta, so the value really does reach the domain."
-    ),
-    ("pull_next", "capacity"): (
-        "CB-157: receives its default at the boundary (`cap = capacity or "
-        "{'large': 1, 'small': 2, 'triage': 5}`) and is then forwarded as "
-        "`capacity=cap`. The RENAME alone would not need a row; the row exists "
-        "because the defaulting expression, not the bare name, is what is "
-        "passed."
     ),
 }
 
@@ -238,7 +240,7 @@ def _read_names(fn_node: ast.FunctionDef) -> set[str]:
     }
 
 
-def _call_arg_names(fn_node: ast.FunctionDef) -> set[str]:
+def _direct_call_arg_names(fn_node: ast.FunctionDef) -> set[str]:
     """Every name handed DIRECTLY to a call, positionally or by keyword."""
     out: set[str] = set()
     for node in ast.walk(_statements(fn_node)):
@@ -253,6 +255,48 @@ def _call_arg_names(fn_node: ast.FunctionDef) -> set[str]:
             if isinstance(kw.value, ast.Name):
                 out.add(kw.value.id)
     return out
+
+
+def _local_aliases(fn_node: ast.FunctionDef) -> dict[str, set[str]]:
+    """local name -> the names its defining expression READS.
+
+    One hop only, and deliberately so. It exists to forgive the single most
+    common legitimate shape at an MCP boundary: a parameter RENAMED or given a
+    default before being forwarded (`cap = capacity or {...}` -> `capacity=cap`,
+    `effective = max_rows if max_rows is not None else limit` -> `limit=...`).
+    Without it the ratchet demands a declared row for a pure rename, which is
+    friction with no information in it -- and a ratchet that annoys without
+    informing is one the next author turns off.
+
+    It does NOT attempt dataflow. Two hops, a subscript store (`meta['k'] = p`)
+    or a loop target still need a declared row, which is correct: at that point
+    the forwarding is genuinely not visible at the boundary and saying so in one
+    line is the whole point of the table.
+    """
+    aliases: dict[str, set[str]] = {}
+    for node in ast.walk(_statements(fn_node)):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name):
+            continue
+        reads = {
+            child.id
+            for child in ast.walk(node.value)
+            if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
+        }
+        aliases.setdefault(target.id, set()).update(reads)
+    return aliases
+
+
+def _call_arg_names(fn_node: ast.FunctionDef) -> set[str]:
+    """Names that reach a call, directly or through ONE local rebinding."""
+    direct = _direct_call_arg_names(fn_node)
+    reached = set(direct)
+    for local, sources in _local_aliases(fn_node).items():
+        if local in direct:
+            reached |= sources
+    return reached
 
 
 def _dynamic_access_used(fn_node: ast.FunctionDef) -> set[str]:
