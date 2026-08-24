@@ -1461,9 +1461,17 @@ def main() -> int:
             print(f"            {detail}")
 
     r_rec = reach.get("milestones.reconcile.reconcile_all", {"mcp": [], "cli": []})
+    # CB-107 was CLOSED by unit T-45 (merge f16764e): `reconcile_all` gained the MCP
+    # wrapper `milestone_reconcile`, so it now reaches BOTH surfaces. This row used to
+    # assert the CLI-only state and, once the card was fixed, reported MISMATCH on every
+    # run — the self-check doing exactly what its own header promises ("a mismatch is
+    # either a script bug or a stale card -- both are findings"), and the finding was the
+    # stale card claim. It is restated against today's truth rather than deleted: a row
+    # that goes quiet teaches nothing, and a standing MISMATCH is an alarm crying wolf,
+    # which masks the real one. If this ever flips back, the wrapper was lost.
     check(
-        "CB-107: reconcile_all is CLI-only, no MCP wrapper",
-        bool(r_rec["cli"]) and not r_rec["mcp"],
+        "CB-107 (fixed by T-45, f16764e): reconcile_all reaches BOTH surfaces",
+        bool(r_rec["cli"]) and bool(r_rec["mcp"]),
         True,
         f"mcp={r_rec['mcp']} cli={r_rec['cli']}",
     )
