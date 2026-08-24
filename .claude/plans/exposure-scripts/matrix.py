@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capability x surface matrix for codebugs, computed by AST pass.
+"""Capability x surface matrix for codebugs -- a HYBRID of AST and the real registry.
 
 WHAT THIS ANSWERS
     For every DOMAIN CAPABILITY (a public module-level function whose first
@@ -21,7 +21,71 @@ UNIT OF COUNT, stated because getting it wrong is this repo's recurring failure
     tools would measure the surface, which is the thing we are trying to explain,
     not the thing being exposed.
 
-SURFACE DETECTION
+THE HYBRID BOUNDARY (CB-153, T-55) -- STATED EXPLICITLY, BECAUSE A HYBRID THAT
+DOES NOT NAME ITS OWN SPLIT IS THE NEXT BLINDNESS.
+    This script used to find MCP tools and CLI verbs by AST SYNTAX alone
+    (`@mcp.tool(...)` decorators, `sub.add_parser("...")` calls). After BT-6's
+    surfacegen pilot, `bench` and `sweep` register their whole surface through
+    DATA DECLARATIONS (`bench_surface.py`, `sweep_surface.py`) consumed by
+    `codebugs.surfacegen.emit_tools`/`emit_cli` at import time -- there is no
+    decorator and no `add_parser` call anywhere in `bench.py`/`sweep.py` for the
+    AST pass to see, so it reported 16 real capabilities (7 bench + 9 sweep) as
+    reachable by NEITHER surface, when both existed. CB-153.
+
+    The fix is NOT teaching the AST pass a third registration shape (that was
+    considered and REJECTED -- a third form would return the same blindness by
+    construction, and this repo has paid for that exact mistake before). Instead:
+
+    SURFACE EXISTENCE (which MCP tool names and CLI verb names are real, right
+    now) comes from the REGISTRY, not from source syntax:
+      MCP : `tests/_mcp_schema.collect_tool_schemas()` -- builds a real server
+            per provider through `db.get_tool_providers(mode="all")` and asks it.
+      CLI : `codebugs.cli.build_parser(mode="all")` -- the exact primitive
+            `cli.main()` itself calls, extracted by T-51 (CB-146) precisely so a
+            surface snapshot need not re-implement subparser assembly.
+    Both are keyed on "what is REALLY registered", which closes the blindness
+    for ANY future registration form, not just the two known today (decorator
+    and surfacegen) -- a decorator-recognizer would need a fourth clause the
+    day a third form appears; the registry cannot be behind a form it did not
+    know about, because it IS what runs.
+
+    LINKING a registry-real surface name back to the domain capability(-ies) it
+    calls, and every SIZE metric (LOC, docstring/body/signature partition, T1/
+    T2/T3 derivability tiers, CLI boilerplate) STILL come from AST, and this is
+    the honestly-stated other half of the hybrid: a generated tool's registered
+    callable is built by `surfacegen.build_tool` at runtime and carries no
+    source span of its own to measure -- there is no "MCP wrapper body" to
+    partition into docstring/code/signature for a function synthesized from a
+    declaration dict. So the SIZE section below (unchanged) keeps operating on
+    the decorator/`add_parser`-detected surface set exactly as before, and does
+    NOT grow to cover `bench`/`sweep`'s generated tools. The registry-only
+    surfaces are linked to capabilities separately (see `resolve_live_impl`),
+    by unwrapping `surfacegen`'s runtime closure (`calls`/`manual` cells) back
+    to the real Python function it ultimately invokes, then either matching
+    that function's identity directly against the capability set or -- for a
+    dispatching handler like `_tool_bench_list` -- walking ITS ast body with the
+    same `resolve_calls` machinery CLI handlers already use. This is registry
+    inspection plus a runtime-to-AST bridge, not decorator pattern-matching, so
+    it generalizes the same way the existence check does: whatever a THIRD
+    registration form does, as long as it ultimately calls `mcp.tool()(fn)` and
+    `commands[name] = fn`, this still finds the real name and the real callable.
+
+    Cost accepted (brief SS3): this script is no longer purely static. It
+    imports the `codebugs` package and `tests/_mcp_schema`, and needs a working
+    Python environment for that half of its output. The GAPS section (BOTH/MCP
+    only/CLI only/NEITHER) and the top-line "MCP tools (registered)"/"CLI verbs
+    (registered)" counts are therefore registry-truth; the SIZE section and its
+    own "MCP tools (AST-visible)"/"CLI verbs (AST-visible)" counts stay AST-only
+    and are printed under that explicit label so the two halves are never
+    conflated as one number.
+
+    `module_surface.py` is a SEPARATE, untouched instrument (CB-153 SS2): it
+    keys on `register_tools`/`register_cli` function SPANS, not the decorator,
+    so it is not blind here -- its wiring ratio for `sweep` answers a different
+    question (how much of the registrar itself is left) and changed meaning,
+    not correctness, when the surface moved into declarations.
+
+SURFACE DETECTION (AST HALF, used for SIZE only -- see above)
     MCP : an inner FunctionDef inside `register_tools(mcp, conn_factory)`
           decorated with `@mcp.tool(...)`.
     CLI : `sub.add_parser("<verb>")` inside `register_cli(sub, commands)`, joined
@@ -32,14 +96,21 @@ SURFACE DETECTION
 
 BLINDNESS, printed rather than hidden
     Dynamic registration, calls through variables, and re-exported aliases are
-    not resolved. Every unresolved call is counted and listed under BLIND SPOTS.
+    not resolved by the AST half. Every unresolved call is counted and listed
+    under BLIND SPOTS. The registry half closes the ONE known dynamic-form
+    blindness (surfacegen); anything it cannot resolve is printed under
+    REGISTRY-ONLY SURFACES rather than silently dropped.
 
 USAGE
     python3 .claude/plans/exposure-scripts/matrix.py
     python3 .claude/plans/exposure-scripts/matrix.py --root src/codebugs
     python3 .claude/plans/exposure-scripts/matrix.py --check   # self-check only
+    python3 .claude/plans/exposure-scripts/matrix.py --ast-only  # skip the
+        registry half entirely (old, blind-to-surfacegen behaviour) -- kept so
+        the CB-153 mutant probe can reproduce the pre-fix report on demand.
 
-Writes nothing anywhere; prints to stdout; stdlib only.
+Prints to stdout; writes nothing anywhere. No longer stdlib-only for the
+registry half (imports the `codebugs` package and `tests/_mcp_schema`).
 """
 
 from __future__ import annotations
@@ -49,6 +120,7 @@ import ast
 import os
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Declared non-capabilities.
@@ -610,7 +682,7 @@ def collect(root: str):
             if fn is not None:
                 handlers[(s_.module, s_.handler)] = fn
 
-    return caps, by_short, surfaces, handlers, imports, trees, files
+    return caps, by_short, surfaces, handlers, imports, trees, files, all_funcs
 
 
 def resolve_calls(
@@ -665,6 +737,183 @@ def resolve_calls(
 
 
 # ---------------------------------------------------------------------------
+# registry half (CB-153, T-55) -- surface EXISTENCE and its LINKING back to
+# domain capabilities, sourced from what is really registered rather than from
+# source syntax. See the module docstring's "THE HYBRID BOUNDARY" section for
+# the full reasoning; this section is the implementation of that boundary.
+# ---------------------------------------------------------------------------
+
+
+def _repo_root() -> Path:
+    """This file lives at <repo>/.claude/plans/exposure-scripts/matrix.py."""
+    return Path(__file__).resolve().parents[3]
+
+
+def _load_registry_primitives():
+    """Import the two ALREADY-BUILT primitives named in the T-55 brief, plus
+    `codebugs.db` for the closure-capture pass below. Raises ImportError with
+    the repo-relative context if the package/tests aren't importable -- this
+    is the accepted cost of the hybrid (module docstring, "Cost accepted").
+    """
+    root = _repo_root()
+    src_dir = str(root / "src")
+    tests_dir = str(root / "tests")
+    for p in (src_dir, tests_dir):
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    from _mcp_schema import collect_tool_schemas  # tests/_mcp_schema.py
+    from codebugs import cli as codebugs_cli
+    from codebugs import db as codebugs_db
+
+    return collect_tool_schemas, codebugs_cli, codebugs_db
+
+
+class _CapturingMCP:
+    """Stands in for the real MCP server object passed to `register_tools`.
+
+    `provider.register_fn(capturing_mcp, conn_factory)` calls
+    `capturing_mcp.tool(...)` exactly as it would call the real server's --
+    whether that happens via a `@mcp.tool()` decorator on a hand-written
+    function OR via `surfacegen.emit_tools`'s `mcp.tool()(fn)` makes no
+    difference to this class, which is the whole point: it captures the REAL
+    (wire name -> real callable) pair regardless of how registration got
+    there, the same way `collect_tool_schemas` does for the schema, without
+    needing the `mcp` SDK's own server/pydantic machinery (this script does
+    not otherwise depend on the `mcp` package).
+    """
+
+    def __init__(self) -> None:
+        self.captured: dict[str, object] = {}
+
+    def tool(self, *_args, **kwargs):
+        def deco(fn):
+            name = kwargs.get("name") or fn.__name__
+            self.captured[name] = fn
+            return fn
+
+        return deco
+
+
+def collect_registered_surfaces(
+    root: str,
+) -> tuple[set[str], set[str], dict[str, object], dict[str, object]]:
+    """The REGISTRY's answer to "what MCP tools and CLI verbs really exist right
+    now", plus the real callable behind each name.
+
+    Returns (mcp_names, cli_names, mcp_fn_by_name, cli_fn_by_name).
+
+    `mcp_names` is sourced from `tests/_mcp_schema.collect_tool_schemas()` --
+    the SAME function the wire-schema golden gate uses -- so this script's
+    headline MCP count can never quietly diverge from what that gate already
+    treats as ground truth. `cli_names` and `cli_fn_by_name` are sourced from
+    `codebugs.cli.build_parser(mode="all")`, the exact primitive `cli.main()`
+    itself calls (CB-146/T-51) -- `commands` already maps every verb to its
+    real handler callable, no capture needed.
+
+    `mcp_fn_by_name` is captured SEPARATELY via `_CapturingMCP`, because
+    `collect_tool_schemas` returns schemas, not callables, and this script
+    needs the callable to walk back to a domain capability. Both walks go
+    through the SAME registry primitive (`db.get_tool_providers(mode="all")`
+    is what `collect_tool_schemas` calls internally too), so a self-check row
+    below asserts the two name sets are identical -- if `_CapturingMCP` were
+    ever wrong about what got registered, that row would go red rather than
+    silently reporting a different tool count than the golden gate does.
+    """
+    collect_tool_schemas, codebugs_cli, codebugs_db = _load_registry_primitives()
+
+    mcp_schemas = collect_tool_schemas()
+    mcp_names = {t["name"] for t in mcp_schemas}
+
+    capturer = _CapturingMCP()
+    for provider in codebugs_db.get_tool_providers(mode="all"):
+        provider.register_fn(capturer, lambda: None)  # conn_factory unused: not calling
+    mcp_fn_by_name = capturer.captured
+
+    _parser, sub, commands = codebugs_cli.build_parser(mode="all")
+    cli_names = set(sub.choices.keys())
+    cli_fn_by_name = dict(commands)
+
+    return mcp_names, cli_names, mcp_fn_by_name, cli_fn_by_name
+
+
+def _unwrap_generated(fn):
+    """If `fn` is a wrapper built by `surfacegen.build_tool`, return the real
+    implementer it closes over; otherwise return `fn` unchanged.
+
+    `build_tool`'s emitted `tool(...)` closure always carries exactly the
+    free variables `calls` and `manual` (see `surfacegen.py`): whichever one
+    is not None is the real Python function the declaration named -- either
+    the domain capability directly (`calls=query`) or a handwritten dispatch
+    body (`manual=_tool_bench_list`). A hand-written `@mcp.tool()` function
+    has no such free-variable pair, so it passes through unchanged and is
+    resolved exactly as `fn` itself, same as any CLI handler already is.
+    """
+    freevars = fn.__code__.co_freevars
+    if fn.__closure__ and "calls" in freevars and "manual" in freevars:
+        cells = dict(zip(freevars, fn.__closure__))
+        manual = cells["manual"].cell_contents
+        calls = cells["calls"].cell_contents
+        return manual if manual is not None else calls
+    return fn
+
+
+def _live_qual(fn) -> str | None:
+    """The capability-table qualname (`"<module>.<name>"`) for a live function
+    object, using the SAME module-naming convention `module_name()` derives
+    from source paths (`codebugs.milestones.reconcile` -> `milestones.reconcile`).
+    Returns None for anything outside the `codebugs` package.
+    """
+    mod = getattr(fn, "__module__", None) or ""
+    if mod != "codebugs" and not mod.startswith("codebugs."):
+        return None
+    mod_short = mod[len("codebugs") :].lstrip(".") or "__init__"
+    # A nested def's __qualname__ is "register_tools.<locals>.add" -- the
+    # capability table is keyed on the bare def name, so take the last segment.
+    name = fn.__qualname__.rsplit(".", 1)[-1]
+    return f"{mod_short}.{name}"
+
+
+def resolve_live_impl(
+    fn,
+    caps: dict[str, "Capability"],
+    by_short: dict[str, list[str]],
+    imports: dict[str, dict[str, str]],
+    all_funcs: dict[tuple[str, str], ast.FunctionDef],
+) -> tuple[set[str], set[str]]:
+    """Resolve one REGISTRY-real callable (an MCP tool's or a CLI verb's actual
+    handler) to the domain capabilities it reaches. Mirrors `resolve_calls`'s
+    (resolved, unresolved) contract.
+
+    Two paths, both ending in the same AST call-resolution the rest of this
+    script already trusts:
+      1. IDENTITY match -- the live function's own qualname is itself a
+         capability (`calls=query` in a SURFACE declaration is literally the
+         `bench.query` capability function; a hand-written `@mcp.tool()` body
+         that delegates through nothing is not, so this path is a shortcut,
+         not the general case).
+      2. AST FALLBACK -- locate the SAME function's def node (matched by the
+         module+name this live object itself reports, not by guessing) in the
+         `all_funcs` index `collect()` already built, and run `resolve_calls`
+         over its body exactly as a CLI handler's body is resolved today. This
+         is what finds e.g. `_tool_bench_list` calling BOTH `list_runs` and
+         `list_benchmarks` in its two branches.
+    """
+    impl = _unwrap_generated(fn)
+    qual = _live_qual(impl)
+    if qual and qual in caps:
+        return {qual}, set()
+
+    mod = getattr(impl, "__module__", None) or ""
+    mod_short = mod[len("codebugs") :].lstrip(".") if mod.startswith("codebugs") else None
+    name = getattr(impl, "__name__", None)
+    node = all_funcs.get((mod_short, name)) if mod_short and name else None
+    if node is None:
+        label = f"{mod_short or '?'}.{name or '?'}"
+        return set(), {f"{label} (registry-real callable has no matching AST def)"}
+    return resolve_calls(node, mod_short, caps, by_short, imports)
+
+
+# ---------------------------------------------------------------------------
 # report
 # ---------------------------------------------------------------------------
 
@@ -676,9 +925,19 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", default=os.path.join("src", "codebugs"))
     ap.add_argument("--check", action="store_true", help="print only the self-check")
+    ap.add_argument(
+        "--ast-only",
+        action="store_true",
+        help=(
+            "skip the registry half (CB-153) and report exactly the old, "
+            "surfacegen-blind numbers -- kept for the mutant probe's before/after"
+        ),
+    )
     args = ap.parse_args()
 
-    caps, by_short, surfaces, handlers, imports, _trees, files = collect(args.root)
+    caps, by_short, surfaces, handlers, imports, _trees, files, all_funcs = collect(
+        args.root
+    )
 
     # link surfaces to capabilities
     for s in surfaces:
@@ -715,6 +974,62 @@ def main() -> int:
     mcp_tools = [s for s in surfaces if s.kind == "mcp"]
     cli_verbs = [s for s in surfaces if s.kind == "cli"]
 
+    # ---- registry half (CB-153, T-55) ----------------------------------
+    # AST-visible names are exactly what mcp_tools/cli_verbs above already
+    # found (decorator / add_parser detection, unchanged). Anything the
+    # REGISTRY reports that the AST pass did not see is a surface a dynamic
+    # registration form (surfacegen today) built -- resolve those separately
+    # and fold them into the SAME `reach` dict the GAPS section reads, so the
+    # cells below reflect what is really registered. `mcp_tools`/`cli_verbs`
+    # themselves are NOT extended -- the SIZE section further down keeps
+    # using them exactly as before (module docstring, "Cost accepted").
+    registry_mcp_names: set[str] = set()
+    registry_cli_names: set[str] = set()
+    registry_extra: list[tuple[str, str, str, set[str], set[str]]] = []
+    # (kind, name, resolved-as-text, resolved quals, unresolved labels)
+    registry_consistency: list[tuple[str, bool, bool, str]] = []
+    if not args.ast_only:
+        (
+            registry_mcp_names,
+            registry_cli_names,
+            mcp_fn_by_name,
+            cli_fn_by_name,
+        ) = collect_registered_surfaces(args.root)
+
+        registry_consistency.append(
+            (
+                "MCP capture agrees with tests/_mcp_schema.collect_tool_schemas()",
+                set(mcp_fn_by_name) == registry_mcp_names,
+                True,
+                f"captured={len(mcp_fn_by_name)} schema={len(registry_mcp_names)}",
+            )
+        )
+
+        ast_mcp_names = {s.name for s in mcp_tools}
+        ast_cli_names = {s.name for s in cli_verbs}
+        missing_mcp = sorted(registry_mcp_names - ast_mcp_names)
+        missing_cli = sorted(registry_cli_names - ast_cli_names)
+
+        for name in missing_mcp:
+            fn = mcp_fn_by_name.get(name)
+            if fn is None:
+                registry_extra.append(("mcp", name, "NOT CAPTURED", set(), {"capture miss"}))
+                continue
+            resolved, unresolved = resolve_live_impl(fn, caps, by_short, imports, all_funcs)
+            for q in resolved:
+                reach[q]["mcp"].append(name)
+            registry_extra.append(("mcp", name, ",".join(sorted(resolved)) or "-", resolved, unresolved))
+
+        for name in missing_cli:
+            fn = cli_fn_by_name.get(name)
+            if fn is None:
+                registry_extra.append(("cli", name, "NOT CAPTURED", set(), {"capture miss"}))
+                continue
+            resolved, unresolved = resolve_live_impl(fn, caps, by_short, imports, all_funcs)
+            for q in resolved:
+                reach[q]["cli"].append(name)
+            registry_extra.append(("cli", name, ",".join(sorted(resolved)) or "-", resolved, unresolved))
+
     both, mcp_only, cli_only, neither = [], [], [], []
     for q, r in reach.items():
         if r["mcp"] and r["cli"]:
@@ -731,14 +1046,39 @@ def main() -> int:
 
     if not args.check:
         print(BAR)
-        print("CAPABILITY x SURFACE MATRIX  --  computed by AST, not by reading")
+        print("CAPABILITY x SURFACE MATRIX  --  HYBRID: registry for existence, AST for size")
         print(BAR)
         print(f"root              : {args.root}")
         print(f"python            : {sys.version.split()[0]}")
         print(f"files scanned     : {files}")
         print(f"capabilities      : {len(caps)}   (public module-level fn, first param `conn`)")
-        print(f"MCP tools         : {len(mcp_tools)}")
-        print(f"CLI verbs         : {len(cli_verbs)}")
+        if args.ast_only:
+            print(f"MCP tools         : {len(mcp_tools)}   (AST/decorator only; --ast-only)")
+            print(f"CLI verbs         : {len(cli_verbs)}   (AST/add_parser only; --ast-only)")
+        else:
+            print(
+                f"MCP tools (registered)   : {len(registry_mcp_names):>3}"
+                "   (ground truth: tests/_mcp_schema.collect_tool_schemas())"
+            )
+            print(
+                f"CLI verbs (registered)   : {len(registry_cli_names):>3}"
+                "   (ground truth: codebugs.cli.build_parser(mode='all'))"
+            )
+            print(
+                f"MCP tools (AST-visible)  : {len(mcp_tools):>3}"
+                "   (decorator-detected; SIZE section below uses only these)"
+            )
+            print(
+                f"CLI verbs (AST-visible)  : {len(cli_verbs):>3}"
+                "   (add_parser-detected; SIZE section below uses only these)"
+            )
+            print(
+                f"  -> {len(registry_mcp_names) - len(mcp_tools)} MCP tool(s) and "
+                f"{len(registry_cli_names) - len(cli_verbs)} CLI verb(s) are registered but "
+                "AST-invisible (CB-153: surfacegen-generated bench/sweep tools). GAPS below "
+                "use the registered set; SIZE below uses the AST-visible set -- see the "
+                "module docstring's HYBRID BOUNDARY."
+            )
         print()
         print(DASH)
         print(f"{'capability':<52} {'MCP':<4} {'CLI':<4}  {'LOC':>4}  surfaces")
@@ -766,6 +1106,26 @@ def main() -> int:
             print(f"\n{label}: {len(group)}")
             for q in sorted(group):
                 print(f"      {q}   ({caps[q].module}, {caps[q].loc} LOC)")
+
+        if not args.ast_only:
+            print()
+            print(BAR)
+            print(
+                f"REGISTRY-ONLY SURFACES  --  registered but AST-invisible: {len(registry_extra)}"
+            )
+            print(BAR)
+            print("(CB-153: these exist per the provider registry but carry no decorator/")
+            print(" add_parser for the AST pass to see -- e.g. surfacegen-generated bench/")
+            print(" sweep tools. Folded into the GAPS cells above. UNRESOLVED here means the")
+            print(" registry proves the surface exists but this script could not trace which")
+            print(" capability it calls -- a real blind spot, printed rather than hidden.)")
+            for kind, name, resolved_text, _resolved, unresolved in sorted(
+                registry_extra, key=lambda t: (t[0], t[1])
+            ):
+                extra = f"  UNRESOLVED={sorted(unresolved)}" if unresolved else ""
+                print(f"      {kind}:{name} -> {resolved_text}{extra}")
+            if not registry_extra:
+                print("      (none -- every registered surface was already AST-visible)")
 
         declared = [q for q in caps if q in NON_CAPABILITIES]
         undeclared_neither = [q for q in neither if q not in NON_CAPABILITIES]
@@ -1137,6 +1497,27 @@ def main() -> int:
         "embeddings.py defines register_tools but registers NO provider; its tools "
         "arrive via reqs.py. Expected to FAIL: the rule is violated in the tree.",
     )
+
+    # CB-153 (T-55): the regression this whole card is about. THIS IS INSURANCE, NOT
+    # THE CURE -- it is an ENUMERATION of two module names, exactly the shape the
+    # card's own SS4 says a self-check cannot use to close a class. The cure is the
+    # registry half above (GAPS is now computed from what is really registered); this
+    # row exists only to make a FUTURE regression on these two specific modules loud
+    # instead of silent, the way the old SELF-CHECK failed to for CB-153 itself.
+    if not args.ast_only:
+        for mod in ("bench", "sweep"):
+            mod_mcp = any(reach[q]["mcp"] for q in caps if caps[q].module == mod)
+            mod_cli = any(reach[q]["cli"] for q in caps if caps[q].module == mod)
+            check(
+                f"CB-153 insurance (not the fix): `{mod}` has non-empty MCP AND CLI "
+                "surface",
+                mod_mcp and mod_cli,
+                True,
+                f"mcp_present={mod_mcp} cli_present={mod_cli}  -- an enumeration of two "
+                "module names; the class-level fix is the registry half above",
+            )
+        for label, got, want, detail in registry_consistency:
+            check(label, got, want, detail)
 
     print()
     print("  Rows are sourced from CLAUDE.md and from tracker cards -- artefacts OUTSIDE")
