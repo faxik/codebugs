@@ -178,12 +178,23 @@ class TestMcpWireSchema:
         This is a decision, not an oversight: (1) a JSON object's member order is not a guaranteed
         part of the wire contract — RFC 8259 leaves it unordered, and a client is free to render
         `properties` in any order, including its own sort; (2) MCP tool calls bind arguments BY
-        NAME, so no client behavior depends on this order; the only thing a reordering touches is
-        the positional signature of the Python callable `collect_tool_schemas` was generated from,
-        which nothing outside this repository's own tests can see; (3) `sort_keys=True` is
-        deliberate, for a stable diffable golden, and undoing it to chase this ordering would buy a
-        property the protocol does not promise at the cost of a full golden regeneration and a
-        permanent new dependency on declaration order.
+        NAME, so no client BEHAVIOR depends on this order; (3) `sort_keys=True` gives a stable
+        diffable golden, and undoing it to chase this ordering would buy a property the protocol
+        does not promise at the cost of a full golden regeneration and a permanent new dependency
+        on declaration order. (Reason (3) is an inference about intent, not a recorded decision:
+        `dump_schema.py`'s own docstring says "flat sorted list", which is about the ORDER OF THE
+        TOOL LIST, and nowhere states that sorting the KEYS was deliberate.)
+
+        WHAT THIS DOES NOT CLAIM, corrected after the T-53 acceptance measured it. An earlier
+        draft of this docstring said the only thing a reordering touches is the positional
+        signature of the generated callable, "which nothing outside this repository's own tests
+        can see". That is FALSE, and the measurement is one line: the SERVER serves `properties`
+        in DECLARATION order (`name, description, default_batch_size, ...`) — the alphabetisation
+        exists only in the written golden. So a client that renders the schema in the order it
+        receives DOES see a reordering, which is the user-visible cost CB-147 itself named (the
+        CB-73 class). Reason (1) still carries the decision — a JSON object's member order is not
+        part of the contract, so a client relying on it relies on something unpromised — but the
+        word "only" was an overclaim, and it is withdrawn rather than defended.
 
         Contrast with the CLI arg-order snapshot (T-51): there, order IS pinned, because it is
         semantically load-bearing — positional CLI arguments are parsed by position and `--help`
