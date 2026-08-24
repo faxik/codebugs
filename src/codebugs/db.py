@@ -571,6 +571,10 @@ def connection_root(conn: sqlite3.Connection) -> str | None:
     "where did THIS one come from". And a required argument would make the
     ordinary `get` an unusable one.
 
+    NEVER RAISES, for the same reason `describe_root` does not: it is consulted
+    on the ordinary read path and a diagnostic that can take down the thing it
+    describes is worse than no diagnostic.
+
     So the coordinate is taken from the connection the caller already handed us:
     the main database file's own path, whose grandparent is the project
     directory by construction (`<root>/.codebugs/findings.db`). None for an
@@ -588,7 +592,16 @@ def connection_root(conn: sqlite3.Connection) -> str | None:
             continue
         if not isinstance(path, str) or not path:
             return None
-        parent = os.path.dirname(os.path.abspath(path))
+        # `abspath` on a RELATIVE value needs `os.getcwd()`, which raises once
+        # the cwd has been deleted out from under a long-lived server — the same
+        # hazard `_absolutized` documents, and it matters more here because this
+        # function is called on the ordinary read path, OUTSIDE the enricher's
+        # own failure guard. A caller that cannot be told where it is gets
+        # `None`, which every consumer already treats as "no root".
+        try:
+            parent = os.path.dirname(os.path.abspath(path))
+        except OSError:
+            return None
         if os.path.basename(parent) != DB_DIR:
             return None
         return os.path.dirname(parent)
