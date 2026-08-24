@@ -21,6 +21,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   supplying one by hand is a separate, already-tracked gap (CB-6).
 
 ### Added
+- **An ordinary read of a card now says where its code went (BT-7).** Until now the
+  location anchor was visible only through `anchor-resolve` / `anchor_resolve` — a
+  second, deliberate call that nobody makes while simply reading a card. `get` (MCP and
+  CLI) now carries an `anchor` summary and RESOLVES it by default, so a card whose file
+  has since been renamed reports the new path in the answer to the question you actually
+  asked. `query` carries the same summary but does **not** resolve it by default, and
+  the asymmetry is deliberate rather than an oversight: resolving one anchor costs two
+  to four git calls, and `query` is the primary read path with a page of up to a hundred
+  rows. Pass `resolve_anchors` (MCP) / `--resolve-anchors` (CLI) to resolve a page, and
+  it is resolved in ONE pass — the per-repository work is done once for the whole page,
+  never per row. `get` has the mirror-image escape hatch, `resolve_anchors=False` /
+  `--no-resolve-anchor`, for a read that must not spawn a process at all.
+
+  **A card that carries no anchor costs nothing, structurally.** Such a row is not sent
+  to the resolver and returns quickly; it never reaches it. The same is true of a card
+  whose capture LOOKED and had nothing to grab — on a live tracker that is the majority
+  of the anchored population, so it matters that it is free too.
+
+  **The summary distinguishes the answers a reader needs to keep apart**, where before
+  there was one absent key: `absent` (no anchor was ever captured), `retracted` (the
+  `loc: null` tombstone — someone said "do not anchor this"), `refused` (capture looked
+  and found nothing to anchor to, with the token saying why), and `anchored`, which
+  additionally reports `loc_status`, `moved_file` and the current `path`. A stored object
+  that breaks its own invariants is `invalid`, and a `meta` column that does not parse at
+  all is `unreadable`. `moved_file` is `null` rather than `false` when nothing was
+  resolved: "did not move" and "was not looked at" are different answers.
+
+  `staleness_check` carries the summary too, with the same opt-in `resolve_anchors`. The
+  two answer neighbouring questions and are more useful together than apart: `file_status`
+  says what became of the FILE, the anchor says where the reported LINES are now.
+
+  Under all of this is a new registry in `db.py`, `register_read_enricher` — a member of
+  its family and the first READING one, so it carries none of the writing seams'
+  transaction machinery. `loc` registers itself into it, exactly as `similarity` registers
+  into the pre-add resolver seam, and core never learns an extension's vocabulary. An
+  enricher that fails cannot take down the read it was decorating, and its failure is
+  reported IN THE RESPONSE (`{"state": "unavailable", "error": …}`) rather than only on
+  stderr — a silently missing key would be indistinguishable from "this card has no
+  anchor", which is the exact conflation this whole design exists to end. That stamp is
+  built by the extension itself, so it has the SAME shape as a real summary — a narrower
+  failure object would make every consumer special-case exactly the path meant to be
+  survivable.
+
+  `recent` carries the summary too, always unresolved and with no flag: it answers "what
+  changed", not "where is it", and a key present on `query` but absent on `recent` would
+  teach a reader to test for presence. `query(group_by=…, resolve_anchors=True)` is
+  REFUSED rather than silently ignored — a grouped result carries counts, not findings,
+  so nothing there could honour the argument (CB-28).
+
 - **`anchor-recapture` can now take rows that never carried a location anchor at all
   (BT-7).** Anchor capture happens only when a genuinely new finding is filed, so every
   card filed before that landed carries no anchor — and the repair pass could not reach

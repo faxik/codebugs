@@ -1583,6 +1583,38 @@
         "option_strings": [],
         "required": true,
         "type": null
+      },
+      {
+        "action_class": "_StoreFalseAction",
+        "choices": null,
+        "const": false,
+        "default": true,
+        "deprecated": false,
+        "dest": "resolve_anchors",
+        "help": "Do not resolve the location anchor against the repository. The card still reports whether it carries one; only the git work is skipped. For a read that must not spawn a process.",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--no-resolve-anchor"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "action_class": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "repo",
+        "help": "Repository to resolve the location anchor against (default: the tracker's own directory). NOT --repo: that name already means 'and also locate .codebugs/' on this CLI's provenance verbs, and one flag with two meanings is a trap",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--anchor-repo"
+        ],
+        "required": false,
+        "type": null
       }
     ],
     "has_handler": true
@@ -2656,6 +2688,38 @@
         ],
         "required": false,
         "type": "int"
+      },
+      {
+        "action_class": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "resolve_anchors",
+        "help": "Resolve each result's location anchor against the repository, adding a 'loc' column with where the code is now. OFF by default: 2-4 git calls per ANCHORED row on a page of up to 100",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--resolve-anchors"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "action_class": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "repo",
+        "help": "Repository to resolve location anchors against (default: the tracker's own directory). See `get --anchor-repo` for why this is not spelled --repo",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--anchor-repo"
+        ],
+        "required": false,
+        "type": null
       }
     ],
     "has_handler": true

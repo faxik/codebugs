@@ -11,7 +11,9 @@ import re
 import sqlite3
 import sys
 from datetime import datetime
-from typing import Any, Literal, NamedTuple, TypedDict
+from typing import Annotated, Any, Literal, NamedTuple, TypedDict
+
+from pydantic import Field
 
 from codebugs import db, entities
 from codebugs.types import (
@@ -2572,12 +2574,57 @@ def anchor_candidates(
     return [dict(r) for r in rows]
 
 
-def get_finding(conn: sqlite3.Connection, finding_id: str) -> dict[str, Any]:
-    """Fetch a single finding by ID. Raises KeyError if not found."""
+def get_finding(
+    conn: sqlite3.Connection,
+    finding_id: str,
+    *,
+    resolve_anchors: bool = True,
+    project_dir: str | None = None,
+) -> dict[str, Any]:
+    """Fetch a single finding by ID. Raises KeyError if not found.
+
+    The row carries an ``anchor`` summary whenever a read enricher is registered
+    (``loc``, today), and by DEFAULT that summary is RESOLVED against the
+    repository: an ordinary read of a card whose code has since moved says where
+    it went, which is the point of the whole seam and what the owner's
+    acceptance names. The cost is bounded by one row, which is why the default
+    here is greedy and ``query``'s is not.
+
+    ``resolve_anchors=False`` is the opt-out, and it exists because a read path
+    that cannot spawn a process must remain available: a script, a test, a
+    machine with no git, a tracker read from outside the tree it describes. It
+    does not remove the summary — the card still says whether it carries an
+    anchor — it removes only the part that costs.
+
+    ``project_dir`` names the repository to resolve against; omitted, it is the
+    tracker's OWN directory (``db.connection_root``), never the process cwd,
+    which BT-7 Р3 refuses. A root that cannot be determined is reported as
+    ``unknown(no_root)`` inside the summary rather than raised.
+    """
     row = conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
     if not row:
         raise KeyError(f"Finding not found: {finding_id}")
-    return db.row_to_dict(row)
+    finding = db.row_to_dict(row)
+    _enrich_read([finding], conn, resolve=resolve_anchors, project_dir=project_dir)
+    return finding
+
+
+def _enrich_read(
+    rows: list[dict[str, Any]],
+    conn: sqlite3.Connection,
+    *,
+    resolve: bool,
+    project_dir: str | None,
+) -> None:
+    """Run the read-enricher seam over rows this module is about to return.
+
+    The root is resolved ONLY when something might actually use it, so a read
+    with resolution off does not even ask the connection where it lives.
+    """
+    root = project_dir
+    if root is None and resolve:
+        root = db.connection_root(conn)
+    db.run_read_enrichers(conn, rows, resolve=resolve, project_dir=root)
 
 
 def query_findings(
@@ -2599,12 +2646,25 @@ def query_findings(
     group_by: str | None = None,
     limit: int = 100,
     offset: int = 0,
+    resolve_anchors: bool = False,
+    project_dir: str | None = None,
 ) -> dict[str, Any]:
     """Query findings with filters. Returns results or grouped counts.
 
     `id` / `ids` are AND-combined with other filters; missing IDs are silently absent.
     `commit` matches the frozen first-report column OR any occurrence-ring entry
     (CB-128) — any observation, not the newest (that is `provenance._effective_commit`).
+
+    Every returned finding carries an ``anchor`` summary while a read enricher is
+    registered, and ``resolve_anchors`` decides only whether that summary COSTS
+    anything. The default is False, and the asymmetry with ``get_finding`` is the
+    design rather than an oversight: resolving one anchor is two to four git
+    calls, and this is the primary read path with a page of up to a hundred rows.
+    Presence of an anchor is reported either way, out of the ``meta`` the row had
+    already read.
+
+    With the flag on, the page is resolved in ONE pass — the per-tree context is
+    built once for the whole population, never per row.
     """
     conditions: list[str] = []
     params: list[Any] = []
@@ -2707,6 +2767,15 @@ def query_findings(
             f"SELECT {group_by} as group_key, COUNT(*) as count FROM findings {where} GROUP BY {group_by} ORDER BY count DESC",
             params,
         ).fetchall()
+        if resolve_anchors:
+            # CB-28: forward where a path exists, refuse only where none could.
+            # A grouped result has no rows to annotate, so nothing here can
+            # honour the argument, and ignoring it would return a success
+            # payload with the caller's request discarded.
+            raise ValueError(
+                "resolve_anchors is not available with group_by: a grouped result "
+                "carries counts, not findings, so there is nothing to annotate"
+            )
         return {"grouped": True, "group_by": group_by, "groups": [dict(r) for r in rows]}
 
     count = conn.execute(f"SELECT COUNT(*) as c FROM findings {where}", params).fetchone()["c"]
@@ -2727,12 +2796,14 @@ def query_findings(
         f"SELECT * FROM findings {where} ORDER BY {rank_sql}, created_at DESC LIMIT ? OFFSET ?",
         params,
     ).fetchall()
+    found = [db.row_to_dict(r) for r in rows]
+    _enrich_read(found, conn, resolve=resolve_anchors, project_dir=project_dir)
     return {
         "grouped": False,
         "total": count,
         "limit": limit,
         "offset": offset,
-        "findings": [db.row_to_dict(r) for r in rows],
+        "findings": found,
     }
 
 
@@ -2857,13 +2928,24 @@ def recent_findings(
         f"SELECT * FROM findings {where} ORDER BY updated_at DESC, rowid DESC LIMIT ? OFFSET ?",
         [*params, limit, offset],
     ).fetchall()
+    found = [db.row_to_dict(r) for r in rows]
+    # The anchor summary is carried here too, and CHEAPLY — never resolved, and
+    # with no flag to turn resolution on. Two reasons, and the first is this
+    # package's own doctrine: `recent` returns the same rows from the same table
+    # through the same surface as `query`, so a key present on one and absent on
+    # the other teaches a reader to test for presence, at which point presence
+    # encodes a second fact (review found the asymmetry). The second is that
+    # `recent` answers "what changed", not "where is it" — a caller who wants
+    # coordinates has `get` for one card and `query(resolve_anchors=True)` for a
+    # page, and a third resolving surface would be a third place to keep honest.
+    _enrich_read(found, conn, resolve=False, project_dir=None)
     return {
         "total": count,
         "limit": limit,
         "offset": offset,
         "since": since_value,
         "status": status_value,
-        "findings": [db.row_to_dict(r) for r in rows],
+        "findings": found,
     }
 
 
@@ -3604,6 +3686,7 @@ def register_tools(mcp, conn_factory) -> None:
         group_by: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        resolve_anchors: Annotated[bool, Field(strict=True)] = False,
     ) -> dict[str, Any]:
         """Search and filter findings. Returns structured results.
 
@@ -3643,6 +3726,14 @@ def register_tools(mcp, conn_factory) -> None:
                       frozen at first report)
             limit: Max results (default 100)
             offset: Pagination offset
+            resolve_anchors: Resolve each result's location anchor against the
+                      repository HEAD, so a card whose code moved reports its
+                      new path. OFF by default because it costs 2-4 git calls
+                      per ANCHORED row and this is the primary read path; the
+                      cheap half — whether a card carries an anchor at all, and
+                      the refusal token when capture found nothing to grab — is
+                      in every result either way. `get` resolves one card by
+                      default.
         """
         with conn_factory() as conn:
             deferred_ids: list[str] | None = None
@@ -3688,6 +3779,7 @@ def register_tools(mcp, conn_factory) -> None:
                 group_by=group_by,
                 limit=limit,
                 offset=offset,
+                resolve_anchors=resolve_anchors,
             )
             if deferred_ids is not None and not result.get("grouped"):
                 for row in result["findings"]:
@@ -3736,18 +3828,32 @@ def register_tools(mcp, conn_factory) -> None:
             )
 
     @mcp.tool()
-    def get(finding_id: str) -> dict[str, Any]:
+    def get(
+        finding_id: str,
+        resolve_anchors: Annotated[bool, Field(strict=True)] = True,
+    ) -> dict[str, Any]:
         """Fetch a single finding by ID with full body (description, severity,
         status, tags, meta, timestamps, commit refs).
+
+        The result carries an `anchor` summary saying where this card's code is
+        NOW: `state` tells a card with no anchor apart from one whose anchor was
+        retracted by hand and from one where capture looked and had nothing to
+        grab, and `loc_status`/`moved_file`/`path` report the resolution against
+        HEAD when it ran.
 
         Raises a not-found error if the ID does not exist. For lenient batch
         lookup that silently drops missing IDs, use `query(ids=[...])`.
 
         Args:
             finding_id: The finding ID (e.g. CB-1383)
+            resolve_anchors: Resolve the anchor against the repository (default
+                    ON — the cost is bounded by one card). Pass False for a read
+                    that must not spawn a process: no git available, no
+                    repository, or a caller that only wants to know whether an
+                    anchor exists at all.
         """
         with conn_factory() as conn:
-            return get_finding(conn, finding_id)
+            return get_finding(conn, finding_id, resolve_anchors=resolve_anchors)
 
     @mcp.tool()
     def stats(group_by: str = "severity") -> dict[str, Any]:
@@ -4015,6 +4121,21 @@ def register_cli(sub, commands) -> None:
         finally:
             conn.close()
 
+    def _anchor_cell(summary: Any) -> str:
+        """One table cell for an anchor summary. Never raises, never lies.
+
+        A RESOLVED row shows what the resolution said; anything else shows the
+        stored state, because "moved_file" and "this card has no anchor" are
+        answers to different questions and a column that printed an empty
+        string for both would recreate the conflation the summary exists to
+        end.
+        """
+        if not isinstance(summary, dict):
+            return ""
+        if summary.get("resolved"):
+            return str(summary.get("loc_status") or "")
+        return str(summary.get("state") or "")
+
     def _cmd_query(args: argparse.Namespace) -> None:
         from codebugs.cli import domain_errors
 
@@ -4042,6 +4163,8 @@ def register_cli(sub, commands) -> None:
                     # rows, the truthiness shape CB-25/CB-82 condemn.
                     # `argparse` gives None only when the flag is absent.
                     limit=args.limit if args.limit is not None else 100,
+                    resolve_anchors=args.resolve_anchors,
+                    project_dir=args.repo,
                 )
         finally:
             conn.close()
@@ -4065,11 +4188,30 @@ def register_cli(sub, commands) -> None:
                 }
                 for f in findings
             ]
+            columns = ["id", "sev", "category", "file", "status", "description"]
+            if args.resolve_anchors:
+                # The ONE place this module names a read enricher's key, and it
+                # is PRESENTATION rather than data flow: the domain path hands
+                # rows to `db.run_read_enrichers` and never learns what any
+                # extension called its summary. A table needs a column header,
+                # and a flag whose effect is invisible would be worse than the
+                # coupling. `.get` throughout, so an unregistered extension
+                # prints a blank cell instead of raising.
+                for row_data, f in zip(data, findings):
+                    row_data["loc"] = _anchor_cell(f.get("anchor"))
+                columns.insert(4, "loc")
             print(
                 format_table(
                     data,
-                    ["id", "sev", "category", "file", "status", "description"],
-                    max_widths={"description": 60, "file": 40, "category": 25},
+                    columns,
+                    # The narrower widths are the COST of the extra column and
+                    # must not be paid by a caller who did not ask for it —
+                    # review caught this applying to every `codebugs query`.
+                    max_widths=(
+                        {"description": 50, "file": 40, "category": 20}
+                        if args.resolve_anchors
+                        else {"description": 60, "file": 40, "category": 25}
+                    ),
                 )
             )
             print(f"\n{result['total']} finding(s) total.")
@@ -4127,7 +4269,12 @@ def register_cli(sub, commands) -> None:
         conn = db.connect()
         try:
             with domain_errors():
-                result = get_finding(conn, args.id)
+                result = get_finding(
+                    conn,
+                    args.id,
+                    resolve_anchors=args.resolve_anchors,
+                    project_dir=args.repo,
+                )
         finally:
             conn.close()
         print(json.dumps(result, indent=2, sort_keys=True))
@@ -4480,6 +4627,24 @@ def register_cli(sub, commands) -> None:
     p.add_argument("--fingerprint", help="Filter by identity fingerprint (exact)")
     p.add_argument("--group-by", help="Group by: file|category|severity|status|source")
     p.add_argument("--limit", type=int, help="Max results")
+    p.add_argument(
+        "--resolve-anchors",
+        dest="resolve_anchors",
+        action="store_true",
+        help=(
+            "Resolve each result's location anchor against the repository, adding a 'loc' "
+            "column with where the code is now. OFF by default: 2-4 git calls per ANCHORED "
+            "row on a page of up to 100"
+        ),
+    )
+    p.add_argument(
+        "--anchor-repo",
+        dest="repo",
+        help=(
+            "Repository to resolve location anchors against (default: the tracker's own "
+            "directory). See `get --anchor-repo` for why this is not spelled --repo"
+        ),
+    )
 
     p = sub.add_parser(
         "recent",
@@ -4514,6 +4679,25 @@ def register_cli(sub, commands) -> None:
 
     p = sub.add_parser("get", help="Fetch a single finding by ID")
     p.add_argument("id", help="Finding ID (e.g. CB-1383)")
+    p.add_argument(
+        "--no-resolve-anchor",
+        dest="resolve_anchors",
+        action="store_false",
+        help=(
+            "Do not resolve the location anchor against the repository. The card still "
+            "reports whether it carries one; only the git work is skipped. For a read "
+            "that must not spawn a process."
+        ),
+    )
+    p.add_argument(
+        "--anchor-repo",
+        dest="repo",
+        help=(
+            "Repository to resolve the location anchor against (default: the tracker's own "
+            "directory). NOT --repo: that name already means 'and also locate .codebugs/' "
+            "on this CLI's provenance verbs, and one flag with two meanings is a trap"
+        ),
+    )
 
     p = sub.add_parser("stats", help="Cross-tabulated summary")
     p.add_argument("--by", help="Group by: severity|category|status|file|source")
