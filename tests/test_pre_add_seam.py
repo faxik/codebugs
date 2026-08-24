@@ -415,17 +415,22 @@ class TestFindingsIntegration:
         )
         assert seen_counts == [0, 1]
 
-    def test_caller_meta_with_resolver_key_refused(self, conn):
+    def test_caller_meta_with_resolver_key_stripped(self, conn):
+        # CB-56: the ADD path no longer refuses a caller-supplied
+        # resolver-declared key — it strips it with visibility instead. The
+        # resolver here writes nothing (`lambda c, o: None`), so the stripped
+        # value has no way to reappear except as a survived spoof.
         db.register_pre_add_resolver("t.a", lambda c, o: None, meta_keys=("ka",))
-        with pytest.raises(ValueError, match="ka"):
-            findings.add_finding(
-                conn,
-                severity="low",
-                category="c",
-                file="f",
-                description="d",
-                meta={"ka": "spoof"}, new_category=True,
-            )
+        result = findings.add_finding(
+            conn,
+            severity="low",
+            category="c",
+            file="f",
+            description="d",
+            meta={"ka": "spoof"}, new_category=True,
+        )
+        assert "ka" not in result["meta"]
+        assert "ka" in result["stripped_meta_keys"]
 
     def test_resolver_errors_refused_on_update(self, conn):
         r = findings.add_finding(

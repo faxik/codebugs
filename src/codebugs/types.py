@@ -7,7 +7,9 @@ from anywhere without circular import risk.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from datetime import datetime, timezone
+from typing import Any
 
 
 def utc_now() -> str:
@@ -300,3 +302,53 @@ def severity_rank(severity: object) -> int:
         return SEVERITIES.index(severity)  # type: ignore[arg-type]
     except ValueError:
         return len(SEVERITIES)
+
+
+# --- Batch payload shape (CB-80) ---
+
+
+def validate_batch_payload(value: object, *, label: str) -> list[Any]:
+    """Refuse a batch argument that is not a list of mappings, with a ``ValueError``.
+
+    ``findings.batch_add_findings`` / ``reqs.batch_add_requirements`` are typed
+    ``list[dict[str, Any]]``, but that annotation is not enforced against a raw
+    Python caller (an MCP client is stopped earlier, by pydantic's own argument
+    model) — neither domain function validated the CONTAINER before indexing
+    into it. Reproduced against 41058c5 (CB-80): ``batch_add_findings(conn, 5)``
+    raised ``TypeError: 'int' object is not iterable``; ``batch_add_findings(conn,
+    [5])`` raised a different ``TypeError`` from the first per-member ``dict``
+    access; and ``batch_add_requirements(conn, "ab")`` is the interesting one —
+    a ``str`` IS iterable, so a check that establishes "is this a list" only by
+    iterating it (``for x in value: ...``, with no test of ``value`` itself)
+    does not stop at the boundary: it silently iterates CHARACTERS, and the
+    failure surfaces two frames deeper as ``TypeError: string indices must be
+    integers``, not here. That is CB-74's "validating one view while consuming
+    another" shape wearing a new outfit, so the container check below is a
+    strict ``isinstance(value, list)`` — never a duck-typed "is iterable" test,
+    and never skipped in favor of trusting the per-element loop alone to catch
+    everything.
+
+    This package's contract is that domain functions raise ``ValueError`` for
+    invalid input; a raw ``TypeError`` leaking out of a validator whose only
+    job is to keep other code from raising one is precisely the failure this
+    function exists to close.
+
+    ``label`` names the caller's own argument in the raised message
+    (``"findings"``, ``"requirements"``) — this module knows nothing about
+    either domain, only the FORM ("a list of objects"), which is what makes
+    the check shareable rather than a third or fourth copy of
+    ``bench.import_json``'s landed list-of-mappings validator (that one also
+    accepts a JSON string and decodes it first; batch payloads here never do,
+    so this function does not carry that half).
+
+    Every element is checked, not just the first: a well-formed member
+    followed by a malformed one would otherwise clear a first-element-only
+    check and die later at the identical unchecked site CB-80 was filed
+    against.
+    """
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be a list of objects, not {type(value).__name__}")
+    for index, element in enumerate(value):
+        if not isinstance(element, Mapping):
+            raise ValueError(f"{label}[{index}] must be an object, not {type(element).__name__}")
+    return value
