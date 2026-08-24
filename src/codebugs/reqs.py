@@ -947,40 +947,47 @@ def register_cli(sub, commands) -> None:
         print(f"Added: {result['id']}")
 
     def _cmd_reqs_update(args: argparse.Namespace) -> None:
+        from codebugs.cli import domain_errors
+
+        # Routed through the shared wrapper so a bad `--priority`/`--status`
+        # prints one line and exits 1 instead of a raw traceback — the
+        # CLAUDE.md-named debt ("reproduces the bug the day someone adds a
+        # ValueError arm for resolve_priority"), closed here rather than by a
+        # hand-written local ValueError arm.
         conn = db.connect()
         try:
-            result = update_requirement(
-                conn, args.id, status=args.status,
-                description=args.description, priority=args.priority,
-                test_coverage=args.test_coverage, notes=args.notes,
-            )
-            print(f"Updated: {result['id']} (status={result['status']})")
-        except KeyError as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
+            with domain_errors():
+                result = update_requirement(
+                    conn, args.id, status=args.status,
+                    description=args.description, priority=args.priority,
+                    test_coverage=args.test_coverage, notes=args.notes,
+                )
+                print(f"Updated: {result['id']} (status={result['status']})")
         finally:
             conn.close()
 
     def _cmd_reqs_query(args: argparse.Namespace) -> None:
+        from codebugs.cli import domain_errors
+
         conn = db.connect()
         ids = [s.strip() for s in args.id.split(",") if s.strip()] if args.id else None
         try:
-            result = query_requirements(
-                conn, ids=ids,
-                status=args.status, priority=args.priority,
-                section=args.section, search=args.search,
-                group_by=args.group_by, limit=args.limit or 100,
-            )
-        except json.JSONDecodeError:
-            # MUST stay ahead of the ValueError arm, which it subclasses. A corrupt
+            # json.JSONDecodeError re-raises (domain_errors, cli.py): a corrupt
             # stored row is not bad user input — see the same contract on
-            # `findings._cmd_query` and `_cmd_update`.
-            raise
-        except ValueError as e:
-            # `--status`/`--priority` are free text and now resolve, so an unknown
-            # value names itself and exits 1 rather than printing a traceback (CB-19).
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
+            # `findings._cmd_query` and `_cmd_update`. `--status`/`--priority`
+            # are free text and resolve, so an unknown value names itself and
+            # exits 1 rather than printing a traceback (CB-19).
+            with domain_errors():
+                result = query_requirements(
+                    conn, ids=ids,
+                    status=args.status, priority=args.priority,
+                    section=args.section, search=args.search,
+                    group_by=args.group_by,
+                    # CB-124: `or 100` silently turned `--limit 0` into 100
+                    # rows. `argparse` gives None only when the flag is
+                    # absent.
+                    limit=args.limit if args.limit is not None else 100,
+                )
         finally:
             conn.close()
 
@@ -1007,12 +1014,12 @@ def register_cli(sub, commands) -> None:
             print(f"\n{result['total']} requirement(s) total.")
 
     def _cmd_reqs_get(args: argparse.Namespace) -> None:
+        from codebugs.cli import domain_errors
+
         conn = db.connect()
         try:
-            result = get_requirement(conn, args.id)
-        except KeyError as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
+            with domain_errors():
+                result = get_requirement(conn, args.id)
         finally:
             conn.close()
         print(json.dumps(result, indent=2, sort_keys=True))
@@ -1066,21 +1073,20 @@ def register_cli(sub, commands) -> None:
                 print(f"  {sec['section']:40s}  {sec['done']}/{sec['total']} ({pct:.0f}%)")
 
     def _cmd_reqs_verify(args: argparse.Namespace) -> None:
+        from codebugs.cli import domain_errors
+
         conn = db.connect()
         checks = args.checks.split(",") if args.checks else None
         try:
-            result = verify_requirements(conn, project_dir=args.project_dir, checks=checks)
-        except json.JSONDecodeError:
-            # BEFORE the ValueError arm, and the ordering is load-bearing
-            # (CB-15/CB-16): JSONDecodeError SUBCLASSES ValueError, and this one
-            # comes from `db.row_to_dict` on a row with malformed stored
-            # tags/meta — a corrupt-data fault, not bad input. Reporting it as
-            # bad input would print a tidy line for a genuine data problem.
-            raise
-        except ValueError as e:
-            # The deleted-cwd refusal from the "tests" check (CB-79).
-            print(f"codebugs: {e}", file=sys.stderr)
-            sys.exit(1)
+            # json.JSONDecodeError re-raises (domain_errors, cli.py):
+            # JSONDecodeError SUBCLASSES ValueError, and this one comes from
+            # `db.row_to_dict` on a row with malformed stored tags/meta — a
+            # corrupt-data fault, not bad input. Reporting it as bad input
+            # would print a tidy line for a genuine data problem. The
+            # deleted-cwd refusal from the "tests" check (CB-79) is a
+            # ValueError and prints as one line.
+            with domain_errors(prefix="codebugs: "):
+                result = verify_requirements(conn, project_dir=args.project_dir, checks=checks)
         finally:
             # Was absent entirely: any exception leaked the connection, exactly
             # as _cmd_reqs_import did before CB-71.
