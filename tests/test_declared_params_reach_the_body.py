@@ -22,8 +22,9 @@ tested".
 THE POPULATION WAS MEASURED BEFORE ANYTHING WAS FIXED, and the measurement is
 the reason this file has the shape it has. `tests/manual/measure_cb157_forwarding.py`
 reports it and `.claude/plans/T61-CB-157-survey.md` records the numbers. Over the
-whole registry: 83 tools, 262 declared parameters, ZERO of which fail the gate
-below. So CB-157's live population is EMPTY -- M11 is a mutant, not a finding --
+whole registry: 83 tools, 301 declared parameters, 262 of them with a body this
+file judges (the other 39 belong to the 10 emitted tools whose shared body
+forwards by construction), and ZERO failing the gate below. So CB-157's live population is EMPTY -- M11 is a mutant, not a finding --
 and what this unit owes is therefore a mechanism that keeps it empty, not a fix.
 
 THE ENUMERATION IS A REGISTRY WALK, NEVER AN AST SWEEP FOR `@mcp.tool`, and that
