@@ -825,3 +825,51 @@ class TestTheGreedyDefaultDoesNotLeakIntoInternalCallers:
         counter.calls.clear()
         provenance.check_findings(conn, str(root), finding_id=fid)
         assert counter.containing("blame") == 0, counter.calls
+
+
+class TestThereIsExactlyOneResolver:
+    """§6's boundary, which nothing else in the suite holds.
+
+    The read path calls the SAME machinery `anchor_resolve` does. An inline
+    "cheap" resolver beside the real one is two spellings of one decision, and
+    the two diverge the first time either learns something — this repository's
+    most-repeated defect. A behavioural test cannot see it (a faithful copy
+    returns the same answers), so the pin is structural.
+    """
+
+    @staticmethod
+    def _calls(fn) -> set[str]:
+        import ast
+        import inspect
+        import textwrap
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        return {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+
+    def test_both_entry_points_go_through_the_same_two_helpers(self):
+        for fn in (loc.resolve_findings, loc.summarize_rows):
+            called = self._calls(fn)
+            assert "_resolve_one" in called, fn.__name__
+            assert "_resolution_context" in called, fn.__name__
+
+    def test_and_neither_reaches_git_on_its_own(self):
+        """`_git` and `resolve_anchor` are reached THROUGH `_resolve_one`, never
+        beside it — a second call site is how the copy starts."""
+        assert "_git" not in self._calls(loc.summarize_rows)
+        assert "resolve_anchor" not in self._calls(loc.summarize_rows)
+        assert "_git" not in self._calls(loc.resolve_findings)
+        assert "resolve_anchor" not in self._calls(loc.resolve_findings)
+
+    def test_findings_never_names_the_resolver_itself(self):
+        """The domain module hands rows to the SEAM and learns nothing about how
+        an extension resolves them — the reason the seam exists at all."""
+        import pathlib
+
+        source = pathlib.Path(findings.__file__).read_text()
+        assert "import loc" not in source
+        assert "from codebugs.loc" not in source
+        assert "resolve_anchor(" not in source
