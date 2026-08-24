@@ -658,21 +658,21 @@ def _connect_or_undetermined(entity_id: str, as_json: bool) -> sqlite3.Connectio
 
 
 def _cmd_claims_claim(args):
+    from codebugs.cli import domain_errors
+
     conn = _connect_or_undetermined(args.id, args.json)
     try:
-        result = claim(
-            conn,
-            entity_id=args.id,
-            holder=args.holder,
-            holder_kind=args.holder_kind,
-            holder_repo=args.repo,
-            note=args.note or "",
-            project=not args.no_project,
-            allow_terminal=args.allow_terminal,
-        )
-    except (ValueError, KeyError) as e:
-        print(f"codebugs: {e}", file=sys.stderr)
-        sys.exit(1)
+        with domain_errors(prefix="codebugs: "):
+            result = claim(
+                conn,
+                entity_id=args.id,
+                holder=args.holder,
+                holder_kind=args.holder_kind,
+                holder_repo=args.repo,
+                note=args.note or "",
+                project=not args.no_project,
+                allow_terminal=args.allow_terminal,
+            )
     finally:
         conn.close()
 
@@ -696,20 +696,20 @@ def _cmd_claims_claim(args):
 
 
 def _cmd_claims_release(args):
+    from codebugs.cli import domain_errors
+
     conn = _connect_or_undetermined(args.id, args.json)
     try:
-        result = release(
-            conn,
-            entity_id=args.id,
-            holder=args.holder,
-            holder_kind=args.holder_kind,
-            holder_repo=args.repo,
-            restore_status=not args.no_restore,
-            reason=args.reason,
-        )
-    except (ValueError, KeyError) as e:
-        print(f"codebugs: {e}", file=sys.stderr)
-        sys.exit(1)
+        with domain_errors(prefix="codebugs: "):
+            result = release(
+                conn,
+                entity_id=args.id,
+                holder=args.holder,
+                holder_kind=args.holder_kind,
+                holder_repo=args.repo,
+                restore_status=not args.no_restore,
+                reason=args.reason,
+            )
     finally:
         conn.close()
 
@@ -732,12 +732,12 @@ def _cmd_claims_release(args):
 
 
 def _cmd_claims_who_holds(args):
+    from codebugs.cli import domain_errors
+
     conn = db.connect()
     try:
-        row = who_holds(conn, entity_id=args.id)
-    except ValueError as e:
-        print(f"codebugs: {e}", file=sys.stderr)
-        sys.exit(1)
+        with domain_errors(prefix="codebugs: "):
+            row = who_holds(conn, entity_id=args.id)
     finally:
         conn.close()
 
