@@ -505,23 +505,25 @@ def register_cli(sub, commands) -> None:
             if meta is not None and not isinstance(meta, dict):
                 print("Error: --meta must be a JSON object", file=sys.stderr)
                 sys.exit(1)
+        from codebugs.cli import domain_errors
+
         conn = db.connect()
-        # No JSONDecodeError-first arm here (the _cmd_update pattern): these
-        # read-only commands parse stored meta through the deliberately
+        # These read-only commands parse stored meta through the deliberately
         # tolerant parse_meta, so a stored-data JSONDecodeError cannot reach
-        # this frame and the arm would assert a hazard that does not exist.
+        # this frame today. Routed through the shared wrapper (cli.py) anyway,
+        # uniformly with every other handler, rather than reasoned about here:
+        # the reachability judgment this comment used to make is exactly the
+        # per-handler thrash CB-55 replaces with one rule.
         try:
-            matches = find_similar(
-                conn,
-                description=args.description,
-                category=args.category,
-                meta=meta,
-                threshold=args.threshold,
-                limit=args.limit,
-            )
-        except (KeyError, ValueError) as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
+            with domain_errors(prefix="Error: "):
+                matches = find_similar(
+                    conn,
+                    description=args.description,
+                    category=args.category,
+                    meta=meta,
+                    threshold=args.threshold,
+                    limit=args.limit,
+                )
         finally:
             conn.close()
         if args.as_json:
@@ -532,21 +534,22 @@ def register_cli(sub, commands) -> None:
             print(format_table(matches, ["id", "status", "score"]))
 
     def _cmd_similarity_report(args) -> None:
+        from codebugs.cli import domain_errors
+
+        # Same as similarity-check: no stored-data JSONDecodeError can surface
+        # here (parse_meta is tolerant), but routed through the shared wrapper
+        # uniformly rather than left as a per-handler judgment call.
         conn = db.connect()
         try:
-            report = group_report(
-                conn,
-                threshold=args.threshold,
-                category=args.category,
-                status=args.status,
-                family_limit=args.family_limit,
-                member_limit=args.member_limit,
-            )
-        except (KeyError, ValueError) as e:
-            # Same as similarity-check: no stored-data JSONDecodeError can
-            # surface here (parse_meta is tolerant), so no re-raise arm.
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
+            with domain_errors(prefix="Error: "):
+                report = group_report(
+                    conn,
+                    threshold=args.threshold,
+                    category=args.category,
+                    status=args.status,
+                    family_limit=args.family_limit,
+                    member_limit=args.member_limit,
+                )
         finally:
             conn.close()
         if args.as_json:
