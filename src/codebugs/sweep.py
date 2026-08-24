@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
-import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -846,6 +845,8 @@ def _parse_tags(args: argparse.Namespace) -> list[str] | None:
 
 
 def _cmd_sweep_create(args: argparse.Namespace) -> None:
+    from codebugs.cli import domain_errors
+
     conn = db.connect()
     kwargs: dict = {}
     if args.name:
@@ -859,158 +860,156 @@ def _cmd_sweep_create(args: argparse.Namespace) -> None:
     if args.terminal_states:
         kwargs["terminal_states"] = _parse_csv(args.terminal_states)
     try:
-        result = create_sweep(conn, **kwargs)
-        print(f"Created: {result['sweep_id']}" + (f" ({result['name']})" if result["name"] else ""))
-        if result["lifecycle"] != ["pending", "done"]:
-            print(f"Lifecycle: {' -> '.join(result['lifecycle'])}")
-    except ValueError as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
+        with domain_errors():
+            result = create_sweep(conn, **kwargs)
+            print(f"Created: {result['sweep_id']}" + (f" ({result['name']})" if result["name"] else ""))
+            if result["lifecycle"] != ["pending", "done"]:
+                print(f"Lifecycle: {' -> '.join(result['lifecycle'])}")
     finally:
         conn.close()
 
 
 def _cmd_sweep_add(args: argparse.Namespace) -> None:
+    from codebugs.cli import domain_errors
+
     conn = db.connect()
     try:
-        result = add_items(conn, args.sweep, args.items, tags=_parse_tags(args))
-        msg = f"Added {result['added']} new items"
-        if result["recurrence_bumped"]:
-            msg += f", bumped recurrence on {result['recurrence_bumped']}"
-        print(msg + ".")
-    except ValueError as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
+        with domain_errors():
+            result = add_items(conn, args.sweep, args.items, tags=_parse_tags(args))
+            msg = f"Added {result['added']} new items"
+            if result["recurrence_bumped"]:
+                msg += f", bumped recurrence on {result['recurrence_bumped']}"
+            print(msg + ".")
     finally:
         conn.close()
 
 
 def _cmd_sweep_next(args: argparse.Namespace) -> None:
+    from codebugs.cli import domain_errors
+
     conn = db.connect()
     try:
-        result = next_batch(conn, args.sweep, limit=args.limit, tags=_parse_tags(args))
-        if not result["items"]:
-            print("(no unprocessed items)")
-            return
-        data = [
-            {
-                "item": i["item"],
-                "state": i["state"],
-                "rec": str(i["recurrence_count"]),
-                "tags": ",".join(i["tags"]),
-            }
-            for i in result["items"]
-        ]
-        print(format_table(data, ["item", "state", "rec", "tags"], max_widths={"item": 60}))
-        print(f"\n{result['remaining']} remaining.")
-    except ValueError as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
+        with domain_errors():
+            result = next_batch(conn, args.sweep, limit=args.limit, tags=_parse_tags(args))
+            if not result["items"]:
+                print("(no unprocessed items)")
+                return
+            data = [
+                {
+                    "item": i["item"],
+                    "state": i["state"],
+                    "rec": str(i["recurrence_count"]),
+                    "tags": ",".join(i["tags"]),
+                }
+                for i in result["items"]
+            ]
+            print(format_table(data, ["item", "state", "rec", "tags"], max_widths={"item": 60}))
+            print(f"\n{result['remaining']} remaining.")
     finally:
         conn.close()
 
 
 def _cmd_sweep_mark(args: argparse.Namespace) -> None:
+    from codebugs.cli import domain_errors
+
     conn = db.connect()
     try:
-        result = mark_items(
-            conn, args.sweep, args.items,
-            processed=not args.undo, state=args.state,
-        )
-        print(f"Marked {result['updated']} items -> state={result['state']}.")
-    except (ValueError, KeyError) as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
+        with domain_errors():
+            result = mark_items(
+                conn, args.sweep, args.items,
+                processed=not args.undo, state=args.state,
+            )
+            print(f"Marked {result['updated']} items -> state={result['state']}.")
     finally:
         conn.close()
 
 
 def _cmd_sweep_status(args: argparse.Namespace) -> None:
+    from codebugs.cli import domain_errors
+
     conn = db.connect()
     try:
-        s = get_status(conn, args.sweep)
-        print(f"Sweep: {s['sweep_id']}" + (f" ({s['name']})" if s["name"] else ""))
-        print(f"Status: {s['status']}")
-        print(f"Lifecycle: {' -> '.join(s['lifecycle'])}")
-        print(f"Items:  {s['processed']}/{s['total']} processed, {s['remaining']} remaining")
-        if s["archived"]:
-            print(f"Archived: {s['archived']}")
-        if s["by_state"]:
-            print("\nBy state:")
-            for state, count in s["by_state"].items():
-                print(f"  {state:20s}  {count}")
-        if s["by_tag"]:
-            print("\nBy tag:")
-            for tag, counts in sorted(s["by_tag"].items()):
-                print(f"  {tag:20s}  {counts['processed']}/{counts['total']}")
-    except ValueError as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
+        with domain_errors():
+            s = get_status(conn, args.sweep)
+            print(f"Sweep: {s['sweep_id']}" + (f" ({s['name']})" if s["name"] else ""))
+            print(f"Status: {s['status']}")
+            print(f"Lifecycle: {' -> '.join(s['lifecycle'])}")
+            print(f"Items:  {s['processed']}/{s['total']} processed, {s['remaining']} remaining")
+            if s["archived"]:
+                print(f"Archived: {s['archived']}")
+            if s["by_state"]:
+                print("\nBy state:")
+                for state, count in s["by_state"].items():
+                    print(f"  {state:20s}  {count}")
+            if s["by_tag"]:
+                print("\nBy tag:")
+                for tag, counts in sorted(s["by_tag"].items()):
+                    print(f"  {tag:20s}  {counts['processed']}/{counts['total']}")
     finally:
         conn.close()
 
 
 def _cmd_sweep_archive(args: argparse.Namespace) -> None:
+    from codebugs.cli import domain_errors
+
     conn = db.connect()
     try:
-        result = archive_sweep(conn, args.sweep)
-        print(f"Archived: {result['sweep_id']}")
-    except ValueError as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
+        with domain_errors():
+            result = archive_sweep(conn, args.sweep)
+            print(f"Archived: {result['sweep_id']}")
     finally:
         conn.close()
 
 
 def _cmd_sweep_archive_items(args: argparse.Namespace) -> None:
+    from codebugs.cli import domain_errors
+
     conn = db.connect()
     try:
-        result = archive_items(
-            conn, args.sweep,
-            items=args.items or None,
-            where_status=args.state,
-            older_than=args.older_than,
-            reason=args.reason,
-        )
-        print(f"Archived {result['archived']} entries in {result['sweep_id']}.")
-    except ValueError as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
+        with domain_errors():
+            result = archive_items(
+                conn, args.sweep,
+                items=args.items or None,
+                where_status=args.state,
+                older_than=args.older_than,
+                reason=args.reason,
+            )
+            print(f"Archived {result['archived']} entries in {result['sweep_id']}.")
     finally:
         conn.close()
 
 
 def _cmd_sweep_list_items(args: argparse.Namespace) -> None:
+    from codebugs.cli import domain_errors
+
     conn = db.connect()
     try:
-        result = list_items(
-            conn, args.sweep,
-            state=args.state, tag=args.tag,
-            include_archived=args.all,
-            archived_only=args.archived_only,
-            limit=args.limit,
-        )
-        if not result["items"]:
-            print("(no items)")
-            return
-        data = [
-            {
-                "item": i["item"],
-                "state": i["state"],
-                "rec": str(i["recurrence_count"]),
-                "archived": "y" if i["archived_at"] else "",
-                "tags": ",".join(i["tags"]),
-            }
-            for i in result["items"]
-        ]
-        print(format_table(
-            data,
-            ["item", "state", "rec", "archived", "tags"],
-            max_widths={"item": 60},
-        ))
-    except ValueError as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
+        with domain_errors():
+            result = list_items(
+                conn, args.sweep,
+                state=args.state, tag=args.tag,
+                include_archived=args.all,
+                archived_only=args.archived_only,
+                limit=args.limit,
+            )
+            if not result["items"]:
+                print("(no items)")
+                return
+            data = [
+                {
+                    "item": i["item"],
+                    "state": i["state"],
+                    "rec": str(i["recurrence_count"]),
+                    "archived": "y" if i["archived_at"] else "",
+                    "tags": ",".join(i["tags"]),
+                }
+                for i in result["items"]
+            ]
+            print(format_table(
+                data,
+                ["item", "state", "rec", "archived", "tags"],
+                max_widths={"item": 60},
+            ))
     finally:
         conn.close()
 

@@ -3,12 +3,56 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import json
 import os
 import signal
 import sqlite3
 import sys
 
 from codebugs import db
+
+
+@contextlib.contextmanager
+def domain_errors(*, prefix: str = ""):
+    """Encode the CB-55 / CB-86 CLI-boundary rule exactly once.
+
+    A domain call wrapped in ``with domain_errors():`` can raise three different
+    things, and CLAUDE.md's Error handling section is precise that they must be
+    told apart rather than folded into one arm:
+
+    - ``json.JSONDecodeError`` IS a ``ValueError`` subclass, but here it means
+      the write already landed and only the RETURN VALUE's serialization then
+      failed — ``row_to_dict`` parsing a matched row's corrupted stored
+      ``meta``/``tags`` (CB-16). Reporting that through the input-validation
+      arm would print a tidy one-line "bad input" message and exit 1 for a
+      mutation that already committed, which CB-86 names as the same lie as
+      CB-15/CB-16. So it is re-raised, unchanged, and reaches the user as a
+      loud traceback — the discriminator `tests/test_bench.py` pins between a
+      post-commit failure and an input error.
+    - Plain ``ValueError`` / ``KeyError`` are genuine bad input (an unknown
+      vocabulary value, a missing id) and print one line to stderr, then
+      ``sys.exit(1)``.
+    - Everything else — ``OSError`` from a git subprocess (CB-79),
+      ``db.TrackerUnwritableError`` (CB-86, classified in ``db._open``),
+      ``BrokenPipeError``/the SIGPIPE path (CB-78, CB-134) — is untouched: it
+      is not caught here and propagates to whatever already decides it. A
+      central arm on ``cli.main`` cannot make any of those calls, which is
+      exactly why this wrapper is scoped to one domain call's region and not
+      hoisted further up the stack (CB-55's own rejected-design note).
+
+    ``prefix`` exists ONLY to preserve an individual handler's existing
+    message text (some print ``str(e)`` bare, some ``f"codebugs: {e}"``, some
+    ``f"Error: {e}"``) — it is formatting, not part of the rule, and the rule
+    itself never changes with it.
+    """
+    try:
+        yield
+    except json.JSONDecodeError:
+        raise
+    except (ValueError, KeyError) as e:
+        print(f"{prefix}{e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _cmd_init(args: argparse.Namespace) -> None:
@@ -33,8 +77,15 @@ def _cmd_init(args: argparse.Namespace) -> None:
     if directory is None and source == "flag":
         directory = declared
     try:
-        result = db.init_project(directory, force=args.force)
-    except (ValueError, OSError) as e:
+        with domain_errors(prefix="codebugs: "):
+            result = db.init_project(directory, force=args.force)
+    except OSError as e:
+        # Kept as its own arm, outside domain_errors: `db.init_project`'s
+        # OSError is a file-I/O failure (CB-79's OTHER vocabulary — not the
+        # git-subprocess one), and the CB-55 wrapper deliberately never
+        # touches OSError at all (see its docstring), so it must stay caught
+        # here or it would escape as a traceback for a state this command has
+        # always reported cleanly.
         print(f"codebugs: {e}", file=sys.stderr)
         sys.exit(1)
     if args.force and db._find_db_root(os.path.dirname(result["root"])) is not None:

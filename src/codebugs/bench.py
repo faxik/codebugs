@@ -969,39 +969,39 @@ def _cmd_bench_import(args: argparse.Namespace) -> None:
 
 
 def _cmd_bench_query(args: argparse.Namespace) -> None:
+    from codebugs.cli import domain_errors
+
     conn = db.connect()
     try:
-        kwargs: dict[str, Any] = {
-            "benchmark": args.benchmark,
-            "group_by": args.group_by or "row",
-            "format": args.format or "json",
-        }
-        if args.runs:
-            kwargs["runs"] = args.runs
-        if args.date_from:
-            kwargs["date_from"] = args.date_from
-        if args.date_to:
-            kwargs["date_to"] = args.date_to
-        if args.metrics:
-            kwargs["metrics"] = [m.strip() for m in args.metrics.split(",")]
-        if args.rows:
-            kwargs["rows"] = [r.strip() for r in args.rows.split(",")]
-        if args.last_n:
-            kwargs["last_n"] = args.last_n
+        with domain_errors():
+            kwargs: dict[str, Any] = {
+                "benchmark": args.benchmark,
+                "group_by": args.group_by or "row",
+                "format": args.format or "json",
+            }
+            if args.runs:
+                kwargs["runs"] = args.runs
+            if args.date_from:
+                kwargs["date_from"] = args.date_from
+            if args.date_to:
+                kwargs["date_to"] = args.date_to
+            if args.metrics:
+                kwargs["metrics"] = [m.strip() for m in args.metrics.split(",")]
+            if args.rows:
+                kwargs["rows"] = [r.strip() for r in args.rows.split(",")]
+            if args.last_n:
+                kwargs["last_n"] = args.last_n
 
-        result = query(conn, **kwargs)
+            result = query(conn, **kwargs)
 
-        if result["runs_matched"] == 0:
-            print("(no matching runs)")
-            return
+            if result["runs_matched"] == 0:
+                print("(no matching runs)")
+                return
 
-        if result["format"] == "csv":
-            print(result["csv"])
-        else:
-            print(json.dumps(result["data"], indent=2))
-    except ValueError as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
+            if result["format"] == "csv":
+                print(result["csv"])
+            else:
+                print(json.dumps(result["data"], indent=2))
     finally:
         conn.close()
 
@@ -1044,23 +1044,20 @@ def _cmd_bench_list(args: argparse.Namespace) -> None:
 
 
 def _cmd_bench_delete(args: argparse.Namespace) -> None:
+    from codebugs.cli import domain_errors
+
     conn = db.connect()
     try:
-        _require_exactly_one(
-            ("--run-id", bool(args.run_id)), ("--benchmark", bool(args.benchmark))
-        )
-        if args.run_id:
-            result = delete_run(conn, args.run_id)
-            print(f"Deleted run {result['deleted']} ({result['results_removed']} results)")
-        else:
-            result = delete_benchmark(conn, args.benchmark)
-            print(f"Deleted benchmark {result['deleted_benchmark']} ({result['runs_removed']} runs, {result['results_removed']} results)")
-    # ValueError is the refusal above. No JSONDecodeError-first arm is needed
-    # here — neither delete function parses stored JSON, so no failure can
-    # follow the write and be misreported as bad input.
-    except (KeyError, ValueError) as e:
-        print(str(e), file=sys.stderr)
-        sys.exit(1)
+        with domain_errors():
+            _require_exactly_one(
+                ("--run-id", bool(args.run_id)), ("--benchmark", bool(args.benchmark))
+            )
+            if args.run_id:
+                result = delete_run(conn, args.run_id)
+                print(f"Deleted run {result['deleted']} ({result['results_removed']} results)")
+            else:
+                result = delete_benchmark(conn, args.benchmark)
+                print(f"Deleted benchmark {result['deleted_benchmark']} ({result['runs_removed']} runs, {result['results_removed']} results)")
     finally:
         conn.close()
 

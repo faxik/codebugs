@@ -1586,7 +1586,6 @@ def register_cli(sub, commands) -> None:
     `--mode`; this only gates which VERBS are exposed.
     """
     import json as _json
-    import sys
 
     from codebugs.fmt import format_table
 
@@ -1639,27 +1638,27 @@ def register_cli(sub, commands) -> None:
     )
 
     def _cmd_anchor_resolve(args) -> None:
+        from codebugs.cli import domain_errors
+
+        # `anchor_candidates` hands back `meta_json` as the stored string and
+        # `_stored_loc` tolerates a column that does not parse, so this path
+        # cannot actually raise json.JSONDecodeError today. Routed through the
+        # shared wrapper anyway (cli.py's domain_errors) rather than reasoned
+        # about per-handler, which is what similarity.py's history shows goes
+        # wrong: an arm hand-written here and then hand-removed as
+        # "unreachable" is exactly the thrash CB-55 exists to end.
         conn = db.connect()
-        # No JSONDecodeError-first arm, and that is a statement about this path
-        # rather than an omission: nothing here converts a stored row through
-        # `db.row_to_dict`. `anchor_candidates` hands back `meta_json` as the
-        # stored string and `_stored_loc` tolerates a column that does not parse,
-        # so the hazard the arm guards against is structurally unreachable —
-        # asserting it would claim a risk that does not exist (similarity's
-        # precedent, and the inverse of `_cmd_update`'s).
         try:
-            result = resolve_findings(
-                conn,
-                finding_id=args.finding_id,
-                status=args.status,
-                category=args.category,
-                file=args.file,
-                project_dir=args.repo,
-                limit=args.limit,
-            )
-        except (KeyError, ValueError) as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
+            with domain_errors(prefix="Error: "):
+                result = resolve_findings(
+                    conn,
+                    finding_id=args.finding_id,
+                    status=args.status,
+                    category=args.category,
+                    file=args.file,
+                    project_dir=args.repo,
+                    limit=args.limit,
+                )
         finally:
             conn.close()
 
@@ -1692,33 +1691,31 @@ def register_cli(sub, commands) -> None:
         )
 
     def _cmd_anchor_recapture(args) -> None:
+        from codebugs.cli import domain_errors
+
+        # JSONDecodeError re-raises rather than printing as bad input, and here
+        # the hazard is real: on `--apply` this path reaches `update_finding`,
+        # which converts the mutated row AFTER its transaction commits, so a
+        # row with malformed stored `meta`/`tags` raises from a write that HAS
+        # ALREADY LANDED. Reporting that through the input-validation arm is
+        # the CB-15/CB-16 lie — exactly what `domain_errors` (cli.py) encodes.
         conn = db.connect()
         try:
-            result = recapture_findings(
-                conn,
-                finding_id=args.finding_id,
-                status=args.status,
-                category=args.category,
-                file=args.file,
-                project_dir=args.repo,
-                apply=args.apply,
-                force_tombstone=args.force_tombstone,
-                include_unanchored=args.include_unanchored,
-                limit=args.limit,
-            )
-        # JSONDecodeError BEFORE ValueError, and here the hazard is real: on
-        # `--apply` this path reaches `update_finding`, which converts the
-        # mutated row AFTER its transaction commits, so a row with malformed
-        # stored `meta`/`tags` raises from a write that HAS ALREADY LANDED.
-        # Reporting that through the input-validation arm is the CB-15/CB-16 lie.
-        except _json.JSONDecodeError:
+            with domain_errors(prefix="Error: "):
+                result = recapture_findings(
+                    conn,
+                    finding_id=args.finding_id,
+                    status=args.status,
+                    category=args.category,
+                    file=args.file,
+                    project_dir=args.repo,
+                    apply=args.apply,
+                    force_tombstone=args.force_tombstone,
+                    include_unanchored=args.include_unanchored,
+                    limit=args.limit,
+                )
+        finally:
             conn.close()
-            raise
-        except (KeyError, ValueError) as e:
-            print(f"Error: {e}", file=sys.stderr)
-            conn.close()
-            sys.exit(1)
-        conn.close()
 
         if args.as_json:
             print(_json.dumps(result, indent=2))

@@ -3810,41 +3810,40 @@ def register_cli(sub, commands) -> None:
         # from another is anchored against nothing.
         project_dir = _ambient_project_dir()
 
+        from codebugs.cli import domain_errors
+
         try:
-            result = add_finding(
-                conn,
-                severity=args.severity,
-                category=args.category,
-                file=args.file,
-                description=args.description,
-                source=args.source or "human",
-                tags=tags,
-                meta=meta or None,
-                fingerprint=args.fingerprint,
-                new_category=args.new_category,
-                # `db.connect()` above walks up from the cwd, so the cwd is the
-                # tree this invocation is about — stated rather than reached for.
-                project_dir=project_dir,
-                # CB-144. The CLI is a FILING SURFACE like the two MCP wrappers,
-                # and it captured nothing, so every CLI-filed card was
-                # structurally unanchorable. Unconditional because there is no
-                # argument to omit: `--commit` is NOT added here on purpose —
-                # that is CB-6's already-named surface gap, and adding it would
-                # mix two axes and disturb the update-parity gate.
-                reported_at_commit=_ambient_head(project_dir),
-            )
-        except json.JSONDecodeError:
-            # MUST stay ahead of the ValueError arm, which it subclasses — the
-            # _cmd_update ordering contract. This is _bump_row's PRE-write
-            # parse of the matched row's stored meta: corruption, not bad
-            # input, so it must not print as a tidy usage error. (The
+            # json.JSONDecodeError re-raises rather than printing as bad input
+            # (domain_errors, cli.py): this is _bump_row's PRE-write parse of
+            # the matched row's stored meta — corruption, not bad input. (The
             # post-commit twin — stored tags failing AFTER the bump landed —
-            # arrives as PostCommitCorruptionError, which no arm here catches
+            # arrives as PostCommitCorruptionError, which nothing here catches
             # and which therefore also propagates loudly.)
-            raise
-        except ValueError as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
+            with domain_errors():
+                result = add_finding(
+                    conn,
+                    severity=args.severity,
+                    category=args.category,
+                    file=args.file,
+                    description=args.description,
+                    source=args.source or "human",
+                    tags=tags,
+                    meta=meta or None,
+                    fingerprint=args.fingerprint,
+                    new_category=args.new_category,
+                    # `db.connect()` above walks up from the cwd, so the cwd is
+                    # the tree this invocation is about — stated rather than
+                    # reached for.
+                    project_dir=project_dir,
+                    # CB-144. The CLI is a FILING SURFACE like the two MCP
+                    # wrappers, and it captured nothing, so every CLI-filed
+                    # card was structurally unanchorable. Unconditional because
+                    # there is no argument to omit: `--commit` is NOT added
+                    # here on purpose — that is CB-6's already-named surface
+                    # gap, and adding it would mix two axes and disturb the
+                    # update-parity gate.
+                    reported_at_commit=_ambient_head(project_dir),
+                )
         finally:
             conn.close()
         # A bump is not a creation — saying "Added" for a non-write is the CB-15
@@ -3860,62 +3859,60 @@ def register_cli(sub, commands) -> None:
             print(f"Added: {result['id']}")
 
     def _cmd_update(args: argparse.Namespace) -> None:
+        from codebugs.cli import domain_errors
+
         conn = db.connect()
         try:
-            result = update_finding(
-                conn,
-                args.id,
-                status=args.status,
-                severity=args.severity,
-                notes=args.notes,
-                append_note=args.append_note,
-            )
-            print(
-                f"Updated: {result['id']} "
-                f"(status={result['status']}, severity={result['severity']})"
-            )
-        except json.JSONDecodeError:
-            # MUST stay ahead of the ValueError arm below, which it subclasses.
-            # This is a corrupted stored row, not bad user input, and the write
-            # has ALREADY been committed by the time result serialization raises.
-            # Reporting it as a clean input error would exit 1 on a successful
-            # mutation — a failure-shaped signal for a write that landed.
-            raise
-        except (KeyError, ValueError) as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
+            # json.JSONDecodeError re-raises rather than printing as bad input
+            # (domain_errors, cli.py): this is a corrupted stored row, not bad
+            # user input, and the write has ALREADY been committed by the time
+            # result serialization raises. Reporting it as a clean input error
+            # would exit 1 on a successful mutation — a failure-shaped signal
+            # for a write that landed.
+            with domain_errors():
+                result = update_finding(
+                    conn,
+                    args.id,
+                    status=args.status,
+                    severity=args.severity,
+                    notes=args.notes,
+                    append_note=args.append_note,
+                )
+                print(
+                    f"Updated: {result['id']} "
+                    f"(status={result['status']}, severity={result['severity']})"
+                )
         finally:
             conn.close()
 
     def _cmd_query(args: argparse.Namespace) -> None:
+        from codebugs.cli import domain_errors
+
         conn = db.connect()
         ids = [s.strip() for s in args.id.split(",") if s.strip()] if args.id else None
         try:
-            result = query_findings(
-                conn,
-                ids=ids,
-                status=args.status,
-                severity=args.severity,
-                category=args.category,
-                file=args.file,
-                source=args.source,
-                fingerprint=args.fingerprint,
-                group_by=args.group_by,
-                limit=args.limit or 100,
-            )
-        except json.JSONDecodeError:
-            # MUST stay ahead of the ValueError arm, which it subclasses — same
-            # ordering contract as `_cmd_update`. A corrupt stored row is not bad
-            # user input, and flattening it into a one-line "bad input" message
+            # json.JSONDecodeError re-raises (domain_errors, cli.py) rather
+            # than printing as bad input: a corrupt stored row is not bad user
+            # input, and flattening it into a one-line "bad input" message
             # would hide a data-integrity problem behind a usage error.
-            raise
-        except ValueError as e:
-            # `--severity`/`--status` are free text; an unknown value now names
-            # itself and exits 1 instead of printing a traceback. Vocabulary
-            # filters have raised since `status` began resolving — this handler
-            # simply never caught it (CB-19).
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
+            # `--severity`/`--status` are free text; an unknown value names
+            # itself and exits 1 instead of printing a traceback (CB-19).
+            with domain_errors():
+                result = query_findings(
+                    conn,
+                    ids=ids,
+                    status=args.status,
+                    severity=args.severity,
+                    category=args.category,
+                    file=args.file,
+                    source=args.source,
+                    fingerprint=args.fingerprint,
+                    group_by=args.group_by,
+                    # CB-124: `or 100` silently turned `--limit 0` into 100
+                    # rows, the truthiness shape CB-25/CB-82 condemn.
+                    # `argparse` gives None only when the flag is absent.
+                    limit=args.limit if args.limit is not None else 100,
+                )
         finally:
             conn.close()
 
@@ -3948,26 +3945,25 @@ def register_cli(sub, commands) -> None:
             print(f"\n{result['total']} finding(s) total.")
 
     def _cmd_recent(args: argparse.Namespace) -> None:
+        from codebugs.cli import domain_errors
+
         conn = db.connect()
         try:
-            result = recent_findings(
-                conn,
-                since=args.since,
-                status=args.status,
-                limit=args.limit or 100,
-            )
-        except json.JSONDecodeError:
-            # MUST stay ahead of the ValueError arm, which it subclasses — the
-            # `_cmd_update` ordering contract. This one reaches here through
-            # `db.row_to_dict` on a row with corrupt stored meta/tags: a
-            # data-integrity problem, not bad user input, and flattening it into
-            # a tidy one-line usage error would hide it.
-            raise
-        except ValueError as e:
-            # A `--since` that is not a date, or an unknown `--status`, names
-            # itself and exits 1 instead of printing a traceback.
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
+            # json.JSONDecodeError re-raises (domain_errors, cli.py): this one
+            # reaches here through `db.row_to_dict` on a row with corrupt
+            # stored meta/tags — a data-integrity problem, not bad user input,
+            # and flattening it into a tidy one-line usage error would hide
+            # it. A `--since` that is not a date, or an unknown `--status`,
+            # names itself and exits 1 instead of printing a traceback.
+            with domain_errors():
+                result = recent_findings(
+                    conn,
+                    since=args.since,
+                    status=args.status,
+                    # CB-124: `or 100` silently turned `--limit 0` into 100
+                    # rows. `argparse` gives None only when the flag is absent.
+                    limit=args.limit if args.limit is not None else 100,
+                )
         finally:
             conn.close()
 
@@ -3996,12 +3992,12 @@ def register_cli(sub, commands) -> None:
         print(f"\n{result['total']} finding(s) touched since {result['since']}.")
 
     def _cmd_get(args: argparse.Namespace) -> None:
+        from codebugs.cli import domain_errors
+
         conn = db.connect()
         try:
-            result = get_finding(conn, args.id)
-        except KeyError as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
+            with domain_errors():
+                result = get_finding(conn, args.id)
         finally:
             conn.close()
         print(json.dumps(result, indent=2, sort_keys=True))
@@ -4144,16 +4140,14 @@ def register_cli(sub, commands) -> None:
                 print(f"codebugs: --fold-map is not valid JSON: {e}", file=sys.stderr)
                 sys.exit(1)
 
+        from codebugs.cli import domain_errors
+
         conn = db.connect()
         try:
-            report = normalize_categories(conn, fold_map=fold_map, apply=args.apply)
-        except json.JSONDecodeError:
-            # MUST stay ahead of the ValueError arm it subclasses (the _cmd_update
-            # ordering contract): a corrupted stored row is not bad user input.
-            raise
-        except (KeyError, ValueError) as e:
-            print(str(e), file=sys.stderr)
-            sys.exit(1)
+            # json.JSONDecodeError re-raises (domain_errors, cli.py): a
+            # corrupted stored row is not bad user input.
+            with domain_errors():
+                report = normalize_categories(conn, fold_map=fold_map, apply=args.apply)
         finally:
             conn.close()
 
