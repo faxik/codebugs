@@ -28,7 +28,9 @@ import json
 import sqlite3
 import sys
 from datetime import datetime, timezone
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import Field
 
 from codebugs import db, entities
 from codebugs import types as t
@@ -518,8 +520,8 @@ def register_tools(mcp, conn_factory) -> None:
         holder_kind: str = "agent",
         holder_repo: str | None = None,
         note: str = "",
-        project: bool = True,
-        allow_terminal: bool = False,
+        project: Annotated[bool, Field(strict=True)] = True,
+        allow_terminal: Annotated[bool, Field(strict=True)] = False,
     ) -> dict[str, Any]:
         """Claim a finding or requirement so parallel agents do not collide.
 
@@ -555,7 +557,7 @@ def register_tools(mcp, conn_factory) -> None:
         holder: str,
         holder_kind: str = "agent",
         holder_repo: str | None = None,
-        restore_status: bool = True,
+        restore_status: Annotated[bool, Field(strict=True)] = True,
         reason: str = "explicit",
     ) -> dict[str, Any]:
         """Release a claim. Authorized on the full (holder, holder_kind, holder_repo)

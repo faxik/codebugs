@@ -41,8 +41,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   effort: if it cannot be written, your refusal still arrives unchanged, and it is
   skipped entirely when `update` is called from inside another operation's transaction,
   because recording a statistic must never commit somebody else's unfinished work. The
-  key is yours to correct with `update --meta-update`, and it cannot be pre-set when
-  filing a card. Re-opening a card does **not** count as a touch: `updated_at` does not
+  key is yours to correct through the MCP tool `update(meta_update={"fingerprint_refusals":
+  N})` — where a colliding `notes=` does not fight it, since `meta_update` merges last and
+  wins — and it cannot be pre-set when filing a card. **From a shell there is no repair
+  path**: the CLI `update` verb carries no `--meta-update` flag, and never has. That is the
+  same CB-6 axis gap as the missing `--meta-key` two paragraphs up, declared in
+  `SURFACE_GAPS` rather than left to be discovered, and it is stated here as a limit and
+  not as something in flight. Re-opening a card does **not** count as a touch: `updated_at` does not
   move, so `codebugs recent` is unaffected.
 
 - **`grouping.py` is now exposed — three MCP tools and three CLI verbs (CB-127).**

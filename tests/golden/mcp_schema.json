@@ -1016,6 +1016,23 @@
     "name": "codemerge_claim"
   },
   {
+    "description": "List all files a session has claimed, in claim order.\n\nArgs:\n    session_id: The merge session ID.\n",
+    "inputSchema": {
+      "properties": {
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "title": "codemerge_claimsArguments",
+      "type": "object"
+    },
+    "name": "codemerge_claims"
+  },
+  {
     "description": "Finish a merge session and release the lock.\n\nCall this after codemerge_merge() returned proceed=true; the session must\nbe in 'merging' state or this refuses in BOTH directions of `success`.\n\nArgs:\n    session_id: The merge session ID\n    success: True if the merge succeeded (status\u2192done). False if the git\n        merge/cherry-pick failed (status\u2192active): the lock is released and\n        the session stays alive so it can try again. False does NOT close\n        the session \u2014 use codemerge_abandon for that.\n",
     "inputSchema": {
       "properties": {
@@ -1060,6 +1077,28 @@
     "name": "codemerge_merge"
   },
   {
+    "description": "List merge sessions with claim counts.\n\nArgs:\n    status: Filter by status ('active', 'merging', 'done', 'abandoned').\n        Omit for all sessions.\n",
+    "inputSchema": {
+      "properties": {
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status"
+        }
+      },
+      "title": "codemerge_sessionsArguments",
+      "type": "object"
+    },
+    "name": "codemerge_sessions"
+  },
+  {
     "description": "Start a new merge session for a branch.\n\nArgs:\n    session_id: Unique identifier for this merge session\n    branch: Git branch name being merged\n    description: Human-readable description of the work\n    base_commit: Git commit SHA this branch diverged from\n    repo_root: Repo root path (default: cwd)\n    allow_restart: If True, reuse this session_id when its previous\n        session is finished \u2014 'abandoned' or 'done'. Restarting DELETES\n        that session's file claims, so re-claim anything you still need.\n        It does NOT restart a live one: starting over an 'active' or\n        'merging' session is an error whether or not this is set.\n",
     "inputSchema": {
       "properties": {
@@ -1100,6 +1139,15 @@
       "type": "object"
     },
     "name": "codemerge_start"
+  },
+  {
+    "description": "Dashboard summary: session counts by status, total active claims,\nand who (if anyone) holds the merge lock.",
+    "inputSchema": {
+      "properties": {},
+      "title": "codemerge_statusArguments",
+      "type": "object"
+    },
+    "name": "codemerge_status"
   },
   {
     "description": "Add items to a sweep. Atomic upsert: existing items have their\n`recurrence_count` bumped instead of being silently skipped, their\n`last_seen` updated, and their archive flag cleared (R5: re-detected\narchived items un-archive automatically).\n\nArgs:\n    sweep_ref: Sweep ID (SW-N) or name\n    items: Item identifiers to add\n    tags: Optional tags applied to this batch (overwrite on bump)\n\nReturns:\n    {sweep_id, added, recurrence_bumped, duplicates_skipped (alias)}\n",
@@ -2024,6 +2072,21 @@
     "name": "milestone_move_item"
   },
   {
+    "description": "One-time repair (CB-107) for stream items whose source finding or\nrequirement resolved before the status-change hook existed (CB-26).\nThe hook keeps new resolutions in sync; this is the retroactive fix for\nrows it never saw.\n\nDRY RUN BY DEFAULT \u2014 without apply=true nothing is written, and the\nresponse still lists every candidate transition it WOULD make. This is\na bulk mutation, and CLAUDE.md is explicit that a repair tool which\nwrites by default is how it becomes an accident, so the dry-run default\nis load-bearing and this wrapper refuses to weaken it.\n\nArgs:\n    apply: Must be a literal JSON boolean. Defaults to false (dry run).\n        Rejected outright for any other JSON type (a string like\n        \"false\", a number, null) rather than coerced by truthiness \u2014\n        an MCP client sends JSON over the wire, and Python's bool(\"0\")\n        and bool(\"false\") are both True, which would silently turn a\n        client's intended dry run into a write (CB-82's class of bug).\n        CB-151: strict typing refuses this at the pydantic boundary\n        before the tool body runs, closing the one hole the previous\n        union annotation + isinstance check left open (1.0/0.0 coerced\n        to a real bool before isinstance could see it).\n",
+    "inputSchema": {
+      "properties": {
+        "apply": {
+          "default": false,
+          "title": "Apply",
+          "type": "boolean"
+        }
+      },
+      "title": "milestone_reconcileArguments",
+      "type": "object"
+    },
+    "name": "milestone_reconcile"
+  },
+  {
     "description": "Set an item's status. Records done_commit if status is terminal.\n\nArgs:\n    item_ref: The item id (e.g. CB-5).\n    status: open / in_progress / done / deferred / dismissed.\n    commit: SHA where the work landed on main (recorded for terminal status).\n    reason: Optional audit reason.\n",
     "inputSchema": {
       "properties": {
@@ -2919,7 +2982,7 @@
     "name": "reqs_summary"
   },
   {
-    "description": "Update a requirement's status, description, or metadata.\n\nArgs:\n    req_id: Requirement ID (e.g. FR-001)\n    status: New status: planned, partial, implemented, verified, superseded, obsolete\n    description: Updated description\n    priority: Updated priority: must, should, could\n    section: Updated section name\n    test_coverage: Updated test file reference\n    notes: Notes (stored in meta.notes)\n    tags: Replace tags\n    meta_update: Merge metadata keys\n",
+    "description": "Update a requirement's status, description, or metadata.\n\nArgs:\n    req_id: Requirement ID (e.g. FR-001)\n    status: New status: planned, partial, implemented, verified, superseded, obsolete\n    description: Updated description\n    priority: Updated priority: must, should, could\n    section: Updated section name\n    test_coverage: Updated test file reference\n    notes: Notes (stored in meta.notes). REPLACES the stored notes\n           wholesale. If meta_update also carries a \"notes\" key, the\n           meta_update value is the one that lands \u2014 see meta_update.\n    tags: Replace tags\n    meta_update: Merge metadata keys. notes and meta_update compose over\n                 ONE dict: notes replaces first, meta_update merges\n                 LAST. So passing both notes= and\n                 meta_update={\"notes\": ...} in a single call is neither\n                 an error nor a refusal \u2014 meta_update wins the\n                 collision, on every key it names. That precedence is\n                 deliberate: meta_update names the storage key directly,\n                 so it is the repair path for a key no other argument\n                 can write. Unlike the findings `update` tool there is\n                 no append_note here, so there is no third writer.\n",
     "inputSchema": {
       "properties": {
         "description": {
@@ -3352,7 +3415,7 @@
     "name": "triage_promote"
   },
   {
-    "description": "Update a finding's status, severity, notes, tags, or metadata.\n\nArgs:\n    finding_id: The finding ID (e.g. CB-1)\n    status: New status: open, in_progress, fixed, not_a_bug, wont_fix, stale.\n            Aliases accepted: done/resolved/implemented/closed \u2192 fixed,\n            wontfix \u2192 wont_fix, invalid \u2192 not_a_bug,\n            active/working/in-progress \u2192 in_progress\n    severity: Re-triage the finding: critical, high, medium, or low.\n              Case-insensitive, but no aliases \u2014 unlike status, \"crit\" and\n              \"P0\" are refused.\n    notes: REPLACES the notes wholesale, discarding whatever was there.\n           To add to an existing record without destroying it, use\n           append_note instead.\n    append_note: Appends a newline-joined line, preserving the prior notes.\n                 This is the safe way to add evidence to a long-lived card.\n    tags: Replace tags list\n    meta_update: Merge additional metadata keys\n    reported_at_ref: Update version/tag label (e.g. \"v2.1.0\"). This is\n                     the SANCTIONED manual mutation of an\n                     observation-frozen column (BT-4): observations\n                     never move it, this call does \u2014 a release is\n                     tagged after filing.\n",
+    "description": "Update a finding's status, severity, notes, tags, or metadata.\n\nArgs:\n    finding_id: The finding ID (e.g. CB-1)\n    status: New status: open, in_progress, fixed, not_a_bug, wont_fix, stale.\n            Aliases accepted: done/resolved/implemented/closed \u2192 fixed,\n            wontfix \u2192 wont_fix, invalid \u2192 not_a_bug,\n            active/working/in-progress \u2192 in_progress\n    severity: Re-triage the finding: critical, high, medium, or low.\n              Case-insensitive, but no aliases \u2014 unlike status, \"crit\" and\n              \"P0\" are refused.\n    notes: REPLACES the notes wholesale, discarding whatever was there.\n           To add to an existing record without destroying it, use\n           append_note instead. If meta_update also carries a \"notes\"\n           key, the meta_update value is the one that lands \u2014 see\n           meta_update for why that is deliberate.\n    append_note: Appends a newline-joined line, preserving the prior notes.\n                 This is the safe way to add evidence to a long-lived card.\n    tags: Replace tags list\n    meta_update: Merge additional metadata keys. The three meta-writing\n                 arguments compose over ONE dict, in this order: notes\n                 replaces, append_note then extends that replacement,\n                 and meta_update merges LAST. So passing both notes=\n                 and meta_update={\"notes\": ...} in a single call is\n                 neither an error nor a refusal \u2014 meta_update wins the\n                 collision, on every key it names. That precedence is\n                 deliberate rather than incidental: meta_update names\n                 the storage key directly, which makes it the repair\n                 path for keys no other argument can reach\n                 (similar_to, category_minted, fingerprint_refusals),\n                 and a stamp no argument could overwrite would be an\n                 unrepairable one.\n    reported_at_ref: Update version/tag label (e.g. \"v2.1.0\"). This is\n                     the SANCTIONED manual mutation of an\n                     observation-frozen column (BT-4): observations\n                     never move it, this call does \u2014 a release is\n                     tagged after filing.\n",
     "inputSchema": {
       "properties": {
         "append_note": {

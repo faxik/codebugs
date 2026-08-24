@@ -24,7 +24,9 @@ open defects and is not implementable yet. This module is the ledger only; the
 from __future__ import annotations
 
 import sqlite3
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import Field
 
 from codebugs import db
 from codebugs.entities import EntityRef
@@ -353,7 +355,7 @@ def register_tools(mcp, conn_factory) -> None:
     def relations_query(
         entity_id: str | None = None,
         rel: str | None = None,
-        include_retracted: bool = False,
+        include_retracted: Annotated[bool, Field(strict=True)] = False,
     ) -> dict[str, Any]:
         """List relations touching a finding, in both directions.
 

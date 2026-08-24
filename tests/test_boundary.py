@@ -163,6 +163,49 @@ class TestMcpWireSchema:
         If this fails: either (a) you intentionally changed a tool — regenerate the golden
         with `PYTHONPATH=src uv run python tests/dump_schema.py > tests/golden/mcp_schema.json`,
         or (b) you accidentally drifted — fix the offending change.
+
+        DECLARED BLIND SPOT (CB-147): this gate does not, and cannot, catch a reordering of
+        `inputSchema.properties` keys within one tool. `tests/dump_schema.py` writes the golden
+        with `json.dumps(..., sort_keys=True)`, which re-sorts every object's keys alphabetically
+        AT WRITE TIME — measured on the live golden: `codesweep_create`'s `properties` read
+        `default_batch_size, description, lifecycle, name, terminal_states, transitions`, while
+        `sweep.create_sweep`'s signature declares them `name, description, default_batch_size,
+        lifecycle, terminal_states, transitions`. The declared order is simply not present in the
+        file this test compares against, so no comparison strategy over that file could recover it
+        (a prior card proposed comparing the golden as raw JSON text instead of parsed dicts; that
+        would still miss this, because the text itself is already alphabetized).
+
+        This is a decision, not an oversight: (1) a JSON object's member order is not a guaranteed
+        part of the wire contract — RFC 8259 leaves it unordered, and a client is free to render
+        `properties` in any order, including its own sort; (2) MCP tool calls bind arguments BY
+        NAME, so no client BEHAVIOR depends on this order; (3) `sort_keys=True` gives a stable
+        diffable golden, and undoing it to chase this ordering would buy a property the protocol
+        does not promise at the cost of a full golden regeneration and a permanent new dependency
+        on declaration order. (Reason (3) is an inference about intent, not a recorded decision:
+        `dump_schema.py`'s own docstring says "flat sorted list", which is about the ORDER OF THE
+        TOOL LIST, and nowhere states that sorting the KEYS was deliberate.)
+
+        WHAT THIS DOES NOT CLAIM, corrected after the T-53 acceptance measured it. An earlier
+        draft of this docstring said the only thing a reordering touches is the positional
+        signature of the generated callable, "which nothing outside this repository's own tests
+        can see". That is FALSE, and the measurement is one line: the SERVER serves `properties`
+        in DECLARATION order (`name, description, default_batch_size, ...`) — the alphabetisation
+        exists only in the written golden. So a client that renders the schema in the order it
+        receives DOES see a reordering, which is the user-visible cost CB-147 itself named (the
+        CB-73 class). Reason (1) still carries the decision — a JSON object's member order is not
+        part of the contract, so a client relying on it relies on something unpromised — but the
+        word "only" was an overclaim, and it is withdrawn rather than defended.
+
+        Contrast with the CLI arg-order snapshot (T-51): there, order IS pinned, because it is
+        semantically load-bearing — positional CLI arguments are parsed by position and `--help`
+        renders them in the declared order. Neither of those is true of a JSON object's keys, so
+        treating the two surfaces identically would be the mistake, not the fix.
+
+        See `test_golden_properties_are_alphabetically_sorted` below, which pins the declaration
+        above against the artifact rather than leaving it as prose: it asserts the golden really
+        IS key-sorted, so a change that silently stopped sorting (e.g. dropping `sort_keys=True`
+        thinking that "fixes" the blind spot) turns that test red instead of leaving this docstring
+        quietly wrong.
         """
         assert self.GOLDEN.exists(), (
             f"Golden file missing at {self.GOLDEN}. Regenerate with the dump script."
@@ -238,6 +281,50 @@ class TestMcpWireSchema:
                 f"probably regenerated on Python < 3.13. Regenerate it on any interpreter "
                 f"with the current dump script."
             )
+
+    def test_golden_properties_are_alphabetically_sorted(self):
+        """Pins the CB-147 declaration in `test_schema_matches_golden`'s docstring: the golden is
+        key-sorted, which is WHY the gate above is blind to `properties` order and not merely
+        asserted to be.
+
+        Without this test the docstring and the file could drift apart silently — exactly this
+        repo's recurring failure mode (a rule stated in prose stops matching the code that is
+        supposed to embody it). Two ways that drift could happen, and this test catches both:
+        someone removes `sort_keys=True` from `tests/dump_schema.py` thinking that is how you'd
+        PIN order (it would instead make the golden's sortedness accidental and file-dependent,
+        contradicting this test — the intended outcome, since undoing the sort is the opposite of
+        the ratified decision and must surface as a red test, not a silent behavior change); or a
+        golden gets hand-edited or produced by some other path that does not sort.
+
+        Every tool is checked, `properties`-less ones included — an empty (or absent) `properties`
+        dict has an empty key list, which is trivially its own sorted() and asserts True for a
+        different, uninteresting reason (there is no order to lose). Counted explicitly so that
+        does not read as false coverage: as of this writing 6 of 83 tools take no parameters
+        (`blockers_check`, `categories`, `codemerge_status`, `reqs_embedding_stats`,
+        `reqs_summary`, `summary`) and are vacuous for this assertion; the remaining 77 are where
+        the check is actually live.
+        """
+        golden = json.loads(self.GOLDEN.read_text())
+        assert len(golden) > 0, "golden is empty — nothing for this test to check"
+
+        vacuous = []
+        live = []
+        for entry in golden:
+            props = list(entry.get("inputSchema", {}).get("properties", {}).keys())
+            if not props:
+                vacuous.append(entry["name"])
+                continue
+            live.append(entry["name"])
+            assert props == sorted(props), (
+                f"{entry['name']}'s golden `properties` keys are not alphabetically sorted "
+                f"({props}). Either the golden was hand-edited/regenerated without "
+                f"`sort_keys=True`, or `tests/dump_schema.py` no longer sorts — in which case the "
+                f"CB-147 blind-spot declaration in test_schema_matches_golden's docstring is now "
+                f"WRONG and must be revisited, not just this test."
+            )
+
+        # This test is meaningful only if there really are tools with parameters to check.
+        assert live, "no tool in the golden has any properties — the sortedness check is vacuous"
 
     def test_collector_normalizes_interpreter_dependent_indentation(self):
         """CB-70. On 3.11/3.12 `__doc__` keeps its source indentation; on 3.13 the

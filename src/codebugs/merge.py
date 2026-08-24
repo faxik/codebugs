@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import Field
 
 from codebugs import db
 from codebugs.types import MERGE_STATUSES, is_vocabulary_filter_active, utc_now
@@ -632,7 +634,7 @@ def register_tools(mcp, conn_factory) -> None:
         description: str = "",
         base_commit: str = "",
         repo_root: str = "",
-        allow_restart: bool = False,
+        allow_restart: Annotated[bool, Field(strict=True)] = False,
     ) -> dict[str, Any]:
         """Start a new merge session for a branch.
 
@@ -721,7 +723,7 @@ def register_tools(mcp, conn_factory) -> None:
     @mcp.tool()
     def codemerge_finish(
         session_id: str,
-        success: bool = True,
+        success: Annotated[bool, Field(strict=True)] = True,
     ) -> dict[str, Any]:
         """Finish a merge session and release the lock.
 
@@ -769,6 +771,40 @@ def register_tools(mcp, conn_factory) -> None:
         """
         with conn_factory() as conn:
             return abandon_session(conn, session_id)
+
+    # --- Read-only introspection (CB-107) ---
+    # Until these three, an MCP client could start, claim, merge and finish a
+    # session but could not see what was actually happening: whose session held
+    # the lock, or what its own claims were. Thin wrappers over the same
+    # functions the CLI has always called (merge-sessions/-status/-claims).
+
+    @mcp.tool()
+    def codemerge_sessions(status: str | None = None) -> list[dict[str, Any]]:
+        """List merge sessions with claim counts.
+
+        Args:
+            status: Filter by status ('active', 'merging', 'done', 'abandoned').
+                Omit for all sessions.
+        """
+        with conn_factory() as conn:
+            return get_sessions(conn, status=status)
+
+    @mcp.tool()
+    def codemerge_status() -> dict[str, Any]:
+        """Dashboard summary: session counts by status, total active claims,
+        and who (if anyone) holds the merge lock."""
+        with conn_factory() as conn:
+            return get_status(conn)
+
+    @mcp.tool()
+    def codemerge_claims(session_id: str) -> list[dict[str, Any]]:
+        """List all files a session has claimed, in claim order.
+
+        Args:
+            session_id: The merge session ID.
+        """
+        with conn_factory() as conn:
+            return get_claims(conn, session_id)
 
 
 register_tool_provider("merge", register_tools)

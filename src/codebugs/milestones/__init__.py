@@ -12,7 +12,9 @@ surface and owns MCP/CLI registration so the wire names stay frozen.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import Field
 
 from codebugs.milestones._schema import (  # noqa: F401
     AUTO_ROUTER_ACTOR,
@@ -345,6 +347,36 @@ def register_tools(mcp, conn_factory) -> None:
         with conn_factory() as conn:
             return get_wip_status(conn, agent_id=agent_id)
 
+    @mcp.tool()
+    def milestone_reconcile(
+        apply: Annotated[bool, Field(strict=True)] = False,
+    ) -> dict[str, Any]:
+        """One-time repair (CB-107) for stream items whose source finding or
+        requirement resolved before the status-change hook existed (CB-26).
+        The hook keeps new resolutions in sync; this is the retroactive fix for
+        rows it never saw.
+
+        DRY RUN BY DEFAULT — without apply=true nothing is written, and the
+        response still lists every candidate transition it WOULD make. This is
+        a bulk mutation, and CLAUDE.md is explicit that a repair tool which
+        writes by default is how it becomes an accident, so the dry-run default
+        is load-bearing and this wrapper refuses to weaken it.
+
+        Args:
+            apply: Must be a literal JSON boolean. Defaults to false (dry run).
+                Rejected outright for any other JSON type (a string like
+                "false", a number, null) rather than coerced by truthiness —
+                an MCP client sends JSON over the wire, and Python's bool("0")
+                and bool("false") are both True, which would silently turn a
+                client's intended dry run into a write (CB-82's class of bug).
+                CB-151: strict typing refuses this at the pydantic boundary
+                before the tool body runs, closing the one hole the previous
+                union annotation + isinstance check left open (1.0/0.0 coerced
+                to a real bool before isinstance could see it).
+        """
+        with conn_factory() as conn:
+            return reconcile_all(conn, apply=apply)
+
     # --- Phase 3: branch tracking + close gate + defer ---
 
     @mcp.tool(name="mark_branch_only")
@@ -376,7 +408,7 @@ def register_tools(mcp, conn_factory) -> None:
     @mcp.tool(name="milestone_close")
     def _milestone_close(
         id: str,
-        force: bool = False,
+        force: Annotated[bool, Field(strict=True)] = False,
         reason: str = "",
     ) -> dict[str, Any]:
         """Close a release milestone. Refuses if items are unfinished, on a
