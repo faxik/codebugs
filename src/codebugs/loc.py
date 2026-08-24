@@ -40,7 +40,9 @@ import subprocess
 import threading
 import time
 from collections.abc import Sequence
-from typing import Any, NamedTuple
+from typing import Annotated, Any, NamedTuple
+
+from pydantic import Field
 
 from codebugs import db
 from codebugs.provenance import resolve_in_worktree, worktree_root
@@ -1810,9 +1812,9 @@ def register_tools(mcp, conn_factory) -> None:
         category: str | None = None,
         file: str | None = None,
         project_dir: str | None = None,
-        apply: bool = False,
-        force_tombstone: bool = False,
-        include_unanchored: bool = False,
+        apply: Annotated[bool, Field(strict=True)] = False,
+        force_tombstone: Annotated[bool, Field(strict=True)] = False,
+        include_unanchored: Annotated[bool, Field(strict=True)] = False,
         limit: int = 10000,
     ) -> dict[str, Any]:
         """Rebuild stored location anchors from the git object store. DRY RUN by default.

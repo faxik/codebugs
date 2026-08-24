@@ -71,9 +71,11 @@ from codebugs import db
 # ---------------------------------------------------------------------------
 
 # DIR-2 territory (findings.py / loc.py): this unit's brief (L3-BRIEF-DIR-1-
-# T-52-cb151-strict-bool-gates.md, CB-151) is explicit that these five belong
-# to the other direction and must not be touched here -- "территория DIR-2,
-# юнит передаётся куратором". `categories_normalize.apply` is named in the
+# T-52-cb151-strict-bool-gates.md, CB-151) is explicit that these belong to
+# the other direction and must not be touched here -- "территория DIR-2, юнит
+# передаётся куратором". DIR-2 has since taken the two `anchor_recapture` rows
+# (T-50, BT-7 Т-c): both bools are strict now, and a third one landed strict
+# beside them rather than growing this table, which may only shrink. `categories_normalize.apply` is named in the
 # same brief as an exact twin of THIS card's own defect (a mass re-key with a
 # dry-run default), so it is the highest-priority row in this table when
 # DIR-2 picks it up.
@@ -91,12 +93,6 @@ DECLARED_EXCEPTIONS: dict[tuple[str, str], str] = {
         "CB-151: DIR-2 territory (findings.py). EXACT TWIN of this card's own "
         "defect -- a mass re-key with a dry-run default -- so this is the "
         "highest-priority row in this table for DIR-2 to pick up."
-    ),
-    ("anchor_recapture", "apply"): (
-        "CB-151: DIR-2 territory (loc.py). Gates writing rebuilt anchors."
-    ),
-    ("anchor_recapture", "force_tombstone"): (
-        "CB-151: DIR-2 territory (loc.py). Gates overwriting a tombstone."
     ),
     # Population-measurement correction, found while BUILDING this ratchet --
     # not anticipated by the CB-151 card or its brief, and not fixed by this

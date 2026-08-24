@@ -2194,8 +2194,17 @@ class TestBackfillPopulation:
         widening the population — so `include_unanchored="false"` must refuse
         rather than quietly evaluate true. Validated as ONE rule over the three,
         because a per-argument guard is an enumeration the next bool would have
-        to re-acquire."""
-        for name in ("apply", "force_tombstone", "include_unanchored"):
+        to re-acquire.
+
+        The LIST is derived from the signature and deliberately not written out
+        here (К-10). A hand-written triple is the same enumeration the guard
+        exists to avoid, one level up: the fourth bool added to this function
+        would silently fall outside it and this test would keep passing while
+        the hole it describes was open."""
+        params = inspect.signature(loc.recapture_findings).parameters
+        flags = [n for n, p in params.items() if isinstance(p.default, bool)]
+        assert set(flags) >= {"apply", "force_tombstone", "include_unanchored"}
+        for name in flags:
             for value in ("false", "0", 1, []):
                 with pytest.raises(ValueError, match=name):
                     loc.recapture_findings(conn, **{name: value})
