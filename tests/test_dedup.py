@@ -735,9 +735,14 @@ class TestDiffReviewRegressions:
         assert held is None or held["triage_held"] == 0, "capacity slot leaked on reopen"
 
     @pytest.mark.parametrize("key", ["occurrences", "occurrences_dropped", "regressed", "recurrence_of"])
-    def test_reserved_meta_keys_refused_on_add(self, conn, key):
-        with pytest.raises(ValueError, match="reserved"):
-            _add(conn, meta={key: 1})
+    def test_reserved_meta_keys_stripped_on_add(self, conn, key):
+        # CB-56: the ADD path no longer refuses machinery-output meta keys —
+        # it strips them with visibility instead. `resolver_errors` is the one
+        # key that still refuses (see test_pre_add_seam's own case); these four
+        # are the static `_RESERVED_META_KEYS`, none of which is that key.
+        result = _add(conn, meta={key: 1})
+        assert key not in result["meta"]
+        assert key in result["stripped_meta_keys"]
 
     def test_reserved_meta_keys_refused_on_meta_update(self, conn):
         first = _add(conn)

@@ -3297,14 +3297,19 @@ class TestFingerprintRefusalIsCountable:
         key is the machinery's OUTPUT, so a caller supplying it at filing time
         would spoof a number that goes to the owner; and a permanently
         unrepairable stamp is the CB-26 shape, so `update(meta_update=)` must be
-        able to rewrite a wrong one."""
-        with pytest.raises(ValueError) as exc:
-            findings.add_finding(
-                conn, severity="low", category="fp_fork", file="h.py",
-                description="spoofing the count", new_category=True,
-                meta={findings.REFUSAL_COUNT_META_KEY: 99},
-            )
-        assert findings.REFUSAL_COUNT_META_KEY in str(exc.value)
+        able to rewrite a wrong one.
+
+        CB-56: the ADD path no longer REFUSES this — it strips it with
+        visibility instead, same as every other machinery-output key except
+        `resolver_errors`. "Reserved on add" now means "cannot be spoofed",
+        proven by the stripped value never landing, not by a raised error."""
+        spoofed = findings.add_finding(
+            conn, severity="low", category="fp_fork", file="h.py",
+            description="spoofing the count", new_category=True,
+            meta={findings.REFUSAL_COUNT_META_KEY: 99},
+        )
+        assert findings.REFUSAL_COUNT_META_KEY not in spoofed["meta"]
+        assert findings.REFUSAL_COUNT_META_KEY in spoofed["stripped_meta_keys"]
 
         a_id, _ = _refusal_pair(conn)
         with pytest.raises(ValueError):

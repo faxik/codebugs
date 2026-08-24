@@ -695,17 +695,25 @@ class TestReadAnchor:
 
 
 class TestReservationShift:
-    def test_add_now_refuses_a_caller_supplied_loc(self, conn):
-        with pytest.raises(ValueError, match="reserved"):
-            findings.add_finding(
-                conn,
-                severity="low",
-                category="anchor_test",
-                file="f.py",
-                description="a caller inventing its own coordinates",
-                meta={"loc": {"v": 2}},
-                new_category=True,
-            )
+    def test_add_now_strips_a_caller_supplied_loc(self, conn):
+        # CB-56 (a later unit): the ADD path no longer refuses a caller's
+        # `loc` value outright — it strips it with visibility instead, same
+        # as every other resolver-declared reserved key except
+        # `resolver_errors`. "Reserved" is still true: a caller's invented
+        # coordinates never land, they are just no longer a hard refusal.
+        result = findings.add_finding(
+            conn,
+            severity="low",
+            category="anchor_test",
+            file="f.py",
+            description="a caller inventing its own coordinates",
+            meta={"loc": {"v": 2}},
+            new_category=True,
+        )
+        assert "loc" in result["stripped_meta_keys"]
+        # The real resolver still runs and writes its OWN loc value (or a
+        # skip record) — the caller's invented `{"v": 2}` never lands.
+        assert result["meta"]["loc"] != {"v": 2}
 
     def test_update_may_repair_or_retract_it(self, conn, repo, head):
         row = findings.add_finding(

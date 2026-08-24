@@ -355,15 +355,30 @@ class TestAnnotateResolver:
         assert entry["id"] == first["id"] and entry["status"] == "not_a_bug"
 
     def test_caller_cannot_spoof_similar_to(self, conn):
-        with pytest.raises(ValueError, match="similar_to"):
-            findings.add_finding(
-                conn,
-                severity="low",
-                category="gate",
-                file="f",
-                description="d",
-                meta={"similar_to": []}, new_category=True,
-            )
+        # CB-56: the ADD path no longer refuses machinery-output meta keys —
+        # it strips them with visibility instead (a caller copying a fetched
+        # card forward, get -> modify -> add, must not be refused for
+        # carrying the very annotation the machinery stamped there). "Cannot
+        # spoof" now means the caller's value never lands, not that the call
+        # raises. `description="d"` is below MIN_TEXT_LEN, so the REAL
+        # resolver computes nothing here either — the only way a survived
+        # spoof could hide would be a genuine annotation, and this shape rules
+        # that out.
+        result = findings.add_finding(
+            conn,
+            severity="low",
+            category="gate",
+            file="f",
+            description="d",
+            meta={"similar_to": []},
+            new_category=True,
+        )
+        assert "similar_to" not in result.get("meta", {}), (
+            "a caller-supplied similar_to must never survive into the stored row"
+        )
+        assert result["stripped_meta_keys"] == ["similar_to"], (
+            "the strip must be VISIBLE in the response (CB-56/BT-5 discipline)"
+        )
 
     def test_rescrub_can_rewrite_similar_to_via_update(self, conn):
         # Review SERIOUS-10: the reservation is add-side only — an unrepairable

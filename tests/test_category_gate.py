@@ -304,8 +304,25 @@ class TestBatchGate:
 
 class TestStampReservation:
     def test_caller_cannot_spoof_the_stamp_on_add(self, conn):
-        with pytest.raises(ValueError, match="category_minted"):
-            _add(conn, cat="spoof_cat", new_category=True, meta={"category_minted": True})
+        # CB-56: the ADD path no longer refuses machinery-output meta keys —
+        # it strips them with visibility instead (the get -> modify -> add
+        # round trip must not be broken by a card that already carries a
+        # stamp). "Cannot spoof" now means the caller's own value never lands,
+        # not that the call raises. Use an EXISTING category so a real mint
+        # cannot produce this key by coincidence and mask a spoof that leaked
+        # through. A DIFFERENT description on the second call, or dedup would
+        # bump the first row and return ITS genuine stamp — not a spoof test.
+        _add(conn, cat="already_here", new_category=True)
+        spoofed = _add(conn, cat="already_here", desc=LONG_B, meta={"category_minted": True})
+        assert spoofed["dedup_action"] == "created", "must be a fresh insert, not a bump"
+        assert "category_minted" not in spoofed.get("meta", {}), (
+            "a caller-supplied category_minted must never survive into a "
+            "non-mint row — it is the mint gate's own output"
+        )
+        assert spoofed["stripped_meta_keys"] == ["category_minted"], (
+            "the strip must be VISIBLE in the response (CB-56/BT-5 discipline), "
+            "not merely silent"
+        )
 
     def test_stamp_is_repairable_on_update(self, conn):
         # Add-side reservation stops spoofing the mint count; a permanently

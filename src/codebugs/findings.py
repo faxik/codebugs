@@ -29,6 +29,7 @@ from codebugs.types import (
     resolve_severity,
     severity_rank,
     utc_now,
+    validate_batch_payload,
 )
 
 SCHEMA = """\
@@ -260,35 +261,85 @@ _FP_ISO_TS = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[
 _FP_WS = re.compile(r"\s+")
 
 
-def _validate_meta_keys(meta: dict[str, Any] | None, *, updating: bool = False) -> None:
-    """Refuse caller meta colliding with identity-machinery or resolver keys.
+# The one reserved key that stays REFUSED on the ADD path rather than being
+# stripped-with-visibility (CB-56). Every other reserved key is machinery
+# OUTPUT that a caller legitimately re-submits by copying a fetched card
+# forward (get -> modify -> add); `resolver_errors` is different in kind — it
+# is a reported FAILURE state (a resolver's annotation attempt did not land),
+# and CLAUDE.md's post-add-resolver seam already documents it as "refused on
+# both paths". Silently stripping it on add would make a caller's belief "my
+# last observation's resolver failed" disappear with no comment, which is the
+# CB-15 shape stripping-with-visibility exists to avoid for everything else.
+# A literal here (not a symbol imported from db) because the runner's own key
+# is not one any extension declares — `db.resolver_reserved_meta_keys()`
+# always includes it unconditionally (`db.py`'s `_RESOLVER_ERRORS_KEY`) — and
+# the name is already a public part of this tracker's query surface
+# (`query(meta_key="resolver_errors")` is documented in CLAUDE.md), so it is
+# not at risk of drifting the way an extension's own key name would.
+_ADD_ALWAYS_REFUSED_META_KEYS = frozenset({"resolver_errors"})
 
-    On UPDATE, keys a resolver declared UPDATABLE at registration (similarity's
-    `similar_to`) are deliberately writable: the add-side reservation stops
-    spoofing, but a permanently unrepairable annotation is the CB-26 shape — a
-    re-scrub must be able to rewrite or clear it. The updatable set comes from
-    the registry, never from a literal here: core findings must not know any
-    one extension's key names (the seam exists so extensions declare their meta
-    contract at registration). `resolver_errors` stays refused on both paths.
 
-    `category_minted` (CB-60) is refused on ADD only: it is the gate's own
-    output and a caller supplying it would spoof the mint count, but a
-    permanently unrepairable stamp is the CB-26 shape, so update(meta_update=)
-    may rewrite a false one.
+def _validate_meta_keys(
+    meta: dict[str, Any] | None, *, updating: bool = False
+) -> tuple[dict[str, Any] | None, frozenset[str]]:
+    """Validate caller meta against identity-machinery/resolver keys.
+
+    Returns ``(meta, stripped_keys)``. On UPDATE (unchanged behavior) that is
+    always ``(meta, frozenset())`` — a reserved key still raises immediately,
+    except keys a resolver declared UPDATABLE at registration (similarity's
+    `similar_to`): the add-side reservation stops spoofing, but a permanently
+    unrepairable annotation is the CB-26 shape, so a re-scrub must be able to
+    rewrite or clear it. The updatable set comes from the registry, never from
+    a literal here: core findings must not know any one extension's key names.
+
+    On ADD (CB-56), a reserved key is no longer an outright refusal. The
+    get -> modify -> add round trip is a real, common caller shape — an MCP
+    client that reads a card back and re-files a variant naturally carries
+    whatever the machinery had stamped onto it (`similar_to`,
+    `category_minted`, `occurrences`, ...) — and CSV import already handles
+    this identical situation by stripping the same dynamic reserved union
+    rather than refusing it (`_import_meta`), so add refusing it was one
+    ingestion surface disagreeing with another over the identical input. What
+    add strips is now returned to the caller, never silently: a caller must
+    never be left believing its meta landed unmodified when part of it was
+    machinery output that got removed before this observation reached
+    identity — the CB-15 "silently dropping caller data" shape applies to a
+    silent strip exactly as it applies to a silent refusal. `resolver_errors`
+    is the one exception, kept as an outright refusal (see
+    `_ADD_ALWAYS_REFUSED_META_KEYS`).
+
+    `category_minted` (CB-60) is among the stripped keys on ADD: it is the
+    mint gate's own output and a caller supplying it would spoof the mint
+    count. It is refused on update instead, because a permanently
+    unrepairable stamp is the CB-26 shape and `update(meta_update=)` must be
+    able to rewrite a false one.
     """
     if not meta:
-        return
+        return meta, frozenset()
     reserved = _RESERVED_META_KEYS | db.resolver_reserved_meta_keys()
     if updating:
         reserved -= db.resolver_updatable_meta_keys()
-    else:
-        reserved |= _ADD_ONLY_RESERVED_META_KEYS
-    hit = reserved & set(meta)
+        hit = reserved & set(meta)
+        if hit:
+            raise ValueError(
+                f"meta keys {sorted(hit)} are reserved for the identity machinery "
+                f"(they are its output, not input — strip them before re-submitting)"
+            )
+        return meta, frozenset()
+
+    reserved |= _ADD_ONLY_RESERVED_META_KEYS
+    hit = _ADD_ALWAYS_REFUSED_META_KEYS & set(meta)
     if hit:
         raise ValueError(
             f"meta keys {sorted(hit)} are reserved for the identity machinery "
-            f"(they are its output, not input — strip them before re-submitting)"
+            f"and report a FAILURE state, not input — omit them rather than "
+            f"re-submitting a fetched card's failure report"
         )
+    strippable = (reserved - _ADD_ALWAYS_REFUSED_META_KEYS) & set(meta)
+    if not strippable:
+        return meta, frozenset()
+    cleaned = {k: v for k, v in meta.items() if k not in strippable}
+    return cleaned, frozenset(strippable)
 
 
 # --- Category canon (CB-60) -----------------------------------------------------------
@@ -1198,19 +1249,37 @@ class PostCommitCorruptionError(Exception):
 #: (AST), and that none of them can ever shadow a column — a future `attention`
 #: column would otherwise be silently overwritten in every response, the CB-16
 #: shape one layer up. Pinned by `tests/test_dedup.py::TestResponseOnlyKeysRatchet`.
-_RESPONSE_ONLY_KEYS = frozenset({"was_new", "dedup_action", "attention"})
+_RESPONSE_ONLY_KEYS = frozenset(
+    {"was_new", "dedup_action", "attention", "stripped_meta_keys"}
+)
 
 
-def _finalize_add(outcome: AddOutcome, *, committed: bool) -> dict[str, Any]:
+def _finalize_add(
+    outcome: AddOutcome,
+    *,
+    committed: bool,
+    stripped_meta_keys: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
     """Convert an _add_one outcome to the response dict, AFTER the transaction closed.
 
     MECHANICAL BY CONTRACT (BT-5): conversion plus key writes, no computation and
     no new failure mode. Every signal was decided inside the transaction, so the
     post-commit path — the one that can already only report `PostCommitCorruptionError`
-    — never acquires a second reason to fail.
+    — never acquires a second reason to fail. `stripped_meta_keys` is likewise
+    handed in already decided: it was computed by `_validate_meta_keys` before the
+    transaction even opened (CB-56), so writing it here is the same "conversion
+    plus key writes" as `attention`, not a second computation site.
 
-    `was_new` / `dedup_action` / `attention` are response-only keys (see
-    `_RESPONSE_ONLY_KEYS`), not columns. ``committed`` is this frame's ``db.txn``
+    `was_new` / `dedup_action` / `attention` / `stripped_meta_keys` are
+    response-only keys (see `_RESPONSE_ONLY_KEYS`), not columns.
+    `stripped_meta_keys` follows the `attention` discipline (BT-5) exactly:
+    present UNCONDITIONALLY, on every branch, and an empty list is a normal
+    answer meaning "checked, nothing to strip" — never "no such channel". A
+    caller that copies a fetched card's `meta` forward (get -> modify -> add)
+    must be able to tell, from this response alone, which of its own keys
+    silently did not land (CB-56); the alternative — the key only appearing
+    when something WAS stripped — collapses exactly the distinction BT-5 was
+    built to keep. ``committed`` is this frame's ``db.txn``
     ownership result: only a frame that actually committed may classify a
     conversion failure as post-commit — under an ambient transaction the owner
     will normally roll the unit back, so claiming "recorded" would mislead
@@ -1242,6 +1311,10 @@ def _finalize_add(outcome: AddOutcome, *, committed: bool) -> dict[str, Any]:
     # A FRESH list per response: the outcome holds a tuple precisely so no two
     # members of one batch can be handed the same mutable object.
     result["attention"] = list(outcome.attention)
+    # UNCONDITIONAL, like `attention` (CB-56/BT-5 discipline): `[]` means
+    # "checked, nothing to strip", never "no such channel". A fresh sorted
+    # list per response for the same reason `attention` gets a fresh list.
+    result["stripped_meta_keys"] = sorted(stripped_meta_keys)
     return result
 
 
@@ -1323,7 +1396,7 @@ def add_finding(
     """
     severity = resolve_severity(severity)
     fingerprint = _validate_fingerprint(fingerprint)
-    _validate_meta_keys(meta)
+    meta, stripped_meta_keys = _validate_meta_keys(meta)
     if finding_id is None:
         # Pure normalization stays pre-txn (it is validation, and it is the
         # fingerprint-derivation input); the mint GATE runs inside _add_one on
@@ -1348,7 +1421,7 @@ def add_finding(
             new_category=new_category,
             project_dir=project_dir,
         )
-    return _finalize_add(outcome, committed=owned)
+    return _finalize_add(outcome, committed=owned, stripped_meta_keys=stripped_meta_keys)
 
 
 # Member keys accepted by batch_add_findings. The strict-argument middleware guards
@@ -1893,17 +1966,30 @@ def batch_add_findings(
     refusal mid-batch propagates and rolls back the whole batch, so nothing
     lands, exactly as when the gate ran up front.
     """
+    # CONTAINER shape first (CB-80): `findings` itself must be a list of
+    # objects before anything below indexes into a member. A `str` argument is
+    # iterable, so a check that only tests each iterated element (never the
+    # container) would silently walk CHARACTERS instead of refusing here — see
+    # `types.validate_batch_payload`.
+    findings = validate_batch_payload(findings, label="findings")
+
     # Validate every ARGUMENT before the transaction opens: invalid input raises
     # immediately, not after a busy_timeout wait, and never half-applies a batch.
     # The category mint gate is the one deliberate exception — it depends on the
     # member's dedup branch, so it runs inside the transaction (CB-113(b)); its
     # refusal rolls back the whole batch, preserving the nothing-lands property.
-    validated: list[tuple[str, str | None, str]] = []
+    #
+    # `meta`/`stripped` come from `_validate_meta_keys` per member (CB-56): the
+    # ADD path strips reserved keys with visibility rather than refusing, and
+    # what gets passed to `_add_one` below must be the STRIPPED meta — reading
+    # `f.get("meta")` again in the second loop would silently reintroduce the
+    # keys this pass just removed.
+    validated: list[tuple[str, str | None, str, dict[str, Any] | None, frozenset[str]]] = []
     for i, f in enumerate(findings):
         unknown = set(f) - _BATCH_MEMBER_KEYS
         if unknown:
             raise ValueError(f"findings[{i}]: unknown keys {sorted(unknown)}")
-        _validate_meta_keys(f.get("meta"))
+        meta, stripped = _validate_meta_keys(f.get("meta"))
         category = f["category"]
         if f.get("id") is None:
             category = normalize_category(category)
@@ -1912,6 +1998,8 @@ def batch_add_findings(
                 resolve_severity(f.get("severity", "medium")),
                 _validate_fingerprint(f.get("fingerprint")),
                 category,
+                meta,
+                stripped,
             )
         )
 
@@ -1920,7 +2008,9 @@ def batch_add_findings(
     # member's returned occurrence_count. Input order is preserved by construction.
     outcomes: list[AddOutcome] = []
     with db.txn(conn) as owned:
-        for f, (severity, fingerprint, category) in zip(findings, validated, strict=True):
+        for f, (severity, fingerprint, category, meta, _stripped) in zip(
+            findings, validated, strict=True
+        ):
             outcomes.append(
                 _add_one(
                     conn,
@@ -1930,7 +2020,7 @@ def batch_add_findings(
                     description=f["description"],
                     source=f.get("source", "human"),
                     tags=f.get("tags"),
-                    meta=f.get("meta"),
+                    meta=meta,
                     finding_id=f.get("id"),
                     reported_at_commit=f.get("reported_at_commit"),
                     reported_at_ref=f.get("reported_at_ref"),
@@ -1939,7 +2029,10 @@ def batch_add_findings(
                     project_dir=project_dir,
                 )
             )
-    return [_finalize_add(outcome, committed=owned) for outcome in outcomes]
+    return [
+        _finalize_add(outcome, committed=owned, stripped_meta_keys=stripped)
+        for outcome, (_sev, _fp, _cat, _meta, stripped) in zip(outcomes, validated, strict=True)
+    ]
 
 
 def _bump_refusal_count(conn: sqlite3.Connection, finding_id: str) -> None:
@@ -3943,6 +4036,17 @@ def register_cli(sub, commands) -> None:
             print(f"Added: {result['id']} (recurrence of closed {result['meta']['recurrence_of']})")
         else:
             print(f"Added: {result['id']}")
+        # CB-56: the CLI prints fixed lines rather than serializing the whole
+        # response (same audience split as `attention`, CLAUDE.md's BT-5 entry),
+        # but a silent strip is forbidden regardless of surface — the visibility
+        # requirement is about the ACT of stripping, not about which caller asked.
+        stripped = result.get("stripped_meta_keys") or []
+        if stripped:
+            print(
+                f"Note: meta keys {stripped} were stripped before filing — they "
+                f"are identity-machinery output, not caller input.",
+                file=sys.stderr,
+            )
 
     def _cmd_update(args: argparse.Namespace) -> None:
         from codebugs.cli import domain_errors
