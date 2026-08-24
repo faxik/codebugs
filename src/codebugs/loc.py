@@ -1124,21 +1124,51 @@ def resolve_anchor(
 # --- read side: the batch surface -----------------------------------------------------
 
 
-def _stored_loc(row: dict[str, Any]) -> tuple[bool, Any]:
-    """`(the row carries an anchor key, its stored value)` from a raw candidate row.
+#: The three states a candidate row's anchor column can be in. TWO of them make
+#: `_stored_loc` return `(False, None)` and all three used to be read through
+#: `stored is None`, which is exactly the conflation the backfill population
+#: cannot survive: "no anchor was ever captured" is the row this pass exists to
+#: reach, "the meta column does not parse" is a row it must never write into,
+#: and `loc: null` is a TOMBSTONE that says "do not recapture". The distinction
+#: lives here, in the reader, because `read_anchor` receives a VALUE and cannot
+#: know by construction whether the key was there at all.
+ANCHOR_UNREADABLE = "unreadable"
+ANCHOR_ABSENT = "absent"
+ANCHOR_PRESENT = "present"
+
+
+def _anchor_state(row: dict[str, Any]) -> tuple[str, Any]:
+    """`(which of the three states, the stored value)` from a raw candidate row.
 
     Reads `meta_json` as the STORED STRING (CB-24 consequence 4) and tolerates a
     `meta` that does not parse at all: a batch over ten thousand rows must not be
-    aborted by one row's malformed column, and "carries no anchor" is the honest
-    reading of meta nobody can read.
+    aborted by one row's malformed column. What it does NOT do any more is call
+    that row "carries no anchor" — an unreadable column and an absent key are
+    different facts about the row, and only the second one is repairable.
+
+    The value is meaningful only in `ANCHOR_PRESENT`; the other two states carry
+    `None` because there is nothing to carry, NOT because the anchor is null.
     """
     try:
         meta = json.loads(row.get("meta_json") or "{}")
     except (TypeError, ValueError):
-        return False, None
-    if not isinstance(meta, dict) or "loc" not in meta:
-        return False, None
-    return True, meta["loc"]
+        return ANCHOR_UNREADABLE, None
+    if not isinstance(meta, dict):
+        return ANCHOR_UNREADABLE, None
+    if "loc" not in meta:
+        return ANCHOR_ABSENT, None
+    return ANCHOR_PRESENT, meta["loc"]
+
+
+def _stored_loc(row: dict[str, Any]) -> tuple[bool, Any]:
+    """`(the row carries an anchor key, its stored value)`.
+
+    Derived from `_anchor_state` rather than parsing again: two copies of "what
+    counts as an anchor" is one drift away from the read side and the repair
+    side disagreeing about the same row.
+    """
+    state, value = _anchor_state(row)
+    return state == ANCHOR_PRESENT, value
 
 
 def resolve_findings(
@@ -1254,6 +1284,19 @@ RECAPTURE_OUTCOMES: tuple[str, ...] = (
     "kept",
     "tombstoned",
     "stale",
+    # --- the backfill population (BT-7 Т-c), reachable only under
+    # `include_unanchored=True`. DELIBERATELY NOT folded into `updated`: the
+    # question this pass exists to answer is "how many rows acquired an anchor
+    # for the FIRST time", and added to "how many anchors were refreshed" it
+    # stops answering it. Both halves of the dry-run/apply pair, by the
+    # `would_update`/`updated` precedent.
+    "would_backfill",
+    "backfilled",
+    # A row whose `meta` column does not parse is NOT a backfill candidate:
+    # writing an anchor into it would rewrite a column we could not read. It is
+    # counted rather than silently skipped, because "nothing to report" and
+    # "eleven rows I refused to touch" are different answers.
+    "unreadable_meta",
 )
 
 
@@ -1267,6 +1310,7 @@ def recapture_findings(
     project_dir: str | None = None,
     apply: bool = False,
     force_tombstone: bool = False,
+    include_unanchored: bool = False,
     limit: int | None = 10000,
 ) -> dict[str, Any]:
     """Rebuild stored anchors from the git object store — the SANCTIONED repair (Р4).
@@ -1315,8 +1359,51 @@ def recapture_findings(
        information. The comparison is on the anchor VALUE, not on a row
        timestamp: an unrelated status write in the same window must not cost a
        repair.
+
+    **THE BACKFILL POPULATION (BT-7 Т-c), behind `include_unanchored`.** Anchor
+    capture lives only in the resolver seam of a genuine new finding, so every
+    row filed before that seam landed carries no anchor at all — and this pass
+    could not reach them, because it skipped any row without an anchor key
+    before it ever captured. `include_unanchored=True` widens the POPULATION (it
+    says which rows are taken, not what is done to them) to rows whose `meta`
+    carries no `loc` key. Three things it deliberately is not:
+
+    - **It is not a fingerprint backfill.** `fingerprint` is IDENTITY and
+      re-keying is a separately negotiated contract with exactly one sanctioned
+      operation (`findings.normalize_categories`, CB-61). Nothing here reads or
+      writes that column. An anchor is a derived coordinate, is not part of
+      identity, and is rebuilt from what the row already stores.
+    - **It is not `force_tombstone`.** `loc: null` is a key that is present and
+      null — an instruction not to recapture — and this flag never touches it.
+      Merging the two would turn "take the rows that were never anchored" into a
+      way to erase tombstones, which is a different question with a different
+      answer.
+    - **It does not weaken points 1-4.** Capture still runs outside any
+      transaction, the compare-and-swap of point 4 still refuses a row that
+      moved under the capture (and compares the anchor's STATE as well as its
+      value, so a row that ACQUIRED an anchor mid-run is refused), and point 2
+      is untouched because it has nothing to protect on a row with no anchor.
+
+    Its outcomes are `would_backfill`/`backfilled`, never folded into
+    `would_update`/`updated`: "acquired an anchor for the first time" is the
+    number this exists to produce and adding it to "refreshed an anchor"
+    destroys it.
     """
     from codebugs import findings
+
+    # CB-82 on a write path: "not supplied" is `None`, never truthiness. These
+    # three gate WRITES — applying at all, overwriting a tombstone, and widening
+    # the population — so `apply="false"` must not open a transaction. Validated
+    # as one rule over all three rather than at the one the card named: a
+    # per-argument guard is an enumeration, and the next bool added to this
+    # signature would have to re-acquire it.
+    for _name, _value in (
+        ("apply", apply),
+        ("force_tombstone", force_tombstone),
+        ("include_unanchored", include_unanchored),
+    ):
+        if not isinstance(_value, bool):
+            raise ValueError(f"{_name} must be a bool, got {type(_value).__name__}")
 
     widen = isinstance(status, str) and status == "all"
     rows = findings.anchor_candidates(
@@ -1332,22 +1419,49 @@ def recapture_findings(
     summary = dict.fromkeys(RECAPTURE_OUTCOMES, 0)
 
     for row in rows:
-        present, stored = _stored_loc(row)
-        if not present:
+        state, stored = _anchor_state(row)
+        if state != ANCHOR_PRESENT and not include_unanchored:
+            # Today's behaviour, and the default: this pass repairs anchors that
+            # EXIST. A row that never carried one is a different question, and
+            # it is answered only when the caller names the population.
             continue
-        if stored is None and not force_tombstone:
+
+        if state == ANCHOR_UNREADABLE:
+            # In the population (it does look unanchored from outside) but never
+            # a candidate: an anchor written here would overwrite a `meta`
+            # column this process could not read.
+            outcome, fresh = "unreadable_meta", None
+        elif state == ANCHOR_ABSENT:
+            fresh = _fresh_capture(row, project_dir)
+            # POINT 2 DOES NOT APPLY HERE, and reading it as if it did is the
+            # trap this branch exists to avoid. Point 2 protects a VALID STORED
+            # anchor from being replaced by a refusal; there is no stored anchor
+            # on this branch, so `had_anchor` would be asking about something
+            # that does not exist and `kept` would report a protection that
+            # protected nothing. A refusal object is written as the honest
+            # record instead — byte-identical to what the file-time resolver
+            # stamps on a new finding (Р8 stores `{"v", "skipped",
+            # "sites_dropped"}`), and its Р8 token reaches the caller in
+            # `reason`, which is where every other outcome's token already is.
+            if not apply:
+                outcome = "would_backfill"
+            else:
+                outcome = _apply_recapture(
+                    conn,
+                    row["id"],
+                    was_state=state,
+                    stored=stored,
+                    fresh=fresh,
+                    written="backfilled",
+                )
+        elif stored is None and not force_tombstone:
+            # Reachable ONLY from ANCHOR_PRESENT, which is the whole fix: the
+            # tombstone is `loc: null`, a key that is THERE and null. Keyed on
+            # `stored is None` alone, this arm swallowed every unanchored row
+            # and reported the backfill population as "retracted".
             outcome, fresh = "tombstoned", None
         else:
-            # OUTSIDE any transaction — see point 1. `capture` builds the same
-            # object the resolver seam would, from the same observation shape.
-            fresh = capture(
-                {
-                    "file": row.get("file"),
-                    "meta": _parsed_meta(row),
-                    "reported_at_commit": row.get("reported_at_commit"),
-                    "project_dir": project_dir,
-                }
-            )
+            fresh = _fresh_capture(row, project_dir)
             # The tombstone counts as something worth protecting, not just a
             # valid anchor. `force_tombstone` says "recapture this one", not
             # "destroy the instruction if the recapture fails" — and a refusal
@@ -1362,7 +1476,14 @@ def recapture_findings(
             elif not apply:
                 outcome = "would_update"
             else:
-                outcome = _apply_recapture(conn, row["id"], stored=stored, fresh=fresh)
+                outcome = _apply_recapture(
+                    conn,
+                    row["id"],
+                    was_state=state,
+                    stored=stored,
+                    fresh=fresh,
+                    written="updated",
+                )
 
         summary[outcome] += 1
         results.append(
@@ -1381,6 +1502,24 @@ def recapture_findings(
     }
 
 
+def _fresh_capture(row: dict[str, Any], project_dir: str | None) -> dict[str, Any]:
+    """Build the anchor this row would get today — OUTSIDE any transaction (point 1).
+
+    Shared by the repair branch and the backfill branch so the two cannot drift
+    into capturing from different observation shapes: a backfilled anchor must be
+    byte-identical to one the file-time resolver seam would have produced, which
+    is the entire argument for backfilling instead of re-filing.
+    """
+    return capture(
+        {
+            "file": row.get("file"),
+            "meta": _parsed_meta(row),
+            "reported_at_commit": row.get("reported_at_commit"),
+            "project_dir": project_dir,
+        }
+    )
+
+
 def _parsed_meta(row: dict[str, Any]) -> dict[str, Any]:
     """The row's stored meta as a dict, or `{}` when it does not parse.
 
@@ -1396,7 +1535,13 @@ def _parsed_meta(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _apply_recapture(
-    conn: Any, finding_id: str, *, stored: Any, fresh: dict[str, Any]
+    conn: Any,
+    finding_id: str,
+    *,
+    was_state: str,
+    stored: Any,
+    fresh: dict[str, Any],
+    written: str,
 ) -> str:
     """Point 4: compare-and-swap the anchor inside ONE transaction.
 
@@ -1415,11 +1560,18 @@ def _apply_recapture(
         current = findings.anchor_candidates(conn, finding_id=finding_id, limit=1)
         if not current:
             return "stale"  # the row went away under us
-        present, now = _stored_loc(current[0])
-        if not present or now != stored:
+        state_now, now = _anchor_state(current[0])
+        # The comparison is on the STATE as well as the value, and the value
+        # alone is not enough — that is what the backfill population changes
+        # here. A row scanned as ANCHOR_ABSENT that acquired a `loc: null`
+        # tombstone under the capture has `now == stored` (both `None`), so a
+        # value-only CAS would write straight through the instruction it was
+        # told never to touch. Comparing the state refuses instead, which is
+        # point 4 read for a population that did not exist when it was written.
+        if state_now != was_state or now != stored:
             return "stale"
         findings.update_finding(conn, finding_id, meta_update={"loc": fresh})
-    return "updated"
+    return written
 
 
 # --- CLI ------------------------------------------------------------------------------
