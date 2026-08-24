@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capability x surface matrix for codebugs, computed by AST pass.
+"""Capability x surface matrix for codebugs -- a HYBRID of AST and the real registry.
 
 WHAT THIS ANSWERS
     For every DOMAIN CAPABILITY (a public module-level function whose first
@@ -21,7 +21,71 @@ UNIT OF COUNT, stated because getting it wrong is this repo's recurring failure
     tools would measure the surface, which is the thing we are trying to explain,
     not the thing being exposed.
 
-SURFACE DETECTION
+THE HYBRID BOUNDARY (CB-153, T-55) -- STATED EXPLICITLY, BECAUSE A HYBRID THAT
+DOES NOT NAME ITS OWN SPLIT IS THE NEXT BLINDNESS.
+    This script used to find MCP tools and CLI verbs by AST SYNTAX alone
+    (`@mcp.tool(...)` decorators, `sub.add_parser("...")` calls). After BT-6's
+    surfacegen pilot, `bench` and `sweep` register their whole surface through
+    DATA DECLARATIONS (`bench_surface.py`, `sweep_surface.py`) consumed by
+    `codebugs.surfacegen.emit_tools`/`emit_cli` at import time -- there is no
+    decorator and no `add_parser` call anywhere in `bench.py`/`sweep.py` for the
+    AST pass to see, so it reported 16 real capabilities (7 bench + 9 sweep) as
+    reachable by NEITHER surface, when both existed. CB-153.
+
+    The fix is NOT teaching the AST pass a third registration shape (that was
+    considered and REJECTED -- a third form would return the same blindness by
+    construction, and this repo has paid for that exact mistake before). Instead:
+
+    SURFACE EXISTENCE (which MCP tool names and CLI verb names are real, right
+    now) comes from the REGISTRY, not from source syntax:
+      MCP : `tests/_mcp_schema.collect_tool_schemas()` -- builds a real server
+            per provider through `db.get_tool_providers(mode="all")` and asks it.
+      CLI : `codebugs.cli.build_parser(mode="all")` -- the exact primitive
+            `cli.main()` itself calls, extracted by T-51 (CB-146) precisely so a
+            surface snapshot need not re-implement subparser assembly.
+    Both are keyed on "what is REALLY registered", which closes the blindness
+    for ANY future registration form, not just the two known today (decorator
+    and surfacegen) -- a decorator-recognizer would need a fourth clause the
+    day a third form appears; the registry cannot be behind a form it did not
+    know about, because it IS what runs.
+
+    LINKING a registry-real surface name back to the domain capability(-ies) it
+    calls, and every SIZE metric (LOC, docstring/body/signature partition, T1/
+    T2/T3 derivability tiers, CLI boilerplate) STILL come from AST, and this is
+    the honestly-stated other half of the hybrid: a generated tool's registered
+    callable is built by `surfacegen.build_tool` at runtime and carries no
+    source span of its own to measure -- there is no "MCP wrapper body" to
+    partition into docstring/code/signature for a function synthesized from a
+    declaration dict. So the SIZE section below (unchanged) keeps operating on
+    the decorator/`add_parser`-detected surface set exactly as before, and does
+    NOT grow to cover `bench`/`sweep`'s generated tools. The registry-only
+    surfaces are linked to capabilities separately (see `resolve_live_impl`),
+    by unwrapping `surfacegen`'s runtime closure (`calls`/`manual` cells) back
+    to the real Python function it ultimately invokes, then either matching
+    that function's identity directly against the capability set or -- for a
+    dispatching handler like `_tool_bench_list` -- walking ITS ast body with the
+    same `resolve_calls` machinery CLI handlers already use. This is registry
+    inspection plus a runtime-to-AST bridge, not decorator pattern-matching, so
+    it generalizes the same way the existence check does: whatever a THIRD
+    registration form does, as long as it ultimately calls `mcp.tool()(fn)` and
+    `commands[name] = fn`, this still finds the real name and the real callable.
+
+    Cost accepted (brief SS3): this script is no longer purely static. It
+    imports the `codebugs` package and `tests/_mcp_schema`, and needs a working
+    Python environment for that half of its output. The GAPS section (BOTH/MCP
+    only/CLI only/NEITHER) and the top-line "MCP tools (registered)"/"CLI verbs
+    (registered)" counts are therefore registry-truth; the SIZE section and its
+    own "MCP tools (AST-visible)"/"CLI verbs (AST-visible)" counts stay AST-only
+    and are printed under that explicit label so the two halves are never
+    conflated as one number.
+
+    `module_surface.py` is a SEPARATE, untouched instrument (CB-153 SS2): it
+    keys on `register_tools`/`register_cli` function SPANS, not the decorator,
+    so it is not blind here -- its wiring ratio for `sweep` answers a different
+    question (how much of the registrar itself is left) and changed meaning,
+    not correctness, when the surface moved into declarations.
+
+SURFACE DETECTION (AST HALF, used for SIZE only -- see above)
     MCP : an inner FunctionDef inside `register_tools(mcp, conn_factory)`
           decorated with `@mcp.tool(...)`.
     CLI : `sub.add_parser("<verb>")` inside `register_cli(sub, commands)`, joined
@@ -32,14 +96,21 @@ SURFACE DETECTION
 
 BLINDNESS, printed rather than hidden
     Dynamic registration, calls through variables, and re-exported aliases are
-    not resolved. Every unresolved call is counted and listed under BLIND SPOTS.
+    not resolved by the AST half. Every unresolved call is counted and listed
+    under BLIND SPOTS. The registry half closes the ONE known dynamic-form
+    blindness (surfacegen); anything it cannot resolve is printed under
+    REGISTRY-ONLY SURFACES rather than silently dropped.
 
 USAGE
     python3 .claude/plans/exposure-scripts/matrix.py
     python3 .claude/plans/exposure-scripts/matrix.py --root src/codebugs
     python3 .claude/plans/exposure-scripts/matrix.py --check   # self-check only
+    python3 .claude/plans/exposure-scripts/matrix.py --ast-only  # skip the
+        registry half entirely (old, blind-to-surfacegen behaviour) -- kept so
+        the CB-153 mutant probe can reproduce the pre-fix report on demand.
 
-Writes nothing anywhere; prints to stdout; stdlib only.
+Prints to stdout; writes nothing anywhere. No longer stdlib-only for the
+registry half (imports the `codebugs` package and `tests/_mcp_schema`).
 """
 
 from __future__ import annotations
@@ -49,6 +120,7 @@ import ast
 import os
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Declared non-capabilities.
