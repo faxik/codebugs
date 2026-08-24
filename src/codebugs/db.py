@@ -461,6 +461,181 @@ def run_pre_add_resolvers(
     return patch
 
 
+# --- Read-enricher seam (BT-7 Т-56) ---
+
+
+@dataclass(frozen=True)
+class ReadEnricher:
+    """A registered read enricher: annotates rows a domain read is about to return.
+
+    A member of this file's registry family and deliberately the first READING
+    one, so half the older contract does not apply and copying it would be
+    cargo. It writes nothing, so there is no transaction to be inside, no
+    savepoint, no nonce and no never-commit rule to enforce. No ordinal is
+    written here on purpose — a count in prose is one this repository has been
+    wrong about every time it left one there. What it does share
+    with `PreAddResolver` is the shape that keeps core ignorant of an
+    extension's vocabulary: `key` is DECLARED at registration exactly as
+    `meta_keys` is, so the runner can stamp a failure under the extension's own
+    name without ever hardcoding it.
+    """
+
+    name: str
+    fn: Callable[..., None]
+    key: str
+    fallback: Callable[[str | None], dict[str, Any]] | None
+
+
+_read_enrichers: list[ReadEnricher] = []
+
+
+def _bare_unavailable(error: str | None) -> dict[str, Any]:
+    """The last-resort failure stamp for an enricher that declared no shape."""
+    return {"state": "unavailable", "error": error}
+
+
+def register_read_enricher(
+    name: str,
+    fn: Callable[..., None],
+    *,
+    key: str,
+    fallback: Callable[[str | None], dict[str, Any]] | None = None,
+) -> None:
+    """Register an enricher for the ordinary finding read paths.
+
+    `fn(conn, rows, *, resolve, project_dir)` annotates `rows` IN PLACE, writing
+    its summary under `key` on every row. `resolve` is the caller's permission
+    to spend real work (git, network, anything measurable); a `False` there must
+    still produce a summary, only a cheaper one — the cost asymmetry between
+    `get` and `query` is the caller's decision to make, not the enricher's.
+
+    `fallback(error)` builds this enricher's summary for a row it could not
+    answer for, and it is DECLARED here for the same reason `key` is: the runner
+    must be able to stamp a failure in the extension's own vocabulary without
+    knowing a single one of its field names. Omitting it gets a two-key
+    `{"state": "unavailable", "error": …}`, which is honest but is a DIFFERENT
+    SHAPE from whatever the enricher normally writes — and review measured what
+    that costs: every consumer written against the documented summary raises
+    `KeyError` on exactly the path this seam exists to make survivable. An
+    enricher whose summary has a fixed key set should supply one.
+
+    Same name-keyed discipline as its sibling registries so module re-import
+    is a no-op, and the same refusal on a same-name re-registration that changes
+    the CONTRACT (`fn` or `key`): a silently ignored implementation that never
+    runs while its author believes it registered is CB-15's failure shape.
+    """
+    for existing in _read_enrichers:
+        if existing.name == name:
+            if existing.fn is not fn or existing.key != key or existing.fallback is not fallback:
+                raise ValueError(
+                    f"read enricher {name!r} already registered with a different "
+                    f"function or key; a silently ignored implementation would never run"
+                )
+            return
+    for existing in _read_enrichers:
+        if existing.key == key:
+            raise ValueError(
+                f"read-enricher key {key!r} already declared by enricher {existing.name!r}"
+            )
+    _read_enrichers.append(ReadEnricher(name, fn, key, fallback))
+
+
+def run_read_enrichers(
+    conn: sqlite3.Connection,
+    rows: list[dict[str, Any]],
+    *,
+    resolve: bool,
+    project_dir: str | None = None,
+) -> None:
+    """Annotate `rows` in place with every registered enricher's summary.
+
+    NEVER RAISES. An extension that fails while enriching must not take down the
+    read it was decorating — the caller asked for a finding, and the finding is
+    still there.
+
+    **The failure is VISIBLE, and that is a decision rather than an inheritance.**
+    The older seams swallow-and-log to stderr, which is nothing at all to an MCP
+    caller; worse, here a silently missing key would be indistinguishable from
+    "this row carries no anchor", and telling those two apart is the entire
+    reason this seam exists. So the runner GUARANTEES the enricher's declared
+    key is present on every row after the pass, and fills any it did not get
+    through the enricher's own declared `fallback`, so the failure stamp has the
+    same SHAPE as a real summary rather than being a second, narrower object a
+    consumer must special-case. stderr keeps its line as the immediate channel;
+    the response is the durable one.
+
+    `_ensure_modules_loaded()` first, for the pre-add resolver's reason: which
+    extensions are registered must not depend on which modules this process
+    happened to import.
+    """
+    _ensure_modules_loaded()
+    for enricher in _read_enrichers:
+        error: str | None = None
+        try:
+            enricher.fn(conn, rows, resolve=resolve, project_dir=project_dir)
+        except Exception as e:  # noqa: BLE001 — a read must survive its decoration
+            error = f"{type(e).__name__}: {e}"[:500]
+            sys.stderr.write(f"[read enricher '{enricher.name}' failed] {e}\n")
+        build = enricher.fallback or _bare_unavailable
+        for row in rows:
+            if enricher.key in row:
+                continue
+            reason = error or "enricher produced no summary for this row"
+            try:
+                row[enricher.key] = build(reason)
+            except Exception as e:  # noqa: BLE001 — the guard may not have a guard
+                sys.stderr.write(f"[read enricher '{enricher.name}' fallback failed] {e}\n")
+                row[enricher.key] = _bare_unavailable(reason)
+
+
+def connection_root(conn: sqlite3.Connection) -> str | None:
+    """The project directory this CONNECTION's tracker lives in, or None.
+
+    A read path that wants to resolve something against the repository needs a
+    root, and the three obvious sources are all wrong for it. Ambient cwd is
+    refused in capitals by BT-7 Р3 — a long-lived server outlives the directory
+    it started in. `describe_root()` is deliberately a one-resolver/two-consumer
+    diagnostic, and it answers "where would a connection be opened from", not
+    "where did THIS one come from". And a required argument would make the
+    ordinary `get` an unusable one.
+
+    NEVER RAISES, for the same reason `describe_root` does not: it is consulted
+    on the ordinary read path and a diagnostic that can take down the thing it
+    describes is worse than no diagnostic.
+
+    So the coordinate is taken from the connection the caller already handed us:
+    the main database file's own path, whose grandparent is the project
+    directory by construction (`<root>/.codebugs/findings.db`). None for an
+    in-memory or otherwise pathless database, and None is a refusal the caller
+    must handle — never a licence to fall back to cwd.
+    """
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+    except sqlite3.Error:
+        return None
+    for row in rows:
+        name = row[1] if not isinstance(row, sqlite3.Row) else row["name"]
+        path = row[2] if not isinstance(row, sqlite3.Row) else row["file"]
+        if name != "main":
+            continue
+        if not isinstance(path, str) or not path:
+            return None
+        # `abspath` on a RELATIVE value needs `os.getcwd()`, which raises once
+        # the cwd has been deleted out from under a long-lived server — the same
+        # hazard `_absolutized` documents, and it matters more here because this
+        # function is called on the ordinary read path, OUTSIDE the enricher's
+        # own failure guard. A caller that cannot be told where it is gets
+        # `None`, which every consumer already treats as "no root".
+        try:
+            parent = os.path.dirname(os.path.abspath(path))
+        except OSError:
+            return None
+        if os.path.basename(parent) != DB_DIR:
+            return None
+        return os.path.dirname(parent)
+    return None
+
+
 # SQLITE_BUSY (5) and SQLITE_LOCKED (6). Extended codes mask down: 517 & 0xFF == 5.
 _CONTENTION_CODES = frozenset({5, 6})
 

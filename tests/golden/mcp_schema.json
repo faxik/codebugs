@@ -1541,12 +1541,17 @@
     "name": "codesweep_status"
   },
   {
-    "description": "Fetch a single finding by ID with full body (description, severity,\nstatus, tags, meta, timestamps, commit refs).\n\nRaises a not-found error if the ID does not exist. For lenient batch\nlookup that silently drops missing IDs, use `query(ids=[...])`.\n\nArgs:\n    finding_id: The finding ID (e.g. CB-1383)\n",
+    "description": "Fetch a single finding by ID with full body (description, severity,\nstatus, tags, meta, timestamps, commit refs).\n\nThe result carries an `anchor` summary saying where this card's code is\nNOW: `state` tells a card with no anchor apart from one whose anchor was\nretracted by hand and from one where capture looked and had nothing to\ngrab, and `loc_status`/`moved_file`/`path` report the resolution against\nHEAD when it ran.\n\nRaises a not-found error if the ID does not exist. For lenient batch\nlookup that silently drops missing IDs, use `query(ids=[...])`.\n\nArgs:\n    finding_id: The finding ID (e.g. CB-1383)\n    resolve_anchors: Resolve the anchor against the repository (default\n            ON \u2014 the cost is bounded by one card). Pass False for a read\n            that must not spawn a process: no git available, no\n            repository, or a caller that only wants to know whether an\n            anchor exists at all.\n",
     "inputSchema": {
       "properties": {
         "finding_id": {
           "title": "Finding Id",
           "type": "string"
+        },
+        "resolve_anchors": {
+          "default": true,
+          "title": "Resolve Anchors",
+          "type": "boolean"
         }
       },
       "required": [
@@ -2233,7 +2238,7 @@
     "name": "pull_next"
   },
   {
-    "description": "Search and filter findings. Returns structured results.\n\nSupports lookup by ID via `id=` (single) or `ids=` (batch). Missing IDs\nare silently absent from the result so the caller can diff. For a strict\nsingle-ID fetch that errors on miss, use `get` instead.\n\nArgs:\n    id: Fetch a single finding by exact ID (e.g. CB-1383)\n    ids: Fetch multiple findings by ID list; missing IDs are skipped\n    status: Filter by status (open, in_progress, fixed, not_a_bug, wont_fix, stale, deferred). Aliases accepted.\n            Use 'deferred' to find items with active blockers.\n    severity: Filter by severity (critical, high, medium, low)\n    category: Filter by exact category\n    file: Filter by file path (substring match)\n    source: Filter by source (claude, ruff, human, etc.). Compares the\n            FIRST reporter \u2014 the column is frozen at first report\n            (BT-4); later observations' sources live only in the\n            occurrence ring (meta.occurrences[*].source), and an\n            imported observation's ring source can be a peer tracker's.\n    tag: Filter by tag (finds findings containing this tag)\n    meta_key: Filter by metadata key existence. Reads the row's AUTHORED\n              top-level meta (the column), never the occurrence ring.\n    meta_value: Filter by metadata value (requires meta_key; same\n                authored top-level meta as meta_key \u2014 ring meta is not\n                consulted)\n    commit: Matches the first-report column OR any occurrence in the\n            ring (prefix match, hex validated) \u2014 \"what was observed on\n            this commit\" (CB-128). `staleness_check` uses the NEWEST\n            ring entry instead: a different question.\n    ref: Filter by reported_at_ref (exact match, never prefix) \u2014 matches\n         the first-observed or manually assigned release ref (BT-4);\n         per-occurrence refs in the ring are not consulted.\n    fingerprint: Filter by identity fingerprint (exact match)\n    group_by: Group results by: file, category, severity, status, source\n              (source groups count FIRST reporters \u2014 the column is\n              frozen at first report)\n    limit: Max results (default 100)\n    offset: Pagination offset\n",
+    "description": "Search and filter findings. Returns structured results.\n\nSupports lookup by ID via `id=` (single) or `ids=` (batch). Missing IDs\nare silently absent from the result so the caller can diff. For a strict\nsingle-ID fetch that errors on miss, use `get` instead.\n\nArgs:\n    id: Fetch a single finding by exact ID (e.g. CB-1383)\n    ids: Fetch multiple findings by ID list; missing IDs are skipped\n    status: Filter by status (open, in_progress, fixed, not_a_bug, wont_fix, stale, deferred). Aliases accepted.\n            Use 'deferred' to find items with active blockers.\n    severity: Filter by severity (critical, high, medium, low)\n    category: Filter by exact category\n    file: Filter by file path (substring match)\n    source: Filter by source (claude, ruff, human, etc.). Compares the\n            FIRST reporter \u2014 the column is frozen at first report\n            (BT-4); later observations' sources live only in the\n            occurrence ring (meta.occurrences[*].source), and an\n            imported observation's ring source can be a peer tracker's.\n    tag: Filter by tag (finds findings containing this tag)\n    meta_key: Filter by metadata key existence. Reads the row's AUTHORED\n              top-level meta (the column), never the occurrence ring.\n    meta_value: Filter by metadata value (requires meta_key; same\n                authored top-level meta as meta_key \u2014 ring meta is not\n                consulted)\n    commit: Matches the first-report column OR any occurrence in the\n            ring (prefix match, hex validated) \u2014 \"what was observed on\n            this commit\" (CB-128). `staleness_check` uses the NEWEST\n            ring entry instead: a different question.\n    ref: Filter by reported_at_ref (exact match, never prefix) \u2014 matches\n         the first-observed or manually assigned release ref (BT-4);\n         per-occurrence refs in the ring are not consulted.\n    fingerprint: Filter by identity fingerprint (exact match)\n    group_by: Group results by: file, category, severity, status, source\n              (source groups count FIRST reporters \u2014 the column is\n              frozen at first report)\n    limit: Max results (default 100)\n    offset: Pagination offset\n    resolve_anchors: Resolve each result's location anchor against the\n              repository HEAD, so a card whose code moved reports its\n              new path. OFF by default because it costs 2-4 git calls\n              per ANCHORED row and this is the primary read path; the\n              cheap half \u2014 whether a card carries an anchor at all, and\n              the refusal token when capture found nothing to grab \u2014 is\n              in every result either way. `get` resolves one card by\n              default.\n",
     "inputSchema": {
       "properties": {
         "category": {
@@ -2368,6 +2373,11 @@
           ],
           "default": null,
           "title": "Ref"
+        },
+        "resolve_anchors": {
+          "default": false,
+          "title": "Resolve Anchors",
+          "type": "boolean"
         },
         "severity": {
           "anyOf": [
@@ -3249,7 +3259,7 @@
     "name": "similarity_report"
   },
   {
-    "description": "Check if findings are stale by comparing against git history.\n\nStaleness is checked against each finding's NEWEST observation: a\ndeduplicated re-observation records its commit in the occurrence ring,\nand that commit \u2014 not the frozen first-report `reported_at_commit` \u2014\nis what the file is compared from; findings with no ring fall back to\nthe first report. Each result carries `checked_commit`, the commit the\nverdict was computed against.\n\nReturns file_status for each finding:\n- current: file unchanged since finding was reported\n- modified: file changed but still exists\n- renamed: file was renamed/moved\n- deleted: file no longer exists\n- unknown: can't determine, with a `reason` naming which question could\n  not be answered \u2014 no provenance data, an unreachable commit, a path\n  outside this repository's worktree, a path the reported commit never\n  contained (a glob, free text, or a file added later), an empty or\n  malformed value, a path that is neither a file nor a directory, or a\n  git/stat call that failed\n\nArgs:\n    finding_id: Check a single finding (e.g. CB-1)\n    status: Filter by finding status (default: open)\n    category: Filter by category\n    file: Filter by file path (substring match)\n",
+    "description": "Check if findings are stale by comparing against git history.\n\nStaleness is checked against each finding's NEWEST observation: a\ndeduplicated re-observation records its commit in the occurrence ring,\nand that commit \u2014 not the frozen first-report `reported_at_commit` \u2014\nis what the file is compared from; findings with no ring fall back to\nthe first report. Each result carries `checked_commit`, the commit the\nverdict was computed against.\n\nReturns file_status for each finding:\n- current: file unchanged since finding was reported\n- modified: file changed but still exists\n- renamed: file was renamed/moved\n- deleted: file no longer exists\n- unknown: can't determine, with a `reason` naming which question could\n  not be answered \u2014 no provenance data, an unreachable commit, a path\n  outside this repository's worktree, a path the reported commit never\n  contained (a glob, free text, or a file added later), an empty or\n  malformed value, a path that is neither a file nor a directory, or a\n  git/stat call that failed\n\nArgs:\n    finding_id: Check a single finding (e.g. CB-1)\n    status: Filter by finding status (default: open)\n    category: Filter by category\n    file: Filter by file path (substring match)\n    resolve_anchors: Also resolve each finding's location anchor against\n            HEAD, so a record says where the reported LINES are now and\n            not only what became of the file. OFF by default: this query\n            permits ten thousand rows and already spends git per file.\n            Every record carries the cheap half of the summary either\n            way \u2014 whether the card has an anchor at all.\n",
     "inputSchema": {
       "properties": {
         "category": {
@@ -3287,6 +3297,11 @@
           ],
           "default": null,
           "title": "Finding Id"
+        },
+        "resolve_anchors": {
+          "default": false,
+          "title": "Resolve Anchors",
+          "type": "boolean"
         },
         "status": {
           "anyOf": [
