@@ -2479,12 +2479,57 @@ def anchor_candidates(
     return [dict(r) for r in rows]
 
 
-def get_finding(conn: sqlite3.Connection, finding_id: str) -> dict[str, Any]:
-    """Fetch a single finding by ID. Raises KeyError if not found."""
+def get_finding(
+    conn: sqlite3.Connection,
+    finding_id: str,
+    *,
+    resolve_anchors: bool = True,
+    project_dir: str | None = None,
+) -> dict[str, Any]:
+    """Fetch a single finding by ID. Raises KeyError if not found.
+
+    The row carries an ``anchor`` summary whenever a read enricher is registered
+    (``loc``, today), and by DEFAULT that summary is RESOLVED against the
+    repository: an ordinary read of a card whose code has since moved says where
+    it went, which is the point of the whole seam and what the owner's
+    acceptance names. The cost is bounded by one row, which is why the default
+    here is greedy and ``query``'s is not.
+
+    ``resolve_anchors=False`` is the opt-out, and it exists because a read path
+    that cannot spawn a process must remain available: a script, a test, a
+    machine with no git, a tracker read from outside the tree it describes. It
+    does not remove the summary — the card still says whether it carries an
+    anchor — it removes only the part that costs.
+
+    ``project_dir`` names the repository to resolve against; omitted, it is the
+    tracker's OWN directory (``db.connection_root``), never the process cwd,
+    which BT-7 Р3 refuses. A root that cannot be determined is reported as
+    ``unknown(no_root)`` inside the summary rather than raised.
+    """
     row = conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
     if not row:
         raise KeyError(f"Finding not found: {finding_id}")
-    return db.row_to_dict(row)
+    finding = db.row_to_dict(row)
+    _enrich_read([finding], conn, resolve=resolve_anchors, project_dir=project_dir)
+    return finding
+
+
+def _enrich_read(
+    rows: list[dict[str, Any]],
+    conn: sqlite3.Connection,
+    *,
+    resolve: bool,
+    project_dir: str | None,
+) -> None:
+    """Run the read-enricher seam over rows this module is about to return.
+
+    The root is resolved ONLY when something might actually use it, so a read
+    with resolution off does not even ask the connection where it lives.
+    """
+    root = project_dir
+    if root is None and resolve:
+        root = db.connection_root(conn)
+    db.run_read_enrichers(conn, rows, resolve=resolve, project_dir=root)
 
 
 def query_findings(
@@ -2506,12 +2551,25 @@ def query_findings(
     group_by: str | None = None,
     limit: int = 100,
     offset: int = 0,
+    resolve_anchors: bool = False,
+    project_dir: str | None = None,
 ) -> dict[str, Any]:
     """Query findings with filters. Returns results or grouped counts.
 
     `id` / `ids` are AND-combined with other filters; missing IDs are silently absent.
     `commit` matches the frozen first-report column OR any occurrence-ring entry
     (CB-128) — any observation, not the newest (that is `provenance._effective_commit`).
+
+    Every returned finding carries an ``anchor`` summary while a read enricher is
+    registered, and ``resolve_anchors`` decides only whether that summary COSTS
+    anything. The default is False, and the asymmetry with ``get_finding`` is the
+    design rather than an oversight: resolving one anchor is two to four git
+    calls, and this is the primary read path with a page of up to a hundred rows.
+    Presence of an anchor is reported either way, out of the ``meta`` the row had
+    already read.
+
+    With the flag on, the page is resolved in ONE pass — the per-tree context is
+    built once for the whole population, never per row.
     """
     conditions: list[str] = []
     params: list[Any] = []
@@ -2634,12 +2692,14 @@ def query_findings(
         f"SELECT * FROM findings {where} ORDER BY {rank_sql}, created_at DESC LIMIT ? OFFSET ?",
         params,
     ).fetchall()
+    found = [db.row_to_dict(r) for r in rows]
+    _enrich_read(found, conn, resolve=resolve_anchors, project_dir=project_dir)
     return {
         "grouped": False,
         "total": count,
         "limit": limit,
         "offset": offset,
-        "findings": [db.row_to_dict(r) for r in rows],
+        "findings": found,
     }
 
 
