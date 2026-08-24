@@ -790,3 +790,38 @@ class TestStalenessCarriesTheAnchorToo:
         assert counter.containing("blame") > 0, counter.calls
         assert all(r["anchor"]["state"] == "anchored" for r in report["findings"])
         assert all(r["anchor"]["resolved"] is False for r in report["findings"])
+
+
+class TestTheGreedyDefaultDoesNotLeakIntoInternalCallers:
+    """`get_finding` resolves by DEFAULT, which is right for a caller that will
+    SHOW the card and wrong for every internal probe that discards the row.
+
+    Both instances are in `provenance`: the existence check inside
+    `check_findings`, and `resolve_trailers`, which touches one card per trailer
+    over a whole rev-range. Neither looks at the summary, so a greedy read there
+    would be two to four subprocesses spent on nothing — a cost regression on a
+    path this unit was never asked to touch.
+    """
+
+    def test_resolve_trailers_spends_no_git_on_anchors(self, tracker, counter):
+        from codebugs import provenance
+
+        root, conn = tracker
+        fid = _anchored(conn, root)[0]
+        (root / "f.py").write_text(_body("GAMMA"))
+        _git(root, "add", "-A")
+        _git(root, "commit", "-qm", f"fix it\n\nResolves: {fid}")
+        counter.calls.clear()
+
+        report = provenance.resolve_trailers(conn, rev_range="HEAD~1..HEAD", project_dir=str(root))
+        assert fid in report["resolved"]
+        assert counter.containing("blame") == 0, counter.calls
+
+    def test_the_existence_probe_inside_staleness_spends_none_either(self, tracker, counter):
+        from codebugs import provenance
+
+        root, conn = tracker
+        fid = _anchored(conn, root)[0]
+        counter.calls.clear()
+        provenance.check_findings(conn, str(root), finding_id=fid)
+        assert counter.containing("blame") == 0, counter.calls

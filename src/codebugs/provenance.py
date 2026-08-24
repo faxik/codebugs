@@ -707,7 +707,12 @@ def check_findings(
         # whatever its status (CB-28). `get_finding` is still what raises KeyError
         # for an unknown id, so that contract is unchanged; the filters are applied
         # on top of it and simply narrow the result to nothing when they exclude it.
-        findings.get_finding(conn, finding_id)  # raises KeyError on an unknown id
+        # `resolve_anchors=False`: this call exists ONLY to raise KeyError on an
+        # unknown id, and the row it returns is discarded. Resolving an anchor
+        # for a row nobody reads is a subprocess spent on nothing — the greedy
+        # default is right for a caller that will SHOW the card, and wrong for
+        # every internal existence probe.
+        findings.get_finding(conn, finding_id, resolve_anchors=False)
         narrowed = findings.query_findings(
             conn,
             resolve_anchors=resolve_anchors,
@@ -888,7 +893,11 @@ def resolve_trailers(
         seen.add((t.verb, t.cb_id))
         label, status_input, bucket = _VERB_ACTIONS[t.verb]
         try:
-            current = findings.get_finding(conn, t.cb_id)
+            # Same reason, and here it is a COST regression rather than waste:
+            # `resolve_trailers` walks a whole rev-range and touches one card per
+            # trailer, so a greedy read would put two to four git calls on each
+            # of them for a summary this function never looks at.
+            current = findings.get_finding(conn, t.cb_id, resolve_anchors=False)
         except KeyError:
             report["missing"].append(t.cb_id)
             continue

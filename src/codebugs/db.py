@@ -470,11 +470,10 @@ class ReadEnricher:
 
     A member of this file's registry family and deliberately the first READING
     one, so half the older contract does not apply and copying it would be
-    cargo. (No ordinal here on purpose: the brief that specified this seam said
-    "five registries" above a list of six, which is this repository's own lesson
-    about counts in prose arriving on the very sentence that introduces the
-    seventh one. `tests/test_registry.py` is where a count belongs.) It writes nothing, so there is no transaction to be inside, no
-    savepoint, no nonce and no never-commit rule to enforce. What it does share
+    cargo. It writes nothing, so there is no transaction to be inside, no
+    savepoint, no nonce and no never-commit rule to enforce. No ordinal is
+    written here on purpose — a count in prose is one this repository has been
+    wrong about every time it left one there. What it does share
     with `PreAddResolver` is the shape that keeps core ignorant of an
     extension's vocabulary: `key` is DECLARED at registration exactly as
     `meta_keys` is, so the runner can stamp a failure under the extension's own
