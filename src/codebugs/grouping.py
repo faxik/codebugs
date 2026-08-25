@@ -245,9 +245,11 @@ def citation_report(
     destroy evidence rather than correct a conclusion.
 
     THE HONEST SCOPE: it suppresses one EDGE, not the PAIR. Removing an edge
-    does not cut a graph — if a third card cites both, they land in one
-    component anyway, and on a corpus whose components run to eleven cards that
-    is an ordinary shape rather than a corner case. The report does not go quiet
+    does not cut a graph — one third card citing both sides is enough to leave
+    them in one component — and the measurement to weigh that against is the
+    module docstring's own: 327 of 524 linked cards sat in a single component
+    before hub splitting, which is not a graph where alternative paths are
+    exotic. The report does not go quiet
     about it: every entry in ``suppressed_edges`` carries ``still_grouped``, and
     ``still_grouped_total`` counts them, so a declaration that lost is a fact
     the reader is handed rather than one they must notice. Cutting for real
