@@ -6,6 +6,7 @@ from anywhere without circular import risk.
 
 from __future__ import annotations
 
+import operator
 import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -352,3 +353,60 @@ def validate_batch_payload(value: object, *, label: str) -> list[Any]:
         if not isinstance(element, Mapping):
             raise ValueError(f"{label}[{index}] must be an object, not {type(element).__name__}")
     return value
+
+
+# --- Row limits (CB-161) ---
+
+
+def require_row_limit(label: str, value: object) -> int | None:
+    """Accept ``None`` (no limit) or a NON-NEGATIVE integer row limit, else ``ValueError``.
+
+    Three callers across two modules build a ``LIMIT`` clause — ``bench.query``,
+    ``bench.list_runs`` and ``sweep.list_items`` — and CB-161 found each of them
+    interpolating the caller's value into SQL text with a guard of its own. The
+    check lives HERE rather than three times over because a predicate that is
+    duplicated rather than shared is one drift away from disagreeing with itself
+    (the same reason ``is_sql_identifier`` is the only copy of its pattern), and
+    because ``types`` is the module every domain module may already import.
+
+    **Zero is legal and means zero rows.** That is not a free choice: on
+    ``sweep.list_items`` a zero ALREADY produced ``LIMIT 0``, i.e. no rows, so a
+    "must be > 0" rule would have broken the one site of the three that behaved
+    correctly. On the two ``bench`` sites a zero used to skip the clause entirely
+    and return EVERYTHING — the opposite of what was asked — and after CB-161
+    it means zero rows there too. One meaning on all three.
+
+    **Negative is refused**, because SQLite reads a negative ``LIMIT`` as NO
+    limit. Binding ``-5`` as a parameter does not repair that: the caller asked
+    to be limited and would silently receive the whole table, which is the
+    success-shaped lie the card was filed against.
+
+    **``bool`` is refused explicitly**, although ``bool`` IS a subclass of
+    ``int``. Other integer subclasses are accepted, matching ``_require_text``'s
+    subclass-tolerant style in ``bench.py``; ``bool`` is singled out because its
+    two values mean something else to every reader. ``last_n=False`` is
+    overwhelmingly likely to have meant "no limit", and silently honouring it as
+    zero rows would rebuild the very defect this function closes, one falsey
+    value further along. The type is read as ``type(value)`` rather than through
+    ``isinstance`` per CB-75: CPython honours a ``__class__`` property, so
+    ``isinstance`` is spoofable.
+
+    The CANONICAL integer is returned and the caller binds THAT, never the
+    object it was handed. Validating one view while consuming another is not a
+    guard (CB-74/CB-82): an ``int`` subclass may override ``__lt__`` and answer
+    this function's comparison differently from the value SQLite would bind.
+    ``operator.index`` cannot fail here, because the type check above has already
+    established a genuine integer.
+    """
+    if value is None:
+        return None
+    if issubclass(type(value), bool) or not issubclass(type(value), int):
+        raise ValueError(f"{label} must be an integer or None, not {type(value).__name__}")
+    canonical = operator.index(value)
+    if canonical < 0:
+        raise ValueError(
+            f"{label} must not be negative (SQLite reads a negative LIMIT as NO limit, "
+            f"so it would silently return everything); got {canonical}. "
+            f"Use 0 for no rows, or omit it for no limit."
+        )
+    return canonical

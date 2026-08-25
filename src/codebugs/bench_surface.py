@@ -87,7 +87,8 @@ Args:
     metrics: Which metrics to include (default: all)
     rows: Which row_labels to include (default: all)
     group_by: Pivot axis — "row" or "run"
-    last_n: Limit to last N runs by date
+    last_n: Limit to last N runs by date. 0 means NO runs; omit it for no
+        limit. A negative value is an error (it used to mean "no limit").
     format: Output — "json" or "csv"
 """
 
@@ -98,7 +99,10 @@ With benchmark: lists runs for that benchmark.
 
 Args:
     benchmark: If provided, list runs for this benchmark
-    last_n: Limit to last N runs (only when benchmark is provided)
+    last_n: Limit to last N runs. Requires benchmark — supplying last_n
+        without one is an ERROR, because benchmark names have no runs to
+        limit and the argument would otherwise be silently discarded.
+        0 means NO runs; omit it for no limit. A negative value is an error.
 """
 
 CODEBENCH_DELETE_DOC = """Delete a single run or all runs for a benchmark.
@@ -167,7 +171,7 @@ SURFACE = [
                 dict(
                     flags=["--group-by"], choices=["row", "run"], default="row", help="Pivot axis"
                 ),
-                dict(flags=["--last-n"], type=int, help="Last N runs only"),
+                dict(flags=["--last-n"], type=int, help="Last N runs only (0 = none)"),
                 dict(
                     flags=["--format"],
                     choices=["json", "csv"],
@@ -193,7 +197,11 @@ SURFACE = [
             help="List benchmarks or runs",
             args=[
                 dict(flags=["benchmark"], nargs="?", help="List runs for this benchmark"),
-                dict(flags=["--last-n"], type=int, help="Last N runs"),
+                dict(
+                    flags=["--last-n"],
+                    type=int,
+                    help="Last N runs; requires a benchmark (0 = none)",
+                ),
             ],
             manual_handler=_cmd_bench_list,
         ),
