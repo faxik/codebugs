@@ -2116,3 +2116,25 @@ class TestDescriptionWriteGuard:
         r = _add(conn, desc=text)
         assert r["description"] == text
         assert r["stripped_description_tail"] is False
+
+    def test_the_cut_is_confined_to_the_two_observation_paths(self):
+        """CB-51: an import is not an observation, so it must not cut either.
+
+        Same boundary the `escalate` / `promote_tags` ratchets hold, pinned the
+        same way (AST, not grep). A peer's export must round-trip byte-for-byte:
+        silently rewriting foreign text on the way in is exactly the divergence
+        between ingestion surfaces that CB-56 narrowed rather than widened. There
+        is deliberately NO opt-out parameter — the cut simply is not on that
+        path, so there is nothing to turn off by argument.
+        """
+        callers = {
+            node.name
+            for node in ast.walk(_findings_ast())
+            if isinstance(node, ast.FunctionDef)
+            and any(
+                isinstance(c.func, ast.Name) and c.func.id == "_strip_tool_call_tail"
+                for c in ast.walk(node)
+                if isinstance(c, ast.Call)
+            )
+        }
+        assert callers == {"add_finding", "batch_add_findings"}
