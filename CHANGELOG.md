@@ -58,9 +58,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 - **`query` and `stats` can now group by TAG and by a top-level `meta` key (CB-62).**
   The tracker could group findings only by the five columns of the row, while the axes
-  a corpus is actually dense along live in `tags` and `meta` — measured here, 154 of 171
-  cards carry a tag and 153 carry at least one non-machinery `meta` key, across 383 tags
-  and 313 keys. `--group-by tag` / `--group-by meta:<key>` (and `stats --by`) answer
+  a corpus is actually dense along live in `tags` and `meta` — measured on this tracker
+  on 2026-08-25, 160 of its 172 cards carry a tag and 155 carry at least one
+  non-machinery `meta` key, across 387 distinct tags and 313 distinct keys. (Those are
+  measurements of a moving corpus, not invariants; they are stamped so a later reader
+  can tell a stale number from a wrong one.) `--group-by tag` / `--group-by meta:<key>`
+  (and `stats --by`) answer
   those, and the point is COMPOSITION: `grouping-tags` has been counting tags for a
   while, but it takes only `status` and `category`, so "which tags do the critical open
   cards in this file carry" could not be asked at all. The two tools deliberately

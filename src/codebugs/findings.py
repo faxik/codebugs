@@ -2670,10 +2670,11 @@ GROUP_AXES_HELP = f"{', '.join(GROUP_COLUMNS)}, {GROUP_TAG}, {GROUP_META_PREFIX}
 # decision free rather than shipping a behaviour that would have to break. `]` is
 # inert today and is refused with its partner so the rule is one sentence.
 #
-# THE COST IS REAL AND WAS MEASURED, not assumed away: of 313 distinct top-level
-# meta keys on the live tracker, TWO carry a dot (`misassigned_to_1.81`,
-# `misassigned_to_1.98`) and none carry the other three. Those two keys cannot be
-# grouped by until CB-167 decides the grammar.
+# THE COST IS REAL AND WAS MEASURED, not assumed away: of the 313 distinct
+# top-level meta keys on this tracker (measured 2026-08-25 — a moving corpus, so
+# read it as a measurement rather than an invariant), exactly TWO carry a dot,
+# `misassigned_to_1.81` and `misassigned_to_1.98`, and none carry the other
+# three. Those two keys cannot be grouped by until CB-167 decides the grammar.
 _META_PATH_METACHARS = '.["]'
 
 # What counts as a value this axis can rank. Positive enumeration on purpose:
@@ -2846,9 +2847,9 @@ def _axis_counts(
         means the counts DOUBLE-COUNT and do not sum to the population.
     ``nonscalar_value_rows`` — a SUBSET of ``ungrouped_rows``: the key is present
         but holds an object or an array, so there is no single value to group by.
-        It is named apart from the rest because on the live tracker the key `loc`
-        is a container on 168 of 171 rows, and reporting those as "carries no
-        value" would be a different, wrong statement about the corpus.
+        It is named apart from the rest because on this tracker the key `loc` is
+        a container on 169 of 172 rows (measured 2026-08-25), and reporting those
+        as "carries no value" would be a different, wrong statement about it.
 
     All four are present on every axis. `[]`-discipline, as `attention` and
     `stripped_meta_keys` already do it here: a key that appears only sometimes

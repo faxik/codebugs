@@ -3707,8 +3707,8 @@ class TestGroupingAxes:
         assert result["nonscalar_value_rows"] == 0
 
     def test_a_container_value_is_ungrouped_AND_named_separately(self, conn):
-        """Measured on the live tracker: `loc` is a container on 168 of 171 rows,
-        `forms_not_chosen` on 5, `sites` on 3. Folding those into
+        """Measured on this tracker on 2026-08-25: `loc` is a container on 169 of its
+        172 rows, `forms_not_chosen` on 5, `sites` on 3. Folding those into
         `ungrouped_rows` would report the rows as carrying no value when they
         carry one this axis cannot rank. (The fixture uses `sites` rather than
         `loc` because the anchor machinery consumes a `loc` key on the add
