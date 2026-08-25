@@ -117,8 +117,9 @@ def _default_file_mode() -> int:
 
 
 @contextlib.contextmanager
-def atomic_write(path: str, *, newline: str | None = None) -> Iterator[IO[str]]:
-    """Yield a writable text handle whose content replaces `path` only on success.
+def atomic_write(path: str, *, newline: str | None = None) -> Iterator[tuple[IO[str], bool]]:
+    """Yield (handle, in_place): a writable text handle whose content replaces
+    `path` only on success, and whether THIS call wrote in place.
 
     `open(path, "w")` truncates the destination BEFORE the first byte is
     written, so any write failure destroys the previous file (CB-76). Here the
@@ -129,6 +130,19 @@ def atomic_write(path: str, *, newline: str | None = None) -> Iterator[IO[str]]:
     accepted or set: `open()` and `os.fdopen()` both take the locale default,
     and pinning one here would silently desynchronise export from import on a
     non-UTF-8 host.
+
+    `in_place` is the CLASSIFICATION THIS FUNCTION ALREADY COMPUTES to decide
+    how to write (CB-143). A caller that needs to know whether its destination
+    is an alias of its own stdout — so it can steer a post-write diagnostic
+    away from the data channel — must use THIS value rather than re-deriving
+    the answer from the path string a second time: a second classifier is a
+    second copy of `_FD_DIR`/`_held_open_inodes()` that can disagree with this
+    one under a race (the fd is reopened between the two calls) or under a
+    future change to either. `in_place` is True exactly in the "Not always
+    atomic" cases below — a FIFO, a character device, a file-descriptor alias,
+    or a regular file whose inode this process already holds open — and False
+    whenever the temp-and-replace path is taken, including for a brand-new
+    file.
 
     TWO LIMITS ON THE NAME, stated here because the caller cannot see them:
 
@@ -203,7 +217,7 @@ def atomic_write(path: str, *, newline: str | None = None) -> Iterator[IO[str]]:
         except OSError as exc:
             raise _typed(exc, path) from exc
         with handle:
-            yield handle
+            yield handle, True
         return
 
     # `open(path, "w")` needs write permission on the FILE; os.replace needs it
@@ -237,7 +251,7 @@ def atomic_write(path: str, *, newline: str | None = None) -> Iterator[IO[str]]:
     # already gone and `_discard` no-ops on it.
     try:
         with handle:
-            yield handle
+            yield handle, False
         # Closed by the `with`, so a flush/close ENOSPC — where quota failures
         # usually surface — has already raised and we never reach the replace.
 

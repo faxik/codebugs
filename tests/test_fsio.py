@@ -23,6 +23,7 @@ it can fail on:
 
 from __future__ import annotations
 
+import csv
 import errno
 import os
 import stat
@@ -244,7 +245,7 @@ class TestFixGuards:
         target.chmod(0o444)
 
         with pytest.raises(PermissionError) as ei:
-            with fsio.atomic_write(str(target)) as f:
+            with fsio.atomic_write(str(target)) as (f, _in_place):
                 f.write("new")
 
         assert str(target) in str(ei.value), "the error must name the path the caller typed"
@@ -267,7 +268,7 @@ class TestFixGuards:
         monkeypatch.setattr(fsio.os, "replace", boom)
 
         with pytest.raises(OSError) as ei:
-            with fsio.atomic_write(str(target)) as f:
+            with fsio.atomic_write(str(target)) as (f, _in_place):
                 f.write("new content")
 
         assert target.read_text() == PREVIOUS
@@ -283,7 +284,7 @@ class TestFixGuards:
         b.symlink_to(a)
 
         with pytest.raises(OSError) as ei:
-            with fsio.atomic_write(str(a)) as f:
+            with fsio.atomic_write(str(a)) as (f, _in_place):
                 f.write("x")
 
         assert ei.value.errno == errno.ELOOP
@@ -305,13 +306,18 @@ class TestFixGuards:
         before = os.stat(target).st_ino
 
         with open(target, "a"):  # this process now holds the inode open
-            with fsio.atomic_write(str(target)) as f:
+            with fsio.atomic_write(str(target)) as (f, in_place):
                 f.write("replacement")
 
         assert os.stat(target).st_ino == before, (
             "the inode was replaced while a descriptor still pointed at it"
         )
         assert target.read_text() == "replacement"
+        assert in_place is True, (
+            "CB-143: a caller (export-csv/reqs-export) steers its post-write "
+            "diagnostic off this exact flag — it must be True here or that "
+            "diagnostic would go to the wrong stream"
+        )
 
     def test_an_fd_alias_resolving_into_proc_is_written_through(self, populated):
         """Killed by the mutation "classify from os.stat alone".
@@ -343,7 +349,7 @@ class TestFixGuards:
         d = tmp_path / "adir"
         d.mkdir()
         with pytest.raises(IsADirectoryError) as ei:
-            with fsio.atomic_write(str(d)) as f:
+            with fsio.atomic_write(str(d)) as (f, _in_place):
                 f.write("x")
         assert str(d) in str(ei.value)
         assert not [n for n in os.listdir(tmp_path) if n.startswith(".codebugs-export-")]
@@ -362,8 +368,9 @@ class TestCompatibility:
         """mkstemp creates 0600, so without the chmod a brand-new export would
         be private where `open(w)` made it umask-derived."""
         target = tmp_path / "fresh.txt"
-        with fsio.atomic_write(str(target)) as f:
+        with fsio.atomic_write(str(target)) as (f, in_place):
             f.write("x")
+        assert in_place is False, "a brand-new file is never written in place"
         old = os.umask(0)
         os.umask(old)
         assert stat.S_IMODE(os.stat(target).st_mode) == 0o666 & ~old
@@ -372,8 +379,9 @@ class TestCompatibility:
         target = tmp_path / "kept.txt"
         target.write_text(PREVIOUS)
         target.chmod(0o640)
-        with fsio.atomic_write(str(target)) as f:
+        with fsio.atomic_write(str(target)) as (f, in_place):
             f.write("x")
+        assert in_place is False, "a plain regular file is replaced, not written in place"
         assert stat.S_IMODE(os.stat(target).st_mode) == 0o640
 
     def test_a_symlink_destination_stays_a_symlink_and_its_target_receives_content(
@@ -384,11 +392,12 @@ class TestCompatibility:
         link = tmp_path / "link.txt"
         link.symlink_to(real)
 
-        with fsio.atomic_write(str(link)) as f:
+        with fsio.atomic_write(str(link)) as (f, in_place):
             f.write("through the link")
 
         assert os.path.islink(link), "the link was replaced by a regular file"
         assert real.read_text() == "through the link"
+        assert in_place is False, "a symlink to a plain file is replaced through, not held-open"
 
     def test_a_fifo_destination_is_written_through_not_replaced(self, tmp_path):
         import threading
@@ -403,10 +412,10 @@ class TestCompatibility:
 
         t = threading.Thread(target=reader)
         t.start()
-        with fsio.atomic_write(str(fifo)) as f:
+        with fsio.atomic_write(str(fifo)) as (f, in_place):
             f.write("streamed")
         t.join(timeout=5)
-
+        assert in_place is True, "a FIFO is stream-like and must be written through"
         assert stat.S_ISFIFO(os.stat(fifo).st_mode), "the FIFO node was replaced"
         assert received == ["streamed"]
 
@@ -586,3 +595,111 @@ class TestExportPayloadIsInHandBeforeTheOpen:
         assert "produce" in order and "open" in order, order
         assert order.index("open") > 0, order
         assert "produce" not in order[order.index("open") :], order
+
+
+# --------------------------------------------------------------------------
+# Group D — CB-143. The diagnostic printed AFTER a successful write must not
+# land on the same channel as the data when the two are the same inode.
+# --------------------------------------------------------------------------
+
+
+class TestCB143DiagnosticDoesNotCorruptTheFile:
+    """`codebugs export-csv /dev/stdout > out.csv` used to give rc 0, empty
+    stderr, and a corrupted file. The mechanism: `atomic_write`'s held-open-
+    inode branch writes the export through a FRESH open of the same path — a
+    second, independent file offset on the same inode, starting at 0. The
+    handler then printed its confirmation through `sys.stdout`, the INHERITED
+    descriptor, whose offset is STILL 0 (nothing had ever been written through
+    it) — so the confirmation landed at the start of the file just written and
+    overwrote the header.
+
+    A REAL file redirect, not a pipe, is required to reproduce this: a pipe
+    has no offset, so two writers through it are simply sequential — the
+    defect is invisible there (see `test_an_fd_alias_resolving_into_proc_is_
+    written_through` above, which uses a pipe and is unaffected by this
+    class). `_redirected_to_file` opens a real destination file and hands it
+    to the child as fd 1, exactly what a shell's `>` does.
+
+    THE ORACLE IS FILE VALIDITY, never "no diagnostic line in stdout" — that
+    weaker check stays green even when the diagnostic vanished while the file
+    stayed corrupt (a fix could route it nowhere and still pass a
+    presence-only check). `csv.reader` over the written file is the check for
+    export-csv; a markdown-header check plays the same role for reqs-export.
+    """
+
+    @staticmethod
+    def _redirected_to_file(project, outfile, *args):
+        with open(outfile, "wb") as out:
+            return subprocess.run(
+                [sys.executable, "-m", "codebugs.cli", "--tracker-root", str(project), *args],
+                stdout=out,
+                stderr=subprocess.PIPE,
+                env={**os.environ, "PYTHONPATH": os.path.join(os.getcwd(), "src")},
+            )
+
+    def test_export_csv_to_dev_stdout_redirected_to_a_real_file_is_valid_csv(
+        self, populated, tmp_path
+    ):
+        outfile = tmp_path / "out.csv"
+        r = self._redirected_to_file(populated, outfile, "export-csv", "/dev/stdout")
+
+        assert r.returncode == 0, r.stderr
+
+        # THE ORACLE (§4 of the brief): file validity, asserted FIRST and
+        # deliberately before the stderr check below. "No diagnostic in
+        # stdout" is a WEAKER check that stays green even when the line just
+        # vanished while the file stayed corrupt — it must not be what turns
+        # this test red against mutant 1 (the diagnostic reverted to
+        # unconditional stdout). Header corruption is.
+        with open(outfile, newline="") as f:
+            rows = list(csv.reader(f))
+        assert rows, "the export produced no rows at all — the file is empty"
+        assert rows[0] == list(findings._RESTORE_COLUMNS), f"header corrupted: {rows[0]!r}"
+        assert len(rows) == 2, f"expected header + 1 finding, got {rows!r}"
+
+        # The confirmation still happens — form (a) never drops it (that was
+        # rejected as (b) in the brief) — it is simply steered off the data
+        # channel and onto stderr, checked only once the file is known-good.
+        assert b"Exported" in r.stderr, r.stderr
+
+    def test_reqs_export_to_dev_stdout_redirected_to_a_real_file_is_intact(
+        self, populated, tmp_path
+    ):
+        outfile = tmp_path / "out.md"
+        r = self._redirected_to_file(populated, outfile, "reqs-export", "/dev/stdout")
+
+        assert r.returncode == 0, r.stderr
+
+        # THE ORACLE, first and deliberately before the stderr check — see the
+        # sibling export-csv test's docstring for why the order is load-bearing.
+        content = outfile.read_text()
+        assert content.startswith("# Requirements"), f"markdown header corrupted: {content[:80]!r}"
+        assert "Exported to" not in content, "the diagnostic line landed inside the data file"
+
+        assert b"Exported" in r.stderr, r.stderr
+
+    @pytest.mark.parametrize(
+        ("command", "target_name"), [("export-csv", "plain.csv"), ("reqs-export", "plain.md")]
+    )
+    def test_an_ordinary_destination_still_confirms_on_stdout(
+        self, populated, tmp_path, command, target_name
+    ):
+        """The other side of the boundary (§4, mutant 2): a destination that is
+        NOT an alias of this process's own stdout must still print its
+        confirmation to stdout. A fix that routed every export's diagnostic to
+        stderr unconditionally would pass every test above and fail only this
+        one."""
+        outfile = tmp_path / target_name
+        r = subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", "--tracker-root", str(populated),
+             command, str(outfile)],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONPATH": os.path.join(os.getcwd(), "src")},
+        )
+        assert r.returncode == 0, r.stderr
+        assert r.stderr == "", r.stderr
+        assert "Exported" in r.stdout, (
+            f"a plain-file export must still confirm on stdout, got stdout={r.stdout!r}"
+        )
+        assert outfile.exists() and outfile.stat().st_size > 0
