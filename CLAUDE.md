@@ -818,6 +818,15 @@ enforcement.
 Every landing after that goes through the harness. If `tools/` is ever rewritten the same way,
 expect the same one-time manual merge.
 
+## Releasing
+
+1. Bump `version` in `pyproject.toml` and `__version__` in `src/codebugs/__init__.py` —
+   `tests/test_release_version.py` refuses a disagreement, the installed distribution included.
+2. Retitle `## [Unreleased]` in `CHANGELOG.md` to `## [X.Y.Z] — <date>`, leave an empty
+   `## [Unreleased]` above it, and open the section with a highlights paragraph written for a user.
+3. **After** the branch lands, tag the merge commit from the primary checkout
+   (`git tag -a vX.Y.Z <merge-sha>`) — a tag made on the branch points at a commit that never landed.
+
 ## Architecture
 
 - **Domain modules** (`src/codebugs/`): `db.py` (findings + shared infra), `reqs.py`, `bench.py`, `blockers.py`, `merge.py`, `sweep.py`, `embeddings.py` (vector storage/similarity search, delegates from reqs), `milestones.py` (releases / streams / capacity-aware pull)
