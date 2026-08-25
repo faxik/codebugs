@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+- The startup message a connecting agent receives now guards its own eight recommended tool
+  names against the live tool catalogue, not just against a wording check. Renaming or removing
+  one of those tools will fail the test suite instead of silently leaving the agent with a working
+  loop that recommends a call which no longer exists.
+
 ## [0.2.0] — 2026-08-25
 
 The first cut since 0.1.0, mostly about the tracker telling the truth. Repeat reports
