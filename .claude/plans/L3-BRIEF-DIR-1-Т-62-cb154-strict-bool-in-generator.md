@@ -116,4 +116,103 @@
 
 # ЗАПИСЬ ИСПОЛНИТЕЛЯ (уровень (3)) — данные, не вердикт
 
-<!-- заполняется на ветке; §7 «Эскалации» обязан появиться здесь отдельным заголовком -->
+## Префлайт §2 — подтверждён
+
+Прочитан исходник `surfacegen.py` до правки. Обе предпосылки держателя воспроизвелись как описано:
+декларации (`sweep_surface.py`, `bench_surface.py`) пишут `str`, `int`, `bool` напрямую как объекты
+типов; параметризованные/опциональные типы идут только через именованный словарь
+(`OPT_TEXT`, `OPT_INT`, `TEXT_LIST`, `OPT_TEXT_LIST`, `OPT_OBJECT`, `OPT_TEXT_LIST_MAP`,
+`OPT_TEXT_OR_ARRAY`), живущий в `surfacegen.py`. `_signature()` уже строит настоящие
+`inspect.Signature`/`__annotations__` — место для правки было готово, расширять грамматику не
+пришлось.
+
+## Главная проба (§5) — дефект был живым
+
+Реальный `MCPServer` (не мок), реальный `sweep.register_tools`, реальная запись в SQLite. ДО правки:
+
+    schema processed: {'default': True, 'title': 'Processed', 'type': 'boolean'}
+    CALL RESULT (processed=1.0): ... "state": "done"
+    STATUS AFTER: {..., 'processed': 1, 'remaining': 0, 'by_state': {'done': 1}}
+
+`processed=1.0` (float, не bool) прошёл границу pydantic и элемент помечен `done`. ПОСЛЕ правки, тот
+же вызов на реальном сервере:
+
+    processed=1.0 (float): REFUSED: ToolError: ... Input should be a valid boolean [type=bool_type, input_value=1.0, input_type=float]
+    processed=1 (int): REFUSED: ToolError: ...
+    processed='true' (str): REFUSED: ToolError: ...
+    processed=True (bool): OK
+    processed=False (bool): OK
+    STATUS AFTER ALL CALLS: {..., 'total': 5, 'processed': 1, 'remaining': 4, ...}
+
+Из пяти элементов только тот, что помечен настоящим `True`, стал `done` — три коэрсируемых вызова
+отказали на границе и ничего не записали. Три фильтра чтения проверены тем же способом:
+`codesweep_list_items(include_archived=1.0)`, `codesweep_list_items(archived_only="true")`,
+`codesweep_list(include_archived=1)` — все три `ToolError`; `include_archived=True`/`False` — `OK`.
+
+## Форма (§3) — реализована как (a), без расширения грамматики
+
+`surfacegen.py`: добавлена константа `STRICT_BOOL = Annotated[bool, Field(strict=True)]` и один
+`if annotation is bool: annotation = STRICT_BOOL` внутри `_signature()`. Ни `sweep_surface.py`, ни
+`bench_surface.py` не тронуты — грамматика деклараций не изменилась ни на символ.
+
+**Цена (§3), названная числом**: сегодня в обеих декларациях (`sweep_surface.py`,
+`bench_surface.py`) ровно **4** параметра объявлены как `type=bool` — все четыре в
+`sweep_surface.py` (`codesweep_mark.processed`, `codesweep_list_items.include_archived`,
+`codesweep_list_items.archived_only`, `codesweep_list.include_archived`); в `bench_surface.py`
+булевых параметров **0** (проверено чтением файла — там только `OPT_TEXT`, `OPT_INT`, `OPT_OBJECT`,
+`OPT_TEXT_LIST`, `OPT_TEXT_OR_ARRAY`, `str`, `int`). Все 4 — ровно те, что и должны стать строгими;
+объявить среди них НЕстрогий bool сегодня было бы нечем — цена варианта (a) реализуется без потерь
+для текущего состояния.
+
+## Инварианты (§4) — проверены
+
+- **Голден не сдвинулся.** `PYTHONPATH=src uv run python tests/dump_schema.py` до и после правки —
+  `diff` пустой (побайтово идентичен, включая `bench`).
+- **Поверхность `bench` не ломается** — 0 bool-параметров там, `tests/test_bench_surface.py`
+  (16 тестов, включая `test_input_schema_matches_the_declared_parameters`) зелёный без изменений.
+- **Четыре строки `DECLARED_EXCEPTIONS` ушли** — `codesweep_mark.processed`,
+  `codesweep_list_items.include_archived`, `codesweep_list_items.archived_only`,
+  `codesweep_list.include_archived` удалены из таблицы в `tests/test_strict_bool_gates.py`, заменены
+  одним объясняющим комментарием (владение больше не «undetermined»: `surfacegen.py`/
+  `sweep_surface.py` — территория DIR-1, BT-6).
+- **Пять DIR-2-строк (`findings.py`, `loc.py`) не тронуты** — diff затрагивает только
+  `tests/test_strict_bool_gates.py` и `src/codebugs/surfacegen.py`.
+
+## Мутанты — оракул подтверждён красным (§5)
+
+Мутация выполнена в КОПИИ вне репозитория (`/tmp/.../scratchpad/mutant_copy`, скопированы только
+`src/` и `tests/`, чистый `__pycache__`, `PYTHONDONTWRITEBYTECODE=1`). Мутант: `if False and
+annotation is bool` в скопированном `surfacegen.py` (строгость выключена). Подтверждено
+`inspect.getsourcefile(codebugs.surfacegen)` внутри процесса, что импортируется именно файл из
+`mutant_copy`, а не из ворктри или основного репозитория (venv через `PYTHONPATH=` перекрывает
+editable-install путь — проверено явным assert перед прогоном теста).
+
+Прогон `tests/test_strict_bool_gates.py` на этой копии (с тест-файлом уже БЕЗ четырёх строк
+исключений, то есть в состоянии "после фикса"): `TestStrictBoolGateRatchet::
+test_every_bool_carrying_param_is_strict_or_declared` — КРАСНЫЙ, называет ровно все четыре
+параметра:
+
+    AssertionError: ... [('codesweep_mark', 'processed'), ('codesweep_list_items', 'include_archived'),
+    ('codesweep_list_items', 'archived_only'), ('codesweep_list', 'include_archived')]
+
+Это одновременно оба сценария §5: «снять строгость с одного сгенерированного параметра» и «убрать
+строку исключения, не починив параметр» — при снятых строках исключений красный держится именно на
+факте нестрогости, что и требовалось.
+
+## Регламент (§8)
+
+- Ветка `fix/t62-cb-154-strict-bool-generator`, создана `tools/worktree-setup.sh`.
+- Коммит `76fadad` — обе правки (`surfacegen.py`, `tests/test_strict_bool_gates.py`) вместе, сразу
+  после проверки главной пробы и до полного прогона сюиты.
+- `uv run --extra dev python -m pytest tests/ -q` — **2420 passed** (0 failed).
+- `uv run --extra dev ruff check src/ tests/` — **All checks passed**.
+- Бюджет файлов: 2 (в пределах заявленных ≤4 — `surfacegen.py`, четыре строки
+  `test_strict_bool_gates.py`; третий тест-файл и «названная четвёртая» не понадобились).
+
+## §7. Эскалации
+
+Пусто. Ни один из четырёх триггеров (а)–(г) не сработал: голден не сдвинулся (измерено diff'ом),
+нестрогого bool, который ОБЯЗАН остаться нестрогим, в декларациях не нашлось (все 4 существующих —
+ровно те, что должны стать строгими), обёртывание не сломало построение `Signature` (вся сюита и
+явные вызовы реального `MCPServer` зелёные), поверхность `bench` не сдвинулась (0 булевых
+параметров там, тесты и голден это подтверждают).
