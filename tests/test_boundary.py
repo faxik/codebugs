@@ -17,7 +17,75 @@ import re
 import pytest
 
 from codebugs import db, findings
-from tests._mcp_schema import collect_tool_schemas, dedent_docstring
+from tests._mcp_schema import collect_tool_schemas, dedent_docstring, normalize_description
+
+# ---------------------------------------------------------------------------
+# Declared exceptions to CB-156's render gate -- SELF-DELETING (CB-165).
+# ---------------------------------------------------------------------------
+#
+# A row here is a PROMISE: at one named place the gate below is deliberately not
+# applied, because the normalizer looked at that section and was right to leave
+# it indented. A promise stops being true the moment the special case goes away,
+# and from that minute the row exempts something that WOULD have passed --
+# silently, and for good. That is why this is a table with two tests at it and
+# not the bare `{("codesweep_add", "Returns:")}` set it replaces: nothing asked
+# whether the tool still existed, whether it still carried a section of that
+# shape, or whether the normalizer was still the reason it did.
+#
+# The pattern is this tree's own, from `tests/test_strict_bool_gates.py`
+# (`DECLARED_EXCEPTIONS` plus `test_every_declared_exception_carries_a_non_empty
+# _reason` and `test_every_declared_exception_still_names_a_real_non_strict_bool
+# _param`), and the rule it states is the one that applies here verbatim: "once
+# a direction fixes its parameter, the row must be REMOVED, not left to rot."
+# The repository states the other half for `SURFACE_GAPS`: "a hole declared for
+# an argument that is in fact present fails the gate too, so the list cannot rot
+# into permission to skip a surface."
+#
+# The two tests close DIFFERENT refusals and neither implies the other: a row
+# can name a live section and carry no reason, and a reasoned row can name a
+# section that vanished last month.
+PROSE_SECTIONS_LEFT_ALONE: dict[tuple[str, str], str] = {
+    ("codesweep_add", "Returns:"): (
+        "CB-156: the body is a single brace-set phrase -- "
+        "`{sweep_id, added, recurrence_bumped, duplicates_skipped (alias)}` -- "
+        "and not a `name: value` item list, so `server._fold_section_items` "
+        "declines to fold it and `markdown_sections` leaves the section "
+        "byte-identical by its own documented rule. Converting it anyway would "
+        "invent a list where the author wrote one phrase, which is the gate "
+        "exceeding its remit rather than the author owing it a fix."
+    ),
+}
+
+
+def _lazily_continued_sections(description: str) -> set[str]:
+    """The section headers in `description` that a client renders as run-on prose.
+
+    ONE definition, used by the gate and by the table's own self-deletion test
+    (CB-165). Two copies of this shape would be one drift away from the gate
+    exempting a section the allowlist test believes it is judging -- the exact
+    "sharing an implementation does not share a decision" failure this
+    repository keeps relearning.
+
+    THE SHAPE, and why it is the render claim: a Google-style header at column 0
+    whose next line is INDENTED is what CommonMark reads as a paragraph followed
+    by lazy continuations -- the indentation is stripped, softbreaks become
+    spaces, and the body fuses into one line. No CommonMark parser is a
+    dependency here (this repository already refused adding one for an
+    assertion), so the structural property stands in for the render.
+
+    Measured BY LINES, which is the method that gives the right answer: splitting
+    on the `Args:` TOKEN instead makes the empty tail of the `Args:` line look
+    like a blank line and reports 73 indented CODE BLOCKS where the real count
+    is 0.
+    """
+    lines = description.split("\n")
+    return {
+        line.strip()
+        for i, line in enumerate(lines[:-1])
+        if re.fullmatch(r"([A-Za-z][A-Za-z ]*):[ \t]*", line)
+        and lines[i + 1].strip()
+        and lines[i + 1].startswith("    ")
+    }
 
 
 class CountingConn:
@@ -306,21 +374,88 @@ class TestMcpWireSchema:
         empty tail of the `Args:` line itself look like a blank line, which reports 73
         indented CODE BLOCKS where the real count is 0.
         """
-        prose_sections_left_alone = {("codesweep_add", "Returns:")}
-        offenders = []
-        for entry in json.loads(self.GOLDEN.read_text()):
-            lines = entry["description"].split("\n")
-            for i, line in enumerate(lines[:-1]):
-                header = re.fullmatch(r"([A-Za-z][A-Za-z ]*):[ \t]*", line)
-                follower = lines[i + 1]
-                if not header or not follower.strip() or not follower.startswith("    "):
-                    continue
-                if (entry["name"], line.strip()) in prose_sections_left_alone:
-                    continue
-                offenders.append(f"{entry['name']}: {line.strip()}")
+        offenders = [
+            f"{entry['name']}: {header}"
+            for entry in json.loads(self.GOLDEN.read_text())
+            for header in sorted(_lazily_continued_sections(entry["description"]))
+            if (entry["name"], header) not in PROSE_SECTIONS_LEFT_ALONE
+        ]
         assert not offenders, (
             "these sections still reach the client as a paragraph with lazy continuations "
             f"instead of a Markdown list (CB-156): {offenders}"
+        )
+
+    def test_every_prose_exception_carries_a_non_empty_reason(self):
+        """Half one of CB-165. A table that can grow silently is the same hole
+        the gate above exists to close, one level up — a row with no reason is
+        indistinguishable from a row somebody added to make a red test green.
+        """
+        empty = [key for key, reason in PROSE_SECTIONS_LEFT_ALONE.items() if not reason.strip()]
+        assert not empty, (
+            f"PROSE_SECTIONS_LEFT_ALONE row(s) with no reason: {empty} — a reason names who "
+            "decided and why, and without one the row is just permission."
+        )
+
+    def test_every_prose_exception_still_names_a_section_the_normalizer_left_alone(self):
+        """Half two of CB-165, and the half nothing held: the table must SHRINK.
+
+        An allowlist row is only honest while its special case exists. A tool that
+        was renamed away, a docstring whose `Returns:` grew into a real `name:
+        value` list, a section deleted outright — each leaves a row that goes on
+        exempting whatever later takes that name, silently and permanently. So a
+        stale row is refused exactly as a missing reason is.
+
+        THREE conditions, and each one refuses a different way for the row to
+        have rotted:
+
+        1. The tool still exists on the surface.
+        2. The section is still in the offender shape. A row that exempts nothing
+           frees nothing and must go — this is `SURFACE_GAPS`' rule verbatim: a
+           hole declared for something that is in fact fine fails the gate too.
+        3. The NORMALIZER is what left it indented. This is the condition that
+           makes the row a decision rather than an accident: `markdown_sections`
+           documents that it leaves a section byte-identical "whenever it is not
+           an item list", so re-running it and finding the section still indented
+           is the production code itself certifying the exemption. The check
+           reads the golden's own text, so it does not duplicate the normalizer's
+           predicate and cannot drift from it.
+
+           BE HONEST ABOUT WHEN CONDITION 3 CAN ACTUALLY FIRE, because the first
+           draft of this docstring justified it with a scenario that cannot
+           happen. It claimed the condition guards against a STALE golden — but
+           `test_schema_matches_golden`, four methods up in this same class,
+           already refuses that, and measured over today's file all 83 golden
+           descriptions are fixed points of `normalize_description`, so condition
+           3 follows from condition 2 on every row that exists right now.
+           What makes it live is the state CB-164 newly admits: since the
+           snapshot registers through the production adapter, a tool that passes
+           its own `description=` reaches the golden UNNORMALIZED, and such a
+           description IS in the offender shape while the normalizer WOULD have
+           folded it (both measured). A row exempting that section would be
+           excusing a defect the normalizer was ready to fix, which is the one
+           thing an allowlist must never be allowed to do — so the row is refused
+           and the author is sent to stop passing `description=` instead.
+        """
+        by_name = {e["name"]: e["description"] for e in json.loads(self.GOLDEN.read_text())}
+        stale = []
+        for tool, header in sorted(PROSE_SECTIONS_LEFT_ALONE):
+            description = by_name.get(tool)
+            if description is None:
+                stale.append(f"{tool}: no tool of that name is on the surface any more")
+            elif header not in _lazily_continued_sections(description):
+                stale.append(
+                    f"{tool}: {header} is no longer an indented section, so this row exempts "
+                    f"nothing — remove it"
+                )
+            elif header not in _lazily_continued_sections(normalize_description(description)):
+                stale.append(
+                    f"{tool}: {header} survives in the golden but the normalizer would fold "
+                    f"it — the indent is not its decision, so the exemption is not one either"
+                )
+        assert not stale, (
+            f"PROSE_SECTIONS_LEFT_ALONE row(s) that have stopped being true: {stale}. This "
+            "table may only SHRINK: once the special case goes away the row must be REMOVED, "
+            "not left to rot into permission to skip a section."
         )
 
     def test_every_golden_section_body_is_a_markdown_list(self):
@@ -419,6 +554,12 @@ class TestMcpWireSchema:
             nothing;
         (2) the collector walks the provider registry, so a tool registered
             anywhere else would never be observed — hence the injected provider.
+
+        Since CB-164 the collector does not normalize with its own hands: it
+        registers through the production adapter and the adapter normalizes. What
+        this test observes — the collector's OUTPUT is dedented — is unchanged and
+        still the right thing to assert; only the mechanism behind it moved, and
+        the test below pins the half that mechanism newly makes visible.
         """
         indented = "Summary line.\n\n    Indented body.\n    "
 
@@ -441,6 +582,56 @@ class TestMcpWireSchema:
         collected = collect_tool_schemas(providers=[provider])
         assert [t["name"] for t in collected] == ["synthetic_tool"]
         assert collected[0]["description"] == "Summary line.\n\nIndented body.\n"
+
+    def test_a_tool_passing_its_own_description_lands_in_the_snapshot_unnormalized(self):
+        """What CB-164's fix buys — and the only thing protecting the fix itself.
+
+        The collector used to build a BARE server and apply `normalize_description`
+        by hand, so the snapshot was a RECONSTRUCTION of the wire rather than a
+        record of it. `src/codebugs/surfacegen.py` already named the hazard that
+        follows, and guarded it with nothing but a convention: "A generated tool
+        passing `description=` would therefore match the golden byte for byte and
+        still ship un-dedented text to clients — CB-73 resurrected behind the very
+        gate built to catch it."
+
+        Registering through the production adapter closes it. An explicit
+        `description=` WINS over `__doc__` by `_NormalizedDescriptions`' own
+        documented rule — "a caller that passed one has already said what the
+        client should see" — so the raw text now reaches the snapshot exactly as a
+        client would receive it, and CB-156's render gate above names it. The last
+        assertion is that composition, and it is why the first two are not enough
+        on their own: verbatim text is only worth recording if the gate can then
+        read it.
+
+        THE REASON THIS TEST EXISTS AT ALL, measured rather than feared: with
+        `tests/_mcp_schema.py` reverted to the hand-normalizing version,
+        `test_boundary.py`, `test_server.py` and `test_loc.py` came to 193 passed.
+        The golden cannot move, because no tool on today's surface passes
+        `description=` — so the fix for "a gate that cannot fire" was itself a
+        change nothing could catch being undone. Leaving that as a comment would
+        have been this unit's own subject committed inside its own fix.
+        """
+        google = "Summary line.\n\nArgs:\n    severity: how bad it is\n    file: where\n"
+
+        def synthetic_tool(value: str) -> dict:
+            return {"value": value}
+
+        def register(mcp, conn_factory):
+            # No docstring on the function: `description=` is the whole input, so
+            # what comes back can only be the adapter's verdict on it.
+            mcp.tool(description=google)(synthetic_tool)
+
+        provider = db.ToolProvider(name="cb164_probe", register_fn=register)
+        collected = collect_tool_schemas(providers=[provider])
+        assert [t["name"] for t in collected] == ["synthetic_tool"]
+        assert collected[0]["description"] == google, (
+            "the collector normalized a description its caller supplied — it is "
+            "reconstructing the wire again instead of recording it (CB-164)"
+        )
+        assert "Args:" in _lazily_continued_sections(collected[0]["description"]), (
+            "the snapshot recorded the text verbatim but CB-156's gate cannot see "
+            "the section in it, so recording it bought nothing"
+        )
 
     @staticmethod
     def _raw_description(provider) -> str:
