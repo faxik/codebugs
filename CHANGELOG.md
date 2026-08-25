@@ -29,14 +29,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a detail: `description` is an identity input, so a tailed and a clean report of one
   defect used to hash apart into two cards. They now collapse onto one.
 
+  On the **command line**, where the response is not shown, `codebugs add` prints a note
+  to stderr instead, for the same reason: the text that reached the database is not the
+  text you typed, and you have to be told.
+
   **Prose that merely quotes the marker is left alone.** The predicate is not the
   `</description>` marker by itself: this project's own card describing this bug quotes
   that marker three times legitimately, and a marker-only rule would have destroyed most
-  of it. A cut happens only where *everything* after the marker is envelope — at least
-  one line, every one of them beginning with `<` at column zero — which is what
-  separates a terminal leak from a quotation or an indented code block. Anything else is
-  left visible rather than cut on a guess; the measured cost of that choice is one row
-  of the 80, whose tail is a bare newline with no envelope at all.
+  of it. A cut happens only where the closing tag is *unmatched* (a balanced XML snippet
+  inside a card is not touched), *everything* after it is envelope, and every one of
+  those lines begins with `<` at column zero — which is what separates a terminal leak
+  from a quotation or an indented code block. Anything else is left visible rather than
+  cut on a guess; the measured cost of that choice is one row of the 80, whose tail is a
+  bare newline with no envelope at all.
+
+  **One case is not solved and is named rather than hidden:** a card that *ends* on a
+  verbatim, unindented, unfenced quotation of the leak is cut, and what it loses is the
+  evidence it exists to record. At that point the quotation is byte-identical to the
+  thing it quotes, so no rule reading only the text can tell them apart. Both ordinary
+  ways of quoting markup already avoid it — put the sample in a fenced code block, or
+  indent it — and the response key and the stderr note mean you are told when it happens
+  and still hold the text you sent.
 
   **Scope:** the observation path only. An explicit `finding_id` asserts identity and
   bypasses this exactly as it bypasses deduplication and category normalization; CSV
