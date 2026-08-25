@@ -1,6 +1,7 @@
 """Tests for the findings domain — CRUD, query, stats, migrations."""
 
 import ast
+import contextlib
 import csv
 import json
 import os
@@ -3491,3 +3492,610 @@ class TestUpdateFindingCallSitesRatchet:
             "longer passes a literal TERMINAL status; a live one would make it a "
             "producer for the skip path documented on _count_fingerprint_refusal."
         )
+
+
+class TestGroupingAxes:
+    """CB-62 item (1): `query`/`stats` group by TAG and by a top-level `meta` key.
+
+    Both axes are MULTI-SOURCE in a way the five column axes are not, and the
+    tests below exist to pin the two places where a right-looking answer is a
+    wrong one: a tagged row belongs to several groups at once (so the counts stop
+    being a partition of the population), and a row carrying no value on the axis
+    belongs to NONE (so it vanishes from the result entirely unless something
+    counts it).
+    """
+
+    @staticmethod
+    def _file(conn, fid, *, tags=None, meta=None, severity="medium", status=None):
+        findings.add_finding(
+            conn,
+            severity=severity,
+            category="perf",
+            file=f"{fid}.py",
+            description=f"desc {fid}",
+            tags=tags,
+            meta=meta,
+            finding_id=fid,
+        )
+        if status:
+            findings.update_finding(conn, finding_id=fid, status=status)
+
+    # --- axis: tag ---------------------------------------------------------
+
+    def test_a_two_tag_row_lands_in_two_groups(self, conn):
+        """Order inside the stored array must not create groups.
+
+        MUTANT this kills: grouping by the raw `tags` COLUMN. `["a","b"]` and
+        `["b","a"]` are two distinct strings, so the mutant reports two groups of
+        one where the truth is two groups of two.
+        """
+        self._file(conn, "CB-1", tags=["a", "b"])
+        self._file(conn, "CB-2", tags=["b", "a"])
+        result = findings.query_findings(conn, group_by="tag")
+        groups = {g["group_key"]: g["count"] for g in result["groups"]}
+        assert groups == {"a": 2, "b": 2}
+        assert result["multi_group_rows"] == 2
+        assert result["population"] == 2
+
+    def test_an_untagged_row_is_counted_rather_than_dropped(self, conn):
+        """`json_each` over an empty array yields nothing, so the row leaves no
+        trace in the groups. MUTANT this kills: dropping `ungrouped_rows`."""
+        self._file(conn, "CB-1", tags=["a"])
+        self._file(conn, "CB-2", tags=[])
+        self._file(conn, "CB-3", tags=None)
+        result = findings.query_findings(conn, group_by="tag")
+        assert [g["group_key"] for g in result["groups"]] == ["a"]
+        assert result["population"] == 3
+        assert result["ungrouped_rows"] == 2
+        assert result["multi_group_rows"] == 0
+
+    def test_a_tag_repeated_inside_one_row_counts_once(self, conn):
+        """MUTANT this kills: `COUNT(*)` instead of `COUNT(DISTINCT id)`. The
+        stored array is the caller's; nothing forbids `["a","a"]`, and two
+        shipped tools reporting different totals for it is the divergence this
+        axis exists to avoid."""
+        self._file(conn, "CB-1", tags=["a", "a"])
+        result = findings.query_findings(conn, group_by="tag")
+        assert [(g["group_key"], g["count"]) for g in result["groups"]] == [("a", 1)]
+
+    def test_the_numbers_agree_with_grouping_tags(self, conn):
+        """The parity pin. `grouping.tag_report` deduplicates within a row in
+        Python; this axis must reach the same totals from SQL, or one corpus has
+        two shipped answers."""
+        from codebugs import grouping
+
+        self._file(conn, "CB-1", tags=["a", "b"])
+        self._file(conn, "CB-2", tags=["a", "a"])
+        self._file(conn, "CB-3", tags=[])
+        self._file(conn, "CB-4", tags=["b", "c"])
+        report = grouping.tag_report(conn, status="open")
+        theirs = {t["tag"]: t["count"] for t in report["tags"]}
+        mine = {
+            g["group_key"]: g["count"]
+            for g in findings.query_findings(conn, status="open", group_by="tag")["groups"]
+        }
+        assert mine == theirs
+        assert findings.query_findings(conn, status="open", group_by="tag")[
+            "ungrouped_rows"
+        ] == report["rows_untagged"]
+
+    def test_the_tag_axis_composes_with_the_other_filters(self, conn):
+        """The whole reason this axis is not a duplicate of `grouping-tags`:
+        that tool takes only `status` and `category`."""
+        self._file(conn, "CB-1", tags=["a"], severity="critical")
+        self._file(conn, "CB-2", tags=["a", "b"], severity="low")
+        result = findings.query_findings(conn, severity="critical", group_by="tag")
+        assert {g["group_key"]: g["count"] for g in result["groups"]} == {"a": 1}
+        assert result["population"] == 1
+
+    def test_both_axes_survive_every_filter_at_once(self, conn):
+        """PARAMETER ORDER, which only a FILTERED query can test.
+
+        The meta branch splices its bound path around the caller's WHERE values
+        — two placeholders before them, one after — and this file already
+        records what happens when such a splice is done as a block instead: the
+        values bind to the wrong placeholders and *filtered* queries are
+        corrupted while every unfiltered test keeps passing (CB-20, the
+        severity-rank CASE). The control below is the same filter set with no
+        axis: the grouped population must equal it, or the grouping path is
+        selecting a different set of rows than the caller asked for."""
+        findings.add_finding(
+            conn,
+            severity="critical",
+            category="perf",
+            file="target.py",
+            description="d1",
+            finding_id="CB-1",
+            tags=["x", "y"],
+            meta={"k": "v", "other": 1},
+            source="ruff",
+            reported_at_commit="abc123",
+            reported_at_ref="v1",
+        )
+        self._file(conn, "CB-2", tags=["x"], meta={"k": "w"})
+        self._file(conn, "CB-3", tags=["x"], meta={"k": "v"}, severity="critical")
+        filters = dict(
+            ids=["CB-1", "CB-2", "CB-3"],
+            status="open",
+            severity="critical",
+            category="perf",
+            file="target",
+            source="ruff",
+            tag="x",
+            meta_key="other",
+            commit="abc",
+            ref="v1",
+        )
+        control = findings.query_findings(conn, **filters)
+        assert [f["id"] for f in control["findings"]] == ["CB-1"]
+        by_meta = findings.query_findings(conn, group_by="meta:k", **filters)
+        assert by_meta["population"] == control["total"]
+        assert [dict(g) for g in by_meta["groups"]] == [{"group_key": "v", "count": 1}]
+        by_tag = findings.query_findings(conn, group_by="tag", **filters)
+        assert by_tag["population"] == control["total"]
+        assert {g["group_key"] for g in by_tag["groups"]} == {"x", "y"}
+        assert by_tag["multi_group_rows"] == 1
+
+    def test_a_row_whose_tags_do_not_parse_is_ungrouped_not_fatal(self, conn):
+        """PREMISE PIN, not a feature. `json_each` RAISES on malformed JSON, so
+        one hand-edited row could abort the whole report; the guard has to be
+        evaluated BEFORE the table-valued function sees the value, and SQLite is
+        free to flatten the subquery that carries it. If a future SQLite reorders
+        that, this test goes red instead of the report dying in a user's hands.
+        `parse_tags` degrades the same three states to no tags at all, which is
+        why they are `ungrouped_rows` rather than a fourth counter."""
+        self._file(conn, "CB-1", tags=["a"])
+        self._file(conn, "CB-2", tags=["b"])
+        conn.execute("UPDATE findings SET tags = 'notjson' WHERE id = 'CB-2'")
+        conn.commit()
+        result = findings.query_findings(conn, group_by="tag")
+        assert [g["group_key"] for g in result["groups"]] == ["a"]
+        assert result["ungrouped_rows"] == 1
+
+    def test_known_limit_the_existing_tag_FILTER_is_still_fatal_on_such_a_row(self, conn):
+        """The honest scope of the test above, pinned so the claim cannot rot.
+
+        The GROUPING path guards itself. The pre-existing `tag=` FILTER does not:
+        it is a bare `EXISTS (SELECT 1 FROM json_each(tags) ...)`, with no
+        `json_valid` guard — unlike the `commit` filter three conditions below it,
+        which has carried one all along. So one hand-edited row aborts any query
+        that uses `tag=`, with or without an axis, and the axis neither caused
+        that nor repairs it.
+
+        Deliberately NOT fixed here: this unit is forbidden from touching the
+        existing filters, and the reason is the same one that makes the dotted
+        meta key a refusal — the population depending on current filter behaviour
+        is not measured. Pinned as a KNOWN LIMIT, the shape `TestKnownLimits`
+        uses for the harness: the day this stops raising, someone re-reads this
+        instead of trusting a stale sentence."""
+        self._file(conn, "CB-1", tags=["a"])
+        self._file(conn, "CB-2", tags=["b"])
+        conn.execute("UPDATE findings SET tags = 'notjson' WHERE id = 'CB-2'")
+        conn.commit()
+        with pytest.raises(sqlite3.OperationalError, match="malformed JSON"):
+            findings.query_findings(conn, tag="a")
+        with pytest.raises(sqlite3.OperationalError, match="malformed JSON"):
+            findings.query_findings(conn, tag="a", group_by="tag")
+
+    # --- axis: meta:<key> --------------------------------------------------
+
+    def test_a_non_string_tag_element_is_dropped_exactly_as_parse_tags_drops_it(self, conn):
+        """MUTANT this kills: removing `je.type = 'text'` from the join.
+
+        Found by mutation probe, not by design — the first version of this class
+        left that clause unpinned, so the axis could have started counting a
+        numeric element as a tag while `grouping-tags` silently dropped it, and
+        the parity claim in `_membership_sql`'s docstring would have been prose
+        with nothing behind it. The state needs a hand-edited row because the
+        write path type-checks tag members (CB-82), which is exactly why it is
+        worth a test: it is reachable only from a foreign or repaired row, i.e.
+        the case nobody exercises by accident."""
+        from codebugs import grouping
+
+        self._file(conn, "CB-1", tags=["c"])
+        self._file(conn, "CB-2", tags=["c"])
+        conn.execute("""UPDATE findings SET tags = '[1, 2, "c"]' WHERE id = 'CB-2'""")
+        conn.commit()
+        result = findings.query_findings(conn, status="open", group_by="tag")
+        assert [(g["group_key"], g["count"]) for g in result["groups"]] == [("c", 2)]
+        assert result["ungrouped_rows"] == 0
+        report = grouping.tag_report(conn, status="open")
+        assert {t["tag"]: t["count"] for t in report["tags"]} == {"c": 2}
+
+    def test_a_NaN_written_by_the_ordinary_write_path_does_not_hide_a_row(self, conn):
+        """THE BLOCKING FINDING of this unit's adversarial review, and it broke
+        the one claim the whole axis was built to make.
+
+        `json_valid(X)` with no flags means canonical RFC-8259, which rejects
+        `NaN`/`Infinity`. Python's `json.loads` accepts them and `json.dumps`
+        WRITES them by default — so this package's own `add_finding` stores
+        `{"x": NaN}`, and CLAUDE.md's CB-82 entry ratifies exactly that value as
+        supported. The guard was therefore STRICTER THAN THE ENGINE IT GUARDS:
+        the row vanished from every meta axis — including for a sibling key
+        holding a perfectly good string — while `grouping.tag_report` counted it,
+        because that goes through `json.loads`. Two shipped tools, one corpus,
+        different answers: the exact divergence this axis exists to prevent,
+        reintroduced by its own safety check.
+
+        MUTANT this kills: dropping the `_JSON5` flag from either guard."""
+        from codebugs import grouping
+
+        self._file(conn, "CB-1", tags=["realtag"], meta={"found_by": "ruff"})
+        self._file(conn, "CB-2", tags=["realtag"], meta={"found_by": "ruff", "x": float("nan")})
+        stored = conn.execute("SELECT meta FROM findings WHERE id = 'CB-2'").fetchone()["meta"]
+        assert "NaN" in stored, f"premise: the write path stores NaN, got {stored!r}"
+
+        by_meta = findings.query_findings(conn, group_by="meta:found_by")
+        assert {g["group_key"]: g["count"] for g in by_meta["groups"]} == {"ruff": 2}
+        assert by_meta["ungrouped_rows"] == 0
+
+        by_tag = findings.query_findings(conn, status="open", group_by="tag")
+        report = grouping.tag_report(conn, status="open")
+        assert {g["group_key"]: g["count"] for g in by_tag["groups"]} == {
+            t["tag"]: t["count"] for t in report["tags"]
+        }
+        assert by_tag["ungrouped_rows"] == report["rows_untagged"]
+
+    def test_a_control_character_in_a_meta_key_is_refused_as_input(self, conn):
+        """Adversarial review. SQLite's path is a C string, so it TRUNCATES at a
+        NUL: measured, `json_extract('{"a":"WRONG_A"}', '$.a\\0b')` answers
+        `'WRONG_A'` — the key `a\\0b` silently reads its neighbour `a`, which is
+        the dotted-key failure exactly. A LEADING NUL is worse still: the path
+        collapses to `'$.'` and SQLite raises `OperationalError`, the
+        environmental class the EMPTY key is already refused to avoid, escaping a
+        domain function that promises `ValueError` and reaching the CLI as a raw
+        traceback because `domain_errors()` classifies neither."""
+        for key in ("\x00a", "a\x00b", "a\tb", "a\nb"):
+            with pytest.raises(ValueError, match="CB-167"):
+                findings.query_findings(conn, group_by=f"meta:{key}")
+            with pytest.raises(ValueError, match="CB-167"):
+                findings.get_stats(conn, group_by=f"meta:{key}")
+
+    def test_the_deferred_short_circuit_keeps_the_grouped_shape(self, conn):
+        """The tool description promises the four disclosure keys on EVERY
+        grouped response, and a promise with "always" in it has to survive its
+        own short circuits (adversarial review).
+
+        `status="deferred"` is a pseudo-status resolved in the MCP wrapper to an
+        id restriction; with nothing deferred it short-circuits, and that arm
+        used to return an UNGROUPED empty page even when the caller asked for
+        groups — so the promised keys were simply absent. The wrapper is called
+        as a plain function here, which is what the branch under test is."""
+        captured = {}
+
+        class _Recorder:
+            def tool(self, *_a, **_k):
+                def deco(fn):
+                    captured[fn.__name__] = fn
+                    return fn
+
+                return deco
+
+        @contextlib.contextmanager
+        def factory():
+            yield conn
+
+        findings.register_tools(_Recorder(), factory)
+        self._file(conn, "CB-1", tags=["a"])
+        result = captured["query"](status="deferred", group_by="tag")
+        assert result["grouped"] is True
+        assert result["groups"] == []
+        for key in ("population", "ungrouped_rows", "multi_group_rows", "nonscalar_value_rows"):
+            assert result[key] == 0, (key, result)
+        # A bad axis must still be refused on this path rather than answered.
+        with pytest.raises(ValueError, match="CB-167"):
+            captured["query"](status="deferred", group_by="meta:a.b")
+
+    def test_the_meta_axis_groups_by_a_top_level_key(self, conn):
+        self._file(conn, "CB-1", meta={"found_by": "ruff"})
+        self._file(conn, "CB-2", meta={"found_by": "ruff"})
+        self._file(conn, "CB-3", meta={"found_by": "human"})
+        result = findings.query_findings(conn, group_by="meta:found_by")
+        assert {g["group_key"]: g["count"] for g in result["groups"]} == {"ruff": 2, "human": 1}
+        assert result["ungrouped_rows"] == 0
+        assert result["multi_group_rows"] == 0
+
+    def test_a_key_holding_an_APOSTROPHE_proves_the_path_is_BOUND(self, conn):
+        """MUTANT this kills: interpolating the path into the SQL text.
+
+        THE FIRST VERSION OF THIS TEST USED A SPACE AND KILLED NOTHING, and the
+        correction is the point. Its docstring argued that
+        `json_extract(meta, $.found by)` is a syntax error — but nobody writes an
+        interpolation that way, because the string would not assemble at all. The
+        realistic one is QUOTED, `json_extract(meta, '$.found by')`, and that is
+        perfectly valid SQL: measured, bound and interpolated return the same
+        answer for a spaced key, so the test could not tell them apart. Found by
+        adversarial review.
+
+        An apostrophe is the discriminator, and it is also the real reason the
+        path is bound rather than a stylistic preference: interpolated, the key
+        `found'by` closes the literal and yields
+        `sqlite3.OperationalError: near "by": syntax error` — a quoting break,
+        which is the doorway an injection walks through. Note the apostrophe is
+        deliberately NOT in `_META_PATH_METACHARS`: it is not path GRAMMAR, it is
+        SQL grammar, and binding is what makes it harmless, so the key is
+        accepted and answered rather than refused.
+
+        The space is kept as a second case, now honestly labelled: it proves the
+        key survives a character that needs no quoting, not that the path is bound.
+        """
+        self._file(conn, "CB-1", meta={"found'by": "ruff"})
+        self._file(conn, "CB-2", meta={"found by": "human"})
+        quoted = findings.query_findings(conn, group_by="meta:found'by")
+        assert {g["group_key"]: g["count"] for g in quoted["groups"]} == {"ruff": 1}
+        spaced = findings.query_findings(conn, group_by="meta:found by")
+        assert {g["group_key"]: g["count"] for g in spaced["groups"]} == {"human": 1}
+
+    def test_an_absent_key_and_a_null_value_are_both_ungrouped(self, conn):
+        """One answer to one question: neither row carries a value on this axis.
+        Both are counted, because a corpus with forty valueless rows and one with
+        none are different facts and the groups alone cannot tell them apart."""
+        self._file(conn, "CB-1", meta={"assignee": "faxik"})
+        self._file(conn, "CB-2", meta={"assignee": None})
+        self._file(conn, "CB-3", meta={"other": "x"})
+        result = findings.query_findings(conn, group_by="meta:assignee")
+        assert [g["group_key"] for g in result["groups"]] == ["faxik"]
+        assert result["population"] == 3
+        assert result["ungrouped_rows"] == 2
+        assert result["nonscalar_value_rows"] == 0
+
+    def test_a_container_value_is_ungrouped_AND_named_separately(self, conn):
+        """Measured on this tracker on 2026-08-25: `loc` is a container on 169 of its
+        172 rows, `forms_not_chosen` on 5, `sites` on 3. Folding those into
+        `ungrouped_rows` would report the rows as carrying no value when they
+        carry one this axis cannot rank. (The fixture uses `sites` rather than
+        `loc` because the anchor machinery consumes a `loc` key on the add
+        path — which is beside the point being pinned here.)"""
+        self._file(conn, "CB-1", meta={"sites": "a.py:1"})
+        self._file(conn, "CB-2", meta={"sites": {"file": "b.py"}})
+        self._file(conn, "CB-3", meta={"sites": ["c.py"]})
+        result = findings.query_findings(conn, group_by="meta:sites")
+        assert [g["group_key"] for g in result["groups"]] == ["a.py:1"]
+        assert result["ungrouped_rows"] == 2
+        assert result["nonscalar_value_rows"] == 2
+
+    def test_a_number_stays_a_number_and_a_boolean_renders_as_a_word(self, conn):
+        """`json_extract` hands back 1/0 for a JSON boolean, which would put
+        `true` and the integer 1 in one group. Rendering the boolean as a word is
+        the cheaper collision: a string spelled "true" is rarer than the number 1."""
+        self._file(conn, "CB-1", meta={"k": 42})
+        self._file(conn, "CB-2", meta={"k": True})
+        self._file(conn, "CB-3", meta={"k": False})
+        groups = {
+            g["group_key"] for g in findings.query_findings(conn, group_by="meta:k")["groups"]
+        }
+        assert groups == {"42", "true", "false"}
+
+    def test_a_meta_key_with_a_dot_is_refused_and_names_the_card(self, conn):
+        """SQLite reads `$.a.b` as a PATH: on `{"a.b": 1, "a": {"b": 2}}` it
+        answers 2, the nested value, not the top-level key that was asked for.
+        The two existing `meta_key` FILTERS build the path exactly that way and
+        are deliberately untouched — that asymmetry is CB-167, and the refusal
+        names it so a reader meets the debt instead of a silent wrong answer.
+
+        MUTANT this kills: dropping the refusal. Note it must NOT be replaced by
+        a test asserting path semantics — that would ratify the wrong answer."""
+        self._file(conn, "CB-1", meta={"misassigned_to_1.81": "x"})
+        with pytest.raises(ValueError, match="CB-167"):
+            findings.query_findings(conn, group_by="meta:misassigned_to_1.81")
+        with pytest.raises(ValueError, match="CB-167"):
+            findings.get_stats(conn, group_by="meta:misassigned_to_1.81")
+
+    @pytest.mark.parametrize("key", ["a.b", "a[0]", 'q"k', "a]b"])
+    def test_every_path_metacharacter_is_refused(self, conn, key):
+        with pytest.raises(ValueError, match="CB-167"):
+            findings.query_findings(conn, group_by=f"meta:{key}")
+
+    def test_an_empty_meta_key_is_refused_as_input_not_as_sqlite(self, conn):
+        """`json_extract(doc, '$.')` raises OperationalError — an environmental
+        exception class out of a domain function, which no CLI arm classifies."""
+        with pytest.raises(ValueError):
+            findings.query_findings(conn, group_by="meta:")
+
+    # --- one definition, both sites ---------------------------------------
+
+    def test_an_unknown_axis_refuses_identically_on_both_sites(self, conn):
+        with pytest.raises(ValueError, match="Invalid group_by") as q:
+            findings.query_findings(conn, group_by="nonsense")
+        with pytest.raises(ValueError, match="Invalid group_by") as s:
+            findings.get_stats(conn, group_by="nonsense")
+        assert str(q.value) == str(s.value)
+        assert "tag" in str(q.value) and "meta:" in str(q.value)
+
+    def test_both_sites_resolve_the_axis_through_one_definition(self):
+        """The two axis lists were hand-written twins in different orders before
+        this unit. Nothing mechanical held them together, so the anti-drift
+        measure has to be that exactly one definition exists and both call it."""
+        tree = ast.parse(pathlib.Path(findings.__file__).read_text())
+        callers = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and any(
+                isinstance(c, ast.Call)
+                and isinstance(c.func, ast.Name)
+                and c.func.id == "_resolve_group_axis"
+                for c in ast.walk(node)
+            )
+        }
+        assert {"query_findings", "get_stats"} <= callers, callers
+        assert not re.search(r"valid_groups\s*=", pathlib.Path(findings.__file__).read_text())
+
+    def test_every_surface_enumerates_every_axis(self):
+        """Prose against code, for the four texts that cannot be generated.
+
+        A docstring cannot be an f-string, so the two MCP descriptions and the
+        two CLI `help=` strings are hand-written while `GROUP_AXES_HELP` — which
+        the refusal message uses — is derived. That asymmetry is exactly how a
+        sixth axis would get added to the resolver and enumerated on none of the
+        surfaces, leaving four texts describing a tool that no longer exists.
+        `test_golden` cannot see it either: a golden pins what the text IS, never
+        what it OUGHT to name.
+
+        MATCHING IS BY TOKEN, and the first draft of this test was VACUOUS
+        because it was not. Asking `"tag" in text` passes on the word "tags",
+        which the very next sentence of every one of these texts contains — so
+        deleting the `tag` axis from an enumeration left this test green
+        (measured). Same defect this repository records for the plan-note naming
+        hook, where `plan.md` is a substring of `my-plan.md`. The enumeration is
+        therefore PARSED — the run of name characters after `by: `, split on its
+        own separators — and compared as a SET, so a missing axis and an invented
+        one both fail.
+        """
+        source = pathlib.Path(findings.__file__).read_text()
+        expected = {*findings.GROUP_COLUMNS, findings.GROUP_TAG, f"{findings.GROUP_META_PREFIX}<key>"}
+        # Stops at the first character an axis name cannot contain — the `.` that
+        # ends the CLI sentence, or the ` (` that opens the MCP aside. A NEWLINE
+        # is a name character here on purpose: both MCP docstrings wrap the
+        # enumeration onto a second line, and without it this test read only the
+        # first five names and failed on texts that were in fact correct.
+        found = [
+            {tok.strip() for tok in re.split(r"[,|]", m.group(1)) if tok.strip()}
+            for m in re.finditer(r"[Gg]roup (?:results )?by: ([A-Za-z_:<>|,\s]+)", source)
+        ]
+        assert len(found) == 4, f"expected 4 axis enumerations, found {len(found)}"
+        for i, names in enumerate(found):
+            assert names == expected, f"surface text #{i} enumerates {names}, expected {expected}"
+
+    def test_group_by_still_refuses_resolve_anchors(self, conn):
+        self._file(conn, "CB-1", tags=["a"])
+        with pytest.raises(ValueError, match="resolve_anchors"):
+            findings.query_findings(conn, group_by="tag", resolve_anchors=True)
+
+    # --- stats carries both axes and the same disclosure -------------------
+
+    def test_stats_groups_by_tag_and_discloses(self, conn):
+        self._file(conn, "CB-1", tags=["a", "b"], severity="critical")
+        self._file(conn, "CB-2", tags=[], severity="low")
+        result = findings.get_stats(conn, group_by="tag")
+        assert result["groups"]["a"]["critical"] == 1
+        assert result["groups"]["b"]["total"] == 1
+        assert result["population"] == 2
+        assert result["ungrouped_rows"] == 1
+        assert result["multi_group_rows"] == 1
+
+    def test_stats_groups_by_a_meta_key(self, conn):
+        self._file(conn, "CB-1", meta={"found_by": "ruff"}, severity="high")
+        self._file(conn, "CB-2", meta={"found_by": "ruff"}, severity="low")
+        result = findings.get_stats(conn, group_by="meta:found_by")
+        assert result["groups"]["ruff"]["total"] == 2
+        assert result["groups"]["ruff"]["high"] == 1
+        assert result["nonscalar_value_rows"] == 0
+
+    def test_a_column_axis_still_reports_a_partition(self, conn):
+        """The five original axes ARE partitions, and the new keys must say so
+        rather than being absent — a reader must never have to test for presence
+        to learn what a number means."""
+        self._file(conn, "CB-1", tags=["a"])
+        self._file(conn, "CB-2", tags=["b"])
+        for result in (
+            findings.query_findings(conn, group_by="category"),
+            findings.get_stats(conn, group_by="category"),
+        ):
+            assert result["population"] == 2
+            assert result["ungrouped_rows"] == 0
+            assert result["multi_group_rows"] == 0
+            assert result["nonscalar_value_rows"] == 0
+
+
+class TestGroupingAxesCliContract:
+    """The domain tests cannot see a parser that never accepts the value nor a
+    handler that crashes formatting it. CB-170 lives here too: `stats` reached
+    `get_stats` with no `domain_errors()` wrapper and closed its connection
+    outside a `finally`, so an unknown axis printed a traceback — and this unit
+    is the one that makes unknown axes more likely, not less."""
+
+    @staticmethod
+    def _run(project, *args):
+        return subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", *args],
+            cwd=project,
+            capture_output=True,
+            text=True,
+        )
+
+    @pytest.fixture
+    def project(self, tmp_project, conn):
+        for i, tags in enumerate((["a", "b"], ["a"], []), start=1):
+            findings.add_finding(
+                conn,
+                severity="medium",
+                category="perf",
+                file=f"f{i}.py",
+                description=f"d{i}",
+                tags=tags,
+                meta={"found_by": "ruff", "n": i},
+                finding_id=f"CB-{i}",
+            )
+        conn.close()
+        return tmp_project
+
+    def test_query_groups_by_tag(self, project):
+        r = self._run(project, "query", "--group-by", "tag")
+        assert r.returncode == 0, r.stderr
+        assert "a" in r.stdout and "b" in r.stdout
+
+    def test_query_discloses_the_two_peculiarities(self, project):
+        r = self._run(project, "query", "--group-by", "tag")
+        assert "1 in no group" in r.stdout, r.stdout
+        assert "1 in more than one group" in r.stdout, r.stdout
+
+    def test_query_groups_by_a_meta_key(self, project):
+        r = self._run(project, "query", "--group-by", "meta:found_by")
+        assert r.returncode == 0, r.stderr
+        assert "ruff" in r.stdout
+
+    def test_stats_groups_by_tag(self, project):
+        r = self._run(project, "stats", "--by", "tag")
+        assert r.returncode == 0, r.stderr
+        assert "a" in r.stdout
+
+    def test_stats_renders_a_numeric_group_key(self, project):
+        """A COMPOSITION pin, and it is worth saying which mutants it does and
+        does not catch. `f"{grp:30s}"` raises TypeError on an integer and
+        `sorted()` refuses to order one against a string, so this verb crashes
+        outright if a numeric meta value ever reaches it as a number. TWO
+        independent mechanisms stop that — the `CAST` in the membership SQL and
+        `_group_cell` at the print — so removing EITHER one leaves this test
+        green, and only removing both turns it red. It is here because a crash in
+        a shipped verb is the failure, and neither mechanism alone is the
+        contract."""
+        r = self._run(project, "stats", "--by", "meta:n")
+        assert r.returncode == 0, r.stderr
+        assert "Traceback" not in r.stderr
+
+    def test_stats_with_no_groups_still_reports_the_population(self, project):
+        """Adversarial review: `stats` said "(no findings)" over a NON-EMPTY
+        tracker whenever an axis put every row outside every group.
+
+        Measured on the live tracker before the fix: `stats --by meta:loc`
+        printed "(no findings)" at exit 0 over 172 cards, 169 of which carry that
+        key — as a container, so none could be grouped by it. The early `return`
+        jumped past the disclosure line, i.e. past the one thing that could have
+        said so. A success-shaped false statement about the corpus, the CB-15 /
+        CB-16 family — and this unit's own subject besides, since the sibling
+        `query` verb answered the same question truthfully all along."""
+        r = self._run(project, "stats", "--by", "meta:absent_everywhere")
+        assert r.returncode == 0, r.stderr
+        assert "no findings" not in r.stdout, r.stdout
+        assert "population 3 row(s)" in r.stdout, r.stdout
+        assert "3 in no group" in r.stdout, r.stdout
+
+    def test_an_unknown_axis_on_stats_is_one_line_not_a_traceback(self, project):
+        """CB-170. MUTANT this kills: removing the `domain_errors()` wrapper."""
+        r = self._run(project, "stats", "--by", "nonsense")
+        assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+        assert "Traceback" not in r.stderr, r.stderr
+        assert len(r.stderr.strip().splitlines()) == 1, r.stderr
+
+    def test_an_unknown_axis_on_query_is_still_one_line(self, project):
+        r = self._run(project, "query", "--group-by", "nonsense")
+        assert r.returncode == 1
+        assert "Traceback" not in r.stderr
+
+    def test_a_dotted_meta_key_refuses_on_both_verbs(self, project):
+        for args in (("query", "--group-by", "meta:a.b"), ("stats", "--by", "meta:a.b")):
+            r = self._run(project, *args)
+            assert r.returncode == 1, (args, r.stdout, r.stderr)
+            assert "CB-167" in r.stderr, (args, r.stderr)
+            assert "Traceback" not in r.stderr

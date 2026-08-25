@@ -32,6 +32,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   than a list of arguments, and turning prose into bullets would invent a structure the
   text does not have.
 
+- **An unknown `--by` on `codebugs stats` now prints one line instead of a traceback,
+  and no longer leaks its database connection (CB-170).** The handler called the domain
+  function bare and closed the connection on the following statement, outside any
+  `finally`, so a rejected axis escaped as a raw traceback while the sibling `query`
+  verb had both halves closed long ago. It matters more now than it did: the set of
+  values `--by` accepts has just grown a `meta:<key>` form, so typing an axis the tool
+  refuses is a thing a reasonable person will do. **Scope, stated because the rest is
+  real**: only this handler was fixed. A sweep of the remaining handlers for the same
+  shape stays on CB-170.
+
 - **`codebugs add` now records the revision the card was filed at (CB-144).** A card
   filed from the CLI used to store `reported_at_commit = NULL` forever: the automatic
   HEAD capture existed only in the MCP `add` / `batch_add` tools, and the CLI handler
@@ -46,6 +56,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   supplying one by hand is a separate, already-tracked gap (CB-6).
 
 ### Added
+- **`query` and `stats` can now group by TAG and by a top-level `meta` key (CB-62).**
+  The tracker could group findings only by the five columns of the row, while the axes
+  a corpus is actually dense along live in `tags` and `meta` — measured on this tracker
+  on 2026-08-25, 160 of its 172 cards carry a tag and 155 carry at least one
+  non-machinery `meta` key, across 387 distinct tags and 313 distinct keys. (Those are
+  measurements of a moving corpus, not invariants; they are stamped so a later reader
+  can tell a stale number from a wrong one.) `--group-by tag` / `--group-by meta:<key>`
+  (and `stats --by`) answer
+  those, and the point is COMPOSITION: `grouping-tags` has been counting tags for a
+  while, but it takes only `status` and `category`, so "which tags do the critical open
+  cards in this file carry" could not be asked at all. The two tools deliberately
+  overlap and their descriptions now say so — one is a tag census with pair
+  co-occurrence, the other a distribution that composes with every `query` filter.
+  Their totals are pinned equal by a test, because two shipped tools disagreeing about
+  one corpus is the failure this was built to avoid.
+
+  **These two axes do not partition the population, and the answer says so out loud.**
+  A card with two tags is counted under both; a card carrying no value on the axis is in
+  no group and would otherwise vanish from the result without trace. Every grouped
+  response — on the five old axes too — now carries `population`, `ungrouped_rows`,
+  `multi_group_rows` and `nonscalar_value_rows` beside `groups`, and the CLI prints them
+  as a footer. Zero is reported as loudly as forty: "no cards without tags" and "forty
+  cards without tags" are different facts, and a line that appeared only when it was
+  non-zero could not state the first.
+
+  **A `meta` key containing `.`, `[`, `]` or `"` is REFUSED rather than guessed at.**
+  SQLite reads `$.a.b` as a nested lookup, so on `{"a.b": 1, "a": {"b": 2}}` it answers
+  2 — the wrong value, silently. Two of this tracker's 313 keys carry a dot and cannot
+  be grouped by until the naming grammar is settled; that is a real cost and it is
+  preferred to a wrong answer. The two existing `meta_key` FILTERS build their path the
+  same naive way and are deliberately left alone, because the population relying on that
+  behaviour is not measured — the asymmetry is tracked as CB-167 and the refusal message
+  names it. A key that is absent, JSON null, or holds an object or array is reported as
+  ungrouped, never invented.
+
+  **One guard is deliberately looser than canonical JSON, and the reason is that
+  this package writes non-canonical JSON itself.** A row is skipped only when its
+  `tags`/`meta` cannot be parsed at all — but `NaN` and `Infinity` are rejected by
+  RFC-8259 and *written by `json.dumps` by default*, so `add_finding(meta={"x":
+  float("nan")})` stores `{"x": NaN}` and that value is explicitly supported
+  (CB-82). A canonical check would have hidden such a row from every `meta:` axis
+  — including for a neighbouring key holding an ordinary string — while
+  `grouping-tags` went on counting it, which is precisely the two-tools-one-corpus
+  divergence this feature exists to prevent. The parse check therefore accepts
+  what SQLite's own `json_extract`/`json_each` accept, and no more. A meta key
+  containing a control character is refused alongside the path metacharacters:
+  SQLite's path is a C string, so a NUL truncates it and the key `a\0b` would
+  silently read its neighbour `a`.
+
 - **An ordinary read of a card now says where its code went (BT-7).** Until now the
   location anchor was visible only through `anchor-resolve` / `anchor_resolve` — a
   second, deliberate call that nobody makes while simply reading a card. `get` (MCP and
