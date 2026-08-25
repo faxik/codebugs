@@ -169,8 +169,13 @@ def _pack_vector(vec: list[float]) -> bytes:
 
 
 def _unpack_vector(blob: bytes) -> list[float]:
-    """Unpack bytes into a float vector."""
-    n = len(blob) // 4
+    """Unpack bytes into a float vector.
+
+    Reads the width through ``_BYTES_PER_COMPONENT`` rather than a literal, so
+    the package holds ONE definition of how wide a component is — the same
+    reason ``_stored_byte_widths`` compares the quantity SQL compares.
+    """
+    n = len(blob) // _BYTES_PER_COMPONENT
     return list(struct.unpack(f"<{n}f", blob))
 
 
