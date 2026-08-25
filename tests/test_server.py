@@ -233,6 +233,72 @@ class TestPreflight:
             os.chdir(original)
 
 
+class TestPreflightWritability:
+    """CB-100: this is the moment that matters MOST, per the card's own design.
+
+    `_conn` connects lazily per tool call, so before this an unwritable
+    tracker gave a silent, healthy-looking startup and then failed every call
+    forever — CB-11's exact failure mode, arriving through a new door. The
+    preflight is the one moment that can name it, and it must stay warn-only:
+    see the other TestPreflight class for that half of the contract, unchanged
+    here.
+    """
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
+    def test_warns_when_the_file_is_unwritable(self, tmp_path, monkeypatch, capsys):
+        db.init_project(str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        findings_path = tmp_path / ".codebugs" / "findings.db"
+        findings_path.chmod(0o000)
+        try:
+            server._preflight()  # must not raise — warn-only
+        finally:
+            findings_path.chmod(0o644)
+        assert "may not be writable" in capsys.readouterr().err
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
+    def test_warns_when_the_directory_is_unwritable(self, tmp_path, monkeypatch, capsys):
+        """The state that decides the mechanism — see
+        TestWritabilityProbe in test_db_infra.py for the file-vs-directory
+        measurement this pins.
+        """
+        db.init_project(str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        codebugs_dir = tmp_path / ".codebugs"
+        codebugs_dir.chmod(0o555)
+        try:
+            server._preflight()  # must not raise — warn-only
+        finally:
+            codebugs_dir.chmod(0o755)
+        assert "may not be writable" in capsys.readouterr().err
+
+    def test_silent_on_a_nonempty_writable_tracker(self, tmp_path, monkeypatch, capsys):
+        """Half the oracle, and the one most likely to pass vacuously: a
+        healthy, NONEMPTY tracker (CB-100 §7) must stay exactly as silent as
+        it is today.
+        """
+        db.init_project(str(tmp_path))
+        conn = db.connect(str(tmp_path))
+        findings.add_finding(
+            conn, severity="low", category="x", file="f.py", description="d", new_category=True
+        )
+        conn.close()
+        monkeypatch.chdir(tmp_path)
+        server._preflight()
+        assert capsys.readouterr().err == ""
+
+    def test_the_no_database_yet_line_does_not_grow_a_second_writability_line(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        repo = tmp_path / "repo"
+        (repo / ".codebugs").mkdir(parents=True)
+        monkeypatch.chdir(repo)
+        server._preflight()
+        err = capsys.readouterr().err
+        assert err.count("does not exist yet") == 1
+        assert "may not be writable" not in err
+
+
 class TestInterpreterIndependentDescriptions:
     """CB-73 — what a client sees must not depend on which Python built the server.
 
