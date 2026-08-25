@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **Telling the tracker that two cards are different defects now stops the citation
+  report merging them (CB-62).** `grouping_citations` groups cards by the `CB-…`
+  references people write in card text, on the assumption that a reference means the
+  two cards are one piece of work. That assumption is sometimes wrong — a card can
+  mention another to contrast with it, or to point at a trap — and until now there was
+  no way to say so: `relations_relate(a, "distinct_from", b)` recorded your judgement
+  and the report ignored it. It no longer does. A pair you have declared different is
+  never put in one component, whichever order you declared it in, and retracting the
+  declaration (`relations_unrelate`) brings the grouping straight back.
+
+  **The reference itself is still reported.** Somebody did write it, and hiding it
+  would destroy evidence rather than correct a conclusion, so the citation stays
+  visible with its quoted context — under a new `suppressed_edges` list, and on the
+  `codebugs grouping-citations` header line as `suppressed=N`. That is deliberate: a
+  `distinct_from` written by mistake would otherwise be invisible in the one report it
+  silences, and you would only see two cards that mysteriously never group.
+
+  **`grouping_filing` is untouched**, and that is a decision rather than an omission.
+  It groups cards by the split lineage you recorded on purpose; overriding one thing
+  you declared with another thing you declared is a different question — which of the
+  two records wins — and it is not answered here.
+
 ## [0.2.0] — 2026-08-25
 
 The first cut since 0.1.0, mostly about the tracker telling the truth. Repeat reports
