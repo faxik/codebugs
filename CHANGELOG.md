@@ -13,6 +13,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   requirement in between, you could get back someone else's version instead of your
   own, with nothing in the response to warn you. It now returns the written row
   directly, so what you see is always your own write.
+- **A leaked tool-call tail at the end of a `description` is now cut at the write
+  boundary, and `add`/`batch_add` say so in the response (CB-90).** Some filing agents
+  include a slice of their own XML-like tool call in the value they pass as
+  `description` — the authored prose ends on a finished sentence and an envelope of
+  `<parameter name="…">` lines follows it. Nothing on the write path rejected that, so
+  the junk was stored, shown to every later reader, and fed to the similarity scorer.
+  Measured on a peer tracker of 3373 rows: 80 descriptions carry it, from one source,
+  spread over 24 separate days across four months — repeated filer behaviour rather
+  than one broken run.
+
+  **The tail is cut, not refused, and the cut is never silent.** A filer that cannot
+  repair itself would lose the entire finding on a refusal, and the finding is real —
+  only its tail is junk. So `add` and `batch_add` responses now carry a top-level
+  **`stripped_description_tail`** boolean, present on every branch, where `False` means
+  *checked, nothing to cut* and never *no such channel* — the same discipline as the
+  existing `stripped_meta_keys` and `attention` keys. `True` means the text stored is
+  not byte-for-byte the text you passed.
+
+  **The cut happens before the fingerprint is derived**, which is the point rather than
+  a detail: `description` is an identity input, so a tailed and a clean report of one
+  defect used to hash apart into two cards. They now collapse onto one.
+
+  On the **command line**, where the response is not shown, `codebugs add` prints a note
+  to stderr instead, for the same reason: the text that reached the database is not the
+  text you typed, and you have to be told.
+
+  **Prose that merely quotes the marker is left alone.** The predicate is not the
+  `</description>` marker by itself: this project's own card describing this bug quotes
+  that marker three times legitimately, and a marker-only rule would have destroyed most
+  of it. A cut happens only where the closing tag is *unmatched* (a balanced XML snippet
+  inside a card is not touched), *everything* after it is envelope, and every one of
+  those lines begins with `<` at column zero — which is what separates a terminal leak
+  from a quotation or an indented code block. Anything else is left visible rather than
+  cut on a guess; the measured cost of that choice is one row of the 80, whose tail is a
+  bare newline with no envelope at all.
+
+  **One case is not solved and is named rather than hidden:** a card that *ends* on a
+  verbatim, unindented, unfenced quotation of the leak is cut, and what it loses is the
+  evidence it exists to record. At that point the quotation is byte-identical to the
+  thing it quotes, so no rule reading only the text can tell them apart. Both ordinary
+  ways of quoting markup already avoid it — put the sample in a fenced code block, or
+  indent it — and the response key and the stderr note mean you are told when it happens
+  and still hold the text you sent.
+
+  **Scope:** the observation path only. An explicit `finding_id` asserts identity and
+  bypasses this exactly as it bypasses deduplication and category normalization; CSV
+  import is unchanged (an import is not an observation); `update` is unchanged, where
+  `description` is immutable by design. Nothing rewrites descriptions already stored —
+  cleaning an existing corpus is a separate, deliberate operation.
 
 - **The `Args:` section of every MCP tool description now reaches your client as a
   Markdown list instead of collapsing into one run-on paragraph (CB-156).** 73 of the
