@@ -7,6 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **The mutation-testing scripts under `tests/manual/` (`mutate_cb69.py`, `mutate_cb31.py`)
+  now refuse to run on a dirty tree instead of silently overwriting uncommitted work
+  (CB-173).** Each script writes a broken version of a source file to disk, runs the
+  suite, then restores the original — and if that file already had uncommitted changes
+  when the script started, "the original" it restores is the wrong one, discarding your
+  edits. They now check `git status` on the files they're about to touch and stop with a
+  clear error naming them before writing anything. Commit or stash first, or pass
+  `--allow-dirty` (or set `CODEBUGS_MUTATION_ALLOW_DIRTY=1`) if you really mean it.
 - **The `Args:` section of every MCP tool description now reaches your client as a
   Markdown list instead of collapsing into one run-on paragraph (CB-156).** 73 of the
   83 tool descriptions carry a Google-style `Args:` section, three carry `Returns:`,
