@@ -34,13 +34,22 @@ def test_help_epilog_names_a_first_step():
 
 
 class TestEveryVerbHelpStillBuilds:
-    """Composition, not just the top-level parser (brief §4's own trap).
+    """Composition, not just the top-level parser.
 
-    `formatter_class` is a per-parser argument that this unit does not need to
-    touch at all (the epilog stays plain text, wrapped by the default
-    formatter) — but if a future edit DOES set one on the top-level parser,
-    this is the test that would catch it breaking a subparser's own help,
-    which `test_help_epilog_names_a_first_step` above cannot see.
+    `test_help_epilog_names_a_first_step` above only exercises the TOP-LEVEL
+    parser's own `--help`; this class renders every VERB's `--help` too,
+    through the same `cli.build_parser` the real CLI and the golden both use.
+
+    This class does NOT catch a `formatter_class` set on the top-level
+    parser breaking a subparser's help. It was written expecting to (T-75's
+    brief asked for exactly that), but T-75's own acceptor MEASURED the
+    opposite: argparse's `formatter_class` is a per-parser argument each
+    subparser receives from its own `add_parser(...)` call, never inherited
+    from the parent parser's construction — so a top-level-only edit to it
+    cannot reach a subparser at all, and no test of subparser help can
+    observe that edit. What this class actually catches is breakage
+    introduced in the VERBS themselves — a subparser definition that raises
+    or renders empty text when `format_help()` is called on it.
     """
 
     def test_top_level_help_still_builds(self):

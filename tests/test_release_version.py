@@ -30,11 +30,15 @@ what is asserted, and it holds permanently.
 """
 
 import importlib.metadata
+import os
 import re
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
 import codebugs
+from codebugs import db
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
@@ -147,4 +151,92 @@ class TestVersionCompositionAtTheOutwardBoundary:
             f"{changelog_version!r}. If the first differs from the others the files were "
             "edited and the environment was never rebuilt, so every `pip show` and every "
             "wheel built from here still carries the old number."
+        )
+
+
+def _run_cli(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
+    """Spawn the real `python -m codebugs.cli` a user would type.
+
+    `PYTHONPATH` is set explicitly because a subprocess does not inherit
+    pytest's own `sys.path` (which gets `src` only from this repo's
+    `pythonpath = ["src"]` pytest-ini setting) — without it the child cannot
+    `import codebugs` at all. `CODEBUGS_ROOT` is stripped from the inherited
+    environment so an ambient tracker-root override left in the shell cannot
+    steer discovery underneath the test.
+    """
+    src_dir = str(Path(codebugs.__file__).resolve().parent.parent)
+    env = dict(os.environ)
+    env.pop(db.ENV_ROOT, None)
+    env["PYTHONPATH"] = src_dir
+    return subprocess.run(
+        [sys.executable, "-m", "codebugs.cli", *args],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+class TestVersionFlag:
+    """`codebugs --version` prints what a user reads, not a hardcoded literal.
+
+    CB-191: the flag did not exist at all. These tests spawn the real CLI
+    subprocess and read its stdout — never `build_parser()` directly — because
+    the point is what a USER typing the command sees, matching this file's own
+    "what a user reads" framing for the rest of the version channels.
+    """
+
+    def test_version_prints_the_package_version_and_exits_zero(self, tmp_path):
+        result = _run_cli(["--version"], cwd=tmp_path)
+        assert result.returncode == 0, (
+            f"`codebugs --version` exited {result.returncode}, stderr={result.stderr!r}"
+        )
+        assert codebugs.__version__ in result.stdout, (
+            f"stdout was {result.stdout!r}, which does not contain "
+            f"codebugs.__version__ ({codebugs.__version__!r}). The flag must report "
+            "the package's actual version, never a literal that goes stale at the "
+            "next release."
+        )
+
+    def test_version_works_with_no_reachable_tracker(self, tmp_path):
+        """The flag must not require `db.connect()` to succeed.
+
+        `tmp_path` is a fresh directory under the OS temp root with no
+        `.codebugs/` anywhere above it and no enclosing `.git/` either, so
+        `db.connect()`'s upward walk would raise `DatabaseNotFoundError` if
+        anything on the `--version` path touched it.
+        """
+        result = _run_cli(["--version"], cwd=tmp_path)
+        assert result.returncode == 0, (
+            f"`codebugs --version` from a directory with no tracker exited "
+            f"{result.returncode} instead of 0. stderr={result.stderr!r}"
+        )
+        assert codebugs.__version__ in result.stdout
+
+    def test_version_is_independent_of_mode(self, tmp_path):
+        """`--mode` selects which domains' CLI verbs get wired in, and must not
+        affect a flag declared on the top-level parser itself."""
+        no_flag = _run_cli(["--version"], cwd=tmp_path)
+        reqs_mode = _run_cli(["--mode", "reqs", "--version"], cwd=tmp_path)
+        findings_mode = _run_cli(["--mode", "findings", "--version"], cwd=tmp_path)
+
+        for label, result in (
+            ("no --mode", no_flag),
+            ("--mode reqs", reqs_mode),
+            ("--mode findings", findings_mode),
+        ):
+            assert result.returncode == 0, (
+                f"{label}: `--version` exited {result.returncode}, "
+                f"stderr={result.stderr!r}"
+            )
+            assert codebugs.__version__ in result.stdout, (
+                f"{label}: stdout was {result.stdout!r}, missing "
+                f"codebugs.__version__ ({codebugs.__version__!r})"
+            )
+
+        assert no_flag.stdout == reqs_mode.stdout == findings_mode.stdout, (
+            "the version output differed by --mode: "
+            f"no-flag={no_flag.stdout!r} reqs={reqs_mode.stdout!r} "
+            f"findings={findings_mode.stdout!r}"
         )

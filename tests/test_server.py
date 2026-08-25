@@ -21,6 +21,7 @@ import asyncio
 import inspect
 import json
 import os
+import re
 import tempfile
 import types
 from contextlib import contextmanager
@@ -31,6 +32,7 @@ from mcp.shared.exceptions import MCPError
 from mcp_types import CallToolResult
 
 from codebugs import db, findings, server
+from tests._mcp_schema import collect_tool_schemas
 
 
 @pytest.fixture
@@ -944,3 +946,127 @@ class TestServerInstructions:
         # §4): a wording edit must not turn this test red.
         for token in ("add", "attention", "dedup_action", "claims_claim", "reqs_add"):
             assert token in text, f"instructions text is missing {token!r}"
+
+
+class TestInstructionsNamedToolsExist:
+    """CB-189: every tool name `INSTRUCTIONS` recommends must exist in the live catalogue.
+
+    `test_instructions_name_the_load_bearing_loop` above checks only that the
+    load-bearing TOKENS are present in the text — it says nothing about
+    whether the things being named still exist. Rename or remove one of the
+    eight tools this text recommends (``add``, ``batch_add``,
+    ``anchor_resolve``, ``update``, ``claims_claim``, ``claims_release``,
+    ``reqs_add``, ``reqs_query``) and that test stays green while the server
+    keeps telling every newly-connected agent to call something that no
+    longer exists. This class closes the missing direction: it intersects
+    every backtick-quoted token in ``INSTRUCTIONS`` against the LIVE tool
+    catalogue (``tests._mcp_schema.collect_tool_schemas``, the same
+    registration path ``server._build_server`` uses — never
+    ``tests/golden/mcp_schema.json``, which is a snapshot someone updates by
+    hand and would drift together with a renamed tool rather than catch it).
+
+    THE NAMED TRAP: not every backtick-quoted token in this text is a tool
+    name. Two are response KEYS the server returns from `add`/`batch_add`
+    (`attention`, `dedup_action`), and one span is a call with an argument
+    (`` `update(status="fixed")` ``). The naive "every backtick token must be
+    a tool" reddens on today's healthy tree.
+
+    CHOICE, stated once: a declared-exception list, not a syntactic
+    predicate — because `attention` and `dedup_action` are, syntactically,
+    ordinary bare snake_case identifiers exactly like `add` or
+    `claims_claim`; nothing about their SHAPE distinguishes a response key
+    from a tool name, so no syntactic rule could tell them apart without
+    silently also excluding real tool names of the same shape. The pattern
+    is `DECLARED_EXCEPTIONS` in `tests/test_no_network_capability.py`:
+    followed here as `_DECLARED_NON_TOOL_TOKENS`, with the same
+    self-deleting property — a row naming a token no longer in the text is
+    itself a failing test (`test_declared_non_tool_tokens_are_not_stale`),
+    so the table cannot quietly become a place real missing tools get
+    parked.
+    """
+
+    # A row here says: this backtick-quoted token is deliberately NOT a tool
+    # name, and here is why. Self-deleting by
+    # `test_declared_non_tool_tokens_are_not_stale`: if the token stops
+    # appearing in `INSTRUCTIONS`, the row must be deleted, not kept as a
+    # standing exemption.
+    _DECLARED_NON_TOOL_TOKENS: dict[str, str] = {
+        "attention": (
+            "a response KEY `add`/`batch_add` return (BT-5's structural "
+            "attention block), not a tool the caller invokes."
+        ),
+        "dedup_action": (
+            "a response KEY `add`/`batch_add` return (CB-43's dedup branch "
+            "name), not a tool the caller invokes."
+        ),
+    }
+
+    @staticmethod
+    def _backtick_head_identifiers(text: str) -> set[str]:
+        """Every backtick span in `text`, reduced to its head identifier.
+
+        A bare span (`` `add` ``) is already an identifier. A call span
+        (`` `update(status="fixed")` ``) names a tool invoked with an
+        argument; everything from the first non-identifier character on is
+        the call's syntax, not part of the name, so only the identifier
+        prefix is kept.
+        """
+        heads = set()
+        for span in re.findall(r"`([^`]+)`", text):
+            match = re.match(r"[A-Za-z_][A-Za-z0-9_]*", span)
+            if match:
+                heads.add(match.group(0))
+        return heads
+
+    def test_every_named_tool_exists_in_the_live_catalogue(self):
+        text = server.INSTRUCTIONS
+        candidates = self._backtick_head_identifiers(text)
+        assert candidates, "premise: INSTRUCTIONS carries at least one backtick-quoted token"
+        live_names = {tool["name"] for tool in collect_tool_schemas()}
+        assert live_names, "premise: the live catalogue is non-empty"
+
+        missing = sorted(
+            token
+            for token in candidates
+            if token not in self._DECLARED_NON_TOOL_TOKENS and token not in live_names
+        )
+        assert not missing, (
+            f"INSTRUCTIONS names {missing} as if they were tools, but the live "
+            "catalogue does not register them under that name -- a "
+            "newly-connected agent following the recommended loop would call "
+            "something that does not exist. Either the tool was renamed or "
+            "removed (fix INSTRUCTIONS to match), or this token was never a "
+            "tool name (add it to _DECLARED_NON_TOOL_TOKENS with a reason)."
+        )
+
+    def test_declared_non_tool_tokens_are_not_stale(self):
+        """Self-deleting: a declared row must still name something in the text."""
+        text = server.INSTRUCTIONS
+        candidates = self._backtick_head_identifiers(text)
+        stale = sorted(
+            token for token in self._DECLARED_NON_TOOL_TOKENS if token not in candidates
+        )
+        assert not stale, (
+            f"_DECLARED_NON_TOOL_TOKENS names {stale}, which no longer appears "
+            "in INSTRUCTIONS -- delete the row rather than leaving a standing "
+            "exemption behind."
+        )
+
+    def test_declared_non_tool_tokens_carry_a_reason(self):
+        empty = [
+            token
+            for token, reason in self._DECLARED_NON_TOOL_TOKENS.items()
+            if not reason.strip()
+        ]
+        assert not empty, (
+            f"_DECLARED_NON_TOOL_TOKENS row(s) with no reason: {empty} -- a "
+            "table that can grow silently is the hole this gate exists to close"
+        )
+
+    def test_backtick_extraction_reduces_a_call_span_to_its_head_identifier(self):
+        # Pins the boundary from the OTHER side (brief §4's second mutant,
+        # syntactic-predicate branch): a real tool name written as a call
+        # must still be recognised as that tool, not lost as "not an
+        # identifier" or kept whole as `update(status="fixed")`.
+        heads = self._backtick_head_identifiers('Close it with `update(status="fixed")`.')
+        assert heads == {"update"}
