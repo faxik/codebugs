@@ -279,6 +279,65 @@ _FP_WS = re.compile(r"\s+")
 _ADD_ALWAYS_REFUSED_META_KEYS = frozenset({"resolver_errors"})
 
 
+#: The one structurally stable marker of a leaked tool-call tail (CB-90).
+#: Measured on the autosorter corpus, 2026-08-25, 3373 rows: 80 descriptions
+#: carry it, each EXACTLY ONCE, and the tail is always TERMINAL. The 61 rows the
+#: card names by `<parameter name=` are a strict subset of those 80.
+_TOOL_CALL_TAIL_MARKER = "</description>"
+
+
+def _strip_tool_call_tail(description: str) -> tuple[str, bool]:
+    """Cut a leaked tool-call tail off *description*. Returns ``(text, was_cut)``.
+
+    A calling agent sometimes includes a slice of its own XML-like tool call in
+    the value it passes as `description`. The authored prose is COMPLETE — the
+    tail is EXTRA, not a truncation (verified on three samples by reading the
+    160 characters before the join, all of which end on a finished sentence), so
+    there is nothing to recover and the cut is cheap.
+
+    **The marker ALONE is NOT the predicate, and that correction is the whole of
+    this function.** The unit brief prescribed "cut from `</description>` to the
+    end of the string", naming this repo's own CB-90 card as the fixture that
+    must survive. Measured, the card's own description contains the marker THREE
+    times legitimately — inside a quoted SQL `LIKE` pattern, inside a quoted
+    example of this very contamination, and inside a prose bullet naming the two
+    substrings — so the prescribed predicate would have destroyed roughly 80% of
+    the text of the card it was told to preserve, cutting at the FIRST occurrence.
+    Widening to `<parameter name=` instead is worse for the same reason and the
+    brief says so.
+
+    The predicate is therefore COMPOUND: cut at the earliest marker from which
+    NOTHING BUT ENVELOPE remains — at least one non-blank line, every one of them
+    beginning with `<` at column zero. That is measured rather than invented: all
+    114 envelope lines across the 80 contaminated tails start with `<` unindented,
+    and none of those tails ever returns to prose. The two properties do the two
+    jobs — "everything after" is what refuses a QUOTATION (a quoted example is
+    followed by more prose), and "column zero" is what refuses an indented code
+    block, which is how prose quotes markup.
+
+    Fail-open on anything else, deliberately (brief §4): an unrecognised shape
+    stays VISIBLE in the stored text rather than being cut on a guess. The
+    measured cost is one row of the 80 — a bare newline after the marker, with no
+    envelope at all — which this leaves alone rather than reach a verdict from a
+    vacuously-true "every line" over an empty set, the "guard reporting clean
+    because it could not look" shape.
+
+    Non-text input is returned unchanged. `description` has no type validation on
+    this path today, and adding one here would be an unrequested behaviour change
+    riding along inside a contamination fix (CB-82's lesson).
+    """
+    if not isinstance(description, str):
+        return description, False
+    at = description.find(_TOOL_CALL_TAIL_MARKER)
+    while at >= 0:
+        rest = description[at + len(_TOOL_CALL_TAIL_MARKER) :]
+        lines = [line for line in rest.splitlines() if line.strip()]
+        if lines and all(line.startswith("<") for line in lines):
+            return description[:at], True
+        at = description.find(_TOOL_CALL_TAIL_MARKER, at + 1)
+    return description, False
+
+
 def _validate_meta_keys(
     meta: dict[str, Any] | None, *, updating: bool = False
 ) -> tuple[dict[str, Any] | None, frozenset[str]]:
@@ -1250,7 +1309,13 @@ class PostCommitCorruptionError(Exception):
 #: column would otherwise be silently overwritten in every response, the CB-16
 #: shape one layer up. Pinned by `tests/test_dedup.py::TestResponseOnlyKeysRatchet`.
 _RESPONSE_ONLY_KEYS = frozenset(
-    {"was_new", "dedup_action", "attention", "stripped_meta_keys"}
+    {
+        "was_new",
+        "dedup_action",
+        "attention",
+        "stripped_meta_keys",
+        "stripped_description_tail",
+    }
 )
 
 
@@ -1259,6 +1324,7 @@ def _finalize_add(
     *,
     committed: bool,
     stripped_meta_keys: frozenset[str] = frozenset(),
+    stripped_description_tail: bool = False,
 ) -> dict[str, Any]:
     """Convert an _add_one outcome to the response dict, AFTER the transaction closed.
 
@@ -1315,6 +1381,10 @@ def _finalize_add(
     # "checked, nothing to strip", never "no such channel". A fresh sorted
     # list per response for the same reason `attention` gets a fresh list.
     result["stripped_meta_keys"] = sorted(stripped_meta_keys)
+    # UNCONDITIONAL for the same reason (CB-90): `False` means "checked, nothing
+    # to cut", never "no such channel". A caller must be able to tell from this
+    # response ALONE that the text it passed is not the text that was stored.
+    result["stripped_description_tail"] = stripped_description_tail
     return result
 
 
@@ -1397,11 +1467,17 @@ def add_finding(
     severity = resolve_severity(severity)
     fingerprint = _validate_fingerprint(fingerprint)
     meta, stripped_meta_keys = _validate_meta_keys(meta)
+    stripped_description_tail = False
     if finding_id is None:
         # Pure normalization stays pre-txn (it is validation, and it is the
         # fingerprint-derivation input); the mint GATE runs inside _add_one on
         # the insert continuation, after the dedup branch is known (CB-113(b)).
         category = normalize_category(category)
+        # Same predicate, same phase, and the phase is load-bearing (CB-90):
+        # `description` is an `auto:v1` input, so a tail cut AFTER derivation
+        # would leave a tailed and a clean report of one defect on two hashes,
+        # i.e. two cards. Cutting here makes them collapse correctly.
+        description, stripped_description_tail = _strip_tool_call_tail(description)
 
     with db.txn(conn) as owned:
         outcome = _add_one(
@@ -1421,7 +1497,12 @@ def add_finding(
             new_category=new_category,
             project_dir=project_dir,
         )
-    return _finalize_add(outcome, committed=owned, stripped_meta_keys=stripped_meta_keys)
+    return _finalize_add(
+        outcome,
+        committed=owned,
+        stripped_meta_keys=stripped_meta_keys,
+        stripped_description_tail=stripped_description_tail,
+    )
 
 
 # Member keys accepted by batch_add_findings. The strict-argument middleware guards
@@ -1444,6 +1525,27 @@ _BATCH_MEMBER_KEYS = frozenset(
         "fingerprint",
     }
 )
+
+
+class _ValidatedMember(NamedTuple):
+    """One `batch_add_findings` member after the pre-transaction cleaning pass.
+
+    Exists so the second loop cannot reach past it to the RAW member dict. Four
+    of these seven fields are values the cleaning pass CHANGED — a category
+    normalized, a fingerprint validated, a meta stripped of reserved keys, a
+    description stripped of a tool-call tail — and each is reported to the caller
+    as having been changed. Reading the raw dict again for any of them would
+    store the uncleaned value behind a response that says otherwise. Named
+    fields make that a compile-time impossibility instead of a comment.
+    """
+
+    severity: str
+    fingerprint: str | None
+    category: str
+    description: str
+    meta: dict[str, Any] | None
+    stripped_meta_keys: frozenset[str]
+    stripped_description_tail: bool
 
 
 class ImportRowError(NamedTuple):
@@ -1979,27 +2081,37 @@ def batch_add_findings(
     # member's dedup branch, so it runs inside the transaction (CB-113(b)); its
     # refusal rolls back the whole batch, preserving the nothing-lands property.
     #
-    # `meta`/`stripped` come from `_validate_meta_keys` per member (CB-56): the
-    # ADD path strips reserved keys with visibility rather than refusing, and
-    # what gets passed to `_add_one` below must be the STRIPPED meta — reading
-    # `f.get("meta")` again in the second loop would silently reintroduce the
-    # keys this pass just removed.
-    validated: list[tuple[str, str | None, str, dict[str, Any] | None, frozenset[str]]] = []
+    # `meta`/`stripped_meta_keys` come from `_validate_meta_keys` per member
+    # (CB-56) and `description`/`stripped_description_tail` from
+    # `_strip_tool_call_tail` (CB-90). Both are the SAME hazard and it is why
+    # this pass carries a record instead of a tuple: what gets passed to
+    # `_add_one` below must be the CLEANED value, and re-reading `f["meta"]` or
+    # `f["description"]` in the second loop would silently reintroduce exactly
+    # what this pass removed — while the response still reported it as cut,
+    # which is a success-shaped lie about the caller's own data. A positional
+    # tuple made that a one-slot misread away (CB-52's lesson: close the
+    # ordering hazard structurally rather than warn about it in a comment).
+    validated: list[_ValidatedMember] = []
     for i, f in enumerate(findings):
         unknown = set(f) - _BATCH_MEMBER_KEYS
         if unknown:
             raise ValueError(f"findings[{i}]: unknown keys {sorted(unknown)}")
         meta, stripped = _validate_meta_keys(f.get("meta"))
         category = f["category"]
+        description = f["description"]
+        tail_cut = False
         if f.get("id") is None:
             category = normalize_category(category)
+            description, tail_cut = _strip_tool_call_tail(description)
         validated.append(
-            (
-                resolve_severity(f.get("severity", "medium")),
-                _validate_fingerprint(f.get("fingerprint")),
-                category,
-                meta,
-                stripped,
+            _ValidatedMember(
+                severity=resolve_severity(f.get("severity", "medium")),
+                fingerprint=_validate_fingerprint(f.get("fingerprint")),
+                category=category,
+                description=description,
+                meta=meta,
+                stripped_meta_keys=stripped,
+                stripped_description_tail=tail_cut,
             )
         )
 
@@ -2008,30 +2120,33 @@ def batch_add_findings(
     # member's returned occurrence_count. Input order is preserved by construction.
     outcomes: list[AddOutcome] = []
     with db.txn(conn) as owned:
-        for f, (severity, fingerprint, category, meta, _stripped) in zip(
-            findings, validated, strict=True
-        ):
+        for f, member in zip(findings, validated, strict=True):
             outcomes.append(
                 _add_one(
                     conn,
-                    severity=severity,
-                    category=category,
+                    severity=member.severity,
+                    category=member.category,
                     file=f["file"],
-                    description=f["description"],
+                    description=member.description,
                     source=f.get("source", "human"),
                     tags=f.get("tags"),
-                    meta=meta,
+                    meta=member.meta,
                     finding_id=f.get("id"),
                     reported_at_commit=f.get("reported_at_commit"),
                     reported_at_ref=f.get("reported_at_ref"),
-                    fingerprint=fingerprint,
+                    fingerprint=member.fingerprint,
                     new_category=new_category,
                     project_dir=project_dir,
                 )
             )
     return [
-        _finalize_add(outcome, committed=owned, stripped_meta_keys=stripped)
-        for outcome, (_sev, _fp, _cat, _meta, stripped) in zip(outcomes, validated, strict=True)
+        _finalize_add(
+            outcome,
+            committed=owned,
+            stripped_meta_keys=member.stripped_meta_keys,
+            stripped_description_tail=member.stripped_description_tail,
+        )
+        for outcome, member in zip(outcomes, validated, strict=True)
     ]
 
 
@@ -3846,6 +3961,17 @@ def register_tools(mcp, conn_factory) -> None:
         `update`'s `meta_update` still refuses every reserved key rather than
         stripping any of them.
 
+        `stripped_description_tail` is a top-level boolean, ALWAYS present and
+        usually `False`, following that same discipline: `False` means "checked,
+        nothing to cut", never "no such channel". Some filing agents leak a
+        slice of their own tool call into the end of `description`; when the
+        text after a `</description>` marker is nothing but envelope lines, that
+        tail is CUT rather than refused — the finding is real and only its tail
+        is junk — and cut BEFORE the fingerprint is derived, so a tailed and a
+        clean report of one defect collapse onto one card instead of two. Prose
+        that merely quotes the marker is not cut. `True` means the text stored
+        is not byte-for-byte the text you passed.
+
         Args:
             severity: critical, high, medium, or low (case-insensitive, no aliases)
             category: Finding category (e.g. tz_naive_datetime, n_plus_one, missing_validation).
@@ -3946,6 +4072,15 @@ def register_tools(mcp, conn_factory) -> None:
         silently did not land. `resolver_errors` is refused outright instead
         (a FAILURE state, not machinery input), on this path exactly as on
         `add`.
+
+        Each result likewise carries its OWN `stripped_description_tail`
+        boolean — always present, usually `False`, meaning "checked, nothing to
+        cut" rather than "no such channel". A leaked tool-call tail on that
+        member's `description` (envelope lines and nothing else after a
+        `</description>` marker) is CUT rather than refused, before the
+        fingerprint is derived so a tailed and a clean report of one defect
+        collapse onto one card; prose merely quoting the marker is left alone.
+        `True` means that member's stored text is not the text you passed.
 
         Args:
             findings: List of finding objects, each with keys:
