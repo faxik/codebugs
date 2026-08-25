@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`codebugs --version` prints the version you are running (CB-191).** Asking which
+  codebugs you had used to mean asking the package manager (`pip show`, `pipx list`)
+  rather than the program. It works in any directory, with or without a tracker, and in
+  every `--mode`.
+
+### Fixed
+- **The paragraph opening the 0.2.0 notes below made four wrong claims about that
+  release, and has been corrected (CB-191).** It counted two strict CLI arguments where
+  there is one, said neither corpus-wide clean-up had been run when the category fold
+  had already been applied here, left out that an un-folded older tracker files a
+  duplicate instead of counting a repeat report, and pointed at a "BREAKING" section
+  that does not exist. The release itself is unchanged; only its description was wrong.
+
 ## [0.2.0] — 2026-08-25
 
 The first cut since 0.1.0, mostly about the tracker telling the truth. Repeat reports
@@ -17,9 +31,20 @@ went after a rename. Most of the rest is commands that stopped claiming unearned
 success: a failed export no longer destroys the one it replaced, a broken import leaves
 nothing behind, dropped filters filter again, tracebacks became one line. A CSV export
 is finally a backup, and an agent connecting over MCP is told the recommended loop. Not
-here: what a finding IS did not change, so nothing needs migrating; the corpus-wide
-clean-ups run only with `--apply` and neither has been run; requirements got fixes but
-no new capability; two CLI arguments became strict (see BREAKING).
+here: requirements got fixes but no new capability, and the way a finding is identified
+was not re-versioned, so nothing forces you to migrate. One clean-up is worth running on
+an older tracker even so: both corpus-wide passes still write only under `--apply`, and
+until `categories-normalize` has folded yours, reporting a defect that was filed before
+category spellings were canonicalized can open a second card instead of raising the
+count on the one you already have. The tracker in this repository has been folded once;
+yours has not, unless you ran it yourself.
+
+**One thing to change in your own scripts.** A single argument became strict, in two
+ways: `codebugs add -l/--lines` now refuses an explicitly empty value, and refuses a
+value that disagrees with a `lines` key passed inside `--meta`. Both used to report
+success while quietly not storing what you typed; both now say what is wrong and exit 1.
+The two entries are marked **BREAKING (CLI)** in the `### Changed` sections below, and
+each says what to change.
 
 ### Fixed
 - **`reqs_embed` and `reqs_batch_embed` now refuse a vector that would break search,
