@@ -948,8 +948,8 @@ We are migrating toward a plugin architecture in phases. Query with `reqs_query 
 **There is no embedding provider in this package, and that is the fact every other rule here
 follows from.** The CALLER computes the vector, in its own process, and passes finished numbers as
 `embedding: list[float]`; the tools never receive the requirement's TEXT at all. Measured before
-this section was written: the package makes no network call anywhere, its only dependency is `mcp`,
-and the vector arrives as an argument.
+this section was written: the only declared runtime dependency is `mcp`, no module of the package
+imports anything that could open a socket, and the vector arrives as an argument.
 
 **The safety claim is bounded to this package's own code and to the vector's route, and the bound
 is load-bearing rather than modest.** Do not write "codebugs cannot reach the network": the `mcp`
