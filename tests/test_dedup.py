@@ -1932,3 +1932,300 @@ class TestMcpDocstringsNameEveryAction:
         """
         doc = _mcp_tool_docstrings()["add"]
         assert "meta.recurrence_of" in doc
+
+
+# --------------------------------------------------------------------------
+# CB-90: the tool-call tail on the write boundary
+# --------------------------------------------------------------------------
+
+#: A faithful reduced excerpt of THIS tracker's own CB-90, kept verbatim.
+#: It is the designated false-positive fixture: legitimate prose that quotes
+#: the contamination shape, so it carries `<parameter name=` AND three
+#: occurrences of the marker while being entirely uncontaminated. Measured on
+#: the live tracker before this unit: 183 rows, CB-90 is the ONLY row matching
+#: the marker at all, and the predicate below cuts none of them.
+CB90_LEGITIMATE = """59 finding descriptions on the autosorter tracker end with a leaked fragment of the tool call that created them, and nothing on the write path rejects it.
+
+    description LIKE '%<parameter name=%'        -> 59 rows
+    description LIKE '%</description>%'          -> 76 rows
+
+Shape, identical in every sample checked (CB-2607, CB-1224, CB-3125):
+
+    ...end of the real prose.</description>
+    <parameter name="source">claude
+    <parameter name="tags">[...]
+
+The authored prose itself is COMPLETE — the leak is a trailing tail, not a truncation.
+
+- WRITE PATH FIRST: reject or strip a description whose tail matches the tool-call envelope (`</description>`, `<parameter name=...>`) on `add`/`update`."""
+
+#: The measured contamination shape. Every one of the 80 marker-bearing rows on
+#: the autosorter corpus has EXACTLY ONE marker, the tail is terminal, and all
+#: 114 envelope lines across those tails start with `<` at column 0.
+CONTAMINATED_TAIL = """<parameter name="source">claude
+<parameter name="tags">["data-quality"]
+</parameter>
+</invoke>
+"""
+CLEAN_PROSE = "The gate accepted a value it never validated, and the reader consumed it as well-formed."
+CONTAMINATED = f"{CLEAN_PROSE}</description>\n{CONTAMINATED_TAIL}"
+
+
+class TestDescriptionWriteGuard:
+    """A tool-call tail is cut at the write boundary and the cut is NAMED (CB-90).
+
+    Form ratified at level (2): strip with visibility, never refuse. A filer that
+    cannot repair itself would lose the whole finding on a refusal, and the
+    finding is real — only its tail is junk. The cut must happen BEFORE fingerprint
+    derivation, because the description is an identity input: two submissions of
+    one defect, one tailed and one clean, otherwise hash apart into two cards.
+
+    The predicate is COMPOUND and that is the load-bearing part. The marker alone
+    does not separate contamination from prose — this repo's own CB-90 card quotes
+    the marker three times legitimately — so a cut happens only where EVERYTHING
+    after the marker is envelope: at least one line, every one of them starting
+    with `<` at column 0. Anything else fails open and stays visible.
+    """
+
+    def test_a_tool_call_tail_is_cut_and_the_cut_is_named(self, conn):
+        r = _add(conn, desc=CONTAMINATED)
+        assert r["description"] == CLEAN_PROSE
+        assert r["stripped_description_tail"] is True
+        stored = findings.get_finding(conn, r["id"])
+        assert stored["description"] == CLEAN_PROSE
+
+    def test_the_key_is_present_and_false_on_a_clean_description(self, conn):
+        """`False` means "checked, nothing to cut" — never "no such channel".
+
+        The `stripped_meta_keys`/`attention` discipline verbatim (CB-56/BT-5): a
+        caller must be able to tell from the response ALONE whether its text was
+        modified, and a key that only appears when something happened collapses
+        exactly that distinction.
+        """
+        r = _add(conn, desc=CLEAN_PROSE)
+        assert "stripped_description_tail" in r
+        assert r["stripped_description_tail"] is False
+
+    def test_the_key_is_present_on_every_dedup_branch(self, conn):
+        first = _add(conn, desc=CONTAMINATED)
+        again = _add(conn, desc=CONTAMINATED)
+        assert again["dedup_action"] == "bumped"
+        assert again["stripped_description_tail"] is True
+        findings.update_finding(conn, finding_id=first["id"], status="fixed")
+        reopened = _add(conn, desc=CONTAMINATED)
+        assert reopened["dedup_action"] == "reopened"
+        assert reopened["stripped_description_tail"] is True
+
+    def test_legitimate_prose_quoting_the_marker_is_not_cut(self, conn):
+        """The main false-positive oracle: this repo's own CB-90 card.
+
+        A predicate widened to `<parameter name=` cuts it (the card names that
+        substring in prose). A predicate keyed on the bare marker cuts ~80% of
+        it, at the FIRST of its three occurrences — inside a quoted SQL LIKE
+        pattern. Both mutants turn this red.
+        """
+        r = _add(conn, desc=CB90_LEGITIMATE)
+        assert r["description"] == CB90_LEGITIMATE
+        assert r["stripped_description_tail"] is False
+
+    def test_the_cut_happens_before_fingerprint_derivation(self, conn):
+        """Tailed and clean submissions of ONE defect collapse into ONE card.
+
+        This is the identity half of the ratified form: the cut does not merely
+        tidy the text, it repairs the fingerprint. A cut moved AFTER derivation
+        leaves two rows with two hashes and turns this red.
+        """
+        first = _add(conn, desc=CONTAMINATED)
+        second = _add(conn, desc=CLEAN_PROSE)
+        assert second["id"] == first["id"]
+        assert second["was_new"] is False
+        assert second["dedup_action"] == "bumped"
+        assert first["fingerprint"] == second["fingerprint"]
+
+    def test_an_explicit_id_bypasses_the_cut(self, conn):
+        """An explicit id asserts identity and bypasses the whole observation
+        machinery — the same predicate that governs dedup, the resolvers and
+        `normalize_category`. Fixtures file text verbatim."""
+        r = _add(conn, desc=CONTAMINATED, finding_id="CB-900")
+        assert r["description"] == CONTAMINATED
+        assert r["stripped_description_tail"] is False
+
+    def test_a_marker_with_no_envelope_after_it_is_left_alone(self, conn):
+        """Fail-open on an unknown shape: an unrecognised tail stays VISIBLE
+        rather than being cut on a guess. Measured cost, stated rather than
+        hidden: 1 of the autosorter corpus's 80 marker rows carries a bare
+        newline after the marker and is deliberately not cut."""
+        text = f"{CLEAN_PROSE}</description>\n"
+        r = _add(conn, desc=text)
+        assert r["description"] == text
+        assert r["stripped_description_tail"] is False
+
+    def test_prose_after_the_envelope_is_not_a_terminal_tail(self, conn):
+        """The tail is TERMINAL, measured on all 80 rows. Envelope lines followed
+        by a return to prose are a quotation, not a leak."""
+        text = f'{CLEAN_PROSE}</description>\n<parameter name="source">claude\n\nAnd then the author kept writing.'
+        r = _add(conn, desc=text)
+        assert r["description"] == text
+        assert r["stripped_description_tail"] is False
+
+    def test_batch_members_are_stored_stripped_and_report_individually(self, conn):
+        """The batch second loop must consume the STRIPPED description.
+
+        Identical hazard to `meta` (CB-56): re-reading `f["description"]` in the
+        loop that calls `_add_one` silently reintroduces the tail this pass just
+        removed, while the response still claims it was cut — a success-shaped
+        lie about the caller's own data.
+        """
+        out = findings.batch_add_findings(
+            conn,
+            findings=[
+                {"category": "bug", "file": "a.py", "description": CONTAMINATED},
+                {"category": "bug", "file": "b.py", "description": CLEAN_PROSE},
+            ],
+            new_category=True,
+        )
+        assert [r["stripped_description_tail"] for r in out] == [True, False]
+        assert out[0]["description"] == CLEAN_PROSE
+        assert findings.get_finding(conn, out[0]["id"])["description"] == CLEAN_PROSE
+
+    def test_both_tool_descriptions_name_the_key(self):
+        """A response key a client cannot discover is not a channel (CB-18)."""
+        for tool in ("add", "batch_add"):
+            assert "stripped_description_tail" in _mcp_tool_docstrings()[tool]
+
+    def test_a_balanced_xml_snippet_is_not_cut(self, conn):
+        """Second false-positive oracle, NOT covered by the CB-90 fixture.
+
+        A card about MCP/XML surfaces can legitimately end in an unindented tag
+        block that contains the marker. Conjuncts 2 and 3 alone cut it — measured,
+        70 bytes of real text lost. What separates it from a leak is that a leak
+        is a MID-CALL SLICE and therefore carries a closing tag whose opening was
+        never in the value, while a quoted snippet is BALANCED. Measured: 0 of the
+        80 contaminated rows contain `<description>` anywhere.
+
+        Mutant: drop the unmatched-opening conjunct — this turns red.
+        """
+        text = (
+            "The MCP tool schema we generate looks like this:\n\n"
+            "<tool>\n"
+            "<name>add</name>\n"
+            "<description>Record a code finding</description>\n"
+            '<parameter name="severity">critical</parameter>\n'
+            "</tool>"
+        )
+        r = _add(conn, desc=text)
+        assert r["description"] == text
+        assert r["stripped_description_tail"] is False
+
+    def test_the_cut_is_confined_to_the_two_observation_paths(self):
+        """CB-51: an import is not an observation, so it must not cut either.
+
+        Same boundary the `escalate` / `promote_tags` ratchets hold, pinned the
+        same way (AST, not grep). A peer's export must round-trip byte-for-byte:
+        silently rewriting foreign text on the way in is exactly the divergence
+        between ingestion surfaces that CB-56 narrowed rather than widened. There
+        is deliberately NO opt-out parameter — the cut simply is not on that
+        path, so there is nothing to turn off by argument.
+        """
+        callers = {
+            node.name
+            for node in ast.walk(_findings_ast())
+            if isinstance(node, ast.FunctionDef)
+            and any(
+                isinstance(c.func, ast.Name) and c.func.id == "_strip_tool_call_tail"
+                for c in ast.walk(node)
+                if isinstance(c, ast.Call)
+            )
+        }
+        assert callers == {"add_finding", "batch_add_findings"}
+
+    def test_an_indented_quotation_of_the_leak_is_not_cut(self, conn):
+        """Third false-positive oracle: the ONLY test that isolates column zero.
+
+        Found by mutation testing, not by review: relaxing `line.startswith("<")`
+        to `line.strip().startswith("<")` left the other eleven tests GREEN. The
+        CB-90 fixture cannot catch it, because that card is already refused by the
+        "everything after the marker is envelope" conjunct — its quotation is
+        followed by more prose. The shape that isolates column zero is a card
+        ENDING on an indented quotation, which is exactly what someone filing a
+        card about this very leak would write.
+
+        Prose quotes markup by INDENTING it. A leak is pasted at column zero:
+        measured, all 114 envelope lines across the 80 contaminated rows are
+        unindented, and CB-90's own quoted example is indented four spaces.
+        """
+        text = (
+            "Cards on the peer tracker end like this:\n\n"
+            "    ...end of the real prose.</description>\n"
+            '    <parameter name="source">claude'
+        )
+        r = _add(conn, desc=text)
+        assert r["description"] == text
+        assert r["stripped_description_tail"] is False
+
+    def test_the_cli_says_so_when_it_cuts_a_tail(self, tmp_project, monkeypatch, capsys):
+        """A silent strip is forbidden on EVERY surface, not just over the wire.
+
+        The CLI prints fixed lines rather than serializing the response, so the
+        response key alone does not reach a human — `_cmd_add` has to say it.
+        Found by adversarial review of this unit's own diff: the rule was stated
+        verbatim in a comment two lines above the meta-key note, and the tail was
+        cut silently anyway. It costs the caller MORE than the meta note does —
+        meta keys are machinery output the caller never authored, while a cut
+        tail removes bytes the caller typed.
+        """
+        import sys as _sys
+
+        monkeypatch.setattr(
+            _sys,
+            "argv",
+            [
+                "codebugs", "--tracker-root", tmp_project, "add",
+                "-s", "low", "-c", "bug", "-f", "a.py", "-d", CONTAMINATED,
+                "--new-category",
+            ],
+        )
+        from codebugs import cli
+
+        cli.main()
+        err = capsys.readouterr().err
+        assert "cut from the description" in err
+
+    def test_the_cli_is_silent_when_it_cuts_nothing(self, tmp_project, monkeypatch, capsys):
+        """The other half: the note must not fire on a clean description, or it
+        stops carrying information."""
+        import sys as _sys
+
+        monkeypatch.setattr(
+            _sys,
+            "argv",
+            [
+                "codebugs", "--tracker-root", tmp_project, "add",
+                "-s", "low", "-c", "bug", "-f", "a.py", "-d", CLEAN_PROSE,
+                "--new-category",
+            ],
+        )
+        from codebugs import cli
+
+        cli.main()
+        assert "cut from the description" not in capsys.readouterr().err
+
+    def test_a_fenced_quotation_of_the_leak_is_not_cut(self, conn):
+        """The second documented escape, pinned so the docstring's claim is true.
+
+        A card ending on a VERBATIM, unindented, unfenced quotation of the leak
+        is genuinely indistinguishable from the leak and IS cut — a residual this
+        unit names rather than papers over. Both ordinary ways of quoting markup
+        escape it, and this pins the fence: the closing ``` line does not start
+        with `<`, so the all-envelope conjunct refuses.
+        """
+        text = (
+            "Cards on the peer tracker end like this:\n\n"
+            "```\n"
+            "...end of the real prose.</description>\n"
+            '<parameter name="source">claude\n'
+            "```"
+        )
+        r = _add(conn, desc=text)
+        assert r["description"] == text
+        assert r["stripped_description_tail"] is False
