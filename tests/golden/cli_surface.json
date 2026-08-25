@@ -783,7 +783,7 @@
         "default": null,
         "deprecated": false,
         "dest": "last_n",
-        "help": "Last N runs",
+        "help": "Last N runs; requires a benchmark (0 = none)",
         "metavar": null,
         "nargs": null,
         "option_strings": [
@@ -948,7 +948,7 @@
         "default": null,
         "deprecated": false,
         "dest": "last_n",
-        "help": "Last N runs only",
+        "help": "Last N runs only (0 = none)",
         "metavar": null,
         "nargs": null,
         "option_strings": [

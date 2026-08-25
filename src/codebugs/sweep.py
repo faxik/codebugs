@@ -20,7 +20,7 @@ from typing import Any
 
 from codebugs import db, surfacegen
 from codebugs.fmt import format_table
-from codebugs.types import utc_now
+from codebugs.types import require_row_limit, utc_now
 
 
 SCHEMA = """\
@@ -665,6 +665,26 @@ def archive_items(
             "Use archive_sweep to archive an entire sweep."
         )
 
+    # An EXPLICITLY EMPTY `items` short-circuits below with `archived: 0`, and
+    # any `where_status`/`older_than` handed in beside it is then never read —
+    # a filter silently dropped behind a success-shaped answer (CB-162). Refuse
+    # exactly that combination and nothing wider: a bare `items=[]` is honest
+    # ("archive this empty set" → nothing archived) and stays legal.
+    #
+    # `items is not None and not items` is the whole discriminator: `None` is
+    # "not supplied" and `[]` is "supplied empty", and they are two different
+    # calls. Truthiness cannot tell them apart, and conflating them would either
+    # refuse the ordinary filter-only call or miss the defect entirely.
+    #
+    # Decidable from the arguments alone, so it is refused BEFORE `db.txn`
+    # opens: a refusal must not take the write lock.
+    if items is not None and not items and (where_status is not None or older_than is not None):
+        raise ValueError(
+            "items=[] selects no entries, so where_status/older_than would be silently "
+            "ignored and nothing would be archived. Omit items to archive by filter, or "
+            "pass the item identifiers you mean to archive."
+        )
+
     # One transaction, opened before the lifecycle read (CB-24): `where_status` is
     # validated against the sweep's stored lifecycle and then used to select the rows
     # the bulk UPDATE archives, so a concurrent lifecycle rewrite between the two would
@@ -734,7 +754,15 @@ def list_items(
     By default excludes archived. `archived_only=True` shows only archived
     entries (useful for restore workflows). Always-considered-by-recurrence
     semantics are enforced by `add_items`, not here.
+
+    `limit` is `None` for no limit, or a non-negative integer; `0` means zero
+    entries, which is what it ALREADY meant here — this site was the one of
+    CB-161's three that behaved correctly on zero, because its guard was already
+    `is not None`. What changed is that the value is now BOUND instead of being
+    interpolated behind an `int()` cast, and a negative value is refused rather
+    than silently read by SQLite as no limit at all.
     """
+    limit = require_row_limit("limit", limit)
     sweep_id = _resolve_sweep(conn, sweep_ref)
 
     conditions = ["sweep_id = ?"]
@@ -756,7 +784,16 @@ def list_items(
         params.append(tag)
 
     where = "WHERE " + " AND ".join(conditions)
-    limit_sql = f" LIMIT {int(limit)}" if limit is not None else ""
+    # Fixed literal + bound value. The `int()` cast is gone with the
+    # interpolation: `require_row_limit` above already refused anything that is
+    # not an integer, and it does so instead of COERCING one — a numeric string
+    # or a `2.7` used to be quietly converted to something the caller did not
+    # write. The parameter goes at the fragment's textual position, the end.
+    if limit is not None:
+        limit_sql = " LIMIT ?"
+        params.append(limit)
+    else:
+        limit_sql = ""
 
     rows = conn.execute(
         f"SELECT item, tags, state, processed, recurrence_count, "

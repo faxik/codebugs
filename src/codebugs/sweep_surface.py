@@ -135,7 +135,10 @@ At least one filter is required.
 
 Args:
     sweep_ref: Sweep ID (SW-N) or name
-    items: Specific item identifiers to archive
+    items: Specific item identifiers to archive. An EXPLICITLY EMPTY list
+        selects nothing; passing it together with where_status or older_than
+        is an ERROR, because those filters would then be silently ignored.
+        Omit items entirely to archive by filter.
     where_status: Archive entries currently in this state
     older_than: Duration spec — '30d', '2w', '6m', '1y'. Compares against
         the entry's last activity timestamp.
@@ -150,7 +153,8 @@ Args:
     tag: Filter to items having this tag
     include_archived: Include archived entries alongside live ones
     archived_only: Show only archived entries (overrides include_archived)
-    limit: Max number of entries to return
+    limit: Max number of entries to return. 0 means NO entries; omit it for
+        no limit. A negative value is an error (it used to mean "no limit").
 """
 
 CODESWEEP_LIST_DOC = """List all sweeps with summary counts.

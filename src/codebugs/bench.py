@@ -22,7 +22,7 @@ from typing import Any
 
 from codebugs import db, surfacegen
 from codebugs.fmt import format_table
-from codebugs.types import utc_now
+from codebugs.types import require_row_limit, utc_now
 
 
 SCHEMA = """\
@@ -531,6 +531,10 @@ def query(
         raise ValueError("group_by must be 'row' or 'run'")
     if format not in ("json", "csv"):
         raise ValueError("format must be 'json' or 'csv'")
+    # Validated with the other arguments, before any statement is issued, so a
+    # refusal costs no work. The canonical integer comes back and is what gets
+    # bound below — never the object the caller handed in (CB-74/CB-82).
+    last_n = require_row_limit("last_n", last_n)
 
     # Find matching runs
     run_conditions = ["r.benchmark = ?"]
@@ -549,7 +553,17 @@ def query(
 
     run_where = " AND ".join(run_conditions)
     order = "ORDER BY r.date DESC"
-    limit_clause = f"LIMIT {last_n}" if last_n else ""
+    # The fragment is a FIXED literal and the value is BOUND, per query_findings.
+    # The guard is `is not None`, never truthiness: with `if last_n:` a supplied
+    # `last_n=0` built no clause at all and the call returned EVERY run — the
+    # opposite of what was asked (CB-161). The parameter is appended at the
+    # fragment's own TEXTUAL position, which is the end of this statement, and
+    # onto `run_params` — `res_params` below belongs to a different query.
+    if last_n is not None:
+        limit_clause = "LIMIT ?"
+        run_params.append(last_n)
+    else:
+        limit_clause = ""
 
     matched_runs = conn.execute(
         f"SELECT run_id, date FROM codebench_runs r WHERE {run_where} {order} {limit_clause}",
@@ -718,16 +732,28 @@ def list_runs(
     benchmark: str | None = None,
     last_n: int | None = None,
 ) -> dict[str, Any]:
-    """List runs, optionally filtered by benchmark name."""
+    """List runs, optionally filtered by benchmark name.
+
+    `last_n` is `None` for no limit, or a non-negative integer; `0` means zero
+    runs. Before CB-161 it was interpolated into the SQL text behind a truthiness
+    guard, so `0` returned every run and a negative value did the same (SQLite
+    reads a negative LIMIT as no limit).
+    """
     conditions: list[str] = []
     params: list[Any] = []
+    last_n = require_row_limit("last_n", last_n)
 
     if benchmark:
         conditions.append("r.benchmark = ?")
         params.append(benchmark)
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-    limit_clause = f"LIMIT {last_n}" if last_n else ""
+    # Fixed literal + bound value, guarded on `is not None`. See `query` above.
+    if last_n is not None:
+        limit_clause = "LIMIT ?"
+        params.append(last_n)
+    else:
+        limit_clause = ""
 
     rows = conn.execute(
         f"SELECT r.run_id, r.benchmark, r.date, r.tags, r.meta, r.created_at, "
@@ -882,6 +908,25 @@ def _tool_bench_import(
 
 
 def _tool_bench_list(conn_factory, *, benchmark, last_n) -> dict[str, Any]:
+    # `last_n` reaches a query only on the runs branch. `list_benchmarks` does
+    # not take the parameter at all, so without this the argument was accepted,
+    # routed past and DISCARDED, and the call still returned success — CB-162,
+    # which is CB-28's shape reached through routing rather than validation.
+    # Refusal is the right repair here and forwarding is not: "the last N
+    # benchmarks" has no meaning to invent (a benchmark is not ordered in time),
+    # and widening `list_benchmarks` was rejected with the card.
+    #
+    # "Supplied" is `is not None`, never truthiness — `last_n=0` is a supplied
+    # limit meaning zero rows, and `if last_n:` would wave it past the refusal.
+    # The branch predicate is the SAME `benchmark` truthiness the dispatch below
+    # uses, deliberately: validating with one predicate and dispatching with
+    # another is what `_tool_bench_import` carries its own warning about.
+    if last_n is not None and not benchmark:
+        raise ValueError(
+            "last_n applies only when benchmark is provided. Without a benchmark this "
+            "lists benchmark NAMES, which have no runs to limit — pass a benchmark, or "
+            "drop last_n."
+        )
     with conn_factory() as conn:
         if benchmark:
             return list_runs(conn, benchmark=benchmark, last_n=last_n)
@@ -989,7 +1034,12 @@ def _cmd_bench_query(args: argparse.Namespace) -> None:
                 kwargs["metrics"] = [m.strip() for m in args.metrics.split(",")]
             if args.rows:
                 kwargs["rows"] = [r.strip() for r in args.rows.split(",")]
-            if args.last_n:
+            # `is not None`, never truthiness: with `if args.last_n:` a typed
+            # `--last-n 0` was dropped here and `query` never saw it, so the CLI
+            # kept returning every run after the domain fix had already made a
+            # supplied zero mean zero rows. The guard one frame up defeats the
+            # guard one frame down (CB-161).
+            if args.last_n is not None:
                 kwargs["last_n"] = args.last_n
 
             result = query(conn, **kwargs)
@@ -1007,38 +1057,56 @@ def _cmd_bench_query(args: argparse.Namespace) -> None:
 
 
 def _cmd_bench_list(args: argparse.Namespace) -> None:
+    from codebugs.cli import domain_errors
+
     conn = db.connect()
     try:
-        if args.benchmark:
-            result = list_runs(conn, benchmark=args.benchmark, last_n=args.last_n)
-            if not result["runs"]:
-                print("(no runs)")
-                return
-            data = [
-                {
-                    "run_id": r["run_id"],
-                    "date": r["date"],
-                    "results": str(r["result_count"]),
-                    "tags": ",".join(r["tags"]),
-                }
-                for r in result["runs"]
-            ]
-            print(format_table(data, ["run_id", "date", "results", "tags"]))
-        else:
-            result = list_benchmarks(conn)
-            if not result["benchmarks"]:
-                print("(no benchmarks)")
-                return
-            data = [
-                {
-                    "benchmark": b["benchmark"],
-                    "runs": str(b["run_count"]),
-                    "first": b["first_date"],
-                    "last": b["last_date"],
-                }
-                for b in result["benchmarks"]
-            ]
-            print(format_table(data, ["benchmark", "runs", "first", "last"]))
+        # `domain_errors()` is required rather than decorative here: `list_runs`
+        # can now raise `ValueError` for a bad `--last-n`, and the refusal below
+        # raises one too, so without the wrapper both would print a raw
+        # traceback. A handler that catches nothing breaks the ordering rule as
+        # surely as one that catches in the wrong order.
+        with domain_errors():
+            # The CLI routes exactly as `_tool_bench_list` does, so it loses
+            # `--last-n` on the benchmarks branch in exactly the same way. Each
+            # refusal belongs where the loss happens, and the loss on this
+            # surface happens HERE — the tool-layer refusal cannot reach it.
+            if args.last_n is not None and not args.benchmark:
+                raise ValueError(
+                    "--last-n applies only with a benchmark. Without one this lists "
+                    "benchmark NAMES, which have no runs to limit — name a benchmark, "
+                    "or drop --last-n."
+                )
+            if args.benchmark:
+                result = list_runs(conn, benchmark=args.benchmark, last_n=args.last_n)
+                if not result["runs"]:
+                    print("(no runs)")
+                    return
+                data = [
+                    {
+                        "run_id": r["run_id"],
+                        "date": r["date"],
+                        "results": str(r["result_count"]),
+                        "tags": ",".join(r["tags"]),
+                    }
+                    for r in result["runs"]
+                ]
+                print(format_table(data, ["run_id", "date", "results", "tags"]))
+            else:
+                result = list_benchmarks(conn)
+                if not result["benchmarks"]:
+                    print("(no benchmarks)")
+                    return
+                data = [
+                    {
+                        "benchmark": b["benchmark"],
+                        "runs": str(b["run_count"]),
+                        "first": b["first_date"],
+                        "last": b["last_date"],
+                    }
+                    for b in result["benchmarks"]
+                ]
+                print(format_table(data, ["benchmark", "runs", "first", "last"]))
     finally:
         conn.close()
 

@@ -808,7 +808,7 @@
     "name": "codebench_import"
   },
   {
-    "description": "List benchmarks or runs.\n\nWithout benchmark: lists all benchmark names with run counts.\nWith benchmark: lists runs for that benchmark.\n\nArgs:\n\n- benchmark: If provided, list runs for this benchmark\n- last_n: Limit to last N runs (only when benchmark is provided)\n",
+    "description": "List benchmarks or runs.\n\nWithout benchmark: lists all benchmark names with run counts.\nWith benchmark: lists runs for that benchmark.\n\nArgs:\n\n- benchmark: If provided, list runs for this benchmark\n- last_n: Limit to last N runs. Requires benchmark \u2014 supplying last_n without one is an ERROR, because benchmark names have no runs to limit and the argument would otherwise be silently discarded. 0 means NO runs; omit it for no limit. A negative value is an error.\n",
     "inputSchema": {
       "properties": {
         "benchmark": {
@@ -842,7 +842,7 @@
     "name": "codebench_list"
   },
   {
-    "description": "Query and pivot benchmark results.\n\ngroup_by=\"row\": original table shape (row_labels as rows, metrics as\ncolumns). Returns one table per run.\n\ngroup_by=\"run\": trend view (runs as rows, metrics as columns).\nReturns one table per row_label.\n\nArgs:\n\n- benchmark: Benchmark name to query\n- runs: Specific run IDs (default: all matching)\n- date_from: Start date filter (inclusive, YYYY-MM-DD)\n- date_to: End date filter (inclusive, YYYY-MM-DD)\n- metrics: Which metrics to include (default: all)\n- rows: Which row_labels to include (default: all)\n- group_by: Pivot axis \u2014 \"row\" or \"run\"\n- last_n: Limit to last N runs by date\n- format: Output \u2014 \"json\" or \"csv\"\n",
+    "description": "Query and pivot benchmark results.\n\ngroup_by=\"row\": original table shape (row_labels as rows, metrics as\ncolumns). Returns one table per run.\n\ngroup_by=\"run\": trend view (runs as rows, metrics as columns).\nReturns one table per row_label.\n\nArgs:\n\n- benchmark: Benchmark name to query\n- runs: Specific run IDs (default: all matching)\n- date_from: Start date filter (inclusive, YYYY-MM-DD)\n- date_to: End date filter (inclusive, YYYY-MM-DD)\n- metrics: Which metrics to include (default: all)\n- rows: Which row_labels to include (default: all)\n- group_by: Pivot axis \u2014 \"row\" or \"run\"\n- last_n: Limit to last N runs by date. 0 means NO runs; omit it for no limit. A negative value is an error (it used to mean \"no limit\").\n- format: Output \u2014 \"json\" or \"csv\"\n",
     "inputSchema": {
       "properties": {
         "benchmark": {
@@ -1212,7 +1212,7 @@
     "name": "codesweep_archive"
   },
   {
-    "description": "Selectively archive entries within a sweep (soft-delete).\n\nArchived entries are excluded from `codesweep_next`, `codesweep_status`\ntotals, and default `codesweep_list_items`. They remain matchable by\n`codesweep_add` for recurrence detection \u2014 re-adding un-archives them\nwith `recurrence_count` carried forward (R5 invariant).\n\nAt least one filter is required.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- items: Specific item identifiers to archive\n- where_status: Archive entries currently in this state\n- older_than: Duration spec \u2014 '30d', '2w', '6m', '1y'. Compares against the entry's last activity timestamp.\n- reason: Free-form reason recorded on each archived entry\n",
+    "description": "Selectively archive entries within a sweep (soft-delete).\n\nArchived entries are excluded from `codesweep_next`, `codesweep_status`\ntotals, and default `codesweep_list_items`. They remain matchable by\n`codesweep_add` for recurrence detection \u2014 re-adding un-archives them\nwith `recurrence_count` carried forward (R5 invariant).\n\nAt least one filter is required.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- items: Specific item identifiers to archive. An EXPLICITLY EMPTY list selects nothing; passing it together with where_status or older_than is an ERROR, because those filters would then be silently ignored. Omit items entirely to archive by filter.\n- where_status: Archive entries currently in this state\n- older_than: Duration spec \u2014 '30d', '2w', '6m', '1y'. Compares against the entry's last activity timestamp.\n- reason: Free-form reason recorded on each archived entry\n",
     "inputSchema": {
       "properties": {
         "items": {
@@ -1375,7 +1375,7 @@
     "name": "codesweep_list"
   },
   {
-    "description": "List items in a sweep with optional filters.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- state: Filter to a specific state\n- tag: Filter to items having this tag\n- include_archived: Include archived entries alongside live ones\n- archived_only: Show only archived entries (overrides include_archived)\n- limit: Max number of entries to return\n",
+    "description": "List items in a sweep with optional filters.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- state: Filter to a specific state\n- tag: Filter to items having this tag\n- include_archived: Include archived entries alongside live ones\n- archived_only: Show only archived entries (overrides include_archived)\n- limit: Max number of entries to return. 0 means NO entries; omit it for no limit. A negative value is an error (it used to mean \"no limit\").\n",
     "inputSchema": {
       "properties": {
         "archived_only": {
