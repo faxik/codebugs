@@ -416,11 +416,25 @@ class TestMcpWireSchema:
            makes the row a decision rather than an accident: `markdown_sections`
            documents that it leaves a section byte-identical "whenever it is not
            an item list", so re-running it and finding the section still indented
-           is the production code itself certifying the exemption. Without this,
-           a golden that had gone stale — hand-edited, or written by an older
-           script — would keep the row looking legitimate while the live surface
-           had moved on. The check reads the golden's own text, so it does not
-           duplicate the normalizer's predicate and cannot drift from it.
+           is the production code itself certifying the exemption. The check
+           reads the golden's own text, so it does not duplicate the normalizer's
+           predicate and cannot drift from it.
+
+           BE HONEST ABOUT WHEN CONDITION 3 CAN ACTUALLY FIRE, because the first
+           draft of this docstring justified it with a scenario that cannot
+           happen. It claimed the condition guards against a STALE golden — but
+           `test_schema_matches_golden`, four methods up in this same class,
+           already refuses that, and measured over today's file all 83 golden
+           descriptions are fixed points of `normalize_description`, so condition
+           3 follows from condition 2 on every row that exists right now.
+           What makes it live is the state CB-164 newly admits: since the
+           snapshot registers through the production adapter, a tool that passes
+           its own `description=` reaches the golden UNNORMALIZED, and such a
+           description IS in the offender shape while the normalizer WOULD have
+           folded it (both measured). A row exempting that section would be
+           excusing a defect the normalizer was ready to fix, which is the one
+           thing an allowlist must never be allowed to do — so the row is refused
+           and the author is sent to stop passing `description=` instead.
         """
         by_name = {e["name"]: e["description"] for e in json.loads(self.GOLDEN.read_text())}
         stale = []

@@ -285,6 +285,20 @@ class TestTheNewLineNumberIsAnswered:
     So the tests here are written to fail on the NUMBER: each asserts a literal
     the fixture makes predictable, on a row whose state is asserted healthy first,
     so a degraded summary can never be mistaken for a passing one.
+
+    WHAT THIS CLASS DELIBERATELY DOES NOT ASSERT, so it is not re-litigated: the
+    CHANNEL. `loc.resolve_anchor` answers through reverse blame (A) or a content
+    search (B), and on these fixtures B produces the same number, so a dead
+    channel A leaves all three tests here green. That is correct rather than a
+    gap, for two measured reasons. The contract under test is the owner's — "the
+    new line is answered" — and both channels honour it, so asserting the channel
+    would make a legitimate reordering of the cascade fail a test about line
+    numbers. And channel A's liveness is already held, one class up: with
+    `_channel_a` stubbed to return `None`, five tests in this battery go red,
+    `TestAnOrdinaryGetSaysWhereTheCodeWent::test_a_card_whose_file_moved_reports_
+    the_new_path_with_no_arguments` among them — its fixture is a file MOVE, and
+    channel B searches the recorded path, so it structurally cannot answer
+    `moved_file`.
     """
 
     @staticmethod
@@ -300,9 +314,15 @@ class TestTheNewLineNumberIsAnswered:
         _git(root, "commit", "-qm", f"insert {n} lines above everything")
 
     @staticmethod
-    def _stored_line(conn, fid):
+    def _stored(conn, fid):
+        """The anchor object as CAPTURE wrote it, straight out of the column.
+
+        Read raw rather than through `get_finding`, because the whole question
+        here is whether the READ recomputed the coordinate or echoed the stored
+        one, and a helper that goes through the read path could not tell.
+        """
         row = conn.execute("SELECT meta FROM findings WHERE id = ?", (fid,)).fetchone()
-        return json.loads(row[0])["loc"]["line"]
+        return json.loads(row[0])["loc"]
 
     def test_a_line_pushed_down_by_an_edit_above_it_is_read_back_at_its_new_number(
         self, tracker
@@ -337,7 +357,7 @@ class TestTheNewLineNumberIsAnswered:
         assert anchor["end"] == 7
         # And the stored coordinate is untouched, which is what makes 7 an answer
         # this read PRODUCED rather than a value it echoed back.
-        assert self._stored_line(conn, fid) == 4
+        assert self._stored(conn, fid)["line"] == 4
 
     def test_each_row_of_a_page_gets_its_own_number_and_not_the_first_one(self, tracker):
         """`summarize_rows` is a BATCH — the per-tree context is built once for a
@@ -348,15 +368,15 @@ class TestTheNewLineNumberIsAnswered:
         """
         root, conn = tracker
         first, second = _anchored(conn, root, n=2)
-        assert self._stored_line(conn, first) != self._stored_line(conn, second)
+        assert self._stored(conn, first)["line"] != self._stored(conn, second)["line"]
         self._push_down(root, 5)
 
         page = findings.query_findings(conn, resolve_anchors=True, limit=100)
         by_id = {f["id"]: f["anchor"] for f in page["findings"]}
         assert by_id[first]["loc_status"] == "moved"
         assert by_id[second]["loc_status"] == "moved"
-        assert by_id[first]["line"] == self._stored_line(conn, first) + 5
-        assert by_id[second]["line"] == self._stored_line(conn, second) + 5
+        assert by_id[first]["line"] == self._stored(conn, first)["line"] + 5
+        assert by_id[second]["line"] == self._stored(conn, second)["line"] + 5
         assert by_id[first]["line"] != by_id[second]["line"]
 
     def test_a_resolved_coordinate_is_an_integer_whenever_the_status_names_one(
@@ -376,28 +396,55 @@ class TestTheNewLineNumberIsAnswered:
         reader who does not want to dig, and a hoist that quietly disagrees with
         what it hoisted is the same two-spellings-of-one-decision defect this
         battery's structural pin exists for, one level down.
+
+        THE SPAN ROW IS NOT DECORATION, and it is here because the first draft of
+        this test did not have it and was VACUOUS in exactly the way the class
+        docstring warns about. Every other fixture in this battery anchors ONE
+        line, so `line == end` on every row, so a `_summary` that SWAPPED the two
+        satisfies the pair assertion everywhere. Measured against that mutant
+        before the span row existed: 2441 passed, the whole suite green. One
+        three-line anchor is what makes the assertion able to fail.
         """
         root, conn = tracker
-        _anchored(conn, root, n=2)
+        first, second = _anchored(conn, root, n=2)
+        span = _file(
+            conn,
+            root,
+            meta={"line": "4-6"},
+            description="three consecutive lines are wrong here, so line and end cannot be equal",
+        )
+        assert self._stored(conn, span)["end"] > self._stored(conn, span)["line"], (
+            "precondition: the capture grammar must have read `4-6` as a SPAN — without a row "
+            "where line != end the pair assertion below cannot fail"
+        )
         _unanchored(conn, root, n=1)
         stripped = _anchored(conn, root)[0]
         _strip_key(conn, stripped)
         self._push_down(root, 2)
 
         page = findings.query_findings(conn, resolve_anchors=True, limit=100)
-        anchors = [f["anchor"] for f in page["findings"]]
-        located = [a for a in anchors if a["loc_status"] in ("current", "moved", "moved_file")]
-        # Non-vacuity, in the direction that matters: an empty list satisfies the
-        # loop below, and an empty list is precisely what a resolver that answers
-        # nothing produces.
-        assert len(located) == 2, anchors
-        for a in located:
+        by_id = {f["id"]: f["anchor"] for f in page["findings"]}
+        anchors = list(by_id.values())
+        located_ids = {
+            fid
+            for fid, a in by_id.items()
+            if a["loc_status"] in ("current", "moved", "moved_file")
+        }
+        # Non-vacuity, and by IDENTITY rather than by count: `len(located) == 3`
+        # would stay green if a future fixture row silently replaced one of these
+        # three, which is how a guard against emptiness rots into a guard against
+        # nothing.
+        assert located_ids == {first, second, span}, anchors
+        for a in (by_id[fid] for fid in located_ids):
             assert a["resolved"] is True
             # `bool` is an `int`, and `True` would otherwise pass for line 1.
             assert isinstance(a["line"], int) and not isinstance(a["line"], bool), a
             assert isinstance(a["end"], int) and not isinstance(a["end"], bool), a
             assert 1 <= a["line"] <= a["end"], a
             assert (a["line"], a["end"]) == (a["resolution"]["line"], a["resolution"]["end"]), a
+        # And the span really did stay a span across the move, at the literal
+        # coordinates the fixture makes predictable: 4-6 pushed down by 2.
+        assert (by_id[span]["line"], by_id[span]["end"]) == (6, 8), by_id[span]
 
 
 # --- 2. the cost, in BOTH directions --------------------------------------------------
