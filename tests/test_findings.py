@@ -3587,6 +3587,54 @@ class TestGroupingAxes:
         assert {g["group_key"]: g["count"] for g in result["groups"]} == {"a": 1}
         assert result["population"] == 1
 
+    def test_both_axes_survive_every_filter_at_once(self, conn):
+        """PARAMETER ORDER, which only a FILTERED query can test.
+
+        The meta branch splices its bound path around the caller's WHERE values
+        — two placeholders before them, one after — and this file already
+        records what happens when such a splice is done as a block instead: the
+        values bind to the wrong placeholders and *filtered* queries are
+        corrupted while every unfiltered test keeps passing (CB-20, the
+        severity-rank CASE). The control below is the same filter set with no
+        axis: the grouped population must equal it, or the grouping path is
+        selecting a different set of rows than the caller asked for."""
+        findings.add_finding(
+            conn,
+            severity="critical",
+            category="perf",
+            file="target.py",
+            description="d1",
+            finding_id="CB-1",
+            tags=["x", "y"],
+            meta={"k": "v", "other": 1},
+            source="ruff",
+            reported_at_commit="abc123",
+            reported_at_ref="v1",
+        )
+        self._file(conn, "CB-2", tags=["x"], meta={"k": "w"})
+        self._file(conn, "CB-3", tags=["x"], meta={"k": "v"}, severity="critical")
+        filters = dict(
+            ids=["CB-1", "CB-2", "CB-3"],
+            status="open",
+            severity="critical",
+            category="perf",
+            file="target",
+            source="ruff",
+            tag="x",
+            meta_key="other",
+            commit="abc",
+            ref="v1",
+        )
+        control = findings.query_findings(conn, **filters)
+        assert [f["id"] for f in control["findings"]] == ["CB-1"]
+        by_meta = findings.query_findings(conn, group_by="meta:k", **filters)
+        assert by_meta["population"] == control["total"]
+        assert [dict(g) for g in by_meta["groups"]] == [{"group_key": "v", "count": 1}]
+        by_tag = findings.query_findings(conn, group_by="tag", **filters)
+        assert by_tag["population"] == control["total"]
+        assert {g["group_key"] for g in by_tag["groups"]} == {"x", "y"}
+        assert by_tag["multi_group_rows"] == 1
+
     def test_a_row_whose_tags_do_not_parse_is_ungrouped_not_fatal(self, conn):
         """PREMISE PIN, not a feature. `json_each` RAISES on malformed JSON, so
         one hand-edited row could abort the whole report; the guard has to be

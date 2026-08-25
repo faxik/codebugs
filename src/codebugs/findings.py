@@ -2784,8 +2784,11 @@ def _membership_sql(
         )
 
     # axis.kind == "meta". The path is BOUND, never interpolated, so a key
-    # holding a space cannot reach the SQL text as syntax — and no `# noqa: S608`
-    # is owed for it either.
+    # holding a space cannot reach the SQL text as syntax — and no S608
+    # suppression is owed for it either, unlike the interpolated-identifier
+    # sites elsewhere in this file. (Spelled as the bare rule code on purpose:
+    # ruff parses a suppression directive out of ANY comment, prose included,
+    # and warns that this one is malformed.)
     #
     # A GROUP KEY IS ALWAYS TEXT, and this is the only axis that could have made
     # it otherwise — a column key is text and a tag is filtered to `type='text'`.
