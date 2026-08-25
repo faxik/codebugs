@@ -1191,6 +1191,83 @@ def _db_path(project_dir: str | None = None) -> str:
     return _resolve_db(project_dir)[0]
 
 
+# `os.access` authorizes with REAL credentials by default; EFFECTIVE ones are
+# what actually decide a write, exactly the distinction `fsio.py`'s own
+# `_ACCESS_KW` documents ("a false refusal is worse than the bug being
+# fixed"). Not imported from there — that module's contract is to import
+# nothing from this package — so the three-line idiom is reproduced rather
+# than coupled to.
+_ACCESS_KW: dict[str, bool] = (
+    {"effective_ids": True} if os.access in os.supports_effective_ids else {}
+)
+
+
+def _writable_probe(path: str) -> bool | None:
+    """Advisory tri-state: is an EXISTING `path` probably writable? (CB-100)
+
+    Never call this for a path that has not already been confirmed to exist
+    — `os.access` on a missing path returns False for an unrelated reason
+    ("not there"), which would collide with the CB-23 "no database there
+    yet" case `describe_root` already reports through `exists`, and would
+    print two different sentences about the same absence.
+
+    TWO checks, not one, and the second was earned by measurement rather
+    than caution. `os.access` on a FILE consults only the file's own
+    permission bits — it says nothing about the DIRECTORY holding it.
+    Measured (a throwaway tracker, outside this repository): with
+    `.codebugs/` at `chmod 555` and `findings.db` left at `0644`,
+    `os.access(findings.db, W_OK, effective_ids=True)` reports True while
+    every verb genuinely refuses with `attempt to write a readonly
+    database` — sqlite needs to create a `-wal`/`-journal` sibling in the
+    directory, which the directory's own bit forbids regardless of the
+    file's. A file-only check would silently miss exactly the one of the
+    three reproduced CB-100 states that decides the answer: it would check
+    something, but not the thing sqlite actually consults. The other two
+    reproduced states (`chmod 000`/`chmod 444` on the file itself) are
+    caught by the file check alone — also measured, on the same tracker.
+
+    THE REJECTED ALTERNATIVE, and why, because the choice was a measurement,
+    not a preference (CB-100 §4). The obvious "authoritative" candidate is a
+    real probe through `_open` — the same code every verb uses, so a
+    positive answer would be a FACT rather than advice. Measured instead of
+    assumed: on an up-to-date tracker `_open`, called with `create=False`,
+    leaves the main database file byte-identical (same sha256, same inode) once the
+    connection closes — so it does not persist a mutation on the ordinary
+    path — but it is a REAL BEGIN-IMMEDIATE-shaped write attempt, and under
+    ordinary, healthy contention (another verb mid-transaction) it BLOCKS
+    for the full `busy_timeout=5000` and then raises `OperationalError:
+    database is locked` — measured, 5.005s. A diagnostic that can hang a
+    `codebugs where` call, or the MCP startup preflight, for five seconds
+    under completely normal concurrent use is worse than the false-positive
+    risk this function accepts, and it also creates transient `-wal`/`-shm`
+    files for the live of the connection — "creates files" is a real cost
+    even where the content ends up unchanged. `_open` is rejected on both
+    counts; this advisory probe is the chosen mechanism.
+
+    Returns True when NEITHER check found a reason to refuse — "not
+    provably unwritable", never "will succeed": this is check-then-act like
+    every `os.access` use, and the permission it reports can be revoked
+    before the next statement runs. `describe_root`'s callers never print
+    this value for exactly that reason — see `describe_root`. Returns False
+    when either check found a reason to refuse: a NEGATIVE `os.access`
+    answer cannot be revoked into a false one the way a positive one can
+    (a right can be pulled between check and use; one can rarely be
+    granted), which is why it is the value worth printing. Returns None
+    when the probe itself could not be run — `os.access` raised, for a
+    reason unrelated to permissions — and None must never collapse into
+    either True or False, or "could not look" reads as either a clean bill
+    of health or a false alarm, the "guard reporting clean because it could
+    not look" shape this direction exists to close.
+    """
+    try:
+        directory = os.path.dirname(path)
+        file_ok = os.access(path, os.W_OK, **_ACCESS_KW)
+        dir_ok = os.access(directory, os.W_OK, **_ACCESS_KW)
+        return file_ok and dir_ok
+    except OSError:
+        return None
+
+
 def describe_root() -> dict[str, Any]:
     """Report where this process is bound and which channel decided it.
 
@@ -1201,6 +1278,22 @@ def describe_root() -> dict[str, Any]:
 
     One resolver, two consumers, so the diagnostic and the server can never
     disagree about where the process is pointed.
+
+    `writable` (CB-100) is a SEPARATE key, deliberately never folded into
+    `exists` — this module's own convention is that resolving is not the
+    same as being there (CB-23), and a third meaning on `exists` would
+    repeat that exact conflation. It is `None` whenever `exists` is not
+    `True`: writability of a file that is not there is not a question this
+    function answers, and computing it only when `exists` keeps the CB-23
+    "no database there yet" line the one thing said about that state,
+    rather than risking a second, colliding line. See `_writable_probe` for
+    the tri-state and the mechanism measurement behind it. Callers print
+    this value ONLY when it is `False` — never when `True`, because
+    `os.access` is check-then-act and a diagnostic that says "writable" and
+    is then refused is the same class of disagreement CB-100 exists to
+    close, merely inverted; and never when `None`, because silence is what
+    "could not determine" must look like here, for the same reason `exists`
+    silence must never mean "healthy".
     """
     declared, source = declared_tracker_root()
     try:
@@ -1216,6 +1309,7 @@ def describe_root() -> dict[str, Any]:
             "path": None,
             "exists": False,
             "error": str(e),
+            "writable": None,
         }
     # `path` is always `<root>/<DB_DIR>/<DB_FILE>`, so the root is recoverable
     # without walking again — and cannot disagree with the path we just resolved.
@@ -1226,13 +1320,15 @@ def describe_root() -> dict[str, Any]:
     # diagnostic prints a path that is not there and calls it healthy — which is
     # exactly the CB-13 misbinding's shape, where the wrong root is a stray
     # directory. A binding you cannot see is a binding you cannot debug (CB-11).
+    exists = os.path.isfile(path)
     return {
         "root": os.path.dirname(os.path.dirname(path)),
         "source": source,
         "source_label": SOURCE_LABELS[source],
         "path": path,
-        "exists": os.path.isfile(path),
+        "exists": exists,
         "error": None,
+        "writable": _writable_probe(path) if exists else None,
     }
 
 

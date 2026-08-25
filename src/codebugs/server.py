@@ -313,6 +313,19 @@ def _preflight() -> None:
             f"codebugs-mcp: tracker root {info['root']} (from {info['source_label']})",
             file=sys.stderr,
         )
+    if info["writable"] is False:
+        # CB-100: this is the moment that matters most — before this, an
+        # unwritable tracker looked healthy at startup and then failed every
+        # tool call forever, with no single moment naming why (CB-11's failure
+        # mode, arriving through a new door). Advisory (os.access is
+        # check-then-act), so worded to investigate rather than declare, and
+        # silent on True/None on purpose — see db.describe_root's docstring.
+        print(
+            f"codebugs-mcp: {info['path']} may not be writable — check "
+            f"permissions on the file and its .codebugs/ directory; "
+            f"`codebugs where` shows the current binding",
+            file=sys.stderr,
+        )
 
 
 SERVER_NAMES = {

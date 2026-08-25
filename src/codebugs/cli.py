@@ -123,6 +123,17 @@ def _cmd_where(args: argparse.Namespace) -> None:
         # it. Saying so is the whole job here: otherwise `where` reports a path
         # that is not there as if it were the project's tracker (CB-23).
         print("          (no database there yet — the next command creates one)")
+    elif info["writable"] is False:
+        # CB-100: an unwritable tracker used to look identical to a healthy one
+        # here, while every verb refused it. `writable` is advisory (os.access
+        # is check-then-act), so this is worded as a warning to investigate, not
+        # a verdict — and it is silent on True/None, on purpose: see
+        # db.describe_root's docstring for why only the negative answer prints.
+        print(
+            "          (may not be writable — check permissions on the file "
+            "and its .codebugs/ directory)",
+            file=sys.stderr,
+        )
 
 
 def _register_builtins(sub, commands: dict) -> None:

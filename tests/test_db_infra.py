@@ -955,6 +955,97 @@ class TestDescribeRoot:
             os.chdir(original)
 
 
+class TestWritabilityProbe:
+    """CB-100: `describe_root()['writable']` — advisory, tri-state, silence-shaped.
+
+    The owner reproduced three states by hand, outside this repository, before
+    this unit existed: `chmod 000` on `findings.db`, `chmod 444` on the same
+    file, and `chmod 555` on the `.codebugs/` DIRECTORY. In every one,
+    `codebugs where` printed a clean binding (rc=0, no warning) while every
+    verb refused with a precise "for writing" message — the diagnostic and the
+    thing it diagnoses disagreeing. These three tests pin that fix; the fourth
+    (directory) is the one that actually decides the mechanism, because
+    `os.access` on the FILE alone cannot see it.
+    """
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
+    def test_chmod_000_file_is_reported_unwritable(self, tmp_path, monkeypatch):
+        db.init_project(str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        findings_path = tmp_path / ".codebugs" / "findings.db"
+        findings_path.chmod(0o000)
+        try:
+            info = db.describe_root()
+            assert info["exists"] is True
+            assert info["writable"] is False
+        finally:
+            findings_path.chmod(0o644)
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
+    def test_chmod_444_file_is_reported_unwritable(self, tmp_path, monkeypatch):
+        db.init_project(str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        findings_path = tmp_path / ".codebugs" / "findings.db"
+        findings_path.chmod(0o444)
+        try:
+            info = db.describe_root()
+            assert info["writable"] is False
+        finally:
+            findings_path.chmod(0o644)
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
+    def test_chmod_555_directory_is_reported_unwritable(self, tmp_path, monkeypatch):
+        """The state that decides the mechanism. The FILE's own bits are
+        untouched (still 0644) — only the DIRECTORY refuses — and sqlite still
+        fails every write with "attempt to write a readonly database"
+        (measured, outside this repository). A file-only `os.access` check
+        reports True here, a false positive; the directory check catches it.
+        """
+        db.init_project(str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        codebugs_dir = tmp_path / ".codebugs"
+        codebugs_dir.chmod(0o555)
+        try:
+            info = db.describe_root()
+            assert info["writable"] is False
+        finally:
+            codebugs_dir.chmod(0o755)
+
+    def test_a_writable_tracker_with_real_rows_is_reported_writable(self, tmp_path, monkeypatch):
+        """Half the oracle, and the half most likely to go vacuously green: a
+        healthy, NONEMPTY tracker must still read as writable (CB-100 §7 — an
+        empty tracker would pass this trivially and prove nothing).
+        """
+        db.init_project(str(tmp_path))
+        conn = db.connect(str(tmp_path))
+        findings.add_finding(
+            conn, severity="low", category="x", file="f.py", description="d", new_category=True
+        )
+        conn.close()
+        monkeypatch.chdir(tmp_path)
+        info = db.describe_root()
+        assert info["exists"] is True
+        assert info["writable"] is True
+
+    def test_writable_is_none_when_the_database_does_not_exist_yet(self, tmp_path, monkeypatch):
+        """The CB-23 'not there yet' state must not grow a second, colliding
+        writability line — `writable` stays None (not True, not False) when
+        `exists` is False, so `where`/preflight print only the existing note.
+        """
+        repo = tmp_path / "repo"
+        (repo / ".codebugs").mkdir(parents=True)
+        monkeypatch.chdir(repo)
+        info = db.describe_root()
+        assert info["exists"] is False
+        assert info["writable"] is None
+
+    def test_writable_is_none_on_the_error_branch(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        info = db.describe_root()
+        assert info["error"] is not None
+        assert info["writable"] is None
+
+
 class TestOpenCallSitesRatchet:
     """`_open` is the only door to a live connection. Guard how many hold a key.
 
@@ -1021,6 +1112,65 @@ class TestWhereCommand:
         db.init_project(str(tmp_path))
         proc = self._where(tmp_path)
         assert "no database there yet" not in proc.stdout
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
+    def test_warns_when_the_file_is_unwritable(self, tmp_path):
+        """CB-100: the diagnostic and the thing it diagnoses must agree.
+
+        Before this fix `where` printed a clean binding for every one of the
+        three states the owner reproduced, while `stats` on the same tracker
+        refused with a precise "for writing" message.
+        """
+        db.init_project(str(tmp_path))
+        findings_path = tmp_path / ".codebugs" / "findings.db"
+        findings_path.chmod(0o000)
+        try:
+            proc = self._where(tmp_path)
+        finally:
+            findings_path.chmod(0o644)
+        assert proc.returncode == 0, proc.stderr
+        assert "may not be writable" in proc.stderr
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
+    def test_warns_when_the_directory_is_unwritable(self, tmp_path):
+        """The state that decides the mechanism — see TestWritabilityProbe:
+        the FILE's own bits stay writable-looking, only the DIRECTORY refuses.
+        """
+        db.init_project(str(tmp_path))
+        codebugs_dir = tmp_path / ".codebugs"
+        codebugs_dir.chmod(0o555)
+        try:
+            proc = self._where(tmp_path)
+        finally:
+            codebugs_dir.chmod(0o755)
+        assert proc.returncode == 0, proc.stderr
+        assert "may not be writable" in proc.stderr
+
+    def test_is_quiet_about_writability_on_a_nonempty_writable_tracker(self, tmp_path):
+        """Half the oracle, and the one most likely to pass vacuously: a
+        healthy, NONEMPTY tracker (CB-100 §7 — an empty one proves nothing)
+        must still print no writability warning at all.
+        """
+        db.init_project(str(tmp_path))
+        conn = db.connect(str(tmp_path))
+        findings.add_finding(
+            conn, severity="low", category="x", file="f.py", description="d", new_category=True
+        )
+        conn.close()
+        proc = self._where(tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        assert "may not be writable" not in proc.stdout + proc.stderr
+
+    def test_the_no_database_yet_line_does_not_grow_a_second_writability_line(self, tmp_path):
+        """The CB-23 note must neither disappear nor be joined by a second,
+        colliding line about writability (CB-100 §7).
+        """
+        repo = tmp_path / "repo"
+        (repo / ".codebugs").mkdir(parents=True)
+        proc = self._where(repo)
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.count("no database there yet") == 1
+        assert "may not be writable" not in proc.stdout + proc.stderr
 
     def test_names_the_env_channel(self, tmp_path):
         declared = _tracker(tmp_path, "declared")
