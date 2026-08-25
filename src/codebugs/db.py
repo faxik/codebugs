@@ -1421,6 +1421,7 @@ def _ensure_modules_loaded() -> None:
             reqs,
             similarity,
             sweep,
+            usage,
         )
 
         _modules_loaded = True

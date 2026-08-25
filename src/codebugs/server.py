@@ -5,15 +5,16 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import time
 from collections.abc import Mapping
 from contextlib import contextmanager
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 from mcp.shared.exceptions import MCPError
-from mcp_types import INVALID_PARAMS
+from mcp_types import INVALID_PARAMS, CallToolResult
 
-from codebugs import db
+from codebugs import db, usage
 
 
 def dedent_docstring(doc: str) -> str:
@@ -275,6 +276,145 @@ def install_strict_arguments(server: MCPServer) -> None:
     server.middleware.append(reject_unknown_arguments)
 
 
+def install_usage_tracking(server: MCPServer, conn_factory: db.ConnFactory) -> None:
+    """Record every `tools/call` this server completes, for `codebugs usage` (release-b, DIR-1).
+
+    THE SDK COUPLING LIVES HERE, BESIDE `install_strict_arguments` — same reason
+    as that function's own docstring: `MCPServer.middleware` is public but its
+    signature is documented as provisional, and this file is already the one
+    place that touches it, so a second seam anywhere else would let the two
+    middlewares drift apart on what the SDK actually hands them.
+
+    WHAT `call_next` ACTUALLY RETURNS FOR A TOOL-BODY FAILURE — the finding that
+    matters most here, verified by reading `mcp.server.mcpserver.server` rather
+    than assumed. `_handle_call_tool` catches every domain exception a tool
+    function raises (everything except `MCPError`) BEFORE it ever reaches a
+    middleware, and returns a normal `CallToolResult(is_error=True, ...)` — not
+    a raised exception. So a `ValueError` from, say, `findings.update_finding`
+    is invisible to `except Exception` here; it can only be seen by matching the
+    RETURNED shape, exactly as the SDK's own `OpenTelemetryMiddleware`
+    (`mcp/server/_otel.py`) does with `case CallToolResult(is_error=True) |
+    {"isError": True}`. Because that swallow already discards the original
+    exception's class (only `str(e)` survives, folded into text content this
+    module must not store — see below), a call caught this way is recorded with
+    the fixed marker `"ToolError"` rather than a guessed class name. A TRUE
+    exception escaping to this middleware (an `MCPError`, or the strict-argument
+    middleware's own refusal if it runs OUTER of this one — see the ordering
+    note below) is recorded with its REAL class name, then re-raised unchanged:
+    recording is never allowed to be the reason a caller's exception changes
+    shape or vanishes.
+
+    ERROR_TYPE IS A CLASS NAME, NEVER THE MESSAGE. `str(e)` can carry the
+    caller's own data (a category name, an id, a whole file path) and can be
+    arbitrarily long; `type(e).__name__` answers "what kind of thing broke"
+    without disclosing any of it. See `usage.py`'s module docstring for the
+    same rule stated from the storage side.
+
+    ORDERING, AND THE COMPOSITION THIS PROJECT'S OWN CLAUDE.md CALLS OUT: this
+    is registered in `main()` AFTER `install_strict_arguments`, so on
+    `server.middleware` (outermost-first, per `MCPServer.middleware`'s own
+    docstring) strict-arguments sits OUTER and this sits INNER. `reject_unknown_arguments`
+    raises `MCPError` BEFORE ever calling ITS OWN `call_next` when an argument
+    name is unknown — so this middleware's `__call__` is never invoked at all
+    for such a call, and a refused-for-bad-arguments call is NOT counted here.
+    That is a conscious choice: `tool_calls` aims to describe what a TOOL's own
+    logic does (how often it runs, how often IT fails, how long it takes), and
+    a client's argument-name typo never reaches the tool body — it is a
+    protocol-level rejection identical in shape for every tool, and folding it
+    into a specific tool's failure count would attribute a client mistake to
+    that tool's own health. `tests/test_server.py`'s
+    `TestUsageAndStrictArgumentsComposition` drives both middlewares together
+    and pins this: an unknown-argument call raises MCPError as before AND
+    leaves `tool_calls` untouched.
+
+    RULE 1 — RECORDING NEVER FAILS THE CALL. The write happens through
+    `_record`, below, which swallows every exception `conn_factory()` or
+    `usage.record_call` can raise.
+    RULE 2 — NO SILENT SWALLOW (CB-15's own rule, applied to this module's own
+    failure mode). A recording failure prints one line to stderr — the one
+    channel every MCP client logs (see `_preflight`'s docstring for the same
+    reasoning) — naming the tool and the failure; it never appears in a tool's
+    OWN response, because the caller's response is not this middleware's to
+    rewrite.
+    RULE 3 — THE CONNECTION COMES FROM THE SERVER'S OWN `conn_factory`, THE
+    SAME ONE EVERY TOOL USES (`server.py`'s `_conn`), never a second,
+    independently-resolved connection. Tracker-root resolution is a heuristic
+    with several declaration channels (CLAUDE.md's Database section); a second
+    resolution path could silently write this table to a DIFFERENT tracker than
+    the one the counted tool call used — the CB-8 class of bug — and this
+    project's own `.claude/plans/L3-BRIEF-DIR-1-release-b-tool-call-usage.md`
+    §2(2.3) names that risk explicitly. The connection the tool itself opened
+    is already closed by the time this middleware runs (each tool body does
+    `with conn_factory() as conn: ...` and exits that block before returning),
+    so this necessarily opens its OWN connection — but through the identical
+    factory, which is what keeps it pointed at the same tracker.
+    """
+
+    async def record_tool_usage(ctx: Any, call_next: Any) -> Any:
+        if ctx.method != "tools/call" or not isinstance(ctx.params, Mapping):
+            return await call_next(ctx)
+        name = ctx.params.get("name")
+        if not isinstance(name, str):
+            return await call_next(ctx)
+
+        start = time.perf_counter()
+        try:
+            result = await call_next(ctx)
+        except Exception as exc:
+            duration_ms = (time.perf_counter() - start) * 1000
+            _record(
+                conn_factory,
+                tool_name=name,
+                success=False,
+                error_type=type(exc).__name__,
+                duration_ms=duration_ms,
+            )
+            raise
+        duration_ms = (time.perf_counter() - start) * 1000
+
+        match result:
+            case CallToolResult(is_error=True) | {"isError": True}:
+                is_error = True
+            case _:
+                is_error = False
+        _record(
+            conn_factory,
+            tool_name=name,
+            success=not is_error,
+            error_type="ToolError" if is_error else None,
+            duration_ms=duration_ms,
+        )
+        return result
+
+    server.middleware.append(record_tool_usage)
+
+
+def _record(
+    conn_factory: db.ConnFactory,
+    *,
+    tool_name: str,
+    success: bool,
+    error_type: str | None,
+    duration_ms: float,
+) -> None:
+    """The one write this module performs — see rules 1-3 on `install_usage_tracking`."""
+    try:
+        with conn_factory() as conn:
+            usage.record_call(
+                conn,
+                tool_name=tool_name,
+                success=success,
+                error_type=error_type,
+                duration_ms=duration_ms,
+            )
+    except Exception as exc:
+        print(
+            f"codebugs-mcp: failed to record tool-call usage for {tool_name!r}: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+
+
 def _preflight() -> None:
     """Say once, on stderr, when this server's tracker binding is broken or unusual.
 
@@ -399,6 +539,12 @@ def main():
 
     # After registration, so the middleware sees the full tool catalogue.
     install_strict_arguments(server)
+    # AFTER strict-arguments: on `server.middleware` (outermost-first) that
+    # makes strict-arguments OUTER and usage tracking INNER, so an
+    # unknown-argument refusal never reaches this middleware at all — a
+    # deliberate choice, not an accident of call order. See
+    # `install_usage_tracking`'s docstring for why.
+    install_usage_tracking(server, _conn)
 
     server.run()
 
