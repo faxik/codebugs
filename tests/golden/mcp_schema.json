@@ -2709,7 +2709,7 @@
     "name": "reqs_add"
   },
   {
-    "description": "Store embeddings for multiple requirements at once.\n\nArgs:\n\n- embeddings: Dict mapping requirement ID to float vector\n",
+    "description": "Store embeddings for multiple requirements at once.\n\nSame preconditions as reqs_embed: you compute the vectors yourself and\npass finished numbers, the requirement text never reaches this tool,\nand codebugs stores them locally and sends them nowhere.\n\nEvery vector in one call must have the same number of components as\nevery other vector in the call AND as the vectors already stored in\nthis tracker; empty vectors, non-numbers, NaN and infinity are refused.\nThe self-consistency rule is a separate one: in an empty tracker there\nis nothing to compare against, so without it a single call could create\nthe mixed state the rules exist to prevent.\n\nArgs:\n\n- embeddings: Dict mapping requirement ID to float vector\n",
     "inputSchema": {
       "properties": {
         "embeddings": {
@@ -2732,7 +2732,7 @@
     "name": "reqs_batch_embed"
   },
   {
-    "description": "Store an embedding vector for a requirement.\n\nThe caller generates the embedding (e.g. via an embedding API).\nEnables semantic search across requirements via reqs_search_similar.\n\nArgs:\n\n- req_id: Requirement ID\n- embedding: Float vector (any dimensionality)\n",
+    "description": "Store an embedding vector for a requirement.\n\nYOU compute the embedding, in your own process, and pass the finished\nnumbers here. This tool never receives the requirement's text. codebugs\nstores the vector in its own local SQLite file and sends it nowhere \u2014\nno module of this package imports a network capability at all, which is\nenforced by a test rather than merely asserted here. (Scope, stated\nprecisely: that is a claim about this package's own code and about the\nroute your vector takes. The MCP transport itself is a separate layer.)\n\nBecause there is no embedding provider inside codebugs, nothing here\nknows the \"right\" dimensionality \u2014 it is whatever the first stored\nvector had. So the vector is refused if it is empty, contains a\nnon-number, contains NaN or infinity, or has a different number of\ncomponents than the vectors already stored in this tracker. Each of\nthose would otherwise break reqs_search_similar: a mismatched width\nmakes it unable to score the other rows, and a NaN makes a row drop out\nof every result with no error at all.\n\nOnce a tracker holds vectors of one width you cannot switch embedding\nmodel: there is no clear-and-re-embed operation in this package.\nreqs_embedding_stats reports which widths are actually present.\n\nArgs:\n\n- req_id: Requirement ID\n- embedding: Float vector. Any dimensionality, but the SAME one for every requirement in a given tracker.\n",
     "inputSchema": {
       "properties": {
         "embedding": {
@@ -2757,7 +2757,7 @@
     "name": "reqs_embed"
   },
   {
-    "description": "Report on embedding coverage --- how many requirements have embeddings.",
+    "description": "Report on embedding coverage --- how many requirements have embeddings.\n\nThis tool takes no input at all, so it is not a privacy surface and\ncarries no precondition block of its own; that is said explicitly\nrather than left as an omission a reader has to interpret.\n\nBeyond coverage it reports `dimensions` --- which vector widths this\ntracker actually holds, and how many rows each --- plus `mixed`, true\nwhen there is more than one. That is the channel for noticing a tracker\nthat received vectors from two different embedding models:\nreqs_search_similar silently excludes rows of a width other than your\nquery's, and being able to see the split here is what keeps that from\nlooking like \"nothing is similar\". Both keys are always present; an\nempty `dimensions` list means no vectors are stored, never that the\ncheck did not run.\n",
     "inputSchema": {
       "properties": {},
       "title": "reqs_embedding_statsArguments",
@@ -2931,7 +2931,7 @@
     "name": "reqs_query"
   },
   {
-    "description": "Find requirements semantically similar to a query.\n\nPass a query embedding (from the same model used to embed requirements).\nReturns requirements ranked by cosine similarity.\n\nArgs:\n\n- query_embedding: Query vector\n- limit: Max results (default 10)\n- min_similarity: Minimum cosine similarity (default 0.3)\n- status: Optional status filter\n",
+    "description": "Find requirements semantically similar to a query.\n\nPass a query embedding (from the same model used to embed requirements).\nYou compute it yourself; no text is sent anywhere by this tool, and the\nquery vector is not stored.\n\nRequirements whose stored vector has a different number of components\nthan your query are EXCLUDED from the search rather than compared, so\none foreign vector can no longer make the whole search fail. That also\nmeans they are invisible here: if you get fewer results than you\nexpect, call reqs_embedding_stats, which reports which widths this\ntracker holds. A query vector that is empty or contains NaN or infinity\nis refused, because it would match nothing and return an empty list\nindistinguishable from an empty tracker.\n\nReturns requirements ranked by cosine similarity.\n\nArgs:\n\n- query_embedding: Query vector\n- limit: Max results (default 10)\n- min_similarity: Minimum cosine similarity (default 0.3)\n- status: Optional status filter\n",
     "inputSchema": {
       "properties": {
         "limit": {
