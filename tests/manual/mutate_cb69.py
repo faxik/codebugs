@@ -5,13 +5,23 @@ must be verified to have LANDED (an unmatched replace is a vacuous row), must
 COMPILE before the suite runs (a duplicate keyword argument parses under ast.parse
 and fails only at compile time), and must be restored in a finally.
 
+CB-173: before any of that, `mutation_guard.require_clean_tree` checks that every
+file this harness is about to overwrite has no uncommitted changes — this harness
+has destroyed uncommitted work on those files by overwriting and later restoring
+the WRONG "original". Pass --allow-dirty (or set
+CODEBUGS_MUTATION_ALLOW_DIRTY=1) to run anyway.
+
 Run:  uv run --extra dev python tests/manual/mutate_cb69.py
 """
 from __future__ import annotations
 
+import argparse
+import os
 import pathlib
 import subprocess
 import sys
+
+from mutation_guard import require_clean_tree
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 SRC = ROOT / "src" / "codebugs"
@@ -128,6 +138,21 @@ def run(label, path, old, new, targets):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="skip the clean-tree check (CB-173) and mutate even with uncommitted "
+        "changes to a target file",
+    )
+    args = parser.parse_args()
+    allow_dirty = args.allow_dirty or os.environ.get("CODEBUGS_MUTATION_ALLOW_DIRTY") == "1"
+    require_clean_tree(
+        sorted({str(path) for _label, path, _old, _new, _targets in MUTATIONS}),
+        cwd=ROOT,
+        allow_dirty=allow_dirty,
+    )
+
     print(f"interpreter: {sys.executable}\n")
     results = [run(*m) for m in MUTATIONS]
     for label, verdict, detail in results:
