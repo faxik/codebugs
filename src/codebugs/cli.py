@@ -193,6 +193,12 @@ def build_parser(mode: str = "all", pre_parser: argparse.ArgumentParser | None =
         description="codebugs — AI-native code finding & requirements tracker",
         prog="codebugs",
         parents=[pre_parser],
+        epilog=(
+            "Getting started: `codebugs init` creates a tracker in this directory; "
+            "`codebugs add -s <severity> -c <category> -f <file> -d <description>` "
+            "files your first finding; `codebugs query` or `codebugs recent` shows "
+            "what is already in the queue."
+        ),
     )
     sub = parser.add_subparsers(dest="command")
     commands: dict = {}
