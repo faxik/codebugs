@@ -30,6 +30,7 @@ GUARD_PATH = MANUAL_DIR / "mutation_guard.py"
 HARNESS_PATH = MANUAL_DIR / "mutate_cb69.py"
 
 sys.path.insert(0, str(MANUAL_DIR))
+import mutation_guard  # noqa: E402
 from mutation_guard import DirtyTreeError, require_clean_tree  # noqa: E402
 
 
@@ -115,6 +116,28 @@ class TestRequireCleanTree:
         with pytest.raises(DirtyTreeError):
             require_clean_tree([target], cwd=not_a_repo)
 
+    def test_subprocess_timeout_refuses(self, git_repo, monkeypatch):
+        """`subprocess.SubprocessError` (e.g. a `git` call that times out) is
+        NOT a subclass of `OSError` (CB-79 in CLAUDE.md), so it must be
+        caught in its own arm and must also read as dirty. Until now no
+        test exercised this branch at all — every existing failure case
+        (missing git, non-executable git, non-zero exit) raises through
+        `OSError` or a plain return code, never through
+        `subprocess.SubprocessError` — so a mutant dropping it from the
+        `except (OSError, subprocess.SubprocessError)` tuple survived.
+        Injecting a real 30-second `git status` timeout would make this
+        test itself take 30 seconds; monkeypatching `subprocess.run` to
+        raise `TimeoutExpired` exercises the exact same except arm without
+        the wait."""
+        repo, target, _other = git_repo
+
+        def _raise_timeout(*_args, **_kwargs):
+            raise subprocess.TimeoutExpired(cmd=["git", "status"], timeout=30)
+
+        monkeypatch.setattr(mutation_guard.subprocess, "run", _raise_timeout)
+        with pytest.raises(DirtyTreeError):
+            require_clean_tree([target], cwd=repo)
+
 
 class TestComposedHarnessRefusesWithoutWriting:
     """A harness invoked with a dirty mutation target must not touch that
@@ -132,8 +155,8 @@ class TestComposedHarnessRefusesWithoutWriting:
         shutil.copy(HARNESS_PATH, repo / "tests" / "manual" / "mutate_cb69.py")
         # Minimal stand-ins for the files mutate_cb69.py names as mutation
         # targets, so the guard has real, tracked files to check. Their
-        # content does not matter: the guard must refuse before the harness
-        # ever reads them for mutation.
+        # content does not matter for findings.py/reqs.py: the guard must
+        # refuse before the harness ever reads any of them for mutation.
         for name in ("findings.py", "blockers.py", "reqs.py"):
             (repo / "src" / "codebugs" / name).write_text(f"# {name}\n")
         _git("init", "-q", cwd=repo)
@@ -142,9 +165,42 @@ class TestComposedHarnessRefusesWithoutWriting:
         _git("add", "-A", cwd=repo)
         _git("commit", "-q", "-m", "initial", cwd=repo)
 
+        # blockers.py's dirtied (uncommitted) content deliberately carries
+        # mutate_cb69.py's own M2 pattern verbatim (the exact `old` string of
+        # its "M2 counts are NOT restricted to the returned ids" mutation).
+        # Without a real pattern here every mutation in MUTATIONS reports
+        # "NOT-APPLIED" regardless of the guard's placement, so `run()` never
+        # calls `path.write_text()` at all and the test cannot tell "the
+        # guard refused before writing" apart from "there was never anything
+        # to write" — CB-173's correction found the assertion below passed
+        # even with the guard call moved to AFTER the mutation loop, for
+        # exactly this reason.
         target = repo / "src" / "codebugs" / "blockers.py"
-        target.write_text("# blockers.py\n# dirtied by the test, uncommitted\n")
+        target.write_text(
+            "# blockers.py\n"
+            "# dirtied by the test, uncommitted\n"
+            "def deferred_ids_and_counts(conn, kind, *, id=None, ids=None):\n"
+            "    restricted = []\n"
+            "    counts = {}\n"
+            "    return restricted, {i: counts[i] for i in restricted}\n"
+        )
         dirty_bytes = target.read_bytes()
+        # A `finally: path.write_text(original)` restores identical BYTES
+        # whether or not the harness ever actually wrote to the file first —
+        # a full, uninterrupted run() cycle (write mutated, test, restore)
+        # ends at the same content as a run that never touched the file at
+        # all. Content equality alone therefore cannot tell "the guard
+        # refused before the first write" apart from "the guard refused
+        # after a completed write-then-restore cycle" — exactly CB-173's
+        # correction: moving the guard call to AFTER the mutation loop left
+        # this test green even with a genuine mutation pattern present,
+        # because every write that loop performs is undone by its own
+        # `finally` before the script exits. `write_text()` bumps the
+        # file's mtime on every call regardless of whether the bytes it
+        # writes end up identical to what was there before (measured), so
+        # comparing mtime catches a write-then-restore cycle that content
+        # comparison cannot.
+        dirty_mtime_ns = target.stat().st_mtime_ns
 
         proc = subprocess.run(
             [sys.executable, str(repo / "tests" / "manual" / "mutate_cb69.py")],
@@ -160,4 +216,11 @@ class TestComposedHarnessRefusesWithoutWriting:
             "the harness wrote to (or restored over) the mutation target "
             "before refusing — a refusal after the first write has already "
             "eaten the uncommitted work"
+        )
+        assert target.stat().st_mtime_ns == dirty_mtime_ns, (
+            "the harness opened the mutation target for writing before "
+            "refusing — content came back byte-identical only because "
+            "`finally` restored it after a completed mutate/test/restore "
+            "cycle, which is exactly the 'refusal after the first write' "
+            "shape this test exists to catch"
         )
