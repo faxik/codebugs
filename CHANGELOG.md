@@ -7,6 +7,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **The `Args:` section of every MCP tool description now reaches your client as a
+  Markdown list instead of collapsing into one run-on paragraph (CB-156).** 73 of the
+  83 tool descriptions carry a Google-style `Args:` section, three carry `Returns:`,
+  and none of them was marked up as Markdown — while MCP clients render descriptions
+  as Markdown. `Args:` sits at column 0 with its argument lines indented four spaces
+  and no blank line between, which CommonMark reads as a paragraph followed by *lazy
+  continuations*: the indentation is stripped, the line breaks become spaces, and every
+  argument fuses into a single line with the boundary between one argument and the next
+  gone. Descriptions now carry a real bullet list, so each argument is its own item —
+  including the 28 descriptions with an argument whose text wrapped onto a second line,
+  which now folds into that argument's own bullet rather than drifting off.
+
+  **The basis for fixing this is not "it is broken for everyone", and saying so
+  precisely matters.** A client configured with GFM-style hard line breaks
+  (`breaks: true`) shows the lines separately and never saw the defect at all. The
+  basis is that the old text was **correct only under a particular setting of somebody
+  else's renderer** — a real Markdown list renders correctly under both settings, which
+  removes the dependency on a foreign configuration.
+
+  **Only the markup changed.** Not one word of any description was added, removed or
+  reordered, and no tool's parameters or behaviour moved. One `Returns:` section
+  (`codesweep_add`) is deliberately untouched, because its body is a sentence rather
+  than a list of arguments, and turning prose into bullets would invent a structure the
+  text does not have.
+
+### Fixed
 - **`codebugs add` now records the revision the card was filed at (CB-144).** A card
   filed from the CLI used to store `reported_at_commit = NULL` forever: the automatic
   HEAD capture existed only in the MCP `add` / `batch_add` tools, and the CLI handler

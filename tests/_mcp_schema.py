@@ -16,7 +16,16 @@ from codebugs import db
 # ONE definition, and it lives in src now (CB-73): the server emits normalized
 # descriptions, so a second copy here would be one drift away from the gate and
 # the server disagreeing about the thing they exist to keep in agreement.
-from codebugs.server import dedent_docstring
+# `normalize_description` is the whole composition (dedent + CB-156's Markdown
+# sections); call it rather than its steps, so this side cannot normalize a
+# different amount than the server does.
+from codebugs.server import normalize_description
+
+# Re-exported, not used here: `tests/test_boundary.py` asserts the golden is
+# dedent-stable with it, and `tests/test_server.py` pins that this module's name
+# IS the server's object — the CB-73 anti-drift check. Importing it here is what
+# makes that pin mean anything.
+from codebugs.server import dedent_docstring  # noqa: F401
 
 
 @contextmanager
@@ -54,7 +63,7 @@ def collect_tool_schemas(providers=None) -> list[dict[str, Any]]:
                 all_tools.append(
                     {
                         "name": t.name,
-                        "description": dedent_docstring(t.description or ""),
+                        "description": normalize_description(t.description or ""),
                         # mcp 2.0 renamed the attribute to input_schema; the wire
                         # field is still inputSchema, so the golden keeps that name.
                         "inputSchema": t.input_schema,

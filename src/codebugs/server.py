@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -49,8 +50,117 @@ def dedent_docstring(doc: str) -> str:
     return "\n".join([lines[0]] + [line[indent:] for line in lines[1:]])
 
 
+_SECTION_HEADER = re.compile(r"^([A-Za-z][A-Za-z ]*):[ \t]*$")
+_SECTION_ITEM = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*[ \t]*:([ \t]|$)")
+_MIN_BODY_INDENT = 4
+
+
+def _indent_width(line: str) -> int:
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def _fold_section_items(body: list[str], base: int) -> list[str] | None:
+    """One emitted list item per argument, or None when the body is not an item list.
+
+    A line at the section's own indent that reads `identifier:` OPENS an item.
+    Anything else — a deeper indent, or a base-indent line that is not
+    item-shaped — CONTINUES the item above it, joined with a space. That second
+    clause is not defensive: `claims_claim` and `claims_release` each carry a
+    `Returns:` whose `outcome: …` item is followed by further sentences at the
+    SAME indent, and the naive "base indent means a new item" rule split one
+    sentence across two bullets. A body that opens with prose (`codesweep_add`'s
+    `Returns:`) is not a list at all and is returned unchanged by the caller —
+    collapsing prose into one paragraph is what a paragraph is for.
+    """
+    items: list[list[str]] = []
+    for line in body:
+        text = line.strip()
+        if _indent_width(line) == base and _SECTION_ITEM.match(text):
+            items.append(["- " + text])
+        elif items:
+            items[-1].append(text)
+        else:
+            return None
+    return [" ".join(parts) for parts in items]
+
+
+def markdown_sections(doc: str) -> str:
+    """Re-emit a Google-style `Args:`/`Returns:` section as a Markdown list (CB-156).
+
+    WHY (and the mechanism matters, because two mechanisms share one symptom).
+    MCP clients render descriptions as Markdown. `Args:` sits at column 0 and its
+    argument lines are indented 4 with NO blank line between, so CommonMark reads
+    `Args:` as opening a PARAGRAPH and — since an indented code block cannot
+    interrupt a paragraph — every argument line becomes a LAZY CONTINUATION of it:
+    indentation stripped, softbreaks rendered as spaces, all arguments fused into
+    one run-on line with the boundaries between them gone. Measured over the wire
+    golden BY LINES: 73 descriptions carry `Args:`, 3 carry `Returns:`, and the
+    blank-line-then-indent pattern that WOULD make a code block occurs in ZERO of
+    the 83. So this is NOT CB-73 recurring: that leak was the source indentation
+    surviving into `__doc__`, `dedent_docstring` closed it and still holds. Here
+    the dedent is already correct and the text is simply not a Markdown list.
+
+    WHY IT IS WORTH FIXING, stated precisely rather than overclaimed: a client
+    configured with GFM-style hard line breaks (`breaks: true`) shows the lines
+    separately and never sees the defect. The claim is therefore not "broken for
+    everyone" but "correct only under a particular setting of SOMEBODY ELSE'S
+    renderer" — a real Markdown list renders correctly under BOTH settings, which
+    is what removes the dependency on a foreign configuration.
+
+    WHAT IT EMITS. The header, a blank line, then one `- name: description` per
+    argument. A bullet list is the right shape because — unlike an indented code
+    block — a list CAN interrupt a paragraph, which three of this surface's own
+    descriptions already rely on (`reqs_verify`, `staleness_check`,
+    `batch_add` write column-0 bullets under a lead-in line and render fine). The
+    blank line is belt and braces for a renderer stricter than CommonMark about
+    that. Continuation lines are joined into their item rather than emitted as
+    their own lines, so an argument stays ONE bullet under `breaks: true` too.
+
+    ONLY MARKUP CHANGES. No word of any description is added, removed or
+    reordered, and a section is left byte-identical whenever it is not an item
+    list. IDEMPOTENT BY CONSTRUCTION: what this emits sits at column 0, and the
+    detection below requires an INDENTED body, so a second pass sees no section.
+    """
+    lines = doc.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        header = _SECTION_HEADER.match(lines[i])
+        follower = lines[i + 1] if i + 1 < len(lines) else ""
+        if not header or not follower.strip() or _indent_width(follower) < _MIN_BODY_INDENT:
+            out.append(lines[i])
+            i += 1
+            continue
+        base = _indent_width(follower)
+        j = i + 1
+        body: list[str] = []
+        while j < len(lines) and lines[j].strip() and _indent_width(lines[j]) >= base:
+            body.append(lines[j])
+            j += 1
+        items = _fold_section_items(body, base)
+        out.append(lines[i])
+        if items is None:
+            out.extend(body)
+        else:
+            out.append("")
+            out.extend(items)
+        i = j
+    return "\n".join(out)
+
+
+def normalize_description(doc: str) -> str:
+    """The ONE composition of every normalization a description gets before the wire.
+
+    `_NormalizedDescriptions` (the server) and `tests/_mcp_schema` (the generator
+    and the gate) both call THIS, never the two steps in sequence, so the three
+    cannot drift about what "normalized" means — the same reason `dedent_docstring`
+    has exactly one definition (CB-73).
+    """
+    return markdown_sections(dedent_docstring(doc))
+
+
 class _NormalizedDescriptions:
-    """Registration-time adapter: every tool's description is dedented ONCE.
+    """Registration-time adapter: every tool's description is normalized ONCE.
 
     WHY THIS EXISTS (CB-73). The SDK reads `Tool.description` from the function's
     `__doc__`, so on a 3.11/3.12 host clients receive the source indentation.
@@ -58,6 +168,13 @@ class _NormalizedDescriptions:
     4-space-indented line following a blank line as an INDENTED CODE BLOCK — so
     the entire prose body of ~61 tools rendered monospaced as code on
     interpreters `requires-python` promises to support. Measured on 3.12 vs 3.13.
+
+    IT NORMALIZES MORE THAN INDENTATION NOW (CB-156). `normalize_description` also
+    re-emits Google-style `Args:`/`Returns:` sections as Markdown lists, because a
+    correctly dedented Google-style section is STILL not a Markdown list — its
+    argument lines are lazy continuations of the `Args:` paragraph and fuse into one
+    run-on line. Same border, same seam, a different way for the wire text to be
+    wrong; see `markdown_sections` for the measurement and the honest scope.
 
     WHY IT WRAPS RATHER THAN MUTATES. Two alternatives were rejected. Rewriting
     `fn.__doc__` in place is a global side effect on another module's objects;
@@ -85,7 +202,7 @@ class _NormalizedDescriptions:
             # here would make this adapter a policy rather than a normalizer.
             if kwargs.get("description") is None and fn.__doc__:
                 return self._server.tool(
-                    *args, **{**kwargs, "description": dedent_docstring(fn.__doc__)}
+                    *args, **{**kwargs, "description": normalize_description(fn.__doc__)}
                 )(fn)
             return inner(fn)
 
