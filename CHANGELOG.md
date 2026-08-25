@@ -11,6 +11,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   codebugs you had used to mean asking the package manager (`pip show`, `pipx list`)
   rather than the program. It works in any directory, with or without a tracker, and in
   every `--mode`.
+- The startup message a connecting agent receives now guards its own eight recommended tool
+  names against the live tool catalogue, not just against a wording check (CB-189). Renaming or
+  removing one of those tools will fail the test suite instead of silently leaving the agent with
+  a working loop that recommends a call which no longer exists.
 
 ### Fixed
 - **The paragraph opening the 0.2.0 notes below made four wrong claims about that
