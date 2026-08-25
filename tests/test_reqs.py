@@ -136,6 +136,214 @@ class TestAddRequirement:
         assert result["meta"]["author"] == "claude"
 
 
+class CommitFiringConnection(sqlite3.Connection):
+    """One-shot hook fired the instant the write transaction closes.
+
+    Copied in shape from ``tests/test_merge.py::CommitFiringConnection`` (itself
+    documented as copied from ``tests/test_milestones.py::CommitPausingConnection``)
+    and for the same reason: **two seams, deliberately**. Unfixed ``add_requirement``
+    closes with ``conn.commit()``; the fixed one closes with ``db.txn``'s
+    ``conn.execute("COMMIT")``. A hook keyed on only one of them gives a vacuous pass
+    on the other, which is precisely the failure this class exists to catch. Each
+    test file in this repo owns its own fixtures rather than sharing one, per the
+    project convention (there is deliberately no ``conftest.py`` for this).
+
+    The hook runs AFTER the underlying commit in both cases — firing before it lands
+    would leave the write lock held, so the second connection writing inside the hook
+    would block until ``busy_timeout`` expired instead of racing.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.after_commit = None
+        self.bare_commit_calls = 0
+
+    def _fire(self):
+        if self.after_commit:
+            hook, self.after_commit = self.after_commit, None
+            hook()
+
+    def commit(self):
+        self.bare_commit_calls += 1
+        super().commit()
+        self._fire()
+
+    def execute(self, sql, *args, **kwargs):
+        cur = super().execute(sql, *args, **kwargs)
+        if sql.lstrip().upper().startswith("COMMIT"):
+            self._fire()
+        return cur
+
+
+class TestAddRequirementReturnsTheRowItWrote:
+    """CB-117: the dict is the row THIS call wrote, never a later re-read.
+
+    ``add_requirement`` used to end with ``conn.commit()`` followed by a fresh
+    ``SELECT * FROM requirements WHERE id = ?``, so anything that touched the row
+    inside that window was reported as the outcome of THIS add. Unlike CB-111's
+    ``merge.abandon_session``, there never was a benign period here: the whole
+    dict always went straight to the MCP client (``reqs_add``), so a race in that
+    window is not a hypothetical hardening — it is a live client-facing lie.
+
+    Trap worth naming for the next reader (the RETURNING rule, CB-30 consequence
+    (5)): once the INSERT carries ``RETURNING``, its ``cursor.rowcount`` is 0 until
+    the cursor is exhausted, so re-expressing success as ``cursor.rowcount == 1``
+    refuses every successful call. No test here duplicates that mutant; it is
+    caught by the ordinary ``TestAddRequirement`` tests above, which all assert on
+    the returned dict.
+    """
+
+    def _open(self, path, factory=sqlite3.Connection):
+        c = sqlite3.connect(path, factory=factory)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA busy_timeout=5000")
+        return c
+
+    def test_a_race_inside_the_commit_window_is_not_reported_as_the_outcome(self, tmp_path):
+        """The discriminator: mutate the just-inserted row the instant the commit lands.
+
+        Fixed, the row was captured by ``RETURNING`` before the commit, so the call
+        reports the ``description``/``status`` THIS call wrote. Unfixed, the trailing
+        ``SELECT`` runs after the hook and reports the competitor's write instead — a
+        successful call describing someone else's data as its own.
+        """
+        path = str(tmp_path / "reqs.db")
+        seed = self._open(path)
+        try:
+            reqs.ensure_schema(seed)
+        finally:
+            seed.close()
+
+        c = self._open(path, factory=CommitFiringConnection)
+        try:
+            def race_from_another_connection():
+                other = self._open(path)
+                try:
+                    other.execute(
+                        "UPDATE requirements SET description='RACED', status='obsolete' "
+                        "WHERE id='FR-001'"
+                    )
+                    other.commit()
+                finally:
+                    other.close()
+
+            c.after_commit = race_from_another_connection
+            result = reqs.add_requirement(
+                c, req_id="FR-001", description="original", status="planned",
+            )
+        finally:
+            c.close()
+
+        assert c.after_commit is None, (
+            "vacuous test: the hook never fired, so no commit seam was observed — "
+            "check that both seams (conn.commit and execute('COMMIT')) are hooked"
+        )
+        assert result["description"] == "original", (
+            "the call must report the row it wrote, not whatever the row became "
+            f"afterwards, got {result['description']!r}"
+        )
+        assert result["status"] == "planned", (
+            "status came from the post-commit re-read, not from the write"
+        )
+
+    def test_it_does_not_commit_an_ambient_transaction(self, tmp_path):
+        """Composition, not just elements: under a caller's open transaction the add
+        must not make the caller's unrelated work permanent.
+
+        This is CB-24 consequence (1): the bare ``conn.commit()`` committed whatever
+        DML the caller had pending, silently, because a single connection has one
+        transaction. ``db.txn`` yields ``False`` here and issues no COMMIT at all,
+        leaving the caller in charge — this is the property the removal of
+        ``conn.commit()`` exists to buy, and without a test exercising it from
+        inside an already-open transaction it stays an unverified claim rather than
+        a checked one.
+        """
+        path = str(tmp_path / "reqs.db")
+        seed = self._open(path)
+        try:
+            reqs.ensure_schema(seed)
+        finally:
+            seed.close()
+
+        c = self._open(path)
+        try:
+            c.execute("BEGIN IMMEDIATE")
+            c.execute(
+                "INSERT INTO requirements (id, description, priority, status, "
+                "created_at, updated_at) VALUES ('FR-999', 'caller work', 'should', "
+                "'planned', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+            )
+            reqs.add_requirement(c, req_id="FR-001", description="d")
+            assert c.in_transaction, "the caller's transaction was closed by the callee"
+            c.execute("ROLLBACK")
+        finally:
+            c.close()
+
+        checker = self._open(path)
+        try:
+            caller_row = checker.execute(
+                "SELECT 1 FROM requirements WHERE id = 'FR-999'"
+            ).fetchone()
+            own_row = checker.execute(
+                "SELECT 1 FROM requirements WHERE id = 'FR-001'"
+            ).fetchone()
+        finally:
+            checker.close()
+        assert caller_row is None, "the caller's uncommitted INSERT was committed for it"
+        assert own_row is None, (
+            "the add's own write must have rolled back with the caller's transaction too"
+        )
+
+    def test_no_bare_commit_is_issued(self, tmp_path):
+        """``add_requirement`` must never call ``conn.commit()`` itself.
+
+        Distinct from the ambient-transaction test above: this fires even on a plain,
+        no-transaction call, where a stray bare ``commit()`` would be harmless in
+        isolation but is exactly the kind of leftover ``db.txn`` migrations are
+        supposed to remove (see CB-111's identical assertion on
+        ``merge.abandon_session``).
+        """
+        path = str(tmp_path / "reqs.db")
+        seed = self._open(path)
+        try:
+            reqs.ensure_schema(seed)
+        finally:
+            seed.close()
+
+        c = self._open(path, factory=CommitFiringConnection)
+        try:
+            reqs.add_requirement(c, req_id="FR-001", description="d")
+            assert c.bare_commit_calls == 0, (
+                "add_requirement must not call conn.commit() itself; db.txn's "
+                "execute('COMMIT') is the only sanctioned close"
+            )
+        finally:
+            c.close()
+
+    def test_no_select_follows_the_insert(self, recording):
+        """Template guard: after the INSERT, no separate read of ``requirements``.
+
+        Asserted against the SQL *template* recorded by ``RecordingConnection``,
+        per the repo rule that a guard of this kind reads the template rather than
+        the executed statement (parameter binding can put arbitrary text, including
+        SQL keywords, inside a bound value).
+        """
+        reqs.add_requirement(recording, req_id="FR-001", description="d")
+
+        insert_index = next(
+            i for i, sql in enumerate(recording.recorded_sql)
+            if sql.strip().upper().startswith("INSERT INTO REQUIREMENTS")
+        )
+        after_insert = recording.recorded_sql[insert_index + 1:]
+        selects = [
+            sql for sql in after_insert
+            if "SELECT" in sql.upper() and "REQUIREMENTS" in sql.upper()
+        ]
+        assert not selects, (
+            f"a SELECT followed the INSERT — the row must come from RETURNING: {selects!r}"
+        )
+
+
 class TestBatchAdd:
     def test_batch_insert(self, conn):
         results = reqs.batch_add_requirements(conn, [

@@ -353,6 +353,66 @@ SERVER_NAMES = {
     "all": "codebugs",
 }
 
+#: Told to every connecting client via `MCPServer(instructions=...)` (T-75). The
+#: 83-tool catalogue says nothing about ORDER; this is the one place that does.
+#: Names the recommended loop and the 5-8 tool names it cannot be read without,
+#: never a full tool listing (that already exists, and is longer than any text
+#: written here) — see the unit brief for the content contract this text is
+#: negotiated against.
+INSTRUCTIONS = """Recommended loop for a finding:
+
+1. File the observation with `add` (or `batch_add` for several at once).
+2. Read what came back before doing anything else: `attention` is the server's
+   own flag when your observation raised the card's severity or diverged from
+   its stored category; `dedup_action` says whether this created a new card,
+   bumped or reopened an existing one, or refiled one already dismissed.
+3. The code location is anchored automatically at file time (git-derived), so
+   the card survives later edits; `anchor_resolve` reports whether an anchor
+   still points at live code.
+4. Close the card with `update(status="fixed")` once it is actually fixed.
+
+Deduplication is the point, not a side effect: filing the same finding twice
+does not create two cards, it bumps or reopens the one that already exists.
+Filing an observation again is normal and useful, not noise.
+
+Working alongside other agents on this tracker? Claim a card with
+`claims_claim` before starting on it and release it with `claims_release` when
+done, or two agents can end up fixing the same thing.
+
+Requirements (`reqs_add`, `reqs_query`, ...) are a separate, authored entity
+next to findings: they have no deduplication. Do not file a requirement
+through `add`, or a defect through `reqs_add`.
+"""
+
+
+def _build_server(mode: str, conn_factory=None) -> MCPServer:
+    """Build and fully wire the MCP server for `mode` — the exact steps `main()` runs.
+
+    Split out of `main()` (T-75) so a test can construct the real server object
+    — the one carrying `instructions=INSTRUCTIONS` and every registered tool —
+    without also entering `server.run()`'s blocking stdio loop. `conn_factory`
+    defaults to the module's own `_conn`, which is what `main()` needs; a test
+    passes its own tracker fixture instead.
+    """
+    if conn_factory is None:
+        conn_factory = _conn
+
+    # mcp 2.0 renamed FastMCP -> MCPServer and dropped the constructor's
+    # json_response flag; it only ever applied to streamable-http, and we run stdio.
+    server_obj = MCPServer(SERVER_NAMES[mode], instructions=INSTRUCTIONS)
+
+    # Wrapped, so what clients receive does not depend on which interpreter
+    # built the server (CB-73). The adapter is registration-time only; the real
+    # server object is what runs and what install_strict_arguments inspects.
+    registrar = _NormalizedDescriptions(server_obj)
+    for provider in db.get_tool_providers(mode=mode):
+        provider.register_fn(registrar, conn_factory)
+
+    # After registration, so the middleware sees the full tool catalogue.
+    install_strict_arguments(server_obj)
+
+    return server_obj
+
 
 def main():
     """Run the MCP server with optional mode selection.
@@ -386,20 +446,7 @@ def main():
     db.set_tracker_root(args.tracker_root)
     _preflight()
 
-    # mcp 2.0 renamed FastMCP -> MCPServer and dropped the constructor's
-    # json_response flag; it only ever applied to streamable-http, and we run stdio.
-    server = MCPServer(SERVER_NAMES[args.mode])
-
-    # Wrapped, so what clients receive does not depend on which interpreter
-    # built the server (CB-73). The adapter is registration-time only; the real
-    # server object is what runs and what install_strict_arguments inspects.
-    registrar = _NormalizedDescriptions(server)
-    for provider in db.get_tool_providers(mode=args.mode):
-        provider.register_fn(registrar, _conn)
-
-    # After registration, so the middleware sees the full tool catalogue.
-    install_strict_arguments(server)
-
+    server = _build_server(args.mode)
     server.run()
 
 
