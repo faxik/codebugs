@@ -712,26 +712,21 @@ class TestAFullDeviceReportsALostOutputAndNotBadInput:
         touches the `sys.stdout` OBJECT, so a proxy cannot reach it — but the
         claim is cheap to assert and expensive to rediscover.
 
-        WHAT THIS DELIBERATELY DOES NOT ASSERT. The redirected file is not a
-        pristine CSV: `/dev/stdout` resolves through `/proc/self/fd/1`, and
-        reopening that path yields a fresh file description at offset 0, so the
-        handler's own "Exported N findings" confirmation lands on top of the
-        header. That is PRE-EXISTING and outside this card — measured
-        byte-identical (666 bytes, the same five lines) against main and against
-        this branch. What CB-136 owes here is that this path still WORKS at all —
-        which is what the assertions below check; the byte-identity was established
-        by running both trees, and is deliberately not asserted (see below).
-        Asserting a clean header would be asserting a repair nobody made.
-
-        AND SAY THE REST PLAINLY, because a reader cannot otherwise tell this
-        from a broken test: this one PASSES AGAINST THE UNFIXED TREE by
-        construction. It is a REGRESSION GUARD on behaviour CB-136 must not
-        disturb, not a discriminator for the defect — the repo's own convention
-        for such a test is to say so rather than let it look like coverage. The
-        "666 bytes" measured against main is NOT asserted here either: the byte
-        count moves with ids and timestamps, so pinning it would be pinning the
-        fixture, and the equality was established by running both trees rather
-        than by this test.
+        THIS DOCSTRING USED TO SAY the redirected file is not a pristine CSV —
+        that the handler's own "Exported N findings" confirmation lands on top
+        of the header, byte-identically on main and on this branch, and that
+        asserting a clean header "would be asserting a repair nobody made."
+        CB-143 is that repair: `atomic_write` now returns the SAME
+        held-open-inode classification this test's own docstring describes, and
+        both CLI export handlers use it to steer the confirmation to stderr
+        precisely when the destination is that alias — never recomputing the
+        classification a second time. So the file IS pristine now, and the
+        confirmation is checked on stderr, not absent. `tests/test_fsio.py::
+        TestCB143DiagnosticDoesNotCorruptTheFile` carries the dedicated
+        real-file-redirect reproduction and the two required mutants; this test
+        stays what CB-136 wrote it as — a regression guard that the
+        held-open-inode WRITE path keeps working — updated only where CB-143
+        changed the observable contract.
         """
         conn = db.connect(str(project))
         try:
@@ -756,7 +751,13 @@ class TestAFullDeviceReportsALostOutputAndNotBadInput:
         assert proc.returncode == 0, proc.stderr.decode()
         lines = out.read_text().splitlines()
         assert sum(1 for line in lines if line.startswith("CB-")) == 3, lines
-        assert any("Exported 3 findings" in line for line in lines), lines
+        assert lines[0].startswith("id,severity,category"), (
+            f"CB-143: header must no longer be corrupted, got {lines[0]!r}"
+        )
+        assert not any("Exported" in line for line in lines), (
+            "the confirmation must not land inside the data file any more"
+        )
+        assert "Exported 3 findings" in proc.stderr.decode(), proc.stderr.decode()
 
     def test_the_code_is_declared_in_claude_md(self):
         """The exit codes are an API for shell callers, and CLAUDE.md is where

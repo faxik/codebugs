@@ -644,16 +644,23 @@ class TestCB143DiagnosticDoesNotCorruptTheFile:
         r = self._redirected_to_file(populated, outfile, "export-csv", "/dev/stdout")
 
         assert r.returncode == 0, r.stderr
-        # The confirmation still happens — form (a) never drops it (that was
-        # rejected as (b) in the brief) — it is simply steered off the data
-        # channel and onto stderr, which is what this asserts.
-        assert b"Exported" in r.stderr, r.stderr
 
+        # THE ORACLE (§4 of the brief): file validity, asserted FIRST and
+        # deliberately before the stderr check below. "No diagnostic in
+        # stdout" is a WEAKER check that stays green even when the line just
+        # vanished while the file stayed corrupt — it must not be what turns
+        # this test red against mutant 1 (the diagnostic reverted to
+        # unconditional stdout). Header corruption is.
         with open(outfile, newline="") as f:
             rows = list(csv.reader(f))
         assert rows, "the export produced no rows at all — the file is empty"
         assert rows[0] == list(findings._RESTORE_COLUMNS), f"header corrupted: {rows[0]!r}"
         assert len(rows) == 2, f"expected header + 1 finding, got {rows!r}"
+
+        # The confirmation still happens — form (a) never drops it (that was
+        # rejected as (b) in the brief) — it is simply steered off the data
+        # channel and onto stderr, checked only once the file is known-good.
+        assert b"Exported" in r.stderr, r.stderr
 
     def test_reqs_export_to_dev_stdout_redirected_to_a_real_file_is_intact(
         self, populated, tmp_path
@@ -662,11 +669,14 @@ class TestCB143DiagnosticDoesNotCorruptTheFile:
         r = self._redirected_to_file(populated, outfile, "reqs-export", "/dev/stdout")
 
         assert r.returncode == 0, r.stderr
-        assert b"Exported" in r.stderr, r.stderr
 
+        # THE ORACLE, first and deliberately before the stderr check — see the
+        # sibling export-csv test's docstring for why the order is load-bearing.
         content = outfile.read_text()
         assert content.startswith("# Requirements"), f"markdown header corrupted: {content[:80]!r}"
         assert "Exported to" not in content, "the diagnostic line landed inside the data file"
+
+        assert b"Exported" in r.stderr, r.stderr
 
     @pytest.mark.parametrize(
         ("command", "target_name"), [("export-csv", "plain.csv"), ("reqs-export", "plain.md")]
