@@ -322,15 +322,30 @@ def active_suppressions(conn: sqlite3.Connection) -> set[tuple[str, str]]:
     empty set is the true answer rather than a degraded one. Swallowing the
     exception would also absorb a disk error, an unreadable page, a corrupted
     file — "the guard reported clean because it could not look", which this
-    repository has filed several cards against. Reachable because ``db.connect``
-    is not the only way to hold a connection: a caller that built its own with
+    repository has filed several cards against, and those still propagate here
+    because nothing is caught. Reachable because ``db.connect`` is not the only
+    way to hold a connection: a caller that built its own with
     ``findings.ensure_schema`` alone has findings and no ledger, which is
     exactly what ``tests/test_grouping.py``'s fixture does.
+
+    THE PROBE ASKS THE SAME QUESTION THE QUERY WILL, which is why it is
+    ``PRAGMA table_info`` and not a read of ``sqlite_master``. A
+    ``sqlite_master`` row is a fact about MAIN's persistent catalogue; name
+    resolution in a ``SELECT`` is a different thing, and the two disagree in
+    four MEASURED states — a VIEW of this name, a TEMP table (which lives in
+    ``sqlite_temp_master``), a table present only in an ATTACHed schema, and a
+    name created in another case, since SQLite resolves case-insensitively while
+    ``name = 'finding_relations'`` is a case-SENSITIVE string compare. In every
+    one of them the ``SELECT`` below succeeds while the catalogue read says no,
+    so the guard would have answered "nobody declared anything" about a ledger
+    it could perfectly well have read — the silent-empty-answer failure this
+    function exists to avoid, reintroduced inside its own fix. ``PRAGMA
+    table_info`` returns a row per column for a table or a view and nothing for
+    an unresolvable name, following the same temp → main → attached search the
+    query does, so the two cannot disagree. Pinned as a premise test, like the
+    git and argparse behaviours elsewhere in this tree.
     """
-    present = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='finding_relations'"
-    ).fetchone()
-    if present is None:
+    if not conn.execute("PRAGMA table_info('finding_relations')").fetchall():
         return set()
     rows = query_relations(conn, rel="distinct_from")["relations"]
     return {

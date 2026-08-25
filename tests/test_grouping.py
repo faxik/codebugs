@@ -378,6 +378,30 @@ class TestDistinctFromSuppression:
         (sup,) = rep["suppressed_edges"]
         assert {sup["a"], sup["b"]} == {hub, citers[0]}
 
+    def test_a_reciprocally_cited_pair_is_suppressed_too(self, rel_conn):
+        """One EDGE can carry several mentions, and every other fixture here
+        carries exactly one.
+
+        Two cards that cite EACH OTHER produce two mentions collapsed onto one
+        edge key by `edges[tuple(sorted(...))]`, and that is an ordinary shape
+        — `tests/test_grouping_surface.py` already has a test built on it. The
+        gap this closes was found by cross-model review: narrowing the branch to
+        `... and len(edges[(a, b)]) == 1` left the whole class green while a
+        mutually-cited declared-distinct pair was joined anyway.
+        """
+        a = add(rel_conn, "the first card, which points at the second one")
+        b = add(rel_conn, f"the second card, which points back at {a}")
+        findings.update_finding(rel_conn, a, append_note=f"see also {b}")
+        relations.relate(rel_conn, a, "distinct_from", b, source="test")
+        rep = grouping.citation_report(rel_conn)
+        (sup,) = rep["suppressed_edges"]
+        assert len(sup["mentions"]) == 2, (
+            "fixture invalid: the pair must cite each other, or this edge "
+            "carries one mention like every other fixture in the class"
+        )
+        assert rep["components_total"] == 0
+        assert rep["still_grouped_total"] == 0
+
     def test_suppressed_edges_come_back_in_a_stable_order(self, rel_conn):
         """Every other list in this report is ordered deliberately; with one
         suppressed pair in the fixture the sort line is unobservable, so it
