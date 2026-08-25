@@ -3653,6 +3653,29 @@ class TestGroupingAxes:
 
     # --- axis: meta:<key> --------------------------------------------------
 
+    def test_a_non_string_tag_element_is_dropped_exactly_as_parse_tags_drops_it(self, conn):
+        """MUTANT this kills: removing `je.type = 'text'` from the join.
+
+        Found by mutation probe, not by design — the first version of this class
+        left that clause unpinned, so the axis could have started counting a
+        numeric element as a tag while `grouping-tags` silently dropped it, and
+        the parity claim in `_membership_sql`'s docstring would have been prose
+        with nothing behind it. The state needs a hand-edited row because the
+        write path type-checks tag members (CB-82), which is exactly why it is
+        worth a test: it is reachable only from a foreign or repaired row, i.e.
+        the case nobody exercises by accident."""
+        from codebugs import grouping
+
+        self._file(conn, "CB-1", tags=["c"])
+        self._file(conn, "CB-2", tags=["c"])
+        conn.execute("""UPDATE findings SET tags = '[1, 2, "c"]' WHERE id = 'CB-2'""")
+        conn.commit()
+        result = findings.query_findings(conn, status="open", group_by="tag")
+        assert [(g["group_key"], g["count"]) for g in result["groups"]] == [("c", 2)]
+        assert result["ungrouped_rows"] == 0
+        report = grouping.tag_report(conn, status="open")
+        assert {t["tag"]: t["count"] for t in report["tags"]} == {"c": 2}
+
     def test_the_meta_axis_groups_by_a_top_level_key(self, conn):
         self._file(conn, "CB-1", meta={"found_by": "ruff"})
         self._file(conn, "CB-2", meta={"found_by": "ruff"})
@@ -3775,20 +3798,31 @@ class TestGroupingAxes:
         surfaces, leaving four texts describing a tool that no longer exists.
         `test_golden` cannot see it either: a golden pins what the text IS, never
         what it OUGHT to name.
-        """
-        from codebugs import cli as cli_module  # noqa: F401  (parser registration)
 
+        MATCHING IS BY TOKEN, and the first draft of this test was VACUOUS
+        because it was not. Asking `"tag" in text` passes on the word "tags",
+        which the very next sentence of every one of these texts contains — so
+        deleting the `tag` axis from an enumeration left this test green
+        (measured). Same defect this repository records for the plan-note naming
+        hook, where `plan.md` is a substring of `my-plan.md`. The enumeration is
+        therefore PARSED — the run of name characters after `by: `, split on its
+        own separators — and compared as a SET, so a missing axis and an invented
+        one both fail.
+        """
         source = pathlib.Path(findings.__file__).read_text()
-        # The two MCP docstrings and the two CLI help strings, located by the
-        # phrase each one opens with rather than by line number.
-        texts = [
-            source[m.end() : m.end() + 900]
-            for m in re.finditer(r"[Gg]roup (?:results )?by: ", source)
+        expected = {*findings.GROUP_COLUMNS, findings.GROUP_TAG, f"{findings.GROUP_META_PREFIX}<key>"}
+        # Stops at the first character an axis name cannot contain — the `.` that
+        # ends the CLI sentence, or the ` (` that opens the MCP aside. A NEWLINE
+        # is a name character here on purpose: both MCP docstrings wrap the
+        # enumeration onto a second line, and without it this test read only the
+        # first five names and failed on texts that were in fact correct.
+        found = [
+            {tok.strip() for tok in re.split(r"[,|]", m.group(1)) if tok.strip()}
+            for m in re.finditer(r"[Gg]roup (?:results )?by: ([A-Za-z_:<>|,\s]+)", source)
         ]
-        assert len(texts) == 4, f"expected 4 axis enumerations, found {len(texts)}"
-        for axis in (*findings.GROUP_COLUMNS, findings.GROUP_TAG, findings.GROUP_META_PREFIX):
-            for i, text in enumerate(texts):
-                assert axis in text, f"axis {axis!r} missing from surface text #{i}"
+        assert len(found) == 4, f"expected 4 axis enumerations, found {len(found)}"
+        for i, names in enumerate(found):
+            assert names == expected, f"surface text #{i} enumerates {names}, expected {expected}"
 
     def test_group_by_still_refuses_resolve_anchors(self, conn):
         self._file(conn, "CB-1", tags=["a"])
