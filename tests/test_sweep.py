@@ -1123,3 +1123,146 @@ class TestArchiveSweepIsOneTransaction:
             "reported archived over a sweep row that is not archived"
         )
         main.close()
+
+
+# --- CB-161 / CB-162 -------------------------------------------------------
+
+
+class RecordingConnection(sqlite3.Connection):
+    """Captures SQL TEMPLATES, not executed statements.
+
+    `set_trace_callback` reports parameters already expanded, so a guard reading
+    it cannot tell a bound `?` from the same digits sitting inside a value.
+    Same shape and same reasoning as the RecordingConnection in
+    tests/test_bench.py and tests/test_findings.py; each test file owns its own
+    fixtures by this repo's convention.
+    """
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.sql_log: list[str] = []
+
+    def execute(self, sql, *a, **kw):
+        self.sql_log.append(sql)
+        return super().execute(sql, *a, **kw)
+
+
+class TestListItemsBoundLimit:
+    """CB-161 — `list_items` binds its limit; zero KEEPS meaning zero entries.
+
+    This site is the one of the card's three that already behaved correctly on
+    zero, because its guard was already `is not None` rather than truthiness.
+    So the zero test below is deliberately GREEN on both sides of this change —
+    it pins behaviour the fix preserves, and a reader must be able to tell that
+    from a broken test, which is why it is said here and in its own name. What
+    actually moves is the interpolation (now a bound parameter) and the negative
+    value (now a refusal rather than SQLite's silent "no limit").
+    """
+
+    @staticmethod
+    def _sweep_with_three(conn):
+        sw = sweep.create_sweep(conn)
+        sweep.add_items(conn, sw["sweep_id"], ["a.py", "b.py", "c.py"])
+        return sw["sweep_id"]
+
+    def test_zero_returns_no_entries_and_did_so_before_this_change_too(self, conn):
+        sweep_id = self._sweep_with_three(conn)
+        assert sweep.list_items(conn, sweep_id, limit=0)["items"] == []
+
+    def test_omitting_the_limit_returns_everything(self, conn):
+        sweep_id = self._sweep_with_three(conn)
+        assert len(sweep.list_items(conn, sweep_id)["items"]) == 3
+
+    def test_a_positive_limit_truncates(self, conn):
+        sweep_id = self._sweep_with_three(conn)
+        assert len(sweep.list_items(conn, sweep_id, limit=2)["items"]) == 2
+
+    def test_a_negative_limit_is_refused(self, conn):
+        """Before this it produced `LIMIT -3`, which SQLite reads as NO limit —
+        so the caller asked to be limited and silently received everything."""
+        sweep_id = self._sweep_with_three(conn)
+        with pytest.raises(ValueError, match="must not be negative"):
+            sweep.list_items(conn, sweep_id, limit=-3)
+
+    @pytest.mark.parametrize("bad", ["2", 2.7, True])
+    def test_a_non_integer_limit_is_refused(self, conn, bad):
+        """`int()` used to COERCE all three of these. Refusing instead is the
+        narrowing this change declares in the CHANGELOG."""
+        sweep_id = self._sweep_with_three(conn)
+        with pytest.raises(ValueError, match="must be an integer"):
+            sweep.list_items(conn, sweep_id, limit=bad)
+
+    def test_the_limit_is_bound_never_interpolated(self, tmp_path):
+        c = sqlite3.connect(str(tmp_path / "t.db"), factory=RecordingConnection)
+        c.row_factory = sqlite3.Row
+        sweep.ensure_schema(c)
+        sweep_id = self._sweep_with_three(c)
+        c.sql_log.clear()
+
+        sweep.list_items(c, sweep_id, limit=2)
+
+        limit_stmts = [s for s in c.sql_log if "LIMIT" in s]
+        assert limit_stmts, "fixture issued no LIMIT statement — the probe did not happen"
+        for stmt in limit_stmts:
+            assert "LIMIT ?" in stmt, stmt
+            assert "LIMIT 2" not in stmt, stmt
+        c.close()
+
+
+class TestArchiveItemsRefusesAnIgnoredFilter:
+    """CB-162 — an explicitly empty `items` beside a filter refuses.
+
+    `archive_items` short-circuits on `items == []` with `{"archived": 0}`, and
+    any `where_status` / `older_than` handed in beside it was then never read:
+    a filter silently dropped behind a success-shaped answer, which is CB-28's
+    shape in the second module.
+
+    The scope is exactly that combination. A BARE `items=[]` is honest — the
+    caller asked to archive an empty set and got an accurate zero — so it stays
+    legal, and the second test of this pair is what stops the first from being
+    satisfied by a refusal of everything.
+    """
+
+    @staticmethod
+    def _sweep_with_items(conn):
+        sw = sweep.create_sweep(conn)
+        sweep.add_items(conn, sw["sweep_id"], ["a.py", "b.py"])
+        return sw["sweep_id"]
+
+    def test_empty_items_with_where_status_is_refused(self, conn):
+        sweep_id = self._sweep_with_items(conn)
+        with pytest.raises(ValueError, match="silently"):
+            sweep.archive_items(conn, sweep_id, items=[], where_status="pending")
+
+    def test_empty_items_with_older_than_is_refused(self, conn):
+        sweep_id = self._sweep_with_items(conn)
+        with pytest.raises(ValueError, match="silently"):
+            sweep.archive_items(conn, sweep_id, items=[], older_than="30d")
+
+    def test_a_bare_empty_items_still_archives_nothing_without_refusing(self, conn):
+        """The obligatory second half. Without it the tests above are satisfied
+        by a refusal of every empty list, which would break a legitimate call.
+        """
+        sweep_id = self._sweep_with_items(conn)
+        result = sweep.archive_items(conn, sweep_id, items=[])
+        assert result["archived"] == 0
+        assert result["sweep_id"] == sweep_id
+
+    def test_a_filter_with_items_omitted_entirely_still_works(self, conn):
+        """`None` is "not supplied" and `[]` is "supplied empty" — two different
+        calls. Conflating them with truthiness would refuse this one, which is
+        the ordinary way the filters are used.
+        """
+        sweep_id = self._sweep_with_items(conn)
+        result = sweep.archive_items(conn, sweep_id, where_status="pending")
+        assert result["archived"] == 2
+
+    def test_the_refusal_happens_before_the_write_lock_is_taken(self, conn):
+        """Decidable from the arguments alone, so it must not open `db.txn`.
+
+        A refusal that takes the write lock makes every concurrent writer wait
+        on a call that was never going to write anything.
+        """
+        with pytest.raises(ValueError, match="silently"):
+            sweep.archive_items(conn, "SW-does-not-exist", items=[], where_status="TODO")
+        assert not conn.in_transaction

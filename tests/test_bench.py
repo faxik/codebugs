@@ -1356,3 +1356,236 @@ class TestDeleteIsOneTransaction:
         assert orphans == 0, "results left behind by a run deleted out from under them"
         assert main.outcome.startswith("refused"), main.outcome
         main.close()
+
+
+# --- CB-161 / CB-162 -------------------------------------------------------
+
+
+class TestBoundRowLimit:
+    """CB-161 — the LIMIT value is BOUND, and a supplied 0 means zero rows.
+
+    `bench.query` and `bench.list_runs` both built
+    `limit_clause = f"LIMIT {last_n}" if last_n else ""`, and TWO independent
+    defects lived in that one line. The value reached SQL as TEXT; and the guard
+    read TRUTHINESS, so a supplied `last_n=0` built no clause at all and the call
+    returned EVERY run — the opposite of what was asked. A negative value took
+    the other road to the same place: `LIMIT -5` is valid SQL that SQLite reads
+    as NO limit.
+
+    Both halves have to be fixed together, which is why the zero tests here would
+    still fail against a tree that only bound the parameter: a bound `0` behind
+    an `if last_n:` guard is never bound at all.
+    """
+
+    @staticmethod
+    def _three_runs(conn):
+        for n, date in enumerate(("2026-01-01", "2026-01-02", "2026-01-03"), start=1):
+            bench.import_csv(
+                conn, benchmark="b", csv_data=SAMPLE_CSV, date=date, run_id=f"BE-{n}"
+            )
+
+    # --- zero means zero, which is the user-facing defect of this card -------
+
+    def test_list_runs_zero_returns_no_runs(self, conn):
+        self._three_runs(conn)
+        assert bench.list_runs(conn, benchmark="b", last_n=0)["runs"] == []
+
+    def test_query_zero_matches_no_runs(self, conn):
+        self._three_runs(conn)
+        assert bench.query(conn, benchmark="b", last_n=0)["runs_matched"] == 0
+
+    def test_omitting_the_limit_still_returns_everything(self, conn):
+        """The other side of the guard: `None` must keep meaning "no limit"."""
+        self._three_runs(conn)
+        assert len(bench.list_runs(conn, benchmark="b")["runs"]) == 3
+        assert bench.query(conn, benchmark="b")["runs_matched"] == 3
+
+    def test_a_positive_limit_still_truncates(self, conn):
+        self._three_runs(conn)
+        assert len(bench.list_runs(conn, benchmark="b", last_n=2)["runs"]) == 2
+        assert bench.query(conn, benchmark="b", last_n=2)["runs_matched"] == 2
+
+    # --- negative refuses instead of silently meaning "everything" -----------
+
+    @pytest.mark.parametrize("fn", ["list_runs", "query"])
+    def test_a_negative_limit_is_refused(self, conn, fn):
+        self._three_runs(conn)
+        with pytest.raises(ValueError, match="must not be negative"):
+            getattr(bench, fn)(conn, benchmark="b", last_n=-5)
+
+    @pytest.mark.parametrize("bad", ["5", 2.7, [], True])
+    def test_a_non_integer_limit_is_refused(self, conn, bad):
+        """`"5"` and `2.7` used to WORK, by interpolation and by `int()`
+        respectively; refusing them is a deliberate narrowing, recorded in the
+        CHANGELOG. `True` is refused although `bool` subclasses `int`: nobody
+        writing `last_n=True` meant "one run".
+        """
+        self._three_runs(conn)
+        with pytest.raises(ValueError, match="must be an integer"):
+            bench.list_runs(conn, benchmark="b", last_n=bad)
+
+    # --- the value is bound, asserted on the TEMPLATE ------------------------
+
+    @pytest.mark.parametrize("fn", ["list_runs", "query"])
+    def test_the_limit_is_bound_never_interpolated(self, tmp_path, fn):
+        """Assert the SQL TEMPLATE, not the executed statement.
+
+        `set_trace_callback` reports parameters already expanded, so a guard
+        built on it cannot tell a bound `?` from the digit `2` sitting in the
+        text — it would pass against the very f-string this card removes.
+        `RecordingConnection` (above) captures templates instead.
+        """
+        c = sqlite3.connect(str(tmp_path / "t.db"), factory=RecordingConnection)
+        c.row_factory = sqlite3.Row
+        bench.ensure_schema(c)
+        self._three_runs(c)
+        c.sql_log.clear()
+
+        getattr(bench, fn)(c, benchmark="b", last_n=2)
+
+        limit_stmts = [s for s in c.sql_log if "LIMIT" in s]
+        assert limit_stmts, "fixture issued no LIMIT statement — the probe did not happen"
+        for stmt in limit_stmts:
+            assert "LIMIT ?" in stmt, stmt
+            assert "LIMIT 2" not in stmt, stmt
+        c.close()
+
+
+class TestUnroutableLastNIsRefused:
+    """CB-162 — `last_n` without `benchmark` refuses instead of vanishing.
+
+    `codebench_list` routes to `list_runs` when a benchmark is given and to
+    `list_benchmarks` otherwise, and `list_benchmarks` has no `last_n` parameter
+    at all. So a correctly spelled, correctly typed, surface-accepted argument
+    was silently discarded on that branch and the call still reported success —
+    CB-28's shape reached through routing rather than validation.
+
+    Refusal is the repair rather than forwarding, because there is no path to
+    forward TO: "the last N benchmarks" has no meaning to invent, and widening
+    `list_benchmarks` was rejected with the card.
+    """
+
+    @staticmethod
+    def _no_connection():
+        raise AssertionError("refused before any connection was opened")
+
+    def test_last_n_without_benchmark_is_refused(self):
+        with pytest.raises(ValueError, match="last_n applies only when benchmark"):
+            bench._tool_bench_list(self._no_connection, benchmark=None, last_n=5)
+
+    def test_a_supplied_zero_is_refused_too(self):
+        """The mutant this pins: `if last_n:` in place of `if last_n is not None:`.
+
+        A zero is a SUPPLIED limit meaning zero rows, so it is just as
+        unroutable as a five — and truthiness cannot see it. Without this case
+        the class above passes against the truthiness spelling.
+        """
+        with pytest.raises(ValueError, match="last_n applies only when benchmark"):
+            bench._tool_bench_list(self._no_connection, benchmark=None, last_n=0)
+
+    def test_an_empty_benchmark_is_not_a_benchmark(self, conn):
+        """The refusal predicate must match the DISPATCH predicate.
+
+        Dispatch below it reads `if benchmark:`, so `benchmark=""` routes to
+        `list_benchmarks` and loses `last_n` exactly as `None` does. Validating
+        with one predicate while dispatching with another is the fault
+        `_tool_bench_import` carries its own warning about.
+        """
+        with pytest.raises(ValueError, match="last_n applies only when benchmark"):
+            bench._tool_bench_list(self._no_connection, benchmark="", last_n=1)
+
+    def test_without_last_n_the_benchmarks_branch_still_works(self, conn):
+        """The other side: this must NOT become a refusal of ordinary calls."""
+        result = bench._tool_bench_list(lambda: conn, benchmark=None, last_n=None)
+        assert "benchmarks" in result
+
+    def test_with_a_benchmark_the_runs_branch_still_honours_last_n(self, conn):
+        bench.import_csv(conn, benchmark="b", csv_data=SAMPLE_CSV, run_id="BE-1")
+        bench.import_csv(conn, benchmark="b", csv_data=SAMPLE_CSV, run_id="BE-2")
+        result = bench._tool_bench_list(lambda: conn, benchmark="b", last_n=1)
+        assert len(result["runs"]) == 1
+
+
+class TestBenchCliSurfaceHonoursTheSameRules:
+    """The CLI is a shipped surface, and BOTH fixes above stop one frame short of it.
+
+    Neither of these is a new site of the defect class — each is the SAME defect
+    one call frame above a site the cards already name, and each defeats the fix
+    below it from the outside:
+
+    (1) `_cmd_bench_query` built its kwargs behind `if args.last_n:`, so a typed
+        `--last-n 0` never reached `query` at all. The domain function can be as
+        correct as it likes; the CLI user still gets every run.
+
+    (2) `_cmd_bench_list` routes exactly as `_tool_bench_list` does, so it drops
+        `--last-n` on the benchmarks branch in exactly the same way. The
+        tool-layer refusal cannot reach the CLI, and the `--last-n` help text
+        this change updates would otherwise describe a refusal that cannot fire
+        on the surface it is printed on.
+    """
+
+    CSV = "method,score\nbm25,0.5\n"
+
+    @staticmethod
+    def _cli(project, *args):
+        return subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", *args],
+            capture_output=True, text=True, cwd=str(project),
+            env={**os.environ, "PYTHONPATH": os.path.join(os.getcwd(), "src")},
+        )
+
+    def _project(self, tmp_path):
+        db.init_project(str(tmp_path))
+        (tmp_path / "r.csv").write_text(self.CSV)
+        for date in ("2026-01-01", "2026-01-02"):
+            r = self._cli(tmp_path, "bench-import", "r.csv", "-b", "b", "--date", date)
+            assert r.returncode == 0, r.stdout + r.stderr
+        return tmp_path
+
+    def test_bench_query_last_n_zero_returns_no_runs(self, tmp_path):
+        project = self._project(tmp_path)
+        r = self._cli(project, "bench-query", "b", "--last-n", "0")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "(no matching runs)" in r.stdout, r.stdout
+
+    def test_bench_query_without_the_flag_still_returns_runs(self, tmp_path):
+        project = self._project(tmp_path)
+        r = self._cli(project, "bench-query", "b")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "(no matching runs)" not in r.stdout, r.stdout
+
+    def test_bench_list_last_n_without_a_benchmark_is_a_clean_refusal(self, tmp_path):
+        project = self._project(tmp_path)
+        r = self._cli(project, "bench-list", "--last-n", "5")
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "Traceback" not in r.stderr, r.stderr
+        assert "--last-n applies only with a benchmark" in r.stderr, r.stderr
+
+    def test_bench_list_last_n_zero_without_a_benchmark_is_refused_too(self, tmp_path):
+        """Pins the truthiness mutant on the CLI half, as its tool-layer twin does."""
+        project = self._project(tmp_path)
+        r = self._cli(project, "bench-list", "--last-n", "0")
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "--last-n applies only with a benchmark" in r.stderr, r.stderr
+
+    def test_bench_list_without_the_flag_still_lists_benchmarks(self, tmp_path):
+        project = self._project(tmp_path)
+        r = self._cli(project, "bench-list")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "b" in r.stdout, r.stdout
+
+    def test_bench_list_with_a_benchmark_still_honours_last_n(self, tmp_path):
+        project = self._project(tmp_path)
+        r = self._cli(project, "bench-list", "b", "--last-n", "1")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert r.stdout.count("BE-") == 1, r.stdout
+
+    def test_a_negative_last_n_is_a_clean_error_not_a_traceback(self, tmp_path):
+        """`_cmd_bench_list` had no `domain_errors()` wrapper at all, so the
+        ValueError `list_runs` now raises would have escaped as a raw traceback.
+        """
+        project = self._project(tmp_path)
+        r = self._cli(project, "bench-list", "b", "--last-n", "-5")
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "Traceback" not in r.stderr, r.stderr
+        assert "must not be negative" in r.stderr, r.stderr

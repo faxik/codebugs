@@ -17,6 +17,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a working loop that recommends a call which no longer exists.
 
 ### Changed
+- **A limit of `0` now means "no records", and a limit that cannot be honoured is
+  refused instead of silently ignored (CB-161, CB-162).** Three places took a limit and
+  two of them did the opposite of what you asked. On `codebench_query` and
+  `codebench_list` (and their `bench-query` / `bench-list` verbs), `last_n=0` returned
+  **every** run rather than none, and a negative limit did the same, because SQLite
+  reads a negative `LIMIT` as no limit at all. Both now mean what they say: `0` gives
+  you nothing back, and a negative number is an error rather than a silent
+  "everything". `codesweep_list_items`' `limit` already gave zero entries on a zero and
+  still does — only its negative case changed.
+
+  **An argument that the chosen path cannot honour now fails rather than disappearing.**
+  `codebench_list` without a benchmark lists benchmark *names*, which have no runs to
+  limit, so a `last_n` passed there was accepted and quietly dropped while the call
+  reported success; it is now an error that tells you to name a benchmark or drop the
+  argument. Likewise `codesweep_archive_items` with an explicitly empty list of items
+  archives nothing, so a `where_status` or `older_than` sent along with it was never
+  read — that combination is now refused. An empty item list on its own is still
+  perfectly legal and still answers `archived: 0`.
+
+  **One narrowing, stated because it can break a working call.** A limit written as a
+  string (`"5"`) or as a fraction (`2.7`) used to be accepted — interpolated as text in
+  one place, rounded down by a cast in another — and is now an error. Passing `True` is
+  likewise refused. Pass a whole number, or omit the argument entirely for no limit.
 - **Telling the tracker that two cards are different defects now stops the citation
   report merging them (CB-62).** `grouping_citations` groups cards by the `CB-…`
   references people write in card text, on the assumption that a reference means the

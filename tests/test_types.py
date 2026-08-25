@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from codebugs import types
 from codebugs.types import (
     FINDING_STATUSES,
     REQUIREMENT_STATUSES,
@@ -319,3 +320,71 @@ class TestSeverityRank:
         # written before the CHECK constraint could hold anything. Ranking it last
         # keeps the comparison total instead of raising inside an open transaction.
         assert severity_rank(value) == len(SEVERITIES)
+
+
+class TestRequireRowLimit:
+    """CB-161 — the ONE definition of "a row limit", shared by three call sites.
+
+    It lives here rather than three times over because a predicate that is
+    duplicated rather than shared is one drift away from disagreeing with
+    itself — the same reason `is_sql_identifier` is the only copy of its
+    pattern.
+    """
+
+    def test_none_is_no_limit(self):
+        assert types.require_row_limit("last_n", None) is None
+
+    def test_zero_is_a_real_limit_meaning_zero_rows(self):
+        """Not "> 0": `sweep.list_items` already gave zero rows on a zero, and a
+        strictly-positive rule would have broken the one correct site of three."""
+        assert types.require_row_limit("last_n", 0) == 0
+
+    def test_a_positive_integer_passes_through(self):
+        assert types.require_row_limit("last_n", 7) == 7
+
+    def test_negative_is_refused(self):
+        with pytest.raises(ValueError, match="must not be negative"):
+            types.require_row_limit("last_n", -1)
+
+    @pytest.mark.parametrize("bad", ["5", 2.7, [], {}, object()])
+    def test_a_non_integer_is_refused(self, bad):
+        with pytest.raises(ValueError, match="must be an integer"):
+            types.require_row_limit("last_n", bad)
+
+    @pytest.mark.parametrize("bad", [True, False])
+    def test_bool_is_refused_although_it_subclasses_int(self, bad):
+        """`isinstance(True, int)` is True, so the naive check accepts `True` and
+        quietly means `LIMIT 1`. `last_n=False` is the worse half: it would mean
+        zero rows to a caller who almost certainly meant "no limit" — this card's
+        own defect, one falsey value further along.
+        """
+        with pytest.raises(ValueError, match="must be an integer"):
+            types.require_row_limit("last_n", bad)
+
+    def test_the_label_names_the_callers_own_argument(self):
+        with pytest.raises(ValueError, match="^limit must be an integer"):
+            types.require_row_limit("limit", "5")
+
+    def test_the_canonical_integer_is_returned_not_the_object_handed_in(self):
+        """Validating one view while consuming another is not a guard (CB-74).
+
+        An `int` subclass may answer this function's comparison differently from
+        the value SQLite would bind, so what comes back — and what the caller
+        binds — is a plain `int`.
+        """
+
+        class Sneaky(int):
+            def __lt__(self, other):
+                return False  # claims never to be negative
+
+        returned = types.require_row_limit("last_n", Sneaky(3))
+        assert type(returned) is int
+        assert returned == 3
+
+    def test_a_lying_subclass_cannot_smuggle_a_negative_past_the_check(self):
+        class Sneaky(int):
+            def __lt__(self, other):
+                return False
+
+        with pytest.raises(ValueError, match="must not be negative"):
+            types.require_row_limit("last_n", Sneaky(-4))
