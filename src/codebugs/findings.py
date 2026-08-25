@@ -285,6 +285,12 @@ _ADD_ALWAYS_REFUSED_META_KEYS = frozenset({"resolver_errors"})
 #: card names by `<parameter name=` are a strict subset of those 80.
 _TOOL_CALL_TAIL_MARKER = "</description>"
 
+#: The opening twin. A leaked tail is by construction a MID-CALL slice, so it
+#: carries the CLOSING tag without the opening one that would match it — 0 of
+#: those 80 rows contain this string anywhere. A legitimate XML/MCP snippet
+#: inside a card is balanced, and that is what tells the two apart.
+_TOOL_CALL_TAIL_OPENER = "<description>"
+
 
 def _strip_tool_call_tail(description: str) -> tuple[str, bool]:
     """Cut a leaked tool-call tail off *description*. Returns ``(text, was_cut)``.
@@ -306,14 +312,26 @@ def _strip_tool_call_tail(description: str) -> tuple[str, bool]:
     Widening to `<parameter name=` instead is worse for the same reason and the
     brief says so.
 
-    The predicate is therefore COMPOUND: cut at the earliest marker from which
-    NOTHING BUT ENVELOPE remains — at least one non-blank line, every one of them
-    beginning with `<` at column zero. That is measured rather than invented: all
-    114 envelope lines across the 80 contaminated tails start with `<` unindented,
-    and none of those tails ever returns to prose. The two properties do the two
-    jobs — "everything after" is what refuses a QUOTATION (a quoted example is
-    followed by more prose), and "column zero" is what refuses an indented code
-    block, which is how prose quotes markup.
+    The predicate is therefore COMPOUND, and each of its three conjuncts refuses
+    a different legitimate shape:
+
+    1. **The closing tag must be UNMATCHED** — no `<description>` before it. A
+       leaked tail is a mid-call slice, so it carries a closing tag whose opening
+       was never in the value; a card that quotes a whole XML or MCP tool
+       definition is BALANCED. Measured: 0 of the 80 contaminated rows contain
+       the opening tag anywhere.
+    2. **Everything after the marker must be envelope** — at least one non-blank
+       line. This is what refuses a QUOTATION, which is followed by more prose.
+    3. **Every one of those lines starts with `<` at COLUMN ZERO.** This is what
+       refuses an indented code block, which is how prose quotes markup — CB-90's
+       own card indents its example four spaces. Measured: all 114 envelope lines
+       across the 80 tails are unindented.
+
+    Conjunct 1 was NOT in the brief and was added after constructing a false
+    positive the designated fixture does not cover: a card about MCP surfaces
+    ending in an unindented `<tool>…<description>x</description><parameter …>`
+    block is cut by conjuncts 2 and 3 alone, losing 70 bytes of legitimate text.
+    It costs nothing on the corpus and closes that class.
 
     Fail-open on anything else, deliberately (brief §4): an unrecognised shape
     stays VISIBLE in the stored text rather than being cut on a guess. The
@@ -330,10 +348,16 @@ def _strip_tool_call_tail(description: str) -> tuple[str, bool]:
         return description, False
     at = description.find(_TOOL_CALL_TAIL_MARKER)
     while at >= 0:
-        rest = description[at + len(_TOOL_CALL_TAIL_MARKER) :]
-        lines = [line for line in rest.splitlines() if line.strip()]
-        if lines and all(line.startswith("<") for line in lines):
-            return description[:at], True
+        # Conjunct 1: this closing tag must be unmatched. Checked per candidate
+        # rather than once for the whole string, because "is THIS tag matched"
+        # is the question — an opening tag sitting inside the envelope after the
+        # cut point would not match a marker before it.
+        if _TOOL_CALL_TAIL_OPENER not in description[:at]:
+            rest = description[at + len(_TOOL_CALL_TAIL_MARKER) :]
+            # Conjuncts 2 and 3.
+            lines = [line for line in rest.splitlines() if line.strip()]
+            if lines and all(line.startswith("<") for line in lines):
+                return description[:at], True
         at = description.find(_TOOL_CALL_TAIL_MARKER, at + 1)
     return description, False
 

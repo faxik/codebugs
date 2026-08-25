@@ -2092,3 +2092,27 @@ class TestDescriptionWriteGuard:
         """A response key a client cannot discover is not a channel (CB-18)."""
         for tool in ("add", "batch_add"):
             assert "stripped_description_tail" in _mcp_tool_docstrings()[tool]
+
+    def test_a_balanced_xml_snippet_is_not_cut(self, conn):
+        """Second false-positive oracle, NOT covered by the CB-90 fixture.
+
+        A card about MCP/XML surfaces can legitimately end in an unindented tag
+        block that contains the marker. Conjuncts 2 and 3 alone cut it — measured,
+        70 bytes of real text lost. What separates it from a leak is that a leak
+        is a MID-CALL SLICE and therefore carries a closing tag whose opening was
+        never in the value, while a quoted snippet is BALANCED. Measured: 0 of the
+        80 contaminated rows contain `<description>` anywhere.
+
+        Mutant: drop the unmatched-opening conjunct — this turns red.
+        """
+        text = (
+            "The MCP tool schema we generate looks like this:\n\n"
+            "<tool>\n"
+            "<name>add</name>\n"
+            "<description>Record a code finding</description>\n"
+            '<parameter name="severity">critical</parameter>\n'
+            "</tool>"
+        )
+        r = _add(conn, desc=text)
+        assert r["description"] == text
+        assert r["stripped_description_tail"] is False
