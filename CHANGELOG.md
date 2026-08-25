@@ -91,6 +91,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   names it. A key that is absent, JSON null, or holds an object or array is reported as
   ungrouped, never invented.
 
+  **One guard is deliberately looser than canonical JSON, and the reason is that
+  this package writes non-canonical JSON itself.** A row is skipped only when its
+  `tags`/`meta` cannot be parsed at all — but `NaN` and `Infinity` are rejected by
+  RFC-8259 and *written by `json.dumps` by default*, so `add_finding(meta={"x":
+  float("nan")})` stores `{"x": NaN}` and that value is explicitly supported
+  (CB-82). A canonical check would have hidden such a row from every `meta:` axis
+  — including for a neighbouring key holding an ordinary string — while
+  `grouping-tags` went on counting it, which is precisely the two-tools-one-corpus
+  divergence this feature exists to prevent. The parse check therefore accepts
+  what SQLite's own `json_extract`/`json_each` accept, and no more. A meta key
+  containing a control character is refused alongside the path metacharacters:
+  SQLite's path is a C string, so a NUL truncates it and the key `a\0b` would
+  silently read its neighbour `a`.
+
 - **An ordinary read of a card now says where its code went (BT-7).** Until now the
   location anchor was visible only through `anchor-resolve` / `anchor_resolve` — a
   second, deliberate call that nobody makes while simply reading a card. `get` (MCP and
