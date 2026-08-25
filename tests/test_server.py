@@ -28,6 +28,7 @@ from contextlib import contextmanager
 import pytest
 from mcp.server.mcpserver import MCPServer
 from mcp.shared.exceptions import MCPError
+from mcp_types import CallToolResult
 
 from codebugs import db, findings, server
 
@@ -173,6 +174,192 @@ class TestStrictToolArguments:
             return len(tools)
 
         assert asyncio.run(check()) > 50
+
+
+class _RaisingCallNext:
+    """Stands in for the rest of the chain when it raises instead of returning."""
+
+    def __init__(self, exc):
+        self._exc = exc
+        self.calls = 0
+
+    async def __call__(self, ctx):
+        self.calls += 1
+        raise self._exc
+
+
+class _ToolFailureCallNext:
+    """Stands in for `_inner` when the tool body raised and `_handle_call_tool`
+    already swallowed it into a `CallToolResult(is_error=True)` — the REAL shape
+    `install_usage_tracking`'s `call_next` sees for a domain exception, per its
+    own docstring's finding about `mcp.server.mcpserver.server._handle_call_tool`.
+    """
+
+    def __init__(self):
+        self.calls = 0
+
+    async def __call__(self, ctx):
+        self.calls += 1
+        return CallToolResult(content=[], is_error=True)
+
+
+def _rows(tracker):
+    with tracker() as conn:
+        return [dict(r) for r in conn.execute("SELECT * FROM tool_calls ORDER BY id").fetchall()]
+
+
+class TestUsageTracking:
+    """Release-b (DIR-1): the `tool_calls` counter that feeds `codebugs usage`.
+
+    Driven directly against `install_usage_tracking`'s middleware, the same
+    seam-testing idiom `TestStrictToolArguments` already uses for the sibling
+    middleware — this is where this project touches the SDK's provisional
+    `MCPServer.middleware`, so it is worth pinning on its own.
+    """
+
+    def _middleware(self, tracker):
+        mcp = MCPServer("codebugs")
+        server.install_usage_tracking(mcp, tracker)
+        return mcp.middleware[-1]
+
+    def test_a_successful_call_is_recorded_with_name_and_nonzero_duration(self, tracker):
+        mw = self._middleware(tracker)
+        call_next = _Recorder()
+        asyncio.run(mw(_ctx("stats", {}), call_next))
+
+        rows = _rows(tracker)
+        assert len(rows) == 1
+        assert rows[0]["tool_name"] == "stats"
+        assert rows[0]["success"] == 1
+        assert rows[0]["error_type"] is None
+        assert rows[0]["duration_ms"] >= 0
+
+    def test_a_raised_exception_is_recorded_as_a_failure_and_still_reaches_the_caller(
+        self, tracker
+    ):
+        """The dispatch-level exception path (an MCPError escaping past
+        `_handle_call_tool`'s own swallow, e.g. from a resolver flow) — recording
+        must not swallow it a second time."""
+        mw = self._middleware(tracker)
+        call_next = _RaisingCallNext(MCPError(code=-32000, message="boom"))
+
+        with pytest.raises(MCPError):
+            asyncio.run(mw(_ctx("update", {"finding_id": "CB-1"}), call_next))
+
+        rows = _rows(tracker)
+        assert len(rows) == 1
+        assert rows[0]["success"] == 0
+        assert rows[0]["error_type"] == "MCPError"
+
+    def test_a_tool_body_failure_is_detected_via_the_result_shape_not_an_exception(
+        self, tracker
+    ):
+        """The finding this middleware's docstring documents: a domain exception
+        from a tool body never reaches this middleware as a raised exception —
+        `_handle_call_tool` already converted it to `CallToolResult(is_error=True)`
+        by the time `call_next` returns. `error_type` is therefore the fixed
+        `"ToolError"` marker, never a guessed class name."""
+        mw = self._middleware(tracker)
+        call_next = _ToolFailureCallNext()
+
+        result = asyncio.run(mw(_ctx("update", {"finding_id": "CB-999"}), call_next))
+        assert result.is_error is True, "the result must pass through unchanged"
+
+        rows = _rows(tracker)
+        assert len(rows) == 1
+        assert rows[0]["success"] == 0
+        assert rows[0]["error_type"] == "ToolError"
+
+    def test_a_recording_failure_does_not_break_the_call_and_is_announced_on_stderr(
+        self, tracker, monkeypatch, capsys
+    ):
+        """The discriminating test for rule 1: break the WRITE, not the tool call,
+        and confirm the call still succeeds while stderr carries a line (rule 2)."""
+        from codebugs import usage as usage_module
+
+        def _boom(*a, **k):
+            raise RuntimeError("disk is on fire")
+
+        monkeypatch.setattr(usage_module, "record_call", _boom)
+
+        mw = self._middleware(tracker)
+        call_next = _Recorder()
+        result = asyncio.run(mw(_ctx("stats", {}), call_next))
+
+        assert result == {"ok": True}, "the tool call must succeed despite the write failure"
+        assert call_next.calls == 1
+        err = capsys.readouterr().err
+        assert "stats" in err
+        assert "RuntimeError" in err
+
+    def test_error_type_never_carries_the_exception_message(self, tracker):
+        """A caller-supplied value can appear in an exception's message (a bad
+        category name, a finding id); only the class name is ever stored."""
+        mw = self._middleware(tracker)
+        call_next = _RaisingCallNext(ValueError("category 'sekret-internal-plan' is unknown"))
+
+        with pytest.raises(ValueError):
+            asyncio.run(mw(_ctx("add", {}), call_next))
+
+        rows = _rows(tracker)
+        assert rows[0]["error_type"] == "ValueError"
+        assert "sekret" not in rows[0]["error_type"]
+
+    def test_non_tools_call_methods_are_left_alone(self, tracker):
+        mw = self._middleware(tracker)
+        call_next = _Recorder()
+        asyncio.run(mw(_ctx("stats", {}, method="tools/list"), call_next))
+        assert _rows(tracker) == []
+
+
+class TestUsageAndStrictArgumentsComposition:
+    """The brief's §4 composition requirement: register both middlewares
+    together and observe what an argument-name refusal does to the counter,
+    rather than trusting each middleware's own isolated test to say so.
+    """
+
+    @staticmethod
+    def _compose(chain, inner):
+        call = inner
+        for mw in reversed(chain):
+
+            def _wrap(ctx, mw=mw, nxt=call):
+                return mw(ctx, nxt)
+
+            call = _wrap
+        return call
+
+    def test_an_argument_name_refusal_is_not_counted(self, tracker):
+        """DECISION (see `install_usage_tracking`'s docstring for the reasoning):
+        usage tracking is registered INNER of strict-argument checking, so a
+        call refused before it ever reaches a tool body is not recorded here —
+        `tool_calls` describes what TOOLS do, not client-side spelling mistakes.
+        """
+        mcp, _ = _server_with_middleware(tracker)
+        server.install_usage_tracking(mcp, tracker)
+        chain = mcp.middleware[-2:]
+
+        composed = self._compose(chain, _Recorder())
+
+        with pytest.raises(MCPError):
+            asyncio.run(composed(_ctx("update", {"finding_id": "CB-1", "note": "TEXT"})))
+
+        assert _rows(tracker) == []
+
+    def test_a_call_with_declared_arguments_is_counted(self, tracker):
+        """The composition's other half: a call that clears strict-argument
+        checking still reaches usage tracking and is recorded."""
+        mcp, _ = _server_with_middleware(tracker)
+        server.install_usage_tracking(mcp, tracker)
+        chain = mcp.middleware[-2:]
+
+        composed = self._compose(chain, _Recorder())
+        asyncio.run(composed(_ctx("update", {"finding_id": "CB-1", "append_note": "T"})))
+
+        rows = _rows(tracker)
+        assert len(rows) == 1
+        assert rows[0]["tool_name"] == "update"
+        assert rows[0]["success"] == 1
 
 
 class TestPreflight:

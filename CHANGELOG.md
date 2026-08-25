@@ -163,6 +163,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   supplying one by hand is a separate, already-tracked gap (CB-6).
 
 ### Added
+- **`codebugs usage` shows which tools get called and what fails (release-b, DIR-1).**
+  Summarizes per-tool call counts, failure counts, and total/average duration, sorted
+  by call count. **It counts only calls made through the MCP server** — not the
+  `codebugs` CLI, and not a direct import of `codebugs.findings` or any other module —
+  and says so in its own output every time it runs. Failures are recorded by exception
+  CLASS only, never by message, so a caller's own data never ends up in the counter.
 - **The MCP server now tells a newly-connected agent the recommended working loop, and
   `codebugs --help` names a first step.** `MCPServer(instructions=)` describes the loop —
   file an observation, read `attention`/`dedup_action` before acting on it, close when
