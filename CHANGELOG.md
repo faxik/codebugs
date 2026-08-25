@@ -33,6 +33,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   there is more than one (`mixed`) — that is where to look if a search returns fewer
   results than you expect.
 
+  If your query vector's size matches *nothing* stored, the search says so instead of
+  handing you an empty list, since an empty list there would be indistinguishable from
+  "nothing is similar". Searching a tracker with no vectors in it still returns an
+  empty list, which is the honest answer.
+
   **One limit, stated plainly: there is still no way to change embedding model.**
   This package has no operation that clears and re-computes existing vectors, so once
   a tracker holds vectors of one size, vectors of another size are refused and there

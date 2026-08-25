@@ -365,8 +365,9 @@ def search_similar(
     _reject_unusable_vector(query_embedding, what="query_embedding")
     conditions = ["embedding IS NOT NULL"]
     params: list[Any] = []
+    wanted = len(query_embedding) * _BYTES_PER_COMPONENT
     conditions.append("length(embedding) = ?")
-    params.append(len(query_embedding) * _BYTES_PER_COMPONENT)
+    params.append(wanted)
     if is_vocabulary_filter_active(status):
         conditions.append("status = ?")
         # Resolved like every other status filter (CB-19 sibling sweep): raw, this
@@ -378,6 +379,37 @@ def search_similar(
     rows = conn.execute(
         f"SELECT * FROM requirements {where}", params,
     ).fetchall()
+
+    if not rows:
+        # THE GUARD ABOVE INTRODUCED A NEW SILENCE, AND THIS IS WHERE IT IS PAID
+        # BACK (found by adversarial review, not by the design). On a UNIFORM
+        # tracker — the ordinary case, and the one the write guard now
+        # guarantees — a query of the wrong width used to be a loud
+        # ``ValueError`` from ``cosine_similarity`` and became an empty list:
+        # the caller is told "nothing is similar" about a tracker full of
+        # vectors, which is the silent-empty-queue shape this whole unit exists
+        # to remove, reintroduced by its own fix. ``embedding_stats`` cannot
+        # rescue it either, because on a uniform tracker it reports
+        # ``mixed: False`` — everything is fine.
+        #
+        # The extra read costs one query and only on the empty answer. It
+        # refuses ONLY on affirmative proof — the tracker holds vectors and NONE
+        # of them is this width — so an empty tracker still answers ``[]``
+        # honestly, and a MIXED tracker where some rows matched never reaches
+        # here at all, which is the CB-174 behaviour being preserved rather
+        # than undone.
+        stored = _stored_byte_widths(conn)
+        if stored and wanted not in stored:
+            widths = ", ".join(_describe_width(n) for n in stored)
+            raise ValueError(
+                f"query vector is {len(query_embedding)}-dimensional but this "
+                f"tracker stores {widths} vectors, so it can match nothing. "
+                "Returning an empty result would be indistinguishable from "
+                "'nothing is similar'. Embed your query with the same model the "
+                "stored vectors came from; reqs_embedding_stats reports what is "
+                "stored."
+            )
+        return []
 
     scored = []
     for row in rows:

@@ -1041,6 +1041,20 @@ UNCONDITIONAL, following the `attention`/`stripped_meta_keys` discipline: an emp
 is therefore not a privacy surface — said explicitly rather than left as an omission a reader has to
 interpret.
 
+**AND THAT CHANNEL IS NOT ENOUGH ON A UNIFORM TRACKER, WHICH IS WHERE THE FIX RE-CREATED THE VERY
+DEFECT IT REMOVES.** Adversarial review measured it: with every stored vector the same width — the
+ordinary case, and the one the write guard now guarantees — a query of a DIFFERENT width used to
+raise loudly from `cosine_similarity` and, with the SQL filter in place, returned `[]`. "Nothing is
+similar" about a full tracker, and `embedding_stats` says `mixed: False`, i.e. everything is fine.
+So `search_similar` refuses instead, on AFFIRMATIVE PROOF only — the result is empty AND the tracker
+holds vectors AND none of them is this width. An empty tracker still answers `[]`, because there an
+empty answer is true; a mixed tracker where some rows matched never reaches the branch, so CB-174's
+degrade-instead-of-fail behaviour is preserved rather than undone; and the branch keys on the WIDTH,
+never on the emptiness, so a right-width query whose status filter matched nothing is still an
+honest empty page. The general lesson is the one this repository keeps paying for: **a fix aimed at
+one silent-empty-queue can open another one, and only an adversary looking at the composition
+notices** — every element here was correct, and the elements together answered a lie.
+
 **RESIDUAL, NAMED AND NOT CLOSED: once a tracker holds vectors of one width, there is no sanctioned
 way to change embedding model.** No clear-and-re-embed operation exists here, and building one with
 no caller asking for it was refused on the direct precedent — CB-44 declined to build the resolver
@@ -1049,6 +1063,17 @@ because a gate with no way out is a wall rather than a diagnostic. **Today this 
 measured on 2026-08-25 across every reachable tracker — codebugs 6 requirements, both autosorter
 trackers 1401 each — the embedded count is **0**, so CB-174 was a dormant breach rather than live
 damage, and the "first vector sets the width" rule had no migration cost at the moment it landed.
+
+**Three residuals found by adversarial review and NAMED rather than closed, because closing each is
+a separate negotiated decision.** (1) The network gate matches a CALL SITE by the name being called,
+so an indirection that hides the name — `getattr(importlib, "import_module")(...)`, or
+`find_spec`/`module_from_spec`/`exec_module` — is not seen; both were reproduced, and closing them
+means tracking values rather than names, a much larger check. The prose above is written to the
+width the gate actually holds and no wider. (2) A ZERO-LENGTH blob is accepted as an authoritative
+width, so a tracker that received `store_embedding(conn, id, [])` from a pre-CB-174 version now
+refuses every real vector, with no clear operation to escape — the same residual as the model
+switch, reached by a different door, and bounded today by the measured zero population. (3) The
+gate reads `src/codebugs/` only, so `tools/` and `tests/` are outside it by design.
 
 **Scope note for anyone extending this: `batch_store_embeddings` is still missing half of the
 hardening its twin received (CB-184).** A requirement that does not exist is silently counted as

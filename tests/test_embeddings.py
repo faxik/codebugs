@@ -390,6 +390,20 @@ class TestTheWidthCheckLivesInsideTheWritingTransaction:
 
     MUTANT: move the ``_reject_width_the_tracker_disagrees_with`` call above the
     ``with db.txn(conn):`` line in either function --- this class goes red.
+
+    **"INSIDE A TRANSACTION" IS NOT THE PROPERTY; "INSIDE THE SAME ONE AS THE
+    WRITE" IS.** The first version of this class asked only whether the guard
+    sat inside *some* ``db.txn`` block, and adversarial review broke it with a
+    mutant that splits one transaction into two consecutive ones --- check in
+    the first, which commits and releases the lock, write in the second.
+    Measured against that mutant: ``BEGIN IMMEDIATE`` fired twice, a competing
+    writer landed in the gap, the tracker ended mixed
+    (``[('FR-1', 12), ('FR-2', 8)]``), and the whole file stayed green at
+    53 passed. That is verbatim the check-then-act this class exists to
+    forbid, so the assertion is now about ONE block holding BOTH.
+
+    A test that validates elements cannot validate their composition --- this
+    repository's own rule, turned on a test written to enforce it.
     """
 
     GUARD = "_reject_width_the_tracker_disagrees_with"
@@ -434,19 +448,46 @@ class TestTheWidthCheckLivesInsideTheWritingTransaction:
             and n.func.id == guard
         ]
 
+    @staticmethod
+    def _writes(node):
+        """UPDATE statements on ``requirements`` reachable from ``node``."""
+        import ast
+
+        found = []
+        for n in ast.walk(node):
+            if isinstance(n, ast.Constant) and isinstance(n.value, str):
+                if n.value.strip().upper().startswith("UPDATE REQUIREMENTS"):
+                    found.append(n)
+        return found
+
     @pytest.mark.parametrize("name", ["store_embedding", "batch_store_embeddings"])
-    def test_the_guard_is_called_and_only_from_inside_a_db_txn_block(self, name):
+    def test_the_guard_and_the_write_share_ONE_db_txn_block(self, name):
         func = self._function(name)
         in_function = self._guard_calls(func, self.GUARD)
         assert len(in_function) == 1, (
             f"{name} must call {self.GUARD} exactly once; found {len(in_function)}"
         )
+        assert self._writes(func), f"{name} must issue an UPDATE -- fixture check"
+
         blocks = self._txn_blocks(func)
         assert blocks, f"{name} must open a db.txn block"
-        inside = [c for block in blocks for stmt in block.body for c in self._guard_calls(stmt, self.GUARD)]
-        assert len(inside) == 1, (
+        assert len(blocks) == 1, (
+            f"{name} opens {len(blocks)} db.txn blocks. Two consecutive "
+            "transactions put the check in one and the write in another, which "
+            "releases the write lock between them -- exactly the "
+            "unsynchronized check-then-act this is here to forbid."
+        )
+
+        block = blocks[0]
+        guarded = [c for stmt in block.body for c in self._guard_calls(stmt, self.GUARD)]
+        written = [w for stmt in block.body for w in self._writes(stmt)]
+        assert len(guarded) == 1, (
             f"{name} calls {self.GUARD} outside its db.txn block -- that is an "
             "unsynchronized check-then-act (CB-24's shape)"
+        )
+        assert written, (
+            f"{name} writes outside the db.txn block that carries the width "
+            "check, so the check decides under a lock the write does not hold"
         )
 
     def test_the_argument_only_checks_run_before_the_transaction(self):
@@ -519,6 +560,59 @@ class TestSearchSurvivesAForeignVector:
         self._mixed_tracker(conn)
         with pytest.raises(ValueError):
             embeddings.search_similar(conn, bad)
+
+
+class TestTheReadGuardDoesNotIntroduceANewSilence:
+    """The SQL width filter creates its own silent-empty-queue, and this is where
+    it is paid back. Found by adversarial review, not by the design.
+
+    On a UNIFORM tracker --- the ordinary case, and the one the write guard now
+    guarantees --- a query of the wrong width used to raise loudly from
+    ``cosine_similarity`` and, with the filter in place, became an empty list:
+    "nothing is similar" about a tracker full of vectors. ``embedding_stats``
+    cannot rescue that one, because a uniform tracker reports ``mixed: False``,
+    i.e. everything is fine. Reintroducing the very defect class this unit
+    removes, inside its own fix.
+
+    MUTANT: delete the refusal in ``search_similar``'s empty-result branch ---
+    the first test here goes red.
+    """
+
+    def test_a_foreign_width_query_on_a_uniform_tracker_is_refused_not_emptied(self, conn):
+        reqs.add_requirement(conn, req_id="FR-1", description="a")
+        reqs.add_requirement(conn, req_id="FR-2", description="b")
+        embeddings.store_embedding(conn, "FR-1", [1.0, 0.0, 0.0])
+        embeddings.store_embedding(conn, "FR-2", [0.0, 1.0, 0.0])
+        assert embeddings.embedding_stats(conn)["mixed"] is False
+
+        with pytest.raises(ValueError) as excinfo:
+            embeddings.search_similar(conn, [1.0, 0.0, 0.0, 0.0, 0.0])
+        message = str(excinfo.value)
+        assert "5-dimensional" in message and "3-dimensional" in message
+
+    def test_an_empty_tracker_still_answers_empty_rather_than_refusing(self, conn):
+        """Affirmative proof only. With nothing stored, an empty answer is TRUE,
+        and refusing would be a false alarm on a perfectly ordinary state."""
+        reqs.add_requirement(conn, req_id="FR-1", description="a")
+        assert embeddings.search_similar(conn, [1.0, 0.0]) == []
+
+    def test_a_mixed_tracker_where_some_rows_match_never_reaches_the_refusal(self, conn):
+        """The CB-174 behaviour is preserved, not undone: as long as the query
+        width matches SOMETHING, the search degrades instead of failing."""
+        for i in (1, 2):
+            reqs.add_requirement(conn, req_id=f"FR-{i}", description="x")
+        _store_raw(conn, "FR-1", embeddings._pack_vector([1.0, 0.0]))
+        _store_raw(conn, "FR-2", embeddings._pack_vector([1.0, 0.0, 0.0]))
+        assert [r["id"] for r in embeddings.search_similar(conn, [1.0, 0.0])] == ["FR-1"]
+
+    def test_a_status_filter_that_empties_the_page_is_not_mistaken_for_a_width_error(
+        self, conn
+    ):
+        """The refusal keys on the WIDTH, never on the emptiness. A right-width
+        query whose status filter matched nothing is an honest empty page."""
+        reqs.add_requirement(conn, req_id="FR-1", description="a", status="implemented")
+        embeddings.store_embedding(conn, "FR-1", [1.0, 0.0])
+        assert embeddings.search_similar(conn, [1.0, 0.0], status="planned") == []
 
 
 class TestTheSilentNanDropIsWhatTheWriteGuardPrevents:

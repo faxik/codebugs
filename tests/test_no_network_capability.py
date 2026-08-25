@@ -158,8 +158,16 @@ def _capability_imports(rel: str, source: str) -> list[tuple[str, str]]:
 
 #: Ways to reach code by NAME at run time. Everything above reads import
 #: statements, and an import statement is the one thing none of these is.
-_UNREADABLE_BY_NAME = frozenset({"__import__", "exec", "eval"})
-_UNREADABLE_BY_ATTRIBUTE = frozenset({"import_module"})
+#:
+#: EVERY NAME IS CHECKED IN BOTH SYNTACTIC FORMS, and it took an adversarial
+#: pass to see why. The first version guarded ``__import__`` as a bare NAME and
+#: ``import_module`` as an ATTRIBUTE, which is how each is usually written --
+#: and each was then reachable through the other's spelling. Both bypasses were
+#: reproduced with a working ``socket.create_connection`` inside the package
+#: (``from importlib import import_module`` in ``milestones/``, and
+#: ``builtins.__import__``), with this file still reporting 23 passed. One rule
+#: written as two half-rules, which is this repository's most repeated defect.
+_CODE_BY_NAME = frozenset({"__import__", "import_module", "exec", "eval"})
 
 
 def _reaches_code_by_name(rel: str, source: str) -> list[str]:
@@ -173,16 +181,31 @@ def _reaches_code_by_name(rel: str, source: str) -> list[str]:
     Measured on the tree this landed on: **zero** occurrences of any of the
     four in ``src/codebugs/``, which is what makes refusing them free rather
     than a rule somebody has to work around on day one.
+
+    KNOWN AND NOT CLOSED, named here rather than left to be rediscovered: this
+    matches a CALL SITE by the name being called, so an indirection that hides
+    the name — ``getattr(importlib, "import_module")(...)``, or the
+    ``find_spec`` / ``module_from_spec`` / ``exec_module`` sequence — is not
+    seen. Both were reproduced by adversarial review. Closing them means
+    tracking values rather than names, which is a different and much larger
+    check; what this file buys is that the ordinary spellings cannot be used by
+    accident, and the prose elsewhere is written to that width and no wider.
     """
     found = []
     for node in ast.walk(ast.parse(source)):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if isinstance(func, ast.Name) and func.id in _UNREADABLE_BY_NAME:
-            found.append(f"{rel}: {func.id}(...)")
-        elif isinstance(func, ast.Attribute) and func.attr in _UNREADABLE_BY_ATTRIBUTE:
-            found.append(f"{rel}: ....{func.attr}(...)")
+        # Both spellings for every name: ``__import__(...)`` and
+        # ``builtins.__import__(...)`` are the same capability, as are
+        # ``import_module(...)`` and ``importlib.import_module(...)``.
+        called = None
+        if isinstance(func, ast.Name):
+            called = func.id
+        elif isinstance(func, ast.Attribute):
+            called = func.attr
+        if called in _CODE_BY_NAME:
+            found.append(f"{rel}: {called}(...)")
     return found
 
 
@@ -276,7 +299,9 @@ class TestTheGateItself:
         "mutant",
         [
             "importlib.import_module('socket')",
+            "from importlib import import_module\nimport_module('socket')",
             "__import__('socket')",
+            "import builtins\nbuiltins.__import__('socket')",
             "exec('import socket')",
             "eval(\'__import__(\"socket\")\')",
         ],
