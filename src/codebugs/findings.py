@@ -2783,7 +2783,7 @@ def _membership_sql(
             "CASE WHEN json_valid(tags) THEN json_type(tags) = 'array' ELSE 0 END"
         )
         return (
-            "SELECT DISTINCT f.id AS id, f.severity AS severity, "
+            "SELECT f.id AS id, f.severity AS severity, "
             "f.occurrence_count AS occurrence_count, je.value AS group_key "
             f"FROM ({inner}) f JOIN json_each(f.tags) je WHERE je.type = 'text'",
             list(params),
