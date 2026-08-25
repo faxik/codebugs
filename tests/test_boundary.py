@@ -540,6 +540,12 @@ class TestMcpWireSchema:
             nothing;
         (2) the collector walks the provider registry, so a tool registered
             anywhere else would never be observed — hence the injected provider.
+
+        Since CB-164 the collector does not normalize with its own hands: it
+        registers through the production adapter and the adapter normalizes. What
+        this test observes — the collector's OUTPUT is dedented — is unchanged and
+        still the right thing to assert; only the mechanism behind it moved, and
+        the test below pins the half that mechanism newly makes visible.
         """
         indented = "Summary line.\n\n    Indented body.\n    "
 
@@ -562,6 +568,56 @@ class TestMcpWireSchema:
         collected = collect_tool_schemas(providers=[provider])
         assert [t["name"] for t in collected] == ["synthetic_tool"]
         assert collected[0]["description"] == "Summary line.\n\nIndented body.\n"
+
+    def test_a_tool_passing_its_own_description_lands_in_the_snapshot_unnormalized(self):
+        """What CB-164's fix buys — and the only thing protecting the fix itself.
+
+        The collector used to build a BARE server and apply `normalize_description`
+        by hand, so the snapshot was a RECONSTRUCTION of the wire rather than a
+        record of it. `src/codebugs/surfacegen.py` already named the hazard that
+        follows, and guarded it with nothing but a convention: "A generated tool
+        passing `description=` would therefore match the golden byte for byte and
+        still ship un-dedented text to clients — CB-73 resurrected behind the very
+        gate built to catch it."
+
+        Registering through the production adapter closes it. An explicit
+        `description=` WINS over `__doc__` by `_NormalizedDescriptions`' own
+        documented rule — "a caller that passed one has already said what the
+        client should see" — so the raw text now reaches the snapshot exactly as a
+        client would receive it, and CB-156's render gate above names it. The last
+        assertion is that composition, and it is why the first two are not enough
+        on their own: verbatim text is only worth recording if the gate can then
+        read it.
+
+        THE REASON THIS TEST EXISTS AT ALL, measured rather than feared: with
+        `tests/_mcp_schema.py` reverted to the hand-normalizing version,
+        `test_boundary.py`, `test_server.py` and `test_loc.py` came to 193 passed.
+        The golden cannot move, because no tool on today's surface passes
+        `description=` — so the fix for "a gate that cannot fire" was itself a
+        change nothing could catch being undone. Leaving that as a comment would
+        have been this unit's own subject committed inside its own fix.
+        """
+        google = "Summary line.\n\nArgs:\n    severity: how bad it is\n    file: where\n"
+
+        def synthetic_tool(value: str) -> dict:
+            return {"value": value}
+
+        def register(mcp, conn_factory):
+            # No docstring on the function: `description=` is the whole input, so
+            # what comes back can only be the adapter's verdict on it.
+            mcp.tool(description=google)(synthetic_tool)
+
+        provider = db.ToolProvider(name="cb164_probe", register_fn=register)
+        collected = collect_tool_schemas(providers=[provider])
+        assert [t["name"] for t in collected] == ["synthetic_tool"]
+        assert collected[0]["description"] == google, (
+            "the collector normalized a description its caller supplied — it is "
+            "reconstructing the wire again instead of recording it (CB-164)"
+        )
+        assert "Args:" in _lazily_continued_sections(collected[0]["description"]), (
+            "the snapshot recorded the text verbatim but CB-156's gate cannot see "
+            "the section in it, so recording it bought nothing"
+        )
 
     @staticmethod
     def _raw_description(provider) -> str:
