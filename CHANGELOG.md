@@ -56,13 +56,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   own, with nothing in the response to warn you. It now returns the written row
   directly, so what you see is always your own write.
 - **The mutation-testing scripts under `tests/manual/` (`mutate_cb69.py`, `mutate_cb31.py`)
-  now refuse to run on a dirty tree instead of silently overwriting uncommitted work
-  (CB-173).** Each script writes a broken version of a source file to disk, runs the
-  suite, then restores the original — and if that file already had uncommitted changes
-  when the script started, "the original" it restores is the wrong one, discarding your
-  edits. They now check `git status` on the files they're about to touch and stop with a
-  clear error naming them before writing anything. Commit or stash first, or pass
-  `--allow-dirty` (or set `CODEBUGS_MUTATION_ALLOW_DIRTY=1`) if you really mean it.
+  now refuse to run on a dirty tree instead of risking your uncommitted work (CB-173).**
+  Each script writes a broken version of a source file to disk, runs the suite, then
+  restores the original — that restore is correct when the run finishes normally. The
+  danger was a run that got killed or timed out first: the broken version was left
+  stranded on disk, and cleaning it up with `git checkout --` discarded any uncommitted
+  edits on that file too. They now check `git status` on the files they're about to touch
+  and stop with a clear error naming them before writing anything. Commit or stash first,
+  or pass `--allow-dirty` (or set `CODEBUGS_MUTATION_ALLOW_DIRTY=1`) if you really mean it.
 - **A leaked tool-call tail at the end of a `description` is now cut at the write
   boundary, and `add`/`batch_add` say so in the response (CB-90).** Some filing agents
   include a slice of their own XML-like tool call in the value they pass as

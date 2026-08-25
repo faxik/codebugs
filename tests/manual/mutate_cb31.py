@@ -6,9 +6,12 @@ keyword argument parses under ast.parse and only fails at compile time, which on
 scored a vacuous kill here — and (3) restored in a finally.
 
 CB-173: before any of that, `mutation_guard.require_clean_tree` checks that every
-file this harness is about to overwrite has no uncommitted changes — this harness
-has destroyed uncommitted work on those files by overwriting and later restoring
-the WRONG "original". Pass --allow-dirty (or set
+file this harness is about to overwrite has no uncommitted changes. A run that
+completes normally restores this content correctly — the danger is a run that
+gets interrupted (killed, timed out) before its `finally` runs: the mutation is
+left stranded on disk, and cleaning that up with `git checkout --` discards any
+uncommitted work on the same file along with it. That destroyed uncommitted
+work five times (CB-173's cited incidents). Pass --allow-dirty (or set
 CODEBUGS_MUTATION_ALLOW_DIRTY=1) to run anyway.
 
 Run:  uv run --extra dev python tests/manual/mutate_cb31.py
