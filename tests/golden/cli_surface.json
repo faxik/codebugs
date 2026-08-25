@@ -5913,6 +5913,74 @@
       "type": null
     }
   },
+  "usage": {
+    "actions": [
+      {
+        "action_class": "_HelpAction",
+        "choices": null,
+        "const": null,
+        "default": "==SUPPRESS==",
+        "deprecated": false,
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "action_class": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "since",
+        "help": "Only count calls at or after this UTC timestamp (YYYY-MM-DDTHH:MM:SSZ)",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--since"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "action_class": "_StoreAction",
+        "choices": null,
+        "const": null,
+        "default": null,
+        "deprecated": false,
+        "dest": "limit",
+        "help": "Show at most this many tools",
+        "metavar": null,
+        "nargs": null,
+        "option_strings": [
+          "--limit"
+        ],
+        "required": false,
+        "type": "int"
+      }
+    ],
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "usage",
+      "help": "Summarize MCP tool-call counts, failures, and timing (MCP-server calls only \u2014 see the printed note)",
+      "metavar": "usage",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
+  },
   "where": {
     "actions": [
       {
