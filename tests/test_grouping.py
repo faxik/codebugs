@@ -327,6 +327,73 @@ class TestDistinctFromSuppression:
         )
         assert grouping.citation_report(rel_conn)["components_total"] == 0
 
+    def test_a_third_card_citing_both_defeats_the_declaration_visibly(self, rel_conn):
+        """THE HONEST SCOPE, pinned so the prose cannot drift away from it.
+
+        Dropping one edge does not cut a graph. Declare A and B distinct while a
+        third card cites both, and all three stay in one component — with the
+        suppressed edge then listed BOTH in `suppressed_edges` and among that
+        component's own edges. What makes that a limitation rather than a lie is
+        that the report says so: `still_grouped` on the entry, counted by
+        `still_grouped_total`. Two-node fixtures cannot see any of this, which is
+        why the rest of this class is not enough on its own.
+        """
+        a = add(rel_conn, "the opening card of a chain that gets cross-referenced")
+        b = add(rel_conn, f"a separate defect whose text happens to mention {a}")
+        c = add(rel_conn, f"a triage note naming both {a} and {b} in one breath")
+        relations.relate(rel_conn, a, "distinct_from", b, source="test")
+        rep = grouping.citation_report(rel_conn)
+        assert rep["suppressed_total"] == 1
+        assert rep["still_grouped_total"] == 1
+        (sup,) = rep["suppressed_edges"]
+        assert sup["still_grouped"] is True
+        assert rep["components_total"] == 1
+        assert {m["id"] for m in rep["components"][0]["members"]} == {a, b, c}
+
+    def test_a_declaration_on_a_hub_edge_is_still_reported(self, rel_conn):
+        """The hub rule and the declaration are two different reasons not to
+        join, and the ORDER they are asked in decides what the report can SAY.
+
+        Asked hub-first, a declaration touching a landmark card never reaches
+        the ledger comparison at all, so `suppressed_total` answers `0` with the
+        declaration alive in the ledger — "no such channel" wearing the face of
+        "looked, nothing fired". The grouping is identical either way, so only
+        this assertion separates the two. Moving the suppression branch back
+        below the hub branch turns this test red.
+        """
+        hub = add(rel_conn, "the landmark card that every neighbourhood points at")
+        citers = [
+            add(rel_conn, f"the alpha report, which points at {hub}"),
+            add(rel_conn, f"the beta report, which also points at {hub}"),
+            add(rel_conn, f"the gamma report, pointing at {hub} as well"),
+            add(rel_conn, f"the delta report, likewise pointing at {hub}"),
+        ]
+        assert grouping.citation_report(rel_conn)["hubs"] == [hub], (
+            "fixture invalid: the landmark must actually exceed hub_degree, or "
+            "the hub branch is never the one that would have swallowed the edge"
+        )
+        relations.relate(rel_conn, hub, "distinct_from", citers[0], source="test")
+        rep = grouping.citation_report(rel_conn)
+        assert rep["suppressed_total"] == 1
+        (sup,) = rep["suppressed_edges"]
+        assert {sup["a"], sup["b"]} == {hub, citers[0]}
+
+    def test_suppressed_edges_come_back_in_a_stable_order(self, rel_conn):
+        """Every other list in this report is ordered deliberately; with one
+        suppressed pair in the fixture the sort line is unobservable, so it
+        takes two."""
+        a = add(rel_conn, "the first card of the first declared-distinct pair")
+        b = add(rel_conn, f"the second card of that pair, mentioning {a}")
+        c = add(rel_conn, "the first card of the second declared-distinct pair")
+        d = add(rel_conn, f"the second card of that other pair, mentioning {c}")
+        relations.relate(rel_conn, a, "distinct_from", b, source="test")
+        relations.relate(rel_conn, c, "distinct_from", d, source="test")
+        rep = grouping.citation_report(rel_conn)
+        assert rep["suppressed_total"] == 2
+        pairs = [(e["a"], e["b"]) for e in rep["suppressed_edges"]]
+        assert pairs == sorted(pairs)
+        assert pairs == sorted([tuple(sorted((a, b))), tuple(sorted((c, d)))])
+
     def test_filing_lineage_is_not_suppressed(self, rel_conn):
         """The NON-SPREAD oracle, and it is as mandatory as the others.
 

@@ -235,16 +235,33 @@ def citation_report(
     are COUNTED as dangling rather than dropped — the count is how the operator
     learns that a status filter cut the graph.
 
-    A DECLARED ``distinct_from`` SUPPRESSES THE COMPONENT, NOT THE EDGE (CB-62).
+    A DECLARED ``distinct_from`` SUPPRESSES THE UNION, NOT THE EDGE (CB-62).
     Note the two halves of "no link here is inferred" above: the MENTION is
     hand-written, and the conclusion drawn from it — that the two cards are one
     unit of work — is this module's guess. So a human's explicit "these are
-    different defects" (``relations_relate … distinct_from``) stops the two
-    cards being merged into one component, while the edge itself stays in the
-    output with its quoted context, because the reference really was written and
-    hiding it would destroy evidence rather than correct a conclusion. The two
-    graphs are NOT unified: ``filing_report``'s declared lineage is untouched,
-    for the reason spelled out at the suppression site.
+    different defects" (``relations_relate … distinct_from``) stops that edge
+    joining the two cards, while the edge itself stays in the output with its
+    quoted context, because the reference really was written and hiding it would
+    destroy evidence rather than correct a conclusion.
+
+    THE HONEST SCOPE: it suppresses one EDGE, not the PAIR. Removing an edge
+    does not cut a graph — if a third card cites both, they land in one
+    component anyway, and on a corpus whose components run to eleven cards that
+    is an ordinary shape rather than a corner case. The report does not go quiet
+    about it: every entry in ``suppressed_edges`` carries ``still_grouped``, and
+    ``still_grouped_total`` counts them, so a declaration that lost is a fact
+    the reader is handed rather than one they must notice. Cutting for real
+    means deciding which side the third card belongs to, which is a different
+    and much larger design.
+
+    ``suppressed_edges`` deliberately takes no ``…_limit``, alone among this
+    report's lists, and the reason is what bounds it: ``anchors`` and
+    ``orphans`` grow with the CORPUS, while this one is bounded by the
+    ``distinct_from`` rows a human typed one at a time. If that ever stops being
+    true it needs a limit like its neighbours.
+
+    The two graphs are NOT unified: ``filing_report``'s declared lineage is
+    untouched, for the reason spelled out at the suppression site.
     """
     if hub_degree is not None and hub_degree < 0:
         raise ValueError(f"hub_degree must be >= 0 or None, got {hub_degree}")
@@ -324,21 +341,42 @@ def citation_report(
     suppressed_edges: list[dict[str, Any]] = []
     dsu = DSU(list(by_id))
     for a, b in edges:
-        if a in hubs or b in hubs:
-            continue
-        # The edge SURVIVES — it is evidence a human wrote the reference — and
-        # only the union is skipped. It is reported separately because with the
-        # pair in no component there is nowhere else it could appear, and
-        # `relations.unrelate`'s own docstring names the hazard: "a suppression
-        # that should not exist is invisible by construction". A wrong
-        # `distinct_from` must therefore be visible in the very report it
-        # silences. `[]` means "looked, nothing suppressed", never "no such
-        # channel" — the `attention` / `stripped_meta_keys` discipline.
+        # THE DECLARATION IS CONSULTED BEFORE THE HUB RULE, and that order is
+        # load-bearing rather than incidental. Both branches `continue`, so the
+        # GROUPING is identical either way; what changes is what the report can
+        # SAY. With the hub test first, a declaration on an edge touching a
+        # landmark card never reached this line at all, and `suppressed_total`
+        # came back `0` with a live declaration sitting in the ledger — "no such
+        # channel" wearing the face of "looked, nothing fired", which is the one
+        # inversion the `attention` / `stripped_meta_keys` discipline forbids.
+        # The damage also ran the wrong way round: a much-cited card is exactly
+        # the one somebody bothers to declare distinct from its neighbours.
         if (a, b) in suppressed:
+            # The EDGE survives — somebody wrote that reference, and hiding it
+            # would destroy evidence rather than correct a conclusion — so only
+            # the union is skipped, and the edge is reported here because with
+            # the pair in no component there is nowhere else it could appear.
+            # `relations.unrelate`'s own docstring names the hazard this closes:
+            # "a suppression that should not exist is invisible by construction".
             suppressed_edges.append({"a": a, "b": b, "mentions": edges[(a, b)]})
             continue
+        if a in hubs or b in hubs:
+            continue
         dsu.union(a, b)
+    # A DECLARATION CAN STILL BE DEFEATED, and staying silent about that would
+    # undo the point of reporting suppressions at all. Skipping ONE union does
+    # not cut a graph: with A–C and C–B unsuppressed, declaring A and B distinct
+    # leaves them in one component through C, and the direct A–B edge is then
+    # listed BOTH here and among that component's own edges — two lines of one
+    # report asserting opposite things, which is the CB-48 shape. Making the cut
+    # real would mean deciding which side C belongs to; that is a genuinely
+    # different and much larger design, so this states the outcome rather than
+    # pretending. Computed after the whole loop, because `dsu.find` means
+    # nothing until every union has been applied.
+    for sup in suppressed_edges:
+        sup["still_grouped"] = dsu.find(sup["a"]) == dsu.find(sup["b"])
     suppressed_edges.sort(key=lambda e: (e["a"], e["b"]))
+    still_grouped_total = sum(1 for e in suppressed_edges if e["still_grouped"])
 
     grouped: dict[str, list[str]] = defaultdict(list)
     for cid in by_id:
@@ -417,6 +455,7 @@ def citation_report(
         "dangling_total": dangling,
         "suppressed_edges": suppressed_edges,
         "suppressed_total": len(suppressed_edges),
+        "still_grouped_total": still_grouped_total,
         "components": components,
         "components_total": components_total,
         "cards_in_components": cards_in_components,
@@ -721,14 +760,19 @@ def register_tools(mcp, conn_factory) -> None:
         outside the population are COUNTED as dangling, never dropped.
 
         A pair you have declared DIFFERENT — relations_relate(a, "distinct_from",
-        b) — is never merged into one component here, in either order, and a
-        retracted declaration stops suppressing. The citation edge itself still
-        appears in the output with its quoted context: your declaration corrects
-        the conclusion this tool draws from the reference, not the fact that
-        somebody wrote it. This is the ONLY place distinct_from suppresses:
-        grouping_filing's declared lineage (split_from / split_children) is
-        untouched, because overriding one declaration with another is a
-        different question from overriding a guess.
+        b) — stops being joined BY THAT REFERENCE, in either order; retracting
+        the declaration brings the grouping back. The citation itself still
+        appears, with its quoted context, in suppressed_edges: your declaration
+        corrects the conclusion this tool draws from the reference, not the fact
+        that somebody wrote it. Read still_grouped on each entry before trusting
+        the separation — dropping one reference does not cut a graph, so if a
+        third card cites both they are in one component regardless, and that
+        flag (counted by still_grouped_total) is how the report tells you your
+        declaration lost rather than leaving you to notice. This is the ONLY
+        place distinct_from suppresses: grouping_filing's declared lineage
+        (split_from / split_children) is untouched, because overriding one
+        declaration with another is a different question from overriding a
+        guess.
 
         Args:
             status: Narrow/widen the population (default: live statuses; "all")
@@ -915,6 +959,7 @@ def register_cli(sub, commands) -> None:
             f"hub_degree={report['hub_degree']} citations={report['citations_total']} "
             f"edges={report['edges_total']} dangling={report['dangling_total']} "
             f"suppressed={report['suppressed_total']} "
+            f"still_grouped={report['still_grouped_total']} "
             f"components={report['components_total']} "
             f"cards_in_components={report['cards_in_components']} hubs={len(report['hubs'])}"
         )
@@ -923,9 +968,14 @@ def register_cli(sub, commands) -> None:
         # cards NOT group, so a reader looking for a component that is missing
         # must meet the reason before the list it is missing from.
         for sup in report["suppressed_edges"]:
+            note = (
+                " -- STILL GROUPED: another citation path connects them"
+                if sup["still_grouped"]
+                else ""
+            )
             print(
                 f"suppressed {sup['a']} <-> {sup['b']} "
-                f"(declared distinct_from; {len(sup['mentions'])} mention(s))"
+                f"(declared distinct_from; {len(sup['mentions'])} mention(s)){note}"
             )
         if not report["components"]:
             print("No citation components.")

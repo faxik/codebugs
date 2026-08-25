@@ -22,7 +22,7 @@ from contextlib import contextmanager
 import pytest
 from mcp.shared.exceptions import MCPError
 
-from codebugs import cli, db, findings, grouping, server
+from codebugs import cli, db, findings, grouping, relations, server
 from tests.test_server import _Recorder, _ctx, _server_with_middleware
 
 TOOLS = {"grouping_citations", "grouping_tags", "grouping_filing"}
@@ -295,3 +295,43 @@ def test_two_cards_citing_each_other_form_one_component(tracker):
     res = _call(mcp, "grouping_citations", {}).structured_content
     assert res["components_total"] == 1
     assert {m["id"] for m in res["components"][0]["members"]} == {a, b}
+
+
+def test_a_declared_distinct_from_reaches_the_cli_and_the_mcp_surface(
+    tracker, monkeypatch, capsys
+):
+    """The whole design rests on the suppression being VISIBLE, so the surfaces
+    that carry it need a test of their own.
+
+    Measured, and the reason this exists: deleting BOTH channels from the CLI —
+    the `suppressed=` counter on the header line and the loop that prints each
+    suppressed pair — left the entire suite green. A defence nothing pins is a
+    defence one edit from disappearing, and this one exists precisely because a
+    mistaken `distinct_from` is otherwise invisible in the report it silences.
+    """
+    with tracker() as conn:
+        a = add(conn, "the card that the other one refers to")
+        b = add(conn, f"a different defect whose text mentions {a} in passing")
+        relations.relate(conn, a, "distinct_from", b, source="test")
+    lo, hi = sorted((a, b))
+
+    mcp, _ = _server_with_middleware(tracker, mode="grouping")
+    res = _call(mcp, "grouping_citations", {}).structured_content
+    assert res["components_total"] == 0
+    assert res["suppressed_total"] == 1
+    assert res["still_grouped_total"] == 0
+
+    _cli(monkeypatch, tracker, ["grouping-citations"])
+    out = capsys.readouterr().out
+    assert "suppressed=1" in out and "still_grouped=0" in out
+    assert f"suppressed {lo} <-> {hi}" in out and "declared distinct_from" in out
+    assert "STILL GROUPED" not in out
+
+    # And the defeated case reaches the same surface: a third card citing both
+    # puts the pair back in one component, which the operator must be told.
+    with tracker() as conn:
+        add(conn, f"a triage note naming both {a} and {b} in one breath")
+    _cli(monkeypatch, tracker, ["grouping-citations"])
+    out = capsys.readouterr().out
+    assert "suppressed=1" in out and "still_grouped=1" in out
+    assert "STILL GROUPED" in out
