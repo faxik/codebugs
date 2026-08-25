@@ -101,16 +101,35 @@ def _reject_unusable_vector(vec: list[float], *, what: str) -> None:
             )
 
 
-def _stored_dimensions(conn: sqlite3.Connection) -> list[int]:
-    """Distinct vector widths already in this tracker, in COMPONENTS.
+def _describe_width(byte_width: int) -> str:
+    """A byte width, said the way a caller thinks about it.
 
-    Reads BYTES from ``length(embedding)`` and divides — see
-    ``_BYTES_PER_COMPONENT`` for the premise and where it is pinned.
+    Falls back to naming the bytes when the length is not a whole number of
+    components, rather than rounding and reporting a dimension count that is
+    not what is stored.
+    """
+    if byte_width % _BYTES_PER_COMPONENT:
+        return f"{byte_width}-byte (not a whole number of components)"
+    return f"{byte_width // _BYTES_PER_COMPONENT}-dimensional"
+
+
+def _stored_byte_widths(conn: sqlite3.Connection) -> list[int]:
+    """Distinct stored vector widths, in BYTES — the same quantity SQL compares.
+
+    Bytes rather than components deliberately, so the write guard and
+    ``search_similar``'s ``WHERE`` decide on ONE number. Dividing by four here
+    would make them two rules a rounding apart: a blob whose length is not a
+    multiple of four (reachable only by writing the column directly, but
+    reachable) divides to the same component count as a well-formed neighbour,
+    so a component-wise write guard would accept a vector beside a row the
+    byte-wise read guard then excludes — the tracker would look uniform to the
+    writer and mixed to the reader. That is the "two copies of one precedence
+    table" drift this repository keeps relearning (CB-22, CB-52).
     """
     rows = conn.execute(
         "SELECT DISTINCT length(embedding) FROM requirements WHERE embedding IS NOT NULL"
     ).fetchall()
-    return sorted({row[0] // _BYTES_PER_COMPONENT for row in rows})
+    return sorted({row[0] for row in rows})
 
 
 def _reject_width_the_tracker_disagrees_with(
@@ -128,12 +147,13 @@ def _reject_width_the_tracker_disagrees_with(
     them. ``db.txn`` issues ``BEGIN IMMEDIATE``, taking the write lock BEFORE
     the read, which is exactly why it is the right wrapper here.
     """
-    conflicting = [n for n in _stored_dimensions(conn) if n != dimensions]
+    wanted = dimensions * _BYTES_PER_COMPONENT
+    conflicting = [n for n in _stored_byte_widths(conn) if n != wanted]
     if conflicting:
-        widths = ", ".join(str(n) for n in conflicting)
+        widths = ", ".join(_describe_width(n) for n in conflicting)
         raise ValueError(
             f"embedding dimension mismatch: this tracker already stores "
-            f"{widths}-dimensional vectors and this write carries {dimensions}. "
+            f"{widths} vectors and this write carries {dimensions}-dimensional. "
             "Vectors of mixed width cannot be compared, so one foreign row is "
             "enough to make reqs_search_similar unable to score the rest. NOTE "
             "the residual this refusal exposes: there is no sanctioned way to "
@@ -392,7 +412,19 @@ def embedding_stats(conn: sqlite3.Connection) -> dict[str, Any]:
         "SELECT length(embedding) AS n, COUNT(*) AS c FROM requirements "
         "WHERE embedding IS NOT NULL GROUP BY length(embedding) ORDER BY n"
     ).fetchall()
-    by_width = [{"dimensions": r["n"] // _BYTES_PER_COMPONENT, "count": r["c"]} for r in widths]
+    # Grouped by BYTE length, the quantity every guard here decides on, and the
+    # byte count is reported beside the component count rather than folded into
+    # it: two blobs can divide to the same dimension and still be different
+    # widths, and a report that hid that would be the "clean because it could
+    # not look" shape.
+    by_width = [
+        {
+            "dimensions": r["n"] // _BYTES_PER_COMPONENT,
+            "bytes": r["n"],
+            "count": r["c"],
+        }
+        for r in widths
+    ]
     return {
         "total": total,
         "embedded": embedded,

@@ -565,7 +565,7 @@ class TestEmbeddingStatsNamesAMixedTracker:
         embeddings.store_embedding(conn, "FR-1", [1.0, 0.0, 0.0])
         embeddings.store_embedding(conn, "FR-2", [0.0, 1.0, 0.0])
         stats = embeddings.embedding_stats(conn)
-        assert stats["dimensions"] == [{"dimensions": 3, "count": 2}]
+        assert stats["dimensions"] == [{"dimensions": 3, "bytes": 12, "count": 2}]
         assert stats["mixed"] is False
 
     def test_a_mixed_tracker_is_named(self, conn):
@@ -576,6 +576,77 @@ class TestEmbeddingStatsNamesAMixedTracker:
         stats = embeddings.embedding_stats(conn)
         assert stats["mixed"] is True
         assert stats["dimensions"] == [
-            {"dimensions": 2, "count": 1},
-            {"dimensions": 3, "count": 1},
+            {"dimensions": 2, "bytes": 8, "count": 1},
+            {"dimensions": 3, "bytes": 12, "count": 1},
         ]
+
+    def test_a_ragged_blob_is_not_folded_into_its_neighbour(self, conn):
+        """Two blobs can divide to the same component count and still be
+        different widths. Reporting only the quotient would say ``mixed: False``
+        over a table SQL treats as two populations."""
+        reqs.add_requirement(conn, req_id="FR-1", description="a")
+        reqs.add_requirement(conn, req_id="FR-2", description="b")
+        embeddings.store_embedding(conn, "FR-1", [1.0, 0.0])  # 8 bytes
+        _store_raw(conn, "FR-2", b"\x00" * 10)  # divides to 2 as well
+        stats = embeddings.embedding_stats(conn)
+        assert stats["mixed"] is True
+        assert [d["bytes"] for d in stats["dimensions"]] == [8, 10]
+
+
+class TestOneQuantityDecidesOnBothSides:
+    """The write guard and the read guard must compare the SAME number.
+
+    A component-wise write guard divides by four, so a blob whose byte length is
+    not a whole number of components folds onto a well-formed neighbour: the
+    write would be accepted while ``search_similar``'s byte-wise ``WHERE``
+    excludes the row it was accepted beside. Two rules a rounding apart, which
+    is the drift CB-22/CB-52 exist to foreclose.
+
+    MUTANT: make ``_stored_byte_widths`` divide by ``_BYTES_PER_COMPONENT`` and
+    compare component counts --- the first test here goes red.
+    """
+
+    def test_a_ragged_blob_still_refuses_a_write_that_divides_to_the_same_count(self, conn):
+        reqs.add_requirement(conn, req_id="FR-1", description="a")
+        reqs.add_requirement(conn, req_id="FR-2", description="b")
+        _store_raw(conn, "FR-1", b"\x00" * 10)  # 10 // 4 == 2
+        with pytest.raises(ValueError) as excinfo:
+            embeddings.store_embedding(conn, "FR-2", [1.0, 0.0])  # 8 bytes
+        assert "10-byte" in str(excinfo.value), str(excinfo.value)
+
+    def test_the_search_guard_excludes_that_row_too(self, conn):
+        reqs.add_requirement(conn, req_id="FR-1", description="a")
+        reqs.add_requirement(conn, req_id="FR-2", description="b")
+        _store_raw(conn, "FR-1", b"\x00" * 10)
+        _store_raw(conn, "FR-2", embeddings._pack_vector([1.0, 0.0]))
+        results = embeddings.search_similar(conn, [1.0, 0.0], min_similarity=0.0)
+        assert [r["id"] for r in results] == ["FR-2"]
+
+
+class TestTheWidthConditionComposesWithTheStatusFilter:
+    """Composition, not elements --- the trap CLAUDE.md records for ``rank_case_sql``.
+
+    Both conditions bind a parameter, and the parameters are positional, so a
+    fragment appended at one textual position with its parameter appended at
+    another silently swaps the two values. Every test that exercises ONE filter
+    passes either way; only a fixture with BOTH plus rows that discriminate can
+    see it.
+    """
+
+    def test_both_filters_apply_and_neither_takes_the_others_value(self, conn):
+        reqs.add_requirement(conn, req_id="FR-1", description="a", status="planned")
+        reqs.add_requirement(conn, req_id="FR-2", description="b", status="implemented")
+        reqs.add_requirement(conn, req_id="FR-3", description="c", status="planned")
+        embeddings.store_embedding(conn, "FR-1", [1.0, 0.0])
+        embeddings.store_embedding(conn, "FR-2", [1.0, 0.0])
+        # A foreign width AND the wanted status: excluded by width alone.
+        _store_raw(conn, "FR-3", embeddings._pack_vector([1.0, 0.0, 0.0]))
+
+        results = embeddings.search_similar(
+            conn, [1.0, 0.0], status="planned", min_similarity=0.0
+        )
+        assert [r["id"] for r in results] == ["FR-1"], (
+            "FR-2 is the right width but the wrong status; FR-3 is the right "
+            "status but the wrong width -- either parameter landing in the "
+            "other's slot changes this answer"
+        )
