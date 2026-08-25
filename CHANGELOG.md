@@ -126,6 +126,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `codebugs` CLI, and not a direct import of `codebugs.findings` or any other module —
   and says so in its own output every time it runs. Failures are recorded by exception
   CLASS only, never by message, so a caller's own data never ends up in the counter.
+- **The MCP server now tells a newly-connected agent the recommended working loop, and
+  `codebugs --help` names a first step.** `MCPServer(instructions=)` describes the loop —
+  file an observation, read `attention`/`dedup_action` before acting on it, close when
+  fixed — and says dedup is the point, not a side effect, and to claim a card before
+  working on it alongside other agents. `codebugs --help` gained a short "Getting
+  started" line pointing at `init`, `add` and `query`.
 - **`query` and `stats` can now group by TAG and by a top-level `meta` key (CB-62).**
   The tracker could group findings only by the five columns of the row, while the axes
   a corpus is actually dense along live in `tags` and `meta` — measured on this tracker

@@ -559,10 +559,20 @@ class TestInterpreterIndependentDescriptions:
         """Structural, and this repo's own lesson for exactly this shape: a
         helper that is unit-tested but never invoked leaves the suite green
         while the defect ships. `main()` cannot be executed here (it parses argv
-        and calls `server.run()`), so the wiring is read."""
-        src = inspect.getsource(server.main)
-        assert "_NormalizedDescriptions(server)" in src, src
-        assert "provider.register_fn(registrar, _conn)" in src, src
+        and calls `server.run()`), so the wiring is read.
+
+        T-75 split the construction out of `main()` into `_build_server` (so a
+        test can build the real server object without entering the blocking
+        `server.run()` loop) — so this is now a TWO-step structural check:
+        `main()` actually calls `_build_server`, and `_build_server` is where
+        the registrar wiring this test exists to pin now lives.
+        """
+        main_src = inspect.getsource(server.main)
+        assert "_build_server(args.mode)" in main_src, main_src
+
+        build_src = inspect.getsource(server._build_server)
+        assert "_NormalizedDescriptions(server_obj)" in build_src, build_src
+        assert "provider.register_fn(registrar, conn_factory)" in build_src, build_src
 
     def test_the_normalizer_has_exactly_one_definition(self):
         """The gate and the server must not be able to disagree about what
@@ -904,3 +914,33 @@ class TestStrippedMetaKeysOverTheWire:
         assert members[1]["stripped_meta_keys"] == ["occurrences"]
         assert json.loads(res.content[0].text)["stripped_meta_keys"] == []
         assert json.loads(res.content[1].text)["stripped_meta_keys"] == ["occurrences"]
+
+
+class TestServerInstructions:
+    """The server tells a newly-connected agent the recommended working loop (T-75).
+
+    `MCPServer.__init__` has a public `instructions` parameter (verified via
+    `inspect.signature` before this was written — it sits next to `name`,
+    `title`, `description`). The MCP wire golden (`tests/golden/mcp_schema.json`)
+    is a snapshot of the 83 TOOL descriptions only; `instructions` is a property
+    of the SERVER object and is deliberately outside it (see `tests/cli_surface.py`
+    and `tests/_mcp_schema.py` for what each golden actually captures) — this test
+    exercises the server's own `instructions` attribute directly instead.
+
+    The real construction path is `server._build_server`, the same function
+    `server.main()` calls — not a hand-rebuilt `MCPServer(...)` here, which
+    would pass even if `main()`'s own call dropped `instructions=` (the exact
+    mutant this unit's brief asks for, §4).
+    """
+
+    def test_built_server_carries_nonempty_instructions(self, tracker):
+        built = server._build_server("findings", tracker)
+        assert isinstance(built.instructions, str)
+        assert built.instructions.strip()
+
+    def test_instructions_name_the_load_bearing_loop(self):
+        text = server.INSTRUCTIONS
+        # Presence of the load-bearing names, not a verbatim paragraph (brief
+        # §4): a wording edit must not turn this test red.
+        for token in ("add", "attention", "dedup_action", "claims_claim", "reqs_add"):
+            assert token in text, f"instructions text is missing {token!r}"
