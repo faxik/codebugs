@@ -2778,12 +2778,19 @@ def _membership_sql(
         # The subquery is also what keeps the caller's WHERE unambiguous —
         # `json_each` exposes a column named `id`, so an unqualified `id = ?`
         # beside it fails outright with "ambiguous column name" (measured).
+        #
+        # HONEST SCOPE: this guards the GROUPING, not the whole query. The
+        # pre-existing `tag=` FILTER is a bare `EXISTS (SELECT 1 FROM
+        # json_each(tags) ...)` with no `json_valid` of its own, so combining
+        # `tag=` with any axis still dies on a malformed row — measured, and
+        # pinned as a known limit rather than repaired, because this unit may not
+        # change a shipped filter's behaviour on an unmeasured population.
         inner = (
             f"SELECT {cols}, tags FROM findings {where} {more} "
             "CASE WHEN json_valid(tags) THEN json_type(tags) = 'array' ELSE 0 END"
         )
         return (
-            "SELECT f.id AS id, f.severity AS severity, "
+            "SELECT DISTINCT f.id AS id, f.severity AS severity, "
             "f.occurrence_count AS occurrence_count, je.value AS group_key "
             f"FROM ({inner}) f JOIN json_each(f.tags) je WHERE je.type = 'text'",
             list(params),

@@ -3651,6 +3651,31 @@ class TestGroupingAxes:
         assert [g["group_key"] for g in result["groups"]] == ["a"]
         assert result["ungrouped_rows"] == 1
 
+    def test_known_limit_the_existing_tag_FILTER_is_still_fatal_on_such_a_row(self, conn):
+        """The honest scope of the test above, pinned so the claim cannot rot.
+
+        The GROUPING path guards itself. The pre-existing `tag=` FILTER does not:
+        it is a bare `EXISTS (SELECT 1 FROM json_each(tags) ...)`, with no
+        `json_valid` guard — unlike the `commit` filter three conditions below it,
+        which has carried one all along. So one hand-edited row aborts any query
+        that uses `tag=`, with or without an axis, and the axis neither caused
+        that nor repairs it.
+
+        Deliberately NOT fixed here: this unit is forbidden from touching the
+        existing filters, and the reason is the same one that makes the dotted
+        meta key a refusal — the population depending on current filter behaviour
+        is not measured. Pinned as a KNOWN LIMIT, the shape `TestKnownLimits`
+        uses for the harness: the day this stops raising, someone re-reads this
+        instead of trusting a stale sentence."""
+        self._file(conn, "CB-1", tags=["a"])
+        self._file(conn, "CB-2", tags=["b"])
+        conn.execute("UPDATE findings SET tags = 'notjson' WHERE id = 'CB-2'")
+        conn.commit()
+        with pytest.raises(sqlite3.OperationalError, match="malformed JSON"):
+            findings.query_findings(conn, tag="a")
+        with pytest.raises(sqlite3.OperationalError, match="malformed JSON"):
+            findings.query_findings(conn, tag="a", group_by="tag")
+
     # --- axis: meta:<key> --------------------------------------------------
 
     def test_a_non_string_tag_element_is_dropped_exactly_as_parse_tags_drops_it(self, conn):
