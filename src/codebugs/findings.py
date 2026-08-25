@@ -2642,13 +2642,18 @@ def _enrich_read(
 # row with two tags is in two groups, and a row carrying no value on the axis is
 # in none and would simply VANISH from the answer. Both facts are therefore
 # reported as numbers beside the groups rather than left for a reader to infer;
-# see `_grouped_counts`.
+# see `_axis_counts`.
 GROUP_COLUMNS: tuple[str, ...] = ("severity", "category", "status", "file", "source")
 GROUP_TAG = "tag"
 GROUP_META_PREFIX = "meta:"
 
-# What the axis line says on every surface. Built from the tuple above so the
-# prose and the code cannot drift; both goldens snapshot the rendered text.
+# The axis list as one string. DERIVED, so the REFUSAL message can never name a
+# set the resolver does not implement — but state the scope precisely: the four
+# surface texts (two MCP docstrings, two CLI `help=`) are hand-written prose and
+# are NOT generated from this, because a docstring cannot be an f-string and
+# generating half of the four would be worse than generating none. What holds
+# those four is a test, `test_every_surface_enumerates_every_axis`, which is the
+# same prose-against-code shape `TestBt4FreshnessDeclarations` uses.
 GROUP_AXES_HELP = f"{', '.join(GROUP_COLUMNS)}, {GROUP_TAG}, {GROUP_META_PREFIX}<key>"
 
 # Characters SQLite's JSON-path grammar spends on structure. A key containing

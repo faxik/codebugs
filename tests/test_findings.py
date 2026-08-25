@@ -3765,6 +3765,31 @@ class TestGroupingAxes:
         assert {"query_findings", "get_stats"} <= callers, callers
         assert not re.search(r"valid_groups\s*=", pathlib.Path(findings.__file__).read_text())
 
+    def test_every_surface_enumerates_every_axis(self):
+        """Prose against code, for the four texts that cannot be generated.
+
+        A docstring cannot be an f-string, so the two MCP descriptions and the
+        two CLI `help=` strings are hand-written while `GROUP_AXES_HELP` — which
+        the refusal message uses — is derived. That asymmetry is exactly how a
+        sixth axis would get added to the resolver and enumerated on none of the
+        surfaces, leaving four texts describing a tool that no longer exists.
+        `test_golden` cannot see it either: a golden pins what the text IS, never
+        what it OUGHT to name.
+        """
+        from codebugs import cli as cli_module  # noqa: F401  (parser registration)
+
+        source = pathlib.Path(findings.__file__).read_text()
+        # The two MCP docstrings and the two CLI help strings, located by the
+        # phrase each one opens with rather than by line number.
+        texts = [
+            source[m.end() : m.end() + 900]
+            for m in re.finditer(r"[Gg]roup (?:results )?by: ", source)
+        ]
+        assert len(texts) == 4, f"expected 4 axis enumerations, found {len(texts)}"
+        for axis in (*findings.GROUP_COLUMNS, findings.GROUP_TAG, findings.GROUP_META_PREFIX):
+            for i, text in enumerate(texts):
+                assert axis in text, f"axis {axis!r} missing from surface text #{i}"
+
     def test_group_by_still_refuses_resolve_anchors(self, conn):
         self._file(conn, "CB-1", tags=["a"])
         with pytest.raises(ValueError, match="resolve_anchors"):
