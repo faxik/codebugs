@@ -1,6 +1,6 @@
 [
   {
-    "description": "Record a code finding observation (deduplicated by fingerprint).\n\nIf the fingerprint matches a live finding, that finding's occurrence count\nis bumped and IT is returned (`was_new: false`, `dedup_action: \"bumped\"`);\na match on a `fixed` finding reopens it as a regression (`\"reopened\"`); a\nmatch on a `wont_fix`/`not_a_bug` finding creates a new row linked via\n`meta.recurrence_of`. Without a fingerprint a conservative server-side one\nis derived from category, file and the normalized description.\n\n`dedup_action` has exactly four values \u2014 \"created\", \"bumped\", \"reopened\"\nand \"recurrence_of_closed\" \u2014 and the fourth is the one to read carefully:\na recurrence of a DISMISSED twin files a NEW row and therefore reports\n`was_new: true`, so a client that tells create from match by gating on\n`was_new == false` misses the event entirely. The twin's id is always in\n`meta.recurrence_of`, and `meta.similar_to` usually carries its status\nalongside; on the paths where it does not \u2014 a caller-supplied fingerprint\nwhose text does not resemble the twin, or a normalized description under\nthe similarity minimum \u2014 the twin's status is NOT in this response at\nall, and costs one `get`.\n\n`attention` is a top-level list, ALWAYS present and often empty: an empty\nlist means \"evaluated, nothing serious fired\", which is a different fact\nfrom an absent channel. Two record forms exist, and a list may carry both\n(severity first, category second; each form at most once).\n\n`{signal: severity_escalated, from, to}` says THIS observation raised the\nfinding's stored severity. It appears only where a stored severity was\nraised \u2014 the `bumped` and `reopened` branches \u2014 and severity is monotonic\nunder observation, so there is no de-escalation record to expect.\n\n`{signal: category_divergence, observed, stored}` says this observation\ndoes not NAME the matched finding's category. It appears on every branch\nthat HAS a matched row: `bumped`, `reopened`, and the recurrence branch,\nwhere the comparison is against the DISMISSED TWIN rather than the new\nrow. Both sides are normalized, so a difference of spelling\n(`Process Improvement` vs `process-improvement`) is deliberately not a\nsignal while a difference of name is; a stored category that is not text\nis skipped rather than raising. A newly created finding matched nothing,\nso it emits neither record.\n\n`stripped_meta_keys` is a top-level list, ALWAYS present and often\nempty, following the same discipline as `attention`: `[]` means\n\"checked, nothing to strip\", never \"no such channel\". A `meta` key\nthat is identity machinery OUTPUT (e.g. `occurrences`, `recurrence_of`,\n`category_minted`) is stripped from what gets stored rather than\nrefused, so a caller that copies a fetched card's `meta` forward\n(`get` -> modify -> `add`) can tell, from this response alone, which\nof its own keys silently did not land. `resolver_errors` is the one\nexception: it reports a FAILURE state, not machinery input, so it is\nREFUSED outright rather than stripped, on this path exactly as on\n`update`'s `meta_update`. This is the ADD-side contract only \u2014 CSV\nimport strips the same dynamic reserved union but silently, with no\nequivalent response key (a decided, separate contract, CB-51), and\n`update`'s `meta_update` still refuses every reserved key rather than\nstripping any of them.\n\nArgs:\n    severity: critical, high, medium, or low (case-insensitive, no aliases)\n    category: Finding category (e.g. tz_naive_datetime, n_plus_one, missing_validation).\n              Call `categories` first to reuse existing category names.\n              Spelling is normalized (casefold, hyphen/whitespace -> \"_\");\n              a category this tracker does not already hold is REFUSED\n              with a hint unless new_category=true \u2014 but only when the\n              observation would CREATE a row: a fingerprint match on a\n              known live or fixed finding is recorded regardless, with\n              the observed category kept in the occurrence ring.\n    file: File path relative to project root\n    description: What's wrong\n    source: First reporter of this defect (default: claude). Frozen at\n            first report by design (BT-4): a re-observation keeps the\n            original; newest sources live in the occurrence ring\n            (meta.occurrences[*].source) \u2014 and an imported observation's\n            ring source can be a peer tracker's.\n    tags: Optional tags for grouping\n    meta: Optional JSON metadata (lines, module, rule_code, etc.).\n          Top-level meta is the row's AUTHORED state, observation-frozen\n          (BT-4): a re-observation's meta lands only as per-occurrence\n          evidence in meta.occurrences[*].meta. Promoting specific keys\n          into the row is a future allowlist by measured demand, not a\n          general merge.\n    reported_at_commit: Git SHA when finding was created (auto-detected from HEAD if omitted)\n    reported_at_ref: Version/tag label (e.g. \"v2.1.0\"), always caller-supplied.\n                     Observation-frozen: a bump never updates it\n                     (per-occurrence refs stay in the ring as evidence) \u2014\n                     but manually mutable BY DESIGN via\n                     update(reported_at_ref=), since a release is tagged\n                     after filing.\n    fingerprint: Stable identity token for this defect, computed from the\n                 INVARIANT part of the observation (normalized error\n                 signature + failing test + anchor file \u2014 no timestamps,\n                 SHAs, run ids). Same defect \u2192 same fingerprint. The\n                 `auto:` prefix is reserved for server-derived values.\n    new_category: Explicit permission to MINT a category the tracker does\n                  not hold yet (CB-60). Minting is stamped as\n                  meta.category_minted for later counting. Existing\n                  categories never need this.\n",
+    "description": "Record a code finding observation (deduplicated by fingerprint).\n\nIf the fingerprint matches a live finding, that finding's occurrence count\nis bumped and IT is returned (`was_new: false`, `dedup_action: \"bumped\"`);\na match on a `fixed` finding reopens it as a regression (`\"reopened\"`); a\nmatch on a `wont_fix`/`not_a_bug` finding creates a new row linked via\n`meta.recurrence_of`. Without a fingerprint a conservative server-side one\nis derived from category, file and the normalized description.\n\n`dedup_action` has exactly four values \u2014 \"created\", \"bumped\", \"reopened\"\nand \"recurrence_of_closed\" \u2014 and the fourth is the one to read carefully:\na recurrence of a DISMISSED twin files a NEW row and therefore reports\n`was_new: true`, so a client that tells create from match by gating on\n`was_new == false` misses the event entirely. The twin's id is always in\n`meta.recurrence_of`, and `meta.similar_to` usually carries its status\nalongside; on the paths where it does not \u2014 a caller-supplied fingerprint\nwhose text does not resemble the twin, or a normalized description under\nthe similarity minimum \u2014 the twin's status is NOT in this response at\nall, and costs one `get`.\n\n`attention` is a top-level list, ALWAYS present and often empty: an empty\nlist means \"evaluated, nothing serious fired\", which is a different fact\nfrom an absent channel. Two record forms exist, and a list may carry both\n(severity first, category second; each form at most once).\n\n`{signal: severity_escalated, from, to}` says THIS observation raised the\nfinding's stored severity. It appears only where a stored severity was\nraised \u2014 the `bumped` and `reopened` branches \u2014 and severity is monotonic\nunder observation, so there is no de-escalation record to expect.\n\n`{signal: category_divergence, observed, stored}` says this observation\ndoes not NAME the matched finding's category. It appears on every branch\nthat HAS a matched row: `bumped`, `reopened`, and the recurrence branch,\nwhere the comparison is against the DISMISSED TWIN rather than the new\nrow. Both sides are normalized, so a difference of spelling\n(`Process Improvement` vs `process-improvement`) is deliberately not a\nsignal while a difference of name is; a stored category that is not text\nis skipped rather than raising. A newly created finding matched nothing,\nso it emits neither record.\n\n`stripped_meta_keys` is a top-level list, ALWAYS present and often\nempty, following the same discipline as `attention`: `[]` means\n\"checked, nothing to strip\", never \"no such channel\". A `meta` key\nthat is identity machinery OUTPUT (e.g. `occurrences`, `recurrence_of`,\n`category_minted`) is stripped from what gets stored rather than\nrefused, so a caller that copies a fetched card's `meta` forward\n(`get` -> modify -> `add`) can tell, from this response alone, which\nof its own keys silently did not land. `resolver_errors` is the one\nexception: it reports a FAILURE state, not machinery input, so it is\nREFUSED outright rather than stripped, on this path exactly as on\n`update`'s `meta_update`. This is the ADD-side contract only \u2014 CSV\nimport strips the same dynamic reserved union but silently, with no\nequivalent response key (a decided, separate contract, CB-51), and\n`update`'s `meta_update` still refuses every reserved key rather than\nstripping any of them.\n\nArgs:\n\n- severity: critical, high, medium, or low (case-insensitive, no aliases)\n- category: Finding category (e.g. tz_naive_datetime, n_plus_one, missing_validation). Call `categories` first to reuse existing category names. Spelling is normalized (casefold, hyphen/whitespace -> \"_\"); a category this tracker does not already hold is REFUSED with a hint unless new_category=true \u2014 but only when the observation would CREATE a row: a fingerprint match on a known live or fixed finding is recorded regardless, with the observed category kept in the occurrence ring.\n- file: File path relative to project root\n- description: What's wrong\n- source: First reporter of this defect (default: claude). Frozen at first report by design (BT-4): a re-observation keeps the original; newest sources live in the occurrence ring (meta.occurrences[*].source) \u2014 and an imported observation's ring source can be a peer tracker's.\n- tags: Optional tags for grouping\n- meta: Optional JSON metadata (lines, module, rule_code, etc.). Top-level meta is the row's AUTHORED state, observation-frozen (BT-4): a re-observation's meta lands only as per-occurrence evidence in meta.occurrences[*].meta. Promoting specific keys into the row is a future allowlist by measured demand, not a general merge.\n- reported_at_commit: Git SHA when finding was created (auto-detected from HEAD if omitted)\n- reported_at_ref: Version/tag label (e.g. \"v2.1.0\"), always caller-supplied. Observation-frozen: a bump never updates it (per-occurrence refs stay in the ring as evidence) \u2014 but manually mutable BY DESIGN via update(reported_at_ref=), since a release is tagged after filing.\n- fingerprint: Stable identity token for this defect, computed from the INVARIANT part of the observation (normalized error signature + failing test + anchor file \u2014 no timestamps, SHAs, run ids). Same defect \u2192 same fingerprint. The `auto:` prefix is reserved for server-derived values.\n- new_category: Explicit permission to MINT a category the tracker does not hold yet (CB-60). Minting is stamped as meta.category_minted for later counting. Existing categories never need this.\n",
     "inputSchema": {
       "properties": {
         "category": {
@@ -106,7 +106,7 @@
     "name": "add"
   },
   {
-    "description": "Rebuild stored location anchors from the git object store. DRY RUN by default.\n\nThe sanctioned repair path: `meta.loc` is writable through\n`update_finding(meta_update=)` and NOTHING validates it there, so a\nhand-assembled object is accepted at the write and read back as\n`unknown(invalid_anchor)`. This verb builds the object itself, from the\nsame capture the file-time resolver uses.\n\nFour behaviours are specified rather than incidental. A FAILED capture\nnever replaces a valid stored anchor (outcome `kept`) \u2014 the refusal is\nusually about the environment, and the anchor it would destroy is still\ngood in a clone that has the history. The `loc: null` tombstone (\"do not\nrecapture\") is left alone unless `force_tombstone` says otherwise. The\ngit work runs outside any transaction, and only the version check and\nthe write share one \u2014 so a row whose anchor changed while the capture\nran is reported `stale` and left to the other writer.\n\n`include_unanchored` widens the POPULATION to rows that never carried an\nanchor at all \u2014 every finding filed before the capture seam landed, since\ncapture runs only when a genuine new finding is filed. They report\n`would_backfill`/`backfilled`, never folded into `would_update`/`updated`:\n\"acquired an anchor for the first time\" is the number this exists to\nproduce. It is NOT `force_tombstone` (a `loc: null` tombstone is a key\nthat is present and null, and this flag never touches it) and it is NOT a\nfingerprint backfill \u2014 nothing here reads or writes that column.\n\nArgs:\n    finding_id: Repair one finding instead of a population\n    status: Status filter; \"all\" widens to every status (default: open)\n    category: Restrict to one category\n    file: Restrict to one file (the finding's `file` column)\n    project_dir: The repository to capture from. Omitting it makes every\n        capture refuse with `no_root`, which by the rule above leaves\n        every valid anchor untouched\n    apply: Write the rebuilt anchors (default: report only)\n    force_tombstone: Overwrite a `loc: null` tombstone\n    include_unanchored: Also take rows carrying no `loc` key at all (the\n        backfill population). Leaves tombstones alone; still a dry run\n        unless `apply` is set\n    limit: Maximum findings examined (default 10000)\n",
+    "description": "Rebuild stored location anchors from the git object store. DRY RUN by default.\n\nThe sanctioned repair path: `meta.loc` is writable through\n`update_finding(meta_update=)` and NOTHING validates it there, so a\nhand-assembled object is accepted at the write and read back as\n`unknown(invalid_anchor)`. This verb builds the object itself, from the\nsame capture the file-time resolver uses.\n\nFour behaviours are specified rather than incidental. A FAILED capture\nnever replaces a valid stored anchor (outcome `kept`) \u2014 the refusal is\nusually about the environment, and the anchor it would destroy is still\ngood in a clone that has the history. The `loc: null` tombstone (\"do not\nrecapture\") is left alone unless `force_tombstone` says otherwise. The\ngit work runs outside any transaction, and only the version check and\nthe write share one \u2014 so a row whose anchor changed while the capture\nran is reported `stale` and left to the other writer.\n\n`include_unanchored` widens the POPULATION to rows that never carried an\nanchor at all \u2014 every finding filed before the capture seam landed, since\ncapture runs only when a genuine new finding is filed. They report\n`would_backfill`/`backfilled`, never folded into `would_update`/`updated`:\n\"acquired an anchor for the first time\" is the number this exists to\nproduce. It is NOT `force_tombstone` (a `loc: null` tombstone is a key\nthat is present and null, and this flag never touches it) and it is NOT a\nfingerprint backfill \u2014 nothing here reads or writes that column.\n\nArgs:\n\n- finding_id: Repair one finding instead of a population\n- status: Status filter; \"all\" widens to every status (default: open)\n- category: Restrict to one category\n- file: Restrict to one file (the finding's `file` column)\n- project_dir: The repository to capture from. Omitting it makes every capture refuse with `no_root`, which by the rule above leaves every valid anchor untouched\n- apply: Write the rebuilt anchors (default: report only)\n- force_tombstone: Overwrite a `loc: null` tombstone\n- include_unanchored: Also take rows carrying no `loc` key at all (the backfill population). Leaves tombstones alone; still a dry run unless `apply` is set\n- limit: Maximum findings examined (default 10000)\n",
     "inputSchema": {
       "properties": {
         "apply": {
@@ -196,7 +196,7 @@
     "name": "anchor_recapture"
   },
   {
-    "description": "Resolve stored location anchors to their current lines on HEAD.\n\nEach anchored finding gets a record: `status` (current / moved /\nmoved_file / lost / ambiguous / unknown), the coordinate, the `channel`\nthat produced it (\"git\" for reverse blame, \"content\" for the secondary\ntext channel), a `reason` token when there is no answer, and\n`survived` as \"<n>/<m>\" when part of a span outlived the rest.\n\n`moved_file` is a status of its own, not `moved` with a different path:\nthe code left the file the finding names, and a consumer must see that\nrather than receive a line number in a file it never asked about.\n\nTHE SUMMARY'S DENOMINATOR IS `anchored`, NOT `total`. `anchored` counts\nthe rows that CARRY an anchor (a persisted refusal and the tombstone\nincluded); rows filed before anchors existed carry none and are counted\nin `without_anchor` instead. So a `moved_file` share is\n`summary[\"moved_file\"] / anchored`; computing it against `total` is a\nshare of a population the number does not describe.\n\nArgs:\n    finding_id: Resolve one finding instead of a population\n    status: Status filter; \"all\" widens to every status (default: open)\n    category: Restrict to one category\n    file: Restrict to one file (the finding's `file` column)\n    project_dir: The repository the anchors resolve against. Omitting it\n        reports `no_root` rather than reading whatever tree the server\n        process happens to stand in \u2014 a long-lived server's cwd has\n        nothing to do with the tracker a call is about\n    limit: Maximum findings examined (default 10000)\n",
+    "description": "Resolve stored location anchors to their current lines on HEAD.\n\nEach anchored finding gets a record: `status` (current / moved /\nmoved_file / lost / ambiguous / unknown), the coordinate, the `channel`\nthat produced it (\"git\" for reverse blame, \"content\" for the secondary\ntext channel), a `reason` token when there is no answer, and\n`survived` as \"<n>/<m>\" when part of a span outlived the rest.\n\n`moved_file` is a status of its own, not `moved` with a different path:\nthe code left the file the finding names, and a consumer must see that\nrather than receive a line number in a file it never asked about.\n\nTHE SUMMARY'S DENOMINATOR IS `anchored`, NOT `total`. `anchored` counts\nthe rows that CARRY an anchor (a persisted refusal and the tombstone\nincluded); rows filed before anchors existed carry none and are counted\nin `without_anchor` instead. So a `moved_file` share is\n`summary[\"moved_file\"] / anchored`; computing it against `total` is a\nshare of a population the number does not describe.\n\nArgs:\n\n- finding_id: Resolve one finding instead of a population\n- status: Status filter; \"all\" widens to every status (default: open)\n- category: Restrict to one category\n- file: Restrict to one file (the finding's `file` column)\n- project_dir: The repository the anchors resolve against. Omitting it reports `no_root` rather than reading whatever tree the server process happens to stand in \u2014 a long-lived server's cwd has nothing to do with the tracker a call is about\n- limit: Maximum findings examined (default 10000)\n",
     "inputSchema": {
       "properties": {
         "category": {
@@ -271,7 +271,7 @@
     "name": "anchor_resolve"
   },
   {
-    "description": "Record multiple finding observations at once (deduplicated by fingerprint).\n\nMembers are deduplicated exactly like `add` \u2014 including against each other,\nso two members sharing a fingerprint yield one insert plus one bump. One\nresult per input, in input order. Unknown member keys are refused.\n\nEach result carries the same discriminators `add` returns, and the same\nfour `dedup_action` values: \"created\", \"bumped\", \"reopened\" and\n\"recurrence_of_closed\", the last of which reports `was_new: true` because\nit files a NEW row linked to a dismissed twin via `meta.recurrence_of`.\n\nEach result also carries its OWN `attention` list \u2014 always present, often\nempty, never shared between members. Two record forms exist, in this\norder and at most once each:\n`{signal: severity_escalated, from, to}` on the `bumped` and `reopened`\nbranches, meaning that member's observation raised the stored finding's\nseverity; and `{signal: category_divergence, observed, stored}` on every\nbranch with a matched row (`bumped`, `reopened`, and the recurrence\nbranch, where the comparison is against the dismissed twin), meaning that\nmember does not NAME the matched finding's category. Both category sides\nare normalized, so a difference of spelling is not a signal; a stored\ncategory that is not text is skipped rather than raising.\n\nEach result also carries its OWN `stripped_meta_keys` list \u2014 always\npresent, often empty, never shared between members \u2014 following the\nsame discipline: a `meta` key that is identity machinery OUTPUT (e.g.\n`occurrences`, `recurrence_of`, `category_minted`) is stripped from\nwhat gets stored rather than refused, and reported here so a caller\nforwarding a fetched card's `meta` can tell which of its own keys\nsilently did not land. `resolver_errors` is refused outright instead\n(a FAILURE state, not machinery input), on this path exactly as on\n`add`.\n\nArgs:\n    findings: List of finding objects, each with keys:\n        severity, category, file, description, and optionally:\n        source, tags, meta, reported_at_commit, reported_at_ref, fingerprint\n    reported_at_commit: Default commit SHA for all findings (auto-detected if omitted).\n                        Per-finding values override this.\n    reported_at_ref: Default version label for all findings.\n                     Per-finding values override this.\n    new_category: Batch-wide permission to MINT categories the tracker\n                  does not hold yet (CB-60); the first member introducing\n                  a category is stamped meta.category_minted.\n",
+    "description": "Record multiple finding observations at once (deduplicated by fingerprint).\n\nMembers are deduplicated exactly like `add` \u2014 including against each other,\nso two members sharing a fingerprint yield one insert plus one bump. One\nresult per input, in input order. Unknown member keys are refused.\n\nEach result carries the same discriminators `add` returns, and the same\nfour `dedup_action` values: \"created\", \"bumped\", \"reopened\" and\n\"recurrence_of_closed\", the last of which reports `was_new: true` because\nit files a NEW row linked to a dismissed twin via `meta.recurrence_of`.\n\nEach result also carries its OWN `attention` list \u2014 always present, often\nempty, never shared between members. Two record forms exist, in this\norder and at most once each:\n`{signal: severity_escalated, from, to}` on the `bumped` and `reopened`\nbranches, meaning that member's observation raised the stored finding's\nseverity; and `{signal: category_divergence, observed, stored}` on every\nbranch with a matched row (`bumped`, `reopened`, and the recurrence\nbranch, where the comparison is against the dismissed twin), meaning that\nmember does not NAME the matched finding's category. Both category sides\nare normalized, so a difference of spelling is not a signal; a stored\ncategory that is not text is skipped rather than raising.\n\nEach result also carries its OWN `stripped_meta_keys` list \u2014 always\npresent, often empty, never shared between members \u2014 following the\nsame discipline: a `meta` key that is identity machinery OUTPUT (e.g.\n`occurrences`, `recurrence_of`, `category_minted`) is stripped from\nwhat gets stored rather than refused, and reported here so a caller\nforwarding a fetched card's `meta` can tell which of its own keys\nsilently did not land. `resolver_errors` is refused outright instead\n(a FAILURE state, not machinery input), on this path exactly as on\n`add`.\n\nArgs:\n\n- findings: List of finding objects, each with keys: severity, category, file, description, and optionally: source, tags, meta, reported_at_commit, reported_at_ref, fingerprint\n- reported_at_commit: Default commit SHA for all findings (auto-detected if omitted). Per-finding values override this.\n- reported_at_ref: Default version label for all findings. Per-finding values override this.\n- new_category: Batch-wide permission to MINT categories the tracker does not hold yet (CB-60); the first member introducing a category is stamped meta.category_minted.\n",
     "inputSchema": {
       "properties": {
         "findings": {
@@ -321,7 +321,7 @@
     "name": "batch_add"
   },
   {
-    "description": "Defer an item by adding a blocker.\n\nArgs:\n    item_id: The blocked entity (e.g. \"CB-5\", \"FR-012\")\n    reason: Why it's blocked\n    blocked_by: Dependency entity (e.g. \"CB-3\"). Required for entity_resolved triggers.\n    trigger_type: entity_resolved, date, or manual.\n                  Defaults to entity_resolved if blocked_by provided, manual otherwise.\n    trigger_at: Date/datetime for date triggers (e.g. \"2026-04-10\"). Normalized to UTC.\n",
+    "description": "Defer an item by adding a blocker.\n\nArgs:\n\n- item_id: The blocked entity (e.g. \"CB-5\", \"FR-012\")\n- reason: Why it's blocked\n- blocked_by: Dependency entity (e.g. \"CB-3\"). Required for entity_resolved triggers.\n- trigger_type: entity_resolved, date, or manual. Defaults to entity_resolved if blocked_by provided, manual otherwise.\n- trigger_at: Date/datetime for date triggers (e.g. \"2026-04-10\"). Normalized to UTC.\n",
     "inputSchema": {
       "properties": {
         "blocked_by": {
@@ -388,7 +388,7 @@
     "name": "blockers_check"
   },
   {
-    "description": "List blockers with filters. Each result includes computed satisfaction state.\n\nArgs:\n    item_id: Filter by blocked item (e.g. \"CB-5\")\n    blocked_by: Filter by dependency (\"what does CB-3 unblock?\")\n    trigger_type: Filter by trigger type (entity_resolved, date, manual)\n    active_only: Only unsatisfied, uncancelled blockers (default: true)\n",
+    "description": "List blockers with filters. Each result includes computed satisfaction state.\n\nArgs:\n\n- item_id: Filter by blocked item (e.g. \"CB-5\")\n- blocked_by: Filter by dependency (\"what does CB-3 unblock?\")\n- trigger_type: Filter by trigger type (entity_resolved, date, manual)\n- active_only: Only unsatisfied, uncancelled blockers (default: true)\n",
     "inputSchema": {
       "properties": {
         "active_only": {
@@ -439,7 +439,7 @@
     "name": "blockers_query"
   },
   {
-    "description": "Cancel or manually resolve a blocker.\n\nArgs:\n    blocker_id: The blocker row ID\n    action: 'cancel' (any trigger type) or 'resolve' (manual triggers only)\n",
+    "description": "Cancel or manually resolve a blocker.\n\nArgs:\n\n- blocker_id: The blocker row ID\n- action: 'cancel' (any trigger type) or 'resolve' (manual triggers only)\n",
     "inputSchema": {
       "properties": {
         "action": {
@@ -470,7 +470,7 @@
     "name": "categories"
   },
   {
-    "description": "One-shot migration: fold stored category spellings to canon (CB-61).\n\nDRY RUN BY DEFAULT \u2014 without `apply=true` nothing is written and the\nreport tells you exactly what would change. New findings are already\ncanonicalized at write time; this exists for rows filed before that,\nwhose stored `auto:v1` fingerprint still carries the old spelling and\ntherefore forks identity when the same defect is reported again.\n\nEach renamed row's fingerprint is handled by kind: a `NULL` or a\ncaller-SUPPLIED fingerprint is left byte-identical, an `auto:v1` one is\nre-derived with the new category after its stored inputs are verified to\nreproduce the stored hash. A row that fails that round trip is skipped\nWHOLE and reported under `unverifiable`. The occurrence ring\n(`meta.occurrences`) is never rewritten.\n\nIf the fold would put two LIVE findings on one fingerprint, the run\nwrites NOTHING and reports the colliding pair by id \u2014 merging two cards\nis a decision, not a migration step.\n\nArgs:\n    fold_map: Optional {stored spelling: canonical target} map, as an\n              object or a JSON string. Every target must already be\n              canonical (casefold, hyphen/whitespace -> \"_\"). Omit it to\n              fold every stored spelling to its own normalized form; `{}`\n              is an explicit no-op.\n    apply: Write the changes. Default false (report only).\n",
+    "description": "One-shot migration: fold stored category spellings to canon (CB-61).\n\nDRY RUN BY DEFAULT \u2014 without `apply=true` nothing is written and the\nreport tells you exactly what would change. New findings are already\ncanonicalized at write time; this exists for rows filed before that,\nwhose stored `auto:v1` fingerprint still carries the old spelling and\ntherefore forks identity when the same defect is reported again.\n\nEach renamed row's fingerprint is handled by kind: a `NULL` or a\ncaller-SUPPLIED fingerprint is left byte-identical, an `auto:v1` one is\nre-derived with the new category after its stored inputs are verified to\nreproduce the stored hash. A row that fails that round trip is skipped\nWHOLE and reported under `unverifiable`. The occurrence ring\n(`meta.occurrences`) is never rewritten.\n\nIf the fold would put two LIVE findings on one fingerprint, the run\nwrites NOTHING and reports the colliding pair by id \u2014 merging two cards\nis a decision, not a migration step.\n\nArgs:\n\n- fold_map: Optional {stored spelling: canonical target} map, as an object or a JSON string. Every target must already be canonical (casefold, hyphen/whitespace -> \"_\"). Omit it to fold every stored spelling to its own normalized form; `{}` is an explicit no-op.\n- apply: Write the changes. Default false (report only).\n",
     "inputSchema": {
       "properties": {
         "apply": {
@@ -501,7 +501,7 @@
     "name": "categories_normalize"
   },
   {
-    "description": "Claim a finding or requirement so parallel agents do not collide.\n\nArgs:\n    entity_id: CB-N, FR-N or NFR-N\n    holder: who is claiming \u2014 a branch name, agent id, or person\n    holder_kind: branch | agent | human\n    holder_repo: absolute path of the repo owning the branch, if any\n    note: free-text reason, kept on renewal unless replaced\n    project: also move a finding to in_progress (requirements never project)\n    allow_terminal: claim even if the entity is already resolved\n\nReturns:\n    outcome: claimed | already_mine | held_by_other | entity_terminal | undetermined.\n    On held_by_other the holder fields name the INCUMBENT.\n    On undetermined, re-issue the identical call \u2014 it converges on already_mine.\n",
+    "description": "Claim a finding or requirement so parallel agents do not collide.\n\nArgs:\n\n- entity_id: CB-N, FR-N or NFR-N\n- holder: who is claiming \u2014 a branch name, agent id, or person\n- holder_kind: branch | agent | human\n- holder_repo: absolute path of the repo owning the branch, if any\n- note: free-text reason, kept on renewal unless replaced\n- project: also move a finding to in_progress (requirements never project)\n- allow_terminal: claim even if the entity is already resolved\n\nReturns:\n\n- outcome: claimed | already_mine | held_by_other | entity_terminal | undetermined. On held_by_other the holder fields name the INCUMBENT. On undetermined, re-issue the identical call \u2014 it converges on already_mine.\n",
     "inputSchema": {
       "properties": {
         "allow_terminal": {
@@ -623,7 +623,7 @@
     "name": "claims_list"
   },
   {
-    "description": "Release a claim. Authorized on the full (holder, holder_kind, holder_repo)\ntriple \u2014 pass exactly what you claimed with.\n\nReturns:\n    outcome: released | not_yours | not_claimed | undetermined.\n    A projected status is restored only if it still holds the projected\n    value, so finished work is never resurrected.\n",
+    "description": "Release a claim. Authorized on the full (holder, holder_kind, holder_repo)\ntriple \u2014 pass exactly what you claimed with.\n\nReturns:\n\n- outcome: released | not_yours | not_claimed | undetermined. A projected status is restored only if it still holds the projected value, so finished work is never resurrected.\n",
     "inputSchema": {
       "properties": {
         "entity_id": {
@@ -689,7 +689,7 @@
     "name": "claims_who_holds"
   },
   {
-    "description": "Delete a single run or all runs for a benchmark.\n\nArgs:\n    run_id: Delete a specific run (e.g. \"BE-1\")\n    benchmark: Delete all runs for a benchmark name\n",
+    "description": "Delete a single run or all runs for a benchmark.\n\nArgs:\n\n- run_id: Delete a specific run (e.g. \"BE-1\")\n- benchmark: Delete all runs for a benchmark name\n",
     "inputSchema": {
       "properties": {
         "benchmark": {
@@ -723,7 +723,7 @@
     "name": "codebench_delete"
   },
   {
-    "description": "Import benchmark results from CSV or JSON.\n\nCSV convention: first column is the row label, remaining columns are\nmetric names with finite numeric values.\n\nJSON convention: array of objects, first key is the row label, rest\nare metric keys with finite numeric values.\n\nEach (row label, metric) pair may appear only once per import, and\nNaN/Infinity are refused: a non-finite measurement is not one.\n\nArgs:\n    benchmark: Benchmark name (e.g. \"search-perf\")\n    csv_data: CSV string (header + data rows). Provide csv_data OR json_data.\n    json_data: JSON array string. Provide csv_data OR json_data.\n    date: Run date (default: today, ISO format YYYY-MM-DD)\n    tags: Optional tags (e.g. [\"nightly\", \"v2.1\"])\n    meta: Optional metadata (e.g. {\"git_sha\": \"abc123\", \"ci_url\": \"...\"})\n",
+    "description": "Import benchmark results from CSV or JSON.\n\nCSV convention: first column is the row label, remaining columns are\nmetric names with finite numeric values.\n\nJSON convention: array of objects, first key is the row label, rest\nare metric keys with finite numeric values.\n\nEach (row label, metric) pair may appear only once per import, and\nNaN/Infinity are refused: a non-finite measurement is not one.\n\nArgs:\n\n- benchmark: Benchmark name (e.g. \"search-perf\")\n- csv_data: CSV string (header + data rows). Provide csv_data OR json_data.\n- json_data: JSON array string. Provide csv_data OR json_data.\n- date: Run date (default: today, ISO format YYYY-MM-DD)\n- tags: Optional tags (e.g. [\"nightly\", \"v2.1\"])\n- meta: Optional metadata (e.g. {\"git_sha\": \"abc123\", \"ci_url\": \"...\"})\n",
     "inputSchema": {
       "properties": {
         "benchmark": {
@@ -808,7 +808,7 @@
     "name": "codebench_import"
   },
   {
-    "description": "List benchmarks or runs.\n\nWithout benchmark: lists all benchmark names with run counts.\nWith benchmark: lists runs for that benchmark.\n\nArgs:\n    benchmark: If provided, list runs for this benchmark\n    last_n: Limit to last N runs (only when benchmark is provided)\n",
+    "description": "List benchmarks or runs.\n\nWithout benchmark: lists all benchmark names with run counts.\nWith benchmark: lists runs for that benchmark.\n\nArgs:\n\n- benchmark: If provided, list runs for this benchmark\n- last_n: Limit to last N runs (only when benchmark is provided)\n",
     "inputSchema": {
       "properties": {
         "benchmark": {
@@ -842,7 +842,7 @@
     "name": "codebench_list"
   },
   {
-    "description": "Query and pivot benchmark results.\n\ngroup_by=\"row\": original table shape (row_labels as rows, metrics as\ncolumns). Returns one table per run.\n\ngroup_by=\"run\": trend view (runs as rows, metrics as columns).\nReturns one table per row_label.\n\nArgs:\n    benchmark: Benchmark name to query\n    runs: Specific run IDs (default: all matching)\n    date_from: Start date filter (inclusive, YYYY-MM-DD)\n    date_to: End date filter (inclusive, YYYY-MM-DD)\n    metrics: Which metrics to include (default: all)\n    rows: Which row_labels to include (default: all)\n    group_by: Pivot axis \u2014 \"row\" or \"run\"\n    last_n: Limit to last N runs by date\n    format: Output \u2014 \"json\" or \"csv\"\n",
+    "description": "Query and pivot benchmark results.\n\ngroup_by=\"row\": original table shape (row_labels as rows, metrics as\ncolumns). Returns one table per run.\n\ngroup_by=\"run\": trend view (runs as rows, metrics as columns).\nReturns one table per row_label.\n\nArgs:\n\n- benchmark: Benchmark name to query\n- runs: Specific run IDs (default: all matching)\n- date_from: Start date filter (inclusive, YYYY-MM-DD)\n- date_to: End date filter (inclusive, YYYY-MM-DD)\n- metrics: Which metrics to include (default: all)\n- rows: Which row_labels to include (default: all)\n- group_by: Pivot axis \u2014 \"row\" or \"run\"\n- last_n: Limit to last N runs by date\n- format: Output \u2014 \"json\" or \"csv\"\n",
     "inputSchema": {
       "properties": {
         "benchmark": {
@@ -950,7 +950,7 @@
     "name": "codebench_query"
   },
   {
-    "description": "Close a session for good, so its files stop blocking everyone else.\n\nThis is the way OUT of a session that will not be merged under its own\nlock \u2014 including the case an agent hits routinely: the branch was\nintegrated by some other route (a merge harness holding its own lock), so\ncodemerge_merge refuses with reason='main_moved' and the session is\nstranded in 'active', which codemerge_finish will not accept. Until it is\nabandoned, its claimed files are reported as conflicts to every later\nsession, with no expiry \u2014 so closing it is what keeps codemerge_check\nworth consulting.\n\nWhat it does, stated exactly: the session's claim rows are NOT deleted,\nthey stop being reported, because the conflict query selects on session\nstatus. The merge lock is released only if this session holds it.\n\nRe-issuing it is safe: a second call on an already-abandoned session\nchanges nothing but the timestamps. A 'done' session is REFUSED \u2014 that\nwould erase the record of a merge that succeeded \u2014 and an unknown\nsession_id is an error.\n\nArgs:\n    session_id: The merge session ID. Whatever session is NAMED is the\n        one closed; nothing ties it to the caller, so passing a stale or\n        mistyped id closes someone else's work.\n",
+    "description": "Close a session for good, so its files stop blocking everyone else.\n\nThis is the way OUT of a session that will not be merged under its own\nlock \u2014 including the case an agent hits routinely: the branch was\nintegrated by some other route (a merge harness holding its own lock), so\ncodemerge_merge refuses with reason='main_moved' and the session is\nstranded in 'active', which codemerge_finish will not accept. Until it is\nabandoned, its claimed files are reported as conflicts to every later\nsession, with no expiry \u2014 so closing it is what keeps codemerge_check\nworth consulting.\n\nWhat it does, stated exactly: the session's claim rows are NOT deleted,\nthey stop being reported, because the conflict query selects on session\nstatus. The merge lock is released only if this session holds it.\n\nRe-issuing it is safe: a second call on an already-abandoned session\nchanges nothing but the timestamps. A 'done' session is REFUSED \u2014 that\nwould erase the record of a merge that succeeded \u2014 and an unknown\nsession_id is an error.\n\nArgs:\n\n- session_id: The merge session ID. Whatever session is NAMED is the one closed; nothing ties it to the caller, so passing a stale or mistyped id closes someone else's work.\n",
     "inputSchema": {
       "properties": {
         "session_id": {
@@ -967,7 +967,7 @@
     "name": "codemerge_abandon"
   },
   {
-    "description": "Check for overlapping file claims with other sessions.\n\nReturns whether the session is clean to proceed, lists any conflicts,\nand records the current main HEAD for CAS comparison at merge time.\n\nArgs:\n    session_id: The merge session ID\n    main_changed_files: Files changed on main since base (optional, for overlap check)\n",
+    "description": "Check for overlapping file claims with other sessions.\n\nReturns whether the session is clean to proceed, lists any conflicts,\nand records the current main HEAD for CAS comparison at merge time.\n\nArgs:\n\n- session_id: The merge session ID\n- main_changed_files: Files changed on main since base (optional, for overlap check)\n",
     "inputSchema": {
       "properties": {
         "main_changed_files": {
@@ -999,7 +999,7 @@
     "name": "codemerge_check"
   },
   {
-    "description": "Claim a file as being modified by this session.\n\nArgs:\n    session_id: The merge session ID\n    file_path: File path being modified (relative to repo root)\n",
+    "description": "Claim a file as being modified by this session.\n\nArgs:\n\n- session_id: The merge session ID\n- file_path: File path being modified (relative to repo root)\n",
     "inputSchema": {
       "properties": {
         "file_path": {
@@ -1021,7 +1021,7 @@
     "name": "codemerge_claim"
   },
   {
-    "description": "List all files a session has claimed, in claim order.\n\nArgs:\n    session_id: The merge session ID.\n",
+    "description": "List all files a session has claimed, in claim order.\n\nArgs:\n\n- session_id: The merge session ID.\n",
     "inputSchema": {
       "properties": {
         "session_id": {
@@ -1038,7 +1038,7 @@
     "name": "codemerge_claims"
   },
   {
-    "description": "Finish a merge session and release the lock.\n\nCall this after codemerge_merge() returned proceed=true; the session must\nbe in 'merging' state or this refuses in BOTH directions of `success`.\n\nArgs:\n    session_id: The merge session ID\n    success: True if the merge succeeded (status\u2192done). False if the git\n        merge/cherry-pick failed (status\u2192active): the lock is released and\n        the session stays alive so it can try again. False does NOT close\n        the session \u2014 use codemerge_abandon for that.\n",
+    "description": "Finish a merge session and release the lock.\n\nCall this after codemerge_merge() returned proceed=true; the session must\nbe in 'merging' state or this refuses in BOTH directions of `success`.\n\nArgs:\n\n- session_id: The merge session ID\n- success: True if the merge succeeded (status\u2192done). False if the git merge/cherry-pick failed (status\u2192active): the lock is released and the session stays alive so it can try again. False does NOT close the session \u2014 use codemerge_abandon for that.\n",
     "inputSchema": {
       "properties": {
         "session_id": {
@@ -1060,7 +1060,7 @@
     "name": "codemerge_finish"
   },
   {
-    "description": "Acquire the merge lock and proceed with merging.\n\nUses compare-and-swap on main HEAD to prevent races. If main has moved\nsince check, returns proceed=False with reason='main_moved'. If another\nsession holds the lock, returns proceed=False with reason='lock_held'.\n\nArgs:\n    session_id: The merge session ID\n    expected_main_head: The main HEAD SHA recorded during codemerge_check\n",
+    "description": "Acquire the merge lock and proceed with merging.\n\nUses compare-and-swap on main HEAD to prevent races. If main has moved\nsince check, returns proceed=False with reason='main_moved'. If another\nsession holds the lock, returns proceed=False with reason='lock_held'.\n\nArgs:\n\n- session_id: The merge session ID\n- expected_main_head: The main HEAD SHA recorded during codemerge_check\n",
     "inputSchema": {
       "properties": {
         "expected_main_head": {
@@ -1082,7 +1082,7 @@
     "name": "codemerge_merge"
   },
   {
-    "description": "List merge sessions with claim counts.\n\nArgs:\n    status: Filter by status ('active', 'merging', 'done', 'abandoned').\n        Omit for all sessions.\n",
+    "description": "List merge sessions with claim counts.\n\nArgs:\n\n- status: Filter by status ('active', 'merging', 'done', 'abandoned'). Omit for all sessions.\n",
     "inputSchema": {
       "properties": {
         "status": {
@@ -1104,7 +1104,7 @@
     "name": "codemerge_sessions"
   },
   {
-    "description": "Start a new merge session for a branch.\n\nArgs:\n    session_id: Unique identifier for this merge session\n    branch: Git branch name being merged\n    description: Human-readable description of the work\n    base_commit: Git commit SHA this branch diverged from\n    repo_root: Repo root path (default: cwd)\n    allow_restart: If True, reuse this session_id when its previous\n        session is finished \u2014 'abandoned' or 'done'. Restarting DELETES\n        that session's file claims, so re-claim anything you still need.\n        It does NOT restart a live one: starting over an 'active' or\n        'merging' session is an error whether or not this is set.\n",
+    "description": "Start a new merge session for a branch.\n\nArgs:\n\n- session_id: Unique identifier for this merge session\n- branch: Git branch name being merged\n- description: Human-readable description of the work\n- base_commit: Git commit SHA this branch diverged from\n- repo_root: Repo root path (default: cwd)\n- allow_restart: If True, reuse this session_id when its previous session is finished \u2014 'abandoned' or 'done'. Restarting DELETES that session's file claims, so re-claim anything you still need. It does NOT restart a live one: starting over an 'active' or 'merging' session is an error whether or not this is set.\n",
     "inputSchema": {
       "properties": {
         "allow_restart": {
@@ -1155,7 +1155,7 @@
     "name": "codemerge_status"
   },
   {
-    "description": "Add items to a sweep. Atomic upsert: existing items have their\n`recurrence_count` bumped instead of being silently skipped, their\n`last_seen` updated, and their archive flag cleared (R5: re-detected\narchived items un-archive automatically).\n\nArgs:\n    sweep_ref: Sweep ID (SW-N) or name\n    items: Item identifiers to add\n    tags: Optional tags applied to this batch (overwrite on bump)\n\nReturns:\n    {sweep_id, added, recurrence_bumped, duplicates_skipped (alias)}\n",
+    "description": "Add items to a sweep. Atomic upsert: existing items have their\n`recurrence_count` bumped instead of being silently skipped, their\n`last_seen` updated, and their archive flag cleared (R5: re-detected\narchived items un-archive automatically).\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- items: Item identifiers to add\n- tags: Optional tags applied to this batch (overwrite on bump)\n\nReturns:\n    {sweep_id, added, recurrence_bumped, duplicates_skipped (alias)}\n",
     "inputSchema": {
       "properties": {
         "items": {
@@ -1195,7 +1195,7 @@
     "name": "codesweep_add"
   },
   {
-    "description": "Archive a sweep. Archived sweeps are excluded from codesweep_list by default.\n\nFor entry-level archive, use `codesweep_archive_items`.\n\nArgs:\n    sweep_ref: Sweep ID (SW-N) or name\n",
+    "description": "Archive a sweep. Archived sweeps are excluded from codesweep_list by default.\n\nFor entry-level archive, use `codesweep_archive_items`.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n",
     "inputSchema": {
       "properties": {
         "sweep_ref": {
@@ -1212,7 +1212,7 @@
     "name": "codesweep_archive"
   },
   {
-    "description": "Selectively archive entries within a sweep (soft-delete).\n\nArchived entries are excluded from `codesweep_next`, `codesweep_status`\ntotals, and default `codesweep_list_items`. They remain matchable by\n`codesweep_add` for recurrence detection \u2014 re-adding un-archives them\nwith `recurrence_count` carried forward (R5 invariant).\n\nAt least one filter is required.\n\nArgs:\n    sweep_ref: Sweep ID (SW-N) or name\n    items: Specific item identifiers to archive\n    where_status: Archive entries currently in this state\n    older_than: Duration spec \u2014 '30d', '2w', '6m', '1y'. Compares against\n        the entry's last activity timestamp.\n    reason: Free-form reason recorded on each archived entry\n",
+    "description": "Selectively archive entries within a sweep (soft-delete).\n\nArchived entries are excluded from `codesweep_next`, `codesweep_status`\ntotals, and default `codesweep_list_items`. They remain matchable by\n`codesweep_add` for recurrence detection \u2014 re-adding un-archives them\nwith `recurrence_count` carried forward (R5 invariant).\n\nAt least one filter is required.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- items: Specific item identifiers to archive\n- where_status: Archive entries currently in this state\n- older_than: Duration spec \u2014 '30d', '2w', '6m', '1y'. Compares against the entry's last activity timestamp.\n- reason: Free-form reason recorded on each archived entry\n",
     "inputSchema": {
       "properties": {
         "items": {
@@ -1280,7 +1280,7 @@
     "name": "codesweep_archive_items"
   },
   {
-    "description": "Create a new sweep for batch iteration over items.\n\nArgs:\n    name: Optional human-readable name (must be unique)\n    description: What this sweep is for\n    default_batch_size: Default items per batch (default: 10)\n    lifecycle: Ordered list of allowed states (default [\"pending\",\"done\"]).\n        For retro-style workflows: [\"DETECTED\",\"CONFIRMED\",\"ESCALATED\",\n        \"POSTPONED\",\"RESOLVED\",\"DROPPED\"].\n    terminal_states: States that count as \"processed\" (default [\"done\"]).\n    transitions: Optional dict[state, list[allowed_next_state]] for\n        DAG-constrained lifecycles. None = unconstrained transitions.\n",
+    "description": "Create a new sweep for batch iteration over items.\n\nArgs:\n\n- name: Optional human-readable name (must be unique)\n- description: What this sweep is for\n- default_batch_size: Default items per batch (default: 10)\n- lifecycle: Ordered list of allowed states (default [\"pending\",\"done\"]). For retro-style workflows: [\"DETECTED\",\"CONFIRMED\",\"ESCALATED\", \"POSTPONED\",\"RESOLVED\",\"DROPPED\"].\n- terminal_states: States that count as \"processed\" (default [\"done\"]).\n- transitions: Optional dict[state, list[allowed_next_state]] for DAG-constrained lifecycles. None = unconstrained transitions.\n",
     "inputSchema": {
       "properties": {
         "default_batch_size": {
@@ -1360,7 +1360,7 @@
     "name": "codesweep_create"
   },
   {
-    "description": "List all sweeps with summary counts.\n\nArgs:\n    include_archived: Include archived sweeps (default: false)\n",
+    "description": "List all sweeps with summary counts.\n\nArgs:\n\n- include_archived: Include archived sweeps (default: false)\n",
     "inputSchema": {
       "properties": {
         "include_archived": {
@@ -1375,7 +1375,7 @@
     "name": "codesweep_list"
   },
   {
-    "description": "List items in a sweep with optional filters.\n\nArgs:\n    sweep_ref: Sweep ID (SW-N) or name\n    state: Filter to a specific state\n    tag: Filter to items having this tag\n    include_archived: Include archived entries alongside live ones\n    archived_only: Show only archived entries (overrides include_archived)\n    limit: Max number of entries to return\n",
+    "description": "List items in a sweep with optional filters.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- state: Filter to a specific state\n- tag: Filter to items having this tag\n- include_archived: Include archived entries alongside live ones\n- archived_only: Show only archived entries (overrides include_archived)\n- limit: Max number of entries to return\n",
     "inputSchema": {
       "properties": {
         "archived_only": {
@@ -1438,7 +1438,7 @@
     "name": "codesweep_list_items"
   },
   {
-    "description": "Mark items by state transition.\n\nArgs:\n    sweep_ref: Sweep ID (SW-N) or name\n    items: Item identifiers to mark\n    processed: Legacy mode \u2014 True maps to first terminal state, False\n        to first non-terminal state. Ignored if `state` is set.\n    state: Explicit target state. Validated against the sweep's\n        `lifecycle` and `transitions` DAG (if declared).\n",
+    "description": "Mark items by state transition.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- items: Item identifiers to mark\n- processed: Legacy mode \u2014 True maps to first terminal state, False to first non-terminal state. Ignored if `state` is set.\n- state: Explicit target state. Validated against the sweep's `lifecycle` and `transitions` DAG (if declared).\n",
     "inputSchema": {
       "properties": {
         "items": {
@@ -1480,7 +1480,7 @@
     "name": "codesweep_mark"
   },
   {
-    "description": "Get next batch of unprocessed (non-terminal, non-archived) items in\ninsertion order.\n\nArgs:\n    sweep_ref: Sweep ID (SW-N) or name\n    limit: Batch size (overrides sweep default)\n    tags: Filter to items matching any of these tags\n",
+    "description": "Get next batch of unprocessed (non-terminal, non-archived) items in\ninsertion order.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- limit: Batch size (overrides sweep default)\n- tags: Filter to items matching any of these tags\n",
     "inputSchema": {
       "properties": {
         "limit": {
@@ -1524,7 +1524,7 @@
     "name": "codesweep_next"
   },
   {
-    "description": "Sweep overview \u2014 total/processed/remaining/archived counts, per-tag and\nper-state breakdowns. Archived entries are excluded from total/processed/\nremaining and reported separately as `archived`.\n\nArgs:\n    sweep_ref: Sweep ID (SW-N) or name\n",
+    "description": "Sweep overview \u2014 total/processed/remaining/archived counts, per-tag and\nper-state breakdowns. Archived entries are excluded from total/processed/\nremaining and reported separately as `archived`.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n",
     "inputSchema": {
       "properties": {
         "sweep_ref": {
@@ -1541,7 +1541,7 @@
     "name": "codesweep_status"
   },
   {
-    "description": "Fetch a single finding by ID with full body (description, severity,\nstatus, tags, meta, timestamps, commit refs).\n\nThe result carries an `anchor` summary saying where this card's code is\nNOW: `state` tells a card with no anchor apart from one whose anchor was\nretracted by hand and from one where capture looked and had nothing to\ngrab, and `loc_status`/`moved_file`/`path` report the resolution against\nHEAD when it ran.\n\nRaises a not-found error if the ID does not exist. For lenient batch\nlookup that silently drops missing IDs, use `query(ids=[...])`.\n\nArgs:\n    finding_id: The finding ID (e.g. CB-1383)\n    resolve_anchors: Resolve the anchor against the repository (default\n            ON \u2014 the cost is bounded by one card). Pass False for a read\n            that must not spawn a process: no git available, no\n            repository, or a caller that only wants to know whether an\n            anchor exists at all.\n",
+    "description": "Fetch a single finding by ID with full body (description, severity,\nstatus, tags, meta, timestamps, commit refs).\n\nThe result carries an `anchor` summary saying where this card's code is\nNOW: `state` tells a card with no anchor apart from one whose anchor was\nretracted by hand and from one where capture looked and had nothing to\ngrab, and `loc_status`/`moved_file`/`path` report the resolution against\nHEAD when it ran.\n\nRaises a not-found error if the ID does not exist. For lenient batch\nlookup that silently drops missing IDs, use `query(ids=[...])`.\n\nArgs:\n\n- finding_id: The finding ID (e.g. CB-1383)\n- resolve_anchors: Resolve the anchor against the repository (default ON \u2014 the cost is bounded by one card). Pass False for a read that must not spawn a process: no git available, no repository, or a caller that only wants to know whether an anchor exists at all.\n",
     "inputSchema": {
       "properties": {
         "finding_id": {
@@ -1563,7 +1563,7 @@
     "name": "get"
   },
   {
-    "description": "Connected components of the hand-written CB-id reference graph.\n\nREAD-ONLY, and an ANNOTATION of what people already wrote \u2014 no link here\nis inferred. Every edge carries the field it came from and the quoted\ncontext of its first mention. A node whose degree exceeds hub_degree is\na landmark many work units point AT, not a member of one: it does not\ntransmit connectivity and is reported as an ANCHOR with its citers, so\nthe components either side of it stay separate. References to ids\noutside the population are COUNTED as dangling, never dropped.\n\nArgs:\n    status: Narrow/widen the population (default: live statuses; \"all\")\n    category: Restrict to one category\n    hub_degree: Degree above which a node becomes an anchor (default 3,\n        chosen on the outcome \u2014 see DEFAULT_HUB_DEGREE); None disables\n        hub splitting and returns the raw components\n    component_limit: Max components returned (totals stay visible)\n    member_limit: Max members per component (edges follow the page)\n    anchor_limit: Max anchors returned (default 25)\n    orphan_limit: Max orphan ids returned (default 50)\n",
+    "description": "Connected components of the hand-written CB-id reference graph.\n\nREAD-ONLY, and an ANNOTATION of what people already wrote \u2014 no link here\nis inferred. Every edge carries the field it came from and the quoted\ncontext of its first mention. A node whose degree exceeds hub_degree is\na landmark many work units point AT, not a member of one: it does not\ntransmit connectivity and is reported as an ANCHOR with its citers, so\nthe components either side of it stay separate. References to ids\noutside the population are COUNTED as dangling, never dropped.\n\nArgs:\n\n- status: Narrow/widen the population (default: live statuses; \"all\")\n- category: Restrict to one category\n- hub_degree: Degree above which a node becomes an anchor (default 3, chosen on the outcome \u2014 see DEFAULT_HUB_DEGREE); None disables hub splitting and returns the raw components\n- component_limit: Max components returned (totals stay visible)\n- member_limit: Max members per component (edges follow the page)\n- anchor_limit: Max anchors returned (default 25)\n- orphan_limit: Max orphan ids returned (default 50)\n",
     "inputSchema": {
       "properties": {
         "anchor_limit": {
@@ -1643,7 +1643,7 @@
     "name": "grouping_citations"
   },
   {
-    "description": "Split lineages and shared filing events (sprint / plan).\n\nREAD-ONLY. LINEAGE IS TRAVERSED, NOT GROUPED: A \u2192 B \u2192 C is one lineage\nwith depths, and its links resolve against EVERY card in the tracker,\nnot just the population, so a `fixed` middle card does not sever the\nchain. A lineage surfaces when at least one member is in the population;\na lineage value naming no card is reported unresolved, not dropped.\nFiling events are grouped by exact value within the population.\n\nArgs:\n    status: Narrow/widen the population (default: live statuses; \"all\")\n    category: Restrict to one category\n    lineage_limit: Max lineages returned (totals stay visible)\n    event_limit: Max filing events returned (totals stay visible)\n",
+    "description": "Split lineages and shared filing events (sprint / plan).\n\nREAD-ONLY. LINEAGE IS TRAVERSED, NOT GROUPED: A \u2192 B \u2192 C is one lineage\nwith depths, and its links resolve against EVERY card in the tracker,\nnot just the population, so a `fixed` middle card does not sever the\nchain. A lineage surfaces when at least one member is in the population;\na lineage value naming no card is reported unresolved, not dropped.\nFiling events are grouped by exact value within the population.\n\nArgs:\n\n- status: Narrow/widen the population (default: live statuses; \"all\")\n- category: Restrict to one category\n- lineage_limit: Max lineages returned (totals stay visible)\n- event_limit: Max filing events returned (totals stay visible)\n",
     "inputSchema": {
       "properties": {
         "category": {
@@ -1701,7 +1701,7 @@
     "name": "grouping_filing"
   },
   {
-    "description": "Tag pivots: counts, co-occurrence, and near-duplicate taxonomy strings.\n\nREAD-ONLY. Co-occurrence carries Jaccard beside the raw count, because\non a corpus with one 390-card tag the raw count ranks that tag's pairs\nfirst no matter how weak the association is. `variants` spans tags AND\ncategories in one namespace: the taxonomy drift is not confined to one\ncolumn (`process_improvement` / `process-improvement`).\n\nArgs:\n    status: Narrow/widen the population (default: live statuses; \"all\")\n    category: Restrict to one category\n    min_pair_count: Drop tag pairs co-occurring fewer times (default 2)\n    tag_limit: Max tags returned (totals stay visible)\n    pair_limit: Max pairs returned (default 50; None for all)\n",
+    "description": "Tag pivots: counts, co-occurrence, and near-duplicate taxonomy strings.\n\nREAD-ONLY. Co-occurrence carries Jaccard beside the raw count, because\non a corpus with one 390-card tag the raw count ranks that tag's pairs\nfirst no matter how weak the association is. `variants` spans tags AND\ncategories in one namespace: the taxonomy drift is not confined to one\ncolumn (`process_improvement` / `process-improvement`).\n\nArgs:\n\n- status: Narrow/widen the population (default: live statuses; \"all\")\n- category: Restrict to one category\n- min_pair_count: Drop tag pairs co-occurring fewer times (default 2)\n- tag_limit: Max tags returned (totals stay visible)\n- pair_limit: Max pairs returned (default 50; None for all)\n",
     "inputSchema": {
       "properties": {
         "category": {
@@ -1764,7 +1764,7 @@
     "name": "grouping_tags"
   },
   {
-    "description": "Flag an item as living on a feature branch (not yet integrated).\nCalled by worktree-setup.sh when a branch is created.\n\nArgs:\n    item_ref: The item id (e.g. CB-5).\n    branch_name: Git branch holding the work.\n",
+    "description": "Flag an item as living on a feature branch (not yet integrated).\nCalled by worktree-setup.sh when a branch is created.\n\nArgs:\n\n- item_ref: The item id (e.g. CB-5).\n- branch_name: Git branch holding the work.\n",
     "inputSchema": {
       "properties": {
         "branch_name": {
@@ -1786,7 +1786,7 @@
     "name": "mark_branch_only"
   },
   {
-    "description": "Mark an item as merged to main. Sets done_commit, status='done',\nclears branch_only. Called by worktree-finish.sh.\n\nArgs:\n    item_ref: The item id (e.g. CB-5).\n    commit: Commit SHA where the work landed on main.\n",
+    "description": "Mark an item as merged to main. Sets done_commit, status='done',\nclears branch_only. Called by worktree-finish.sh.\n\nArgs:\n\n- item_ref: The item id (e.g. CB-5).\n- commit: Commit SHA where the work landed on main.\n",
     "inputSchema": {
       "properties": {
         "commit": {
@@ -1808,7 +1808,7 @@
     "name": "mark_integrated"
   },
   {
-    "description": "Attach an item (bug / requirement / external) to a milestone.\n\nArgs:\n    milestone_id: Target milestone slug.\n    item_kind: 'bug' (CB-N), 'requirement' (FR-N), or 'external'.\n    item_ref: The id of the underlying entity (must exist for bug/req).\n    size: 'large' (worktree+sprint), 'small' (1-2h), 'triage' (minutes).\n    priority: Lower = higher priority. Default 100.\n    acceptance: Markdown acceptance criteria. Required for size='large'.\n    linked_frs: Optional list of FR ids to link (used by pull_next eligibility).\n",
+    "description": "Attach an item (bug / requirement / external) to a milestone.\n\nArgs:\n\n- milestone_id: Target milestone slug.\n- item_kind: 'bug' (CB-N), 'requirement' (FR-N), or 'external'.\n- item_ref: The id of the underlying entity (must exist for bug/req).\n- size: 'large' (worktree+sprint), 'small' (1-2h), 'triage' (minutes).\n- priority: Lower = higher priority. Default 100.\n- acceptance: Markdown acceptance criteria. Required for size='large'.\n- linked_frs: Optional list of FR ids to link (used by pull_next eligibility).\n",
     "inputSchema": {
       "properties": {
         "acceptance": {
@@ -1865,7 +1865,7 @@
     "name": "milestone_add_item"
   },
   {
-    "description": "Audit log query with filters. Returns most-recent rows first.\n\nArgs:\n    milestone_id: Filter by milestone slug.\n    item_ref: Filter by item id.\n    actor: Filter by actor.\n    since: ISO datetime \u2014 only rows at or after this time.\n    limit: Max rows (default 200).\n",
+    "description": "Audit log query with filters. Returns most-recent rows first.\n\nArgs:\n\n- milestone_id: Filter by milestone slug.\n- item_ref: Filter by item id.\n- actor: Filter by actor.\n- since: ISO datetime \u2014 only rows at or after this time.\n- limit: Max rows (default 200).\n",
     "inputSchema": {
       "properties": {
         "actor": {
@@ -1928,7 +1928,7 @@
     "name": "milestone_audit_query"
   },
   {
-    "description": "Close a release milestone. Refuses if items are unfinished, on a\nbranch, or have unresolved blockers. Streams cannot be closed.\n\nArgs:\n    id: Milestone slug (must be kind='release').\n    force: Override the close-gate (still won't close streams). Audit-logged.\n    reason: Audit reason for the close.\n",
+    "description": "Close a release milestone. Refuses if items are unfinished, on a\nbranch, or have unresolved blockers. Streams cannot be closed.\n\nArgs:\n\n- id: Milestone slug (must be kind='release').\n- force: Override the close-gate (still won't close streams). Audit-logged.\n- reason: Audit reason for the close.\n",
     "inputSchema": {
       "properties": {
         "force": {
@@ -1955,7 +1955,7 @@
     "name": "milestone_close"
   },
   {
-    "description": "Create a new milestone.\n\nArgs:\n    id: Slug identifier, e.g. 'release/1.2' or 'stream/security'.\n    kind: 'release' or 'stream'. Streams never close.\n    description: Short charter for the milestone.\n    target_date: ISO date (e.g. '2026-06-30'). Optional, releases only.\n",
+    "description": "Create a new milestone.\n\nArgs:\n\n- id: Slug identifier, e.g. 'release/1.2' or 'stream/security'.\n- kind: 'release' or 'stream'. Streams never close.\n- description: Short charter for the milestone.\n- target_date: ISO date (e.g. '2026-06-30'). Optional, releases only.\n",
     "inputSchema": {
       "properties": {
         "description": {
@@ -1994,7 +1994,7 @@
     "name": "milestone_create"
   },
   {
-    "description": "Move an item to stream/maintenance (or another milestone) and\nmark it deferred.\n\nArgs:\n    item_ref: The item to defer.\n    to_milestone: Destination (default 'stream/maintenance').\n    reason: Optional audit reason.\n",
+    "description": "Move an item to stream/maintenance (or another milestone) and\nmark it deferred.\n\nArgs:\n\n- item_ref: The item to defer.\n- to_milestone: Destination (default 'stream/maintenance').\n- reason: Optional audit reason.\n",
     "inputSchema": {
       "properties": {
         "item_ref": {
@@ -2021,7 +2021,7 @@
     "name": "milestone_defer"
   },
   {
-    "description": "List milestones with optional filters.\n\nArgs:\n    kind: 'release' or 'stream'.\n    state: 'open' / 'closing' / 'shipped' / 'archived'.\n",
+    "description": "List milestones with optional filters.\n\nArgs:\n\n- kind: 'release' or 'stream'.\n- state: 'open' / 'closing' / 'shipped' / 'archived'.\n",
     "inputSchema": {
       "properties": {
         "kind": {
@@ -2055,7 +2055,7 @@
     "name": "milestone_list"
   },
   {
-    "description": "Move an item to a different milestone.\n\nArgs:\n    item_ref: The item to move (e.g. CB-5).\n    to_milestone: Destination milestone slug.\n    reason: One-line audit reason.\n",
+    "description": "Move an item to a different milestone.\n\nArgs:\n\n- item_ref: The item to move (e.g. CB-5).\n- to_milestone: Destination milestone slug.\n- reason: One-line audit reason.\n",
     "inputSchema": {
       "properties": {
         "item_ref": {
@@ -2082,7 +2082,7 @@
     "name": "milestone_move_item"
   },
   {
-    "description": "One-time repair (CB-107) for stream items whose source finding or\nrequirement resolved before the status-change hook existed (CB-26).\nThe hook keeps new resolutions in sync; this is the retroactive fix for\nrows it never saw.\n\nDRY RUN BY DEFAULT \u2014 without apply=true nothing is written, and the\nresponse still lists every candidate transition it WOULD make. This is\na bulk mutation, and CLAUDE.md is explicit that a repair tool which\nwrites by default is how it becomes an accident, so the dry-run default\nis load-bearing and this wrapper refuses to weaken it.\n\nArgs:\n    apply: Must be a literal JSON boolean. Defaults to false (dry run).\n        Rejected outright for any other JSON type (a string like\n        \"false\", a number, null) rather than coerced by truthiness \u2014\n        an MCP client sends JSON over the wire, and Python's bool(\"0\")\n        and bool(\"false\") are both True, which would silently turn a\n        client's intended dry run into a write (CB-82's class of bug).\n        CB-151: strict typing refuses this at the pydantic boundary\n        before the tool body runs, closing the one hole the previous\n        union annotation + isinstance check left open (1.0/0.0 coerced\n        to a real bool before isinstance could see it).\n",
+    "description": "One-time repair (CB-107) for stream items whose source finding or\nrequirement resolved before the status-change hook existed (CB-26).\nThe hook keeps new resolutions in sync; this is the retroactive fix for\nrows it never saw.\n\nDRY RUN BY DEFAULT \u2014 without apply=true nothing is written, and the\nresponse still lists every candidate transition it WOULD make. This is\na bulk mutation, and CLAUDE.md is explicit that a repair tool which\nwrites by default is how it becomes an accident, so the dry-run default\nis load-bearing and this wrapper refuses to weaken it.\n\nArgs:\n\n- apply: Must be a literal JSON boolean. Defaults to false (dry run). Rejected outright for any other JSON type (a string like \"false\", a number, null) rather than coerced by truthiness \u2014 an MCP client sends JSON over the wire, and Python's bool(\"0\") and bool(\"false\") are both True, which would silently turn a client's intended dry run into a write (CB-82's class of bug). CB-151: strict typing refuses this at the pydantic boundary before the tool body runs, closing the one hole the previous union annotation + isinstance check left open (1.0/0.0 coerced to a real bool before isinstance could see it).\n",
     "inputSchema": {
       "properties": {
         "apply": {
@@ -2097,7 +2097,7 @@
     "name": "milestone_reconcile"
   },
   {
-    "description": "Set an item's status. Records done_commit if status is terminal.\n\nArgs:\n    item_ref: The item id (e.g. CB-5).\n    status: open / in_progress / done / deferred / dismissed.\n    commit: SHA where the work landed on main (recorded for terminal status).\n    reason: Optional audit reason.\n",
+    "description": "Set an item's status. Records done_commit if status is terminal.\n\nArgs:\n\n- item_ref: The item id (e.g. CB-5).\n- status: open / in_progress / done / deferred / dismissed.\n- commit: SHA where the work landed on main (recorded for terminal status).\n- reason: Optional audit reason.\n",
     "inputSchema": {
       "properties": {
         "commit": {
@@ -2136,7 +2136,7 @@
     "name": "milestone_set_status"
   },
   {
-    "description": "Detailed rollup for one milestone: item counts by status / size,\nblockers, branch-only items, days to target.\n\nArgs:\n    id: Milestone slug.\n",
+    "description": "Detailed rollup for one milestone: item counts by status / size,\nblockers, branch-only items, days to target.\n\nArgs:\n\n- id: Milestone slug.\n",
     "inputSchema": {
       "properties": {
         "id": {
@@ -2153,7 +2153,7 @@
     "name": "milestone_status"
   },
   {
-    "description": "Update mutable fields of a milestone. id and kind are immutable.\n\nArgs:\n    id: Milestone slug.\n    description: New description (or None to skip).\n    target_date: New ISO target date (or None to skip).\n    state: New state (open / closing / shipped / archived).\n",
+    "description": "Update mutable fields of a milestone. id and kind are immutable.\n\nArgs:\n\n- id: Milestone slug.\n- description: New description (or None to skip).\n- target_date: New ISO target date (or None to skip).\n- state: New state (open / closing / shipped / archived).\n",
     "inputSchema": {
       "properties": {
         "description": {
@@ -2206,7 +2206,7 @@
     "name": "milestone_update"
   },
   {
-    "description": "Claim the next eligible item for the calling agent. Returns the\nitem dict or None if nothing eligible.\n\nPriority: stream/security > release/* (earliest target_date) >\n          stream/triage > stream/maintenance.\n\nArgs:\n    agent_id: Stable id for the calling agent. Used as actor in audit.\n    capacity: Dict like {'large':1,'small':2,'triage':5}. Defaults\n        to those values if not provided.\n",
+    "description": "Claim the next eligible item for the calling agent. Returns the\nitem dict or None if nothing eligible.\n\nPriority: stream/security > release/* (earliest target_date) >\n          stream/triage > stream/maintenance.\n\nArgs:\n\n- agent_id: Stable id for the calling agent. Used as actor in audit.\n- capacity: Dict like {'large':1,'small':2,'triage':5}. Defaults to those values if not provided.\n",
     "inputSchema": {
       "properties": {
         "agent_id": {
@@ -2238,7 +2238,7 @@
     "name": "pull_next"
   },
   {
-    "description": "Search and filter findings. Returns structured results.\n\nSupports lookup by ID via `id=` (single) or `ids=` (batch). Missing IDs\nare silently absent from the result so the caller can diff. For a strict\nsingle-ID fetch that errors on miss, use `get` instead.\n\nArgs:\n    id: Fetch a single finding by exact ID (e.g. CB-1383)\n    ids: Fetch multiple findings by ID list; missing IDs are skipped\n    status: Filter by status (open, in_progress, fixed, not_a_bug, wont_fix, stale, deferred). Aliases accepted.\n            Use 'deferred' to find items with active blockers.\n    severity: Filter by severity (critical, high, medium, low)\n    category: Filter by exact category\n    file: Filter by file path (substring match)\n    source: Filter by source (claude, ruff, human, etc.). Compares the\n            FIRST reporter \u2014 the column is frozen at first report\n            (BT-4); later observations' sources live only in the\n            occurrence ring (meta.occurrences[*].source), and an\n            imported observation's ring source can be a peer tracker's.\n    tag: Filter by tag (finds findings containing this tag)\n    meta_key: Filter by metadata key existence. Reads the row's AUTHORED\n              top-level meta (the column), never the occurrence ring.\n    meta_value: Filter by metadata value (requires meta_key; same\n                authored top-level meta as meta_key \u2014 ring meta is not\n                consulted)\n    commit: Matches the first-report column OR any occurrence in the\n            ring (prefix match, hex validated) \u2014 \"what was observed on\n            this commit\" (CB-128). `staleness_check` uses the NEWEST\n            ring entry instead: a different question.\n    ref: Filter by reported_at_ref (exact match, never prefix) \u2014 matches\n         the first-observed or manually assigned release ref (BT-4);\n         per-occurrence refs in the ring are not consulted.\n    fingerprint: Filter by identity fingerprint (exact match)\n    group_by: Group results by: file, category, severity, status, source\n              (source groups count FIRST reporters \u2014 the column is\n              frozen at first report)\n    limit: Max results (default 100)\n    offset: Pagination offset\n    resolve_anchors: Resolve each result's location anchor against the\n              repository HEAD, so a card whose code moved reports its\n              new path. OFF by default because it costs 2-4 git calls\n              per ANCHORED row and this is the primary read path; the\n              cheap half \u2014 whether a card carries an anchor at all, and\n              the refusal token when capture found nothing to grab \u2014 is\n              in every result either way. `get` resolves one card by\n              default.\n",
+    "description": "Search and filter findings. Returns structured results.\n\nSupports lookup by ID via `id=` (single) or `ids=` (batch). Missing IDs\nare silently absent from the result so the caller can diff. For a strict\nsingle-ID fetch that errors on miss, use `get` instead.\n\nArgs:\n\n- id: Fetch a single finding by exact ID (e.g. CB-1383)\n- ids: Fetch multiple findings by ID list; missing IDs are skipped\n- status: Filter by status (open, in_progress, fixed, not_a_bug, wont_fix, stale, deferred). Aliases accepted. Use 'deferred' to find items with active blockers.\n- severity: Filter by severity (critical, high, medium, low)\n- category: Filter by exact category\n- file: Filter by file path (substring match)\n- source: Filter by source (claude, ruff, human, etc.). Compares the FIRST reporter \u2014 the column is frozen at first report (BT-4); later observations' sources live only in the occurrence ring (meta.occurrences[*].source), and an imported observation's ring source can be a peer tracker's.\n- tag: Filter by tag (finds findings containing this tag)\n- meta_key: Filter by metadata key existence. Reads the row's AUTHORED top-level meta (the column), never the occurrence ring.\n- meta_value: Filter by metadata value (requires meta_key; same authored top-level meta as meta_key \u2014 ring meta is not consulted)\n- commit: Matches the first-report column OR any occurrence in the ring (prefix match, hex validated) \u2014 \"what was observed on this commit\" (CB-128). `staleness_check` uses the NEWEST ring entry instead: a different question.\n- ref: Filter by reported_at_ref (exact match, never prefix) \u2014 matches the first-observed or manually assigned release ref (BT-4); per-occurrence refs in the ring are not consulted.\n- fingerprint: Filter by identity fingerprint (exact match)\n- group_by: Group results by: file, category, severity, status, source (source groups count FIRST reporters \u2014 the column is frozen at first report)\n- limit: Max results (default 100)\n- offset: Pagination offset\n- resolve_anchors: Resolve each result's location anchor against the repository HEAD, so a card whose code moved reports its new path. OFF by default because it costs 2-4 git calls per ANCHORED row and this is the primary read path; the cheap half \u2014 whether a card carries an anchor at all, and the refusal token when capture found nothing to grab \u2014 is in every result either way. `get` resolves one card by default.\n",
     "inputSchema": {
       "properties": {
         "category": {
@@ -2434,7 +2434,7 @@
     "name": "query"
   },
   {
-    "description": "Findings TOUCHED at or after a date \u2014 the one call for \"what closed since\".\n\nWHAT THIS MEASURES: `updated_at`, the time of the LAST WRITE to the row,\nand not the moment the finding was closed. There is no close timestamp\nanywhere in the schema. A status change moves `updated_at`, and so do a\nre-tag, a meta patch, a severity re-triage, an `append_note`, and a\nDEDUPLICATED OBSERVATION \u2014 a repeat report bumps the occurrence count and\nstamps `updated_at` while the status stays exactly where it was.\n\nSo `recent(since=..., status=\"fixed\")` means \"cards that are fixed NOW and\nwere touched since that date\", NOT \"cards closed since that date\". The\nerror is ONE-SIDED: false positives are possible, misses are not, because\nclosing a card always writes `updated_at`.\n\nRows come back newest touch first, with `rowid` breaking the whole-second\nties `updated_at` produces, so a paged walk is stable.\n\nArgs:\n    since: Lower bound on `updated_at`, INCLUSIVE. 'YYYY-MM-DD' or\n           'YYYY-MM-DDTHH:MM:SSZ'. REQUIRED \u2014 an unparseable value is\n           refused rather than defaulted, because a silently widened\n           window answers a question nobody asked.\n    status: Filter by status (open, in_progress, fixed, not_a_bug,\n            wont_fix, stale). Aliases accepted. Omit for every status.\n            The `deferred` pseudo-status of `query` is NOT accepted here\n            and is refused rather than ignored \u2014 use `query` for it.\n    limit: Max results (default 100)\n    offset: Pagination offset\n",
+    "description": "Findings TOUCHED at or after a date \u2014 the one call for \"what closed since\".\n\nWHAT THIS MEASURES: `updated_at`, the time of the LAST WRITE to the row,\nand not the moment the finding was closed. There is no close timestamp\nanywhere in the schema. A status change moves `updated_at`, and so do a\nre-tag, a meta patch, a severity re-triage, an `append_note`, and a\nDEDUPLICATED OBSERVATION \u2014 a repeat report bumps the occurrence count and\nstamps `updated_at` while the status stays exactly where it was.\n\nSo `recent(since=..., status=\"fixed\")` means \"cards that are fixed NOW and\nwere touched since that date\", NOT \"cards closed since that date\". The\nerror is ONE-SIDED: false positives are possible, misses are not, because\nclosing a card always writes `updated_at`.\n\nRows come back newest touch first, with `rowid` breaking the whole-second\nties `updated_at` produces, so a paged walk is stable.\n\nArgs:\n\n- since: Lower bound on `updated_at`, INCLUSIVE. 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SSZ'. REQUIRED \u2014 an unparseable value is refused rather than defaulted, because a silently widened window answers a question nobody asked.\n- status: Filter by status (open, in_progress, fixed, not_a_bug, wont_fix, stale). Aliases accepted. Omit for every status. The `deferred` pseudo-status of `query` is NOT accepted here and is refused rather than ignored \u2014 use `query` for it.\n- limit: Max results (default 100)\n- offset: Pagination offset\n",
     "inputSchema": {
       "properties": {
         "limit": {
@@ -2473,7 +2473,7 @@
     "name": "recent"
   },
   {
-    "description": "List relations touching a finding, in both directions.\n\nArgs:\n    entity_id: Finding to look up (e.g. \"CB-5\"). Omit to list all.\n    rel: Filter by relation. `rel=\"distinct_from\"` alone lists every\n         live suppression, which is worth reviewing periodically.\n    include_retracted: Include tombstoned edges (default: false)\n",
+    "description": "List relations touching a finding, in both directions.\n\nArgs:\n\n- entity_id: Finding to look up (e.g. \"CB-5\"). Omit to list all.\n- rel: Filter by relation. `rel=\"distinct_from\"` alone lists every live suppression, which is worth reviewing periodically.\n- include_retracted: Include tombstoned edges (default: false)\n",
     "inputSchema": {
       "properties": {
         "entity_id": {
@@ -2512,7 +2512,7 @@
     "name": "relations_query"
   },
   {
-    "description": "Assert a typed relation between two findings.\n\nArgs:\n    src_id: Source finding (e.g. \"CB-5\"). For duplicate_of this is the\n            LOSER \u2014 the card that dies.\n    rel: duplicate_of, split_from, follow_up_of, found_during,\n         distinct_from, or related_to.\n    dst_id: Target finding. For duplicate_of this is the SURVIVOR.\n    source: Who is asserting this (e.g. \"owner\", \"goldset-2026-08-17\").\n    note: Optional reasoning.\n",
+    "description": "Assert a typed relation between two findings.\n\nArgs:\n\n- src_id: Source finding (e.g. \"CB-5\"). For duplicate_of this is the LOSER \u2014 the card that dies.\n- rel: duplicate_of, split_from, follow_up_of, found_during, distinct_from, or related_to.\n- dst_id: Target finding. For duplicate_of this is the SURVIVOR.\n- source: Who is asserting this (e.g. \"owner\", \"goldset-2026-08-17\").\n- note: Optional reasoning.\n",
     "inputSchema": {
       "properties": {
         "dst_id": {
@@ -2556,7 +2556,7 @@
     "name": "relations_relate"
   },
   {
-    "description": "Retract a relation. Tombstones it \u2014 the row and its history remain.\n\nArgs:\n    src_id: Source finding\n    rel: The relation to retract\n    dst_id: Target finding\n    retracted_by: Who is retracting it\n    reason: Why\n",
+    "description": "Retract a relation. Tombstones it \u2014 the row and its history remain.\n\nArgs:\n\n- src_id: Source finding\n- rel: The relation to retract\n- dst_id: Target finding\n- retracted_by: Who is retracting it\n- reason: Why\n",
     "inputSchema": {
       "properties": {
         "dst_id": {
@@ -2600,7 +2600,7 @@
     "name": "relations_unrelate"
   },
   {
-    "description": "Free agent capacity for an item.\n\nArgs:\n    item_ref: The item id (e.g. CB-5).\n    status: 'done' (terminal) or 'abandoned' (returns item to 'open').\n    commit: SHA where the work landed (recorded if status='done').\n",
+    "description": "Free agent capacity for an item.\n\nArgs:\n\n- item_ref: The item id (e.g. CB-5).\n- status: 'done' (terminal) or 'abandoned' (returns item to 'open').\n- commit: SHA where the work landed (recorded if status='done').\n",
     "inputSchema": {
       "properties": {
         "commit": {
@@ -2634,7 +2634,7 @@
     "name": "release_item"
   },
   {
-    "description": "Add a requirement.\n\nArgs:\n    req_id: Requirement ID (e.g. FR-001)\n    description: What the system shall do\n    section: Section name (e.g. \"1.10 Document Sorting\")\n    priority: must, should, or could\n    status: planned, partial, implemented, verified, superseded, obsolete\n    source: Where this requirement came from (e.g. Take 26, NEW)\n    test_coverage: Test file name(s)\n    tags: Optional tags\n    meta: Optional metadata\n",
+    "description": "Add a requirement.\n\nArgs:\n\n- req_id: Requirement ID (e.g. FR-001)\n- description: What the system shall do\n- section: Section name (e.g. \"1.10 Document Sorting\")\n- priority: must, should, or could\n- status: planned, partial, implemented, verified, superseded, obsolete\n- source: Where this requirement came from (e.g. Take 26, NEW)\n- test_coverage: Test file name(s)\n- tags: Optional tags\n- meta: Optional metadata\n",
     "inputSchema": {
       "properties": {
         "description": {
@@ -2709,7 +2709,7 @@
     "name": "reqs_add"
   },
   {
-    "description": "Store embeddings for multiple requirements at once.\n\nArgs:\n    embeddings: Dict mapping requirement ID to float vector\n",
+    "description": "Store embeddings for multiple requirements at once.\n\nArgs:\n\n- embeddings: Dict mapping requirement ID to float vector\n",
     "inputSchema": {
       "properties": {
         "embeddings": {
@@ -2732,7 +2732,7 @@
     "name": "reqs_batch_embed"
   },
   {
-    "description": "Store an embedding vector for a requirement.\n\nThe caller generates the embedding (e.g. via an embedding API).\nEnables semantic search across requirements via reqs_search_similar.\n\nArgs:\n    req_id: Requirement ID\n    embedding: Float vector (any dimensionality)\n",
+    "description": "Store an embedding vector for a requirement.\n\nThe caller generates the embedding (e.g. via an embedding API).\nEnables semantic search across requirements via reqs_search_similar.\n\nArgs:\n\n- req_id: Requirement ID\n- embedding: Float vector (any dimensionality)\n",
     "inputSchema": {
       "properties": {
         "embedding": {
@@ -2766,7 +2766,7 @@
     "name": "reqs_embedding_stats"
   },
   {
-    "description": "Fetch a single requirement by ID with full body.\n\nRaises a not-found error if the ID does not exist. For lenient batch\nlookup that silently drops missing IDs, use `reqs_query(ids=[...])`.\n\nArgs:\n    req_id: The requirement ID (e.g. FR-001)\n",
+    "description": "Fetch a single requirement by ID with full body.\n\nRaises a not-found error if the ID does not exist. For lenient batch\nlookup that silently drops missing IDs, use `reqs_query(ids=[...])`.\n\nArgs:\n\n- req_id: The requirement ID (e.g. FR-001)\n",
     "inputSchema": {
       "properties": {
         "req_id": {
@@ -2783,7 +2783,7 @@
     "name": "reqs_get"
   },
   {
-    "description": "Import requirements from a REQUIREMENTS.md file.\n\nParses markdown tables with columns:\n| ID | Requirement | Priority | Status | Source | Test Coverage |\n\nUses INSERT OR REPLACE, so re-importing updates existing entries.\n\nArgs:\n    markdown_path: Path to the REQUIREMENTS.md file\n",
+    "description": "Import requirements from a REQUIREMENTS.md file.\n\nParses markdown tables with columns:\n| ID | Requirement | Priority | Status | Source | Test Coverage |\n\nUses INSERT OR REPLACE, so re-importing updates existing entries.\n\nArgs:\n\n- markdown_path: Path to the REQUIREMENTS.md file\n",
     "inputSchema": {
       "properties": {
         "markdown_path": {
@@ -2800,7 +2800,7 @@
     "name": "reqs_import"
   },
   {
-    "description": "Search and filter requirements.\n\nSupports lookup by ID via `id=` (single) or `ids=` (batch). Missing IDs\nare silently absent from the result. For a strict single-ID fetch that\nerrors on miss, use `reqs_get`.\n\nArgs:\n    id: Fetch a single requirement by exact ID (e.g. FR-001)\n    ids: Fetch multiple requirements by ID list; missing IDs are skipped\n    status: Filter by status (planned, partial, implemented, verified, superseded, obsolete, deferred).\n            Use 'deferred' to find requirements with active blockers.\n    priority: Filter by priority (must, should, could)\n    section: Filter by section (substring match)\n    search: Search in description and ID\n    source: Filter by source (substring match)\n    tag: Filter by tag\n    group_by: Group by: section, status, priority, source\n    limit: Max results (default 100)\n    offset: Pagination offset\n",
+    "description": "Search and filter requirements.\n\nSupports lookup by ID via `id=` (single) or `ids=` (batch). Missing IDs\nare silently absent from the result. For a strict single-ID fetch that\nerrors on miss, use `reqs_get`.\n\nArgs:\n\n- id: Fetch a single requirement by exact ID (e.g. FR-001)\n- ids: Fetch multiple requirements by ID list; missing IDs are skipped\n- status: Filter by status (planned, partial, implemented, verified, superseded, obsolete, deferred). Use 'deferred' to find requirements with active blockers.\n- priority: Filter by priority (must, should, could)\n- section: Filter by section (substring match)\n- search: Search in description and ID\n- source: Filter by source (substring match)\n- tag: Filter by tag\n- group_by: Group by: section, status, priority, source\n- limit: Max results (default 100)\n- offset: Pagination offset\n",
     "inputSchema": {
       "properties": {
         "group_by": {
@@ -2931,7 +2931,7 @@
     "name": "reqs_query"
   },
   {
-    "description": "Find requirements semantically similar to a query.\n\nPass a query embedding (from the same model used to embed requirements).\nReturns requirements ranked by cosine similarity.\n\nArgs:\n    query_embedding: Query vector\n    limit: Max results (default 10)\n    min_similarity: Minimum cosine similarity (default 0.3)\n    status: Optional status filter\n",
+    "description": "Find requirements semantically similar to a query.\n\nPass a query embedding (from the same model used to embed requirements).\nReturns requirements ranked by cosine similarity.\n\nArgs:\n\n- query_embedding: Query vector\n- limit: Max results (default 10)\n- min_similarity: Minimum cosine similarity (default 0.3)\n- status: Optional status filter\n",
     "inputSchema": {
       "properties": {
         "limit": {
@@ -2973,7 +2973,7 @@
     "name": "reqs_search_similar"
   },
   {
-    "description": "Aggregated requirement counts by status x priority.\n\nArgs:\n    group_by: Group by: status, priority, section, source\n",
+    "description": "Aggregated requirement counts by status x priority.\n\nArgs:\n\n- group_by: Group by: status, priority, section, source\n",
     "inputSchema": {
       "properties": {
         "group_by": {
@@ -2997,7 +2997,7 @@
     "name": "reqs_summary"
   },
   {
-    "description": "Update a requirement's status, description, or metadata.\n\nArgs:\n    req_id: Requirement ID (e.g. FR-001)\n    status: New status: planned, partial, implemented, verified, superseded, obsolete\n    description: Updated description\n    priority: Updated priority: must, should, could\n    section: Updated section name\n    test_coverage: Updated test file reference\n    notes: Notes (stored in meta.notes). REPLACES the stored notes\n           wholesale. If meta_update also carries a \"notes\" key, the\n           meta_update value is the one that lands \u2014 see meta_update.\n    tags: Replace tags\n    meta_update: Merge metadata keys. notes and meta_update compose over\n                 ONE dict: notes replaces first, meta_update merges\n                 LAST. So passing both notes= and\n                 meta_update={\"notes\": ...} in a single call is neither\n                 an error nor a refusal \u2014 meta_update wins the\n                 collision, on every key it names. That precedence is\n                 deliberate: meta_update names the storage key directly,\n                 so it is the repair path for a key no other argument\n                 can write. Unlike the findings `update` tool there is\n                 no append_note here, so there is no third writer.\n",
+    "description": "Update a requirement's status, description, or metadata.\n\nArgs:\n\n- req_id: Requirement ID (e.g. FR-001)\n- status: New status: planned, partial, implemented, verified, superseded, obsolete\n- description: Updated description\n- priority: Updated priority: must, should, could\n- section: Updated section name\n- test_coverage: Updated test file reference\n- notes: Notes (stored in meta.notes). REPLACES the stored notes wholesale. If meta_update also carries a \"notes\" key, the meta_update value is the one that lands \u2014 see meta_update.\n- tags: Replace tags\n- meta_update: Merge metadata keys. notes and meta_update compose over ONE dict: notes replaces first, meta_update merges LAST. So passing both notes= and meta_update={\"notes\": ...} in a single call is neither an error nor a refusal \u2014 meta_update wins the collision, on every key it names. That precedence is deliberate: meta_update names the storage key directly, so it is the repair path for a key no other argument can write. Unlike the findings `update` tool there is no append_note here, so there is no third writer.\n",
     "inputSchema": {
       "properties": {
         "description": {
@@ -3114,7 +3114,7 @@
     "name": "reqs_update"
   },
   {
-    "description": "Verify requirements for issues.\n\nRuns automated checks to find problems:\n- tests: do referenced test files actually exist?\n- ids: duplicate IDs, numbering gaps\n- status: contradictions (description says superseded but status says planned)\n\nArgs:\n    checks: List of checks to run (default: all). Options: tests, ids, status\n    project_dir: Project root for test file verification (default: cwd)\n",
+    "description": "Verify requirements for issues.\n\nRuns automated checks to find problems:\n- tests: do referenced test files actually exist?\n- ids: duplicate IDs, numbering gaps\n- status: contradictions (description says superseded but status says planned)\n\nArgs:\n\n- checks: List of checks to run (default: all). Options: tests, ids, status\n- project_dir: Project root for test file verification (default: cwd)\n",
     "inputSchema": {
       "properties": {
         "checks": {
@@ -3151,7 +3151,7 @@
     "name": "reqs_verify"
   },
   {
-    "description": "Preview what the file-time annotator would stamp for an observation.\n\nApplies EXACTLY the resolver's policy: same candidate pool (live +\ndismissed, same category, newest 500), same minimum-text-length gate,\nsame scoring. Advisory only \u2014 nothing is written.\n\nArgs:\n    description: The observation's description text\n    category: Category to search within (annotation never crosses it)\n    meta: Optional observation meta (volatile values are stripped from\n        the text before scoring, same as fingerprint normalization)\n    threshold: Minimum similarity in [0, 1] (default 0.7, calibrated)\n    limit: Max matches returned (default 5)\n",
+    "description": "Preview what the file-time annotator would stamp for an observation.\n\nApplies EXACTLY the resolver's policy: same candidate pool (live +\ndismissed, same category, newest 500), same minimum-text-length gate,\nsame scoring. Advisory only \u2014 nothing is written.\n\nArgs:\n\n- description: The observation's description text\n- category: Category to search within (annotation never crosses it)\n- meta: Optional observation meta (volatile values are stripped from the text before scoring, same as fingerprint normalization)\n- threshold: Minimum similarity in [0, 1] (default 0.7, calibrated)\n- limit: Max matches returned (default 5)\n",
     "inputSchema": {
       "properties": {
         "category": {
@@ -3196,7 +3196,7 @@
     "name": "similarity_check"
   },
   {
-    "description": "Offline grouping scrub: similarity families as auditable evidence.\n\nFamilies are connected components with min_pair_score and edge lists \u2014\nthe dry run for any future backfill/merge (the blocked backfill card);\nno merge is performed or implied. Default population is LIVE rows;\npass status= to widen (the sentinel \"all\" means every status).\nWall-clock is quadratic per category block (~115k pair comparisons on\na 3k-row tracker); prefer the CLI for very large trackers.\n\nArgs:\n    threshold: Minimum similarity in [0, 1] (default 0.7, calibrated)\n    category: Restrict to one category\n    status: Widen/narrow the population (default: live statuses; \"all\")\n    family_limit: Max families returned (totals stay visible)\n    member_limit: Max members per family (totals stay visible)\n",
+    "description": "Offline grouping scrub: similarity families as auditable evidence.\n\nFamilies are connected components with min_pair_score and edge lists \u2014\nthe dry run for any future backfill/merge (the blocked backfill card);\nno merge is performed or implied. Default population is LIVE rows;\npass status= to widen (the sentinel \"all\" means every status).\nWall-clock is quadratic per category block (~115k pair comparisons on\na 3k-row tracker); prefer the CLI for very large trackers.\n\nArgs:\n\n- threshold: Minimum similarity in [0, 1] (default 0.7, calibrated)\n- category: Restrict to one category\n- status: Widen/narrow the population (default: live statuses; \"all\")\n- family_limit: Max families returned (totals stay visible)\n- member_limit: Max members per family (totals stay visible)\n",
     "inputSchema": {
       "properties": {
         "category": {
@@ -3259,7 +3259,7 @@
     "name": "similarity_report"
   },
   {
-    "description": "Check if findings are stale by comparing against git history.\n\nStaleness is checked against each finding's NEWEST observation: a\ndeduplicated re-observation records its commit in the occurrence ring,\nand that commit \u2014 not the frozen first-report `reported_at_commit` \u2014\nis what the file is compared from; findings with no ring fall back to\nthe first report. Each result carries `checked_commit`, the commit the\nverdict was computed against.\n\nReturns file_status for each finding:\n- current: file unchanged since finding was reported\n- modified: file changed but still exists\n- renamed: file was renamed/moved\n- deleted: file no longer exists\n- unknown: can't determine, with a `reason` naming which question could\n  not be answered \u2014 no provenance data, an unreachable commit, a path\n  outside this repository's worktree, a path the reported commit never\n  contained (a glob, free text, or a file added later), an empty or\n  malformed value, a path that is neither a file nor a directory, or a\n  git/stat call that failed\n\nArgs:\n    finding_id: Check a single finding (e.g. CB-1)\n    status: Filter by finding status (default: open)\n    category: Filter by category\n    file: Filter by file path (substring match)\n    resolve_anchors: Also resolve each finding's location anchor against\n            HEAD, so a record says where the reported LINES are now and\n            not only what became of the file. OFF by default: this query\n            permits ten thousand rows and already spends git per file.\n            Every record carries the cheap half of the summary either\n            way \u2014 whether the card has an anchor at all.\n",
+    "description": "Check if findings are stale by comparing against git history.\n\nStaleness is checked against each finding's NEWEST observation: a\ndeduplicated re-observation records its commit in the occurrence ring,\nand that commit \u2014 not the frozen first-report `reported_at_commit` \u2014\nis what the file is compared from; findings with no ring fall back to\nthe first report. Each result carries `checked_commit`, the commit the\nverdict was computed against.\n\nReturns file_status for each finding:\n- current: file unchanged since finding was reported\n- modified: file changed but still exists\n- renamed: file was renamed/moved\n- deleted: file no longer exists\n- unknown: can't determine, with a `reason` naming which question could\n  not be answered \u2014 no provenance data, an unreachable commit, a path\n  outside this repository's worktree, a path the reported commit never\n  contained (a glob, free text, or a file added later), an empty or\n  malformed value, a path that is neither a file nor a directory, or a\n  git/stat call that failed\n\nArgs:\n\n- finding_id: Check a single finding (e.g. CB-1)\n- status: Filter by finding status (default: open)\n- category: Filter by category\n- file: Filter by file path (substring match)\n- resolve_anchors: Also resolve each finding's location anchor against HEAD, so a record says where the reported LINES are now and not only what became of the file. OFF by default: this query permits ten thousand rows and already spends git per file. Every record carries the cheap half of the summary either way \u2014 whether the card has an anchor at all.\n",
     "inputSchema": {
       "properties": {
         "category": {
@@ -3322,7 +3322,7 @@
     "name": "staleness_check"
   },
   {
-    "description": "Aggregated cross-tabulated counts.\n\nArgs:\n    group_by: Group by: severity, category, status, file, source\n              (source buckets count FIRST reporters \u2014 the column is\n              frozen at first report, BT-4)\n",
+    "description": "Aggregated cross-tabulated counts.\n\nArgs:\n\n- group_by: Group by: severity, category, status, file, source (source buckets count FIRST reporters \u2014 the column is frozen at first report, BT-4)\n",
     "inputSchema": {
       "properties": {
         "group_by": {
@@ -3346,7 +3346,7 @@
     "name": "summary"
   },
   {
-    "description": "Mark a triage item as dismissed. Propagates to the underlying entity:\nbug \u2192 finding 'not_a_bug'; requirement \u2192 requirement 'obsolete';\nexternal \u2192 no propagation.\n\nArgs:\n    bug_id: The item id (e.g. CB-5).\n    reason: Required one-line audit reason.\n",
+    "description": "Mark a triage item as dismissed. Propagates to the underlying entity:\nbug \u2192 finding 'not_a_bug'; requirement \u2192 requirement 'obsolete';\nexternal \u2192 no propagation.\n\nArgs:\n\n- bug_id: The item id (e.g. CB-5).\n- reason: Required one-line audit reason.\n",
     "inputSchema": {
       "properties": {
         "bug_id": {
@@ -3368,7 +3368,7 @@
     "name": "triage_dismiss"
   },
   {
-    "description": "List open items in stream/triage, oldest first.\n\nArgs:\n    limit: Max rows (default 50).\n",
+    "description": "List open items in stream/triage, oldest first.\n\nArgs:\n\n- limit: Max rows (default 50).\n",
     "inputSchema": {
       "properties": {
         "limit": {
@@ -3383,7 +3383,7 @@
     "name": "triage_inbox"
   },
   {
-    "description": "Move a triage item to a target milestone.\n\nArgs:\n    bug_id: The item id (e.g. CB-5).\n    to_milestone: Destination milestone slug.\n    size: 'large' / 'small' / 'triage'. Default 'small'.\n    acceptance: Required for size='large'.\n    priority: Lower = higher priority. Default 100.\n    linked_frs: FR ids linked to this item (required for size='large' bugs\n        in release milestones to be pull-eligible).\n",
+    "description": "Move a triage item to a target milestone.\n\nArgs:\n\n- bug_id: The item id (e.g. CB-5).\n- to_milestone: Destination milestone slug.\n- size: 'large' / 'small' / 'triage'. Default 'small'.\n- acceptance: Required for size='large'.\n- priority: Lower = higher priority. Default 100.\n- linked_frs: FR ids linked to this item (required for size='large' bugs in release milestones to be pull-eligible).\n",
     "inputSchema": {
       "properties": {
         "acceptance": {
@@ -3435,7 +3435,7 @@
     "name": "triage_promote"
   },
   {
-    "description": "Update a finding's status, severity, notes, tags, or metadata.\n\nArgs:\n    finding_id: The finding ID (e.g. CB-1)\n    status: New status: open, in_progress, fixed, not_a_bug, wont_fix, stale.\n            Aliases accepted: done/resolved/implemented/closed \u2192 fixed,\n            wontfix \u2192 wont_fix, invalid \u2192 not_a_bug,\n            active/working/in-progress \u2192 in_progress\n    severity: Re-triage the finding: critical, high, medium, or low.\n              Case-insensitive, but no aliases \u2014 unlike status, \"crit\" and\n              \"P0\" are refused.\n    notes: REPLACES the notes wholesale, discarding whatever was there.\n           To add to an existing record without destroying it, use\n           append_note instead. If meta_update also carries a \"notes\"\n           key, the meta_update value is the one that lands \u2014 see\n           meta_update for why that is deliberate.\n    append_note: Appends a newline-joined line, preserving the prior notes.\n                 This is the safe way to add evidence to a long-lived card.\n    tags: Replace tags list\n    meta_update: Merge additional metadata keys. The three meta-writing\n                 arguments compose over ONE dict, in this order: notes\n                 replaces, append_note then extends that replacement,\n                 and meta_update merges LAST. So passing both notes=\n                 and meta_update={\"notes\": ...} in a single call is\n                 neither an error nor a refusal \u2014 meta_update wins the\n                 collision, on every key it names. That precedence is\n                 deliberate rather than incidental: meta_update names\n                 the storage key directly, which makes it the repair\n                 path for keys no other argument can reach\n                 (similar_to, category_minted, fingerprint_refusals),\n                 and a stamp no argument could overwrite would be an\n                 unrepairable one.\n    reported_at_ref: Update version/tag label (e.g. \"v2.1.0\"). This is\n                     the SANCTIONED manual mutation of an\n                     observation-frozen column (BT-4): observations\n                     never move it, this call does \u2014 a release is\n                     tagged after filing.\n",
+    "description": "Update a finding's status, severity, notes, tags, or metadata.\n\nArgs:\n\n- finding_id: The finding ID (e.g. CB-1)\n- status: New status: open, in_progress, fixed, not_a_bug, wont_fix, stale. Aliases accepted: done/resolved/implemented/closed \u2192 fixed, wontfix \u2192 wont_fix, invalid \u2192 not_a_bug, active/working/in-progress \u2192 in_progress\n- severity: Re-triage the finding: critical, high, medium, or low. Case-insensitive, but no aliases \u2014 unlike status, \"crit\" and \"P0\" are refused.\n- notes: REPLACES the notes wholesale, discarding whatever was there. To add to an existing record without destroying it, use append_note instead. If meta_update also carries a \"notes\" key, the meta_update value is the one that lands \u2014 see meta_update for why that is deliberate.\n- append_note: Appends a newline-joined line, preserving the prior notes. This is the safe way to add evidence to a long-lived card.\n- tags: Replace tags list\n- meta_update: Merge additional metadata keys. The three meta-writing arguments compose over ONE dict, in this order: notes replaces, append_note then extends that replacement, and meta_update merges LAST. So passing both notes= and meta_update={\"notes\": ...} in a single call is neither an error nor a refusal \u2014 meta_update wins the collision, on every key it names. That precedence is deliberate rather than incidental: meta_update names the storage key directly, which makes it the repair path for keys no other argument can reach (similar_to, category_minted, fingerprint_refusals), and a stamp no argument could overwrite would be an unrepairable one.\n- reported_at_ref: Update version/tag label (e.g. \"v2.1.0\"). This is the SANCTIONED manual mutation of an observation-frozen column (BT-4): observations never move it, this call does \u2014 a release is tagged after filing.\n",
     "inputSchema": {
       "properties": {
         "append_note": {
@@ -3540,7 +3540,7 @@
     "name": "update"
   },
   {
-    "description": "Snapshot of agent_capacity. agent_id=None returns all agents.\n\nArgs:\n    agent_id: Filter to one agent (None = all).\n",
+    "description": "Snapshot of agent_capacity. agent_id=None returns all agents.\n\nArgs:\n\n- agent_id: Filter to one agent (None = all).\n",
     "inputSchema": {
       "properties": {
         "agent_id": {

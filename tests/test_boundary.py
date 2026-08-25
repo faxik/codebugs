@@ -282,6 +282,83 @@ class TestMcpWireSchema:
                 f"with the current dump script."
             )
 
+    def test_no_golden_description_reaches_the_client_as_a_lazy_continuation(self):
+        """STRUCTURAL gate on CB-156, and the property is what makes it a RENDER claim.
+
+        The text gate above says "the string changed"; the question this card asks is
+        "does a human read it as a list". No CommonMark parser is a dependency here and
+        one is deliberately not added for an assertion (this repository already refused
+        that for PyYAML), so the assertion is instead the STRUCTURAL property the render
+        follows from: a Google-style section header at column 0 whose next line is
+        INDENTED is exactly the shape CommonMark reads as a paragraph plus lazy
+        continuations — the indentation is stripped, softbreaks become spaces, and every
+        argument fuses into one run-on line. If no description carries that shape, no
+        argument can arrive as a lazy continuation, which is the render property.
+
+        Measured over this golden BY LINES, before the fix: 74 of 83 descriptions carried
+        the shape (`Args:` 73, `Returns:` 3, two descriptions carrying both). After: 1 —
+        `codesweep_add`'s `Returns:`, whose body is a single prose line rather than a
+        `name: value` list, so it is deliberately left alone and is allowlisted BY NAME
+        here rather than by a shape rule, so a second one cannot join it quietly.
+
+        Note the measurement method, because the wrong one gives a confident wrong answer:
+        split the description into LINES. Splitting on the `Args:` TOKEN instead makes the
+        empty tail of the `Args:` line itself look like a blank line, which reports 73
+        indented CODE BLOCKS where the real count is 0.
+        """
+        prose_sections_left_alone = {("codesweep_add", "Returns:")}
+        offenders = []
+        for entry in json.loads(self.GOLDEN.read_text()):
+            lines = entry["description"].split("\n")
+            for i, line in enumerate(lines[:-1]):
+                header = re.fullmatch(r"([A-Za-z][A-Za-z ]*):[ \t]*", line)
+                follower = lines[i + 1]
+                if not header or not follower.strip() or not follower.startswith("    "):
+                    continue
+                if (entry["name"], line.strip()) in prose_sections_left_alone:
+                    continue
+                offenders.append(f"{entry['name']}: {line.strip()}")
+        assert not offenders, (
+            "these sections still reach the client as a paragraph with lazy continuations "
+            f"instead of a Markdown list (CB-156): {offenders}"
+        )
+
+    def test_every_golden_section_body_is_a_markdown_list(self):
+        """The other half, and neither test implies the other.
+
+        The test above proves no section is still INDENTED; this one proves the sections
+        that were converted actually became a LIST. A mutant that simply deleted the
+        argument lines, or dedented them to column 0 without a marker, would satisfy the
+        first assertion and produce prose again — so the marker is asserted directly.
+
+        The header is matched as a SINGLE word here, unlike the test above, and that is
+        not an oversight: this surface also carries ordinary prose sentences that end in
+        a colon and introduce un-indented content (`Parses markdown tables with columns:`
+        in `reqs_import`, and two more). Those are paragraphs, not Google-style sections,
+        and demanding a bullet under them would be this gate inventing a rule. They stay
+        covered by the test above, which judges by the INDENT of what follows and so
+        classifies them correctly without needing to know their names.
+        """
+        expected = {"Args", "Returns"}
+        seen, missing = set(), []
+        for entry in json.loads(self.GOLDEN.read_text()):
+            lines = entry["description"].split("\n")
+            for i, line in enumerate(lines):
+                header = re.fullmatch(r"([A-Za-z]+):[ \t]*", line)
+                if not header:
+                    continue
+                body = [x for x in lines[i + 1 :] if x.strip()][:1]
+                if not body or body[0].startswith("    "):
+                    continue  # prose section body, covered by the test above
+                seen.add(header.group(1))
+                if not body[0].startswith("- "):
+                    missing.append(f"{entry['name']}: {line.strip()} -> {body[0][:40]!r}")
+        assert not missing, f"section bodies that are not Markdown list items: {missing}"
+        assert seen >= expected, (
+            f"this gate saw only {sorted(seen)} — if a section kind vanished from the "
+            f"surface the assertion above became vacuous for it"
+        )
+
     def test_golden_properties_are_alphabetically_sorted(self):
         """Pins the CB-147 declaration in `test_schema_matches_golden`'s docstring: the golden is
         key-sorted, which is WHY the gate above is blind to `properties` order and not merely
@@ -431,13 +508,24 @@ class TestBt4FreshnessDeclarations:
         A continuation is any following line that neither starts a new
         `name:` entry nor is blank. Joined to one string so the assertions
         below are indifferent to where the prose wraps.
+
+        BOTH SPELLINGS ARE ACCEPTED, and the reason is worth a line. Since
+        CB-156 an argument reaches the client as a Markdown list item
+        (`- name: text`) with its wrapped lines already folded into it, so the
+        continuation loop below is a no-op on the live surface. It is kept
+        rather than deleted because this helper describes a SHAPE, and the
+        indented Google form is still what the docstrings themselves carry —
+        a caller feeding this a raw `__doc__` must get the same answer as one
+        feeding it the normalized wire text.
         """
         lines = description.splitlines()
-        starts = [i for i, ln in enumerate(lines) if re.match(rf"\s*{param}:", ln)]
+        entry_start = re.compile(rf"\s*(?:[-*+] )?{param}:")
+        any_entry = re.compile(r"\s*(?:[-*+] )?\w+:")
+        starts = [i for i, ln in enumerate(lines) if entry_start.match(ln)]
         assert starts, f"no Args entry for {param!r}"
         entry = [lines[starts[0]]]
         for ln in lines[starts[0] + 1 :]:
-            if not ln.strip() or re.match(r"\s*\w+:", ln):
+            if not ln.strip() or any_entry.match(ln):
                 break
             entry.append(ln)
         return " ".join(s.strip() for s in entry)

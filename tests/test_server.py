@@ -314,10 +314,146 @@ class TestInterpreterIndependentDescriptions:
     def test_the_normalizer_has_exactly_one_definition(self):
         """The gate and the server must not be able to disagree about what
         'normalized' means. `tests/_mcp_schema` imports this one rather than
-        carrying a copy, which is how CB-70's helper started."""
+        carrying a copy, which is how CB-70's helper started.
+
+        `normalize_description` is checked as well as `dedent_docstring`, because
+        since CB-156 it is the WHOLE composition and the dedent is only its first
+        step: importing the same dedent while composing a different amount of
+        normalization would put the gate and the server back into disagreement
+        with both halves of this assertion still green."""
         from tests import _mcp_schema
 
         assert _mcp_schema.dedent_docstring is server.dedent_docstring
+        assert _mcp_schema.normalize_description is server.normalize_description
+
+    def test_the_adapter_emits_the_whole_composition_not_just_the_dedent(self):
+        """The seam-level mutant this class exists to catch (CB-156).
+
+        The wire golden is generated through `tests/_mcp_schema`, NOT through this
+        adapter, so a mutant that reverted the adapter alone to `dedent_docstring`
+        would leave the golden gate perfectly green while every real client went
+        back to receiving a run-on paragraph. That is a gate that cannot fire, so
+        the adapter's own output is asserted here."""
+        srv = MCPServer("composed")
+        self._register(server._NormalizedDescriptions(srv), TestMarkdownSections.GOOGLE)
+        emitted = asyncio.run(srv.list_tools())[0].description
+        assert emitted == server.normalize_description(TestMarkdownSections.GOOGLE)
+        assert "\n- severity: " in emitted, emitted
+
+
+class TestMarkdownSections:
+    """CB-156: a Google-style section reaches the client as a Markdown list.
+
+    THE MECHANISM, because two mechanisms share one symptom and only one of them is
+    this. `Args:` sits at column 0 and its argument lines are indented 4 with NO
+    blank line between. CommonMark reads `Args:` as opening a PARAGRAPH, and an
+    indented code block CANNOT interrupt a paragraph — so each argument line is a
+    LAZY CONTINUATION: its indentation is stripped, its softbreak renders as a
+    space, and the arguments fuse into one line with the boundaries gone. This is
+    NOT CB-73's indented code block: that needs a preceding BLANK line, which
+    occurs in 0 of the 83 wire descriptions.
+
+    THE SCOPE IS DELIBERATELY MODEST and is stated the same way in the CHANGELOG: a
+    client configured with GFM hard line breaks (`breaks: true`) shows the lines
+    separately and never sees the defect. So the claim is not "broken for everyone"
+    but "correct only under a particular setting of somebody else's renderer" — a
+    real Markdown list is correct under BOTH settings.
+    """
+
+    GOOGLE = (
+        "Add a finding.\n"
+        "\n"
+        "Args:\n"
+        "    severity: critical, high, medium, or low\n"
+        "    category: Finding category. Spelling is normalized\n"
+        "        (casefold, hyphen -> underscore) before it is stored.\n"
+        "    file: File path relative to project root\n"
+        "\n"
+        "Returns:\n"
+        "    finding_id: the id that was written\n"
+    )
+
+    def test_arguments_become_list_items_rather_than_one_paragraph(self):
+        out = server.markdown_sections(self.GOOGLE)
+        assert "Args:\n\n- severity: critical, high, medium, or low\n" in out, out
+        assert "\n- file: File path relative to project root\n" in out, out
+        assert "\n    severity:" not in out, out
+
+    def test_a_wrapped_argument_folds_into_the_SAME_list_item(self):
+        """The unit's main mechanical difficulty: 28 of the 83 wire descriptions
+        carry an argument whose text runs onto a further, more deeply indented
+        line. It must join its own bullet — not become a second bullet, and not
+        be dropped."""
+        out = server.markdown_sections(self.GOOGLE)
+        item = [ln for ln in out.split("\n") if ln.startswith("- category:")]
+        assert len(item) == 1, out
+        assert item[0] == (
+            "- category: Finding category. Spelling is normalized "
+            "(casefold, hyphen -> underscore) before it is stored."
+        ), item
+        assert "(casefold" not in out.replace(item[0], ""), out
+
+    def test_returns_is_converted_too_not_only_args(self):
+        """The card named `Args:` alone; the surface carries `Returns:` as well, and
+        fixing only the named one would be this repository's eighth rule-as-an-
+        enumeration. The header regex matches any `Word:` line, so `Raises:` and
+        `Yields:` are covered by shape rather than by being listed."""
+        out = server.markdown_sections(self.GOOGLE)
+        assert "Returns:\n\n- finding_id: the id that was written" in out, out
+
+    def test_a_prose_section_body_is_left_byte_identical(self):
+        """`codesweep_add`'s `Returns:` is one prose line, not `name: value` items.
+        Bulleting it would invent a list; collapsing prose into a paragraph is
+        correct, so the section is not touched at all."""
+        prose = "Add items.\n\nReturns:\n    {sweep_id, added, duplicates_skipped}\n"
+        assert server.markdown_sections(prose) == prose
+
+    def test_a_base_indent_line_that_is_not_an_item_continues_the_item_above(self):
+        """Measured on the real surface: `claims_claim` and `claims_release` each
+        carry a `Returns:` whose `outcome: …` item is followed by further sentences
+        at the SAME indent. The naive rule 'base indent means a new item' split one
+        sentence across two bullets."""
+        doc = (
+            "Claim.\n\nReturns:\n"
+            "    outcome: claimed | already_mine | held_by_other.\n"
+            "    On held_by_other the holder fields name the INCUMBENT.\n"
+        )
+        items = [ln for ln in server.markdown_sections(doc).split("\n") if ln.startswith("- ")]
+        assert items == [
+            "- outcome: claimed | already_mine | held_by_other. "
+            "On held_by_other the holder fields name the INCUMBENT."
+        ], items
+
+    def test_an_argument_description_containing_a_colon_is_not_re_split(self):
+        """Nothing parses the item into name and description — an argument line is
+        prefixed with a marker and otherwise left alone — so a colon anywhere in
+        the text cannot mislead it."""
+        doc = "T.\n\nArgs:\n    ref: a git ref, e.g. refs/heads/main: the default\n"
+        out = server.markdown_sections(doc)
+        assert "- ref: a git ref, e.g. refs/heads/main: the default" in out, out
+
+    def test_normalization_is_idempotent(self):
+        """By construction rather than by luck: what it emits sits at column 0, and
+        a section is only recognised when its body is INDENTED, so a second pass
+        sees nothing to convert."""
+        once = server.markdown_sections(self.GOOGLE)
+        assert server.markdown_sections(once) == once
+        assert server.normalize_description(once) == once
+
+    def test_prose_that_merely_ends_in_a_colon_is_not_a_section(self):
+        """`reqs_import`, `reqs_verify` and `staleness_check` open blocks with a
+        sentence ending in a colon. Those are prose lead-ins whose bodies sit at
+        column 0, and three of them are ALREADY followed by column-0 bullets —
+        which is independent evidence that a list is the right emission form,
+        since a list, unlike an indented code block, may interrupt a paragraph."""
+        doc = "T.\n\nRuns automated checks:\n- tests: do the files exist?\n"
+        assert server.markdown_sections(doc) == doc
+
+    def test_no_word_of_the_description_is_changed(self):
+        """The unit is markup-only: not one new word about any tool's behaviour."""
+        before = self.GOOGLE.split()
+        after = server.markdown_sections(self.GOOGLE).split()
+        assert [w for w in after if w != "-"] == before
 
 
 class TestAttentionOverTheWire:

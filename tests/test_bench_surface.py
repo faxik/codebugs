@@ -33,7 +33,7 @@ from mcp.shared.exceptions import MCPError
 
 from codebugs import bench, db, server, surfacegen
 from codebugs.bench_surface import SURFACE
-from codebugs.server import dedent_docstring
+from codebugs.server import normalize_description
 
 TOOL_NAMES = ["codebench_delete", "codebench_import", "codebench_list", "codebench_query"]
 VERB_NAMES = ["bench-delete", "bench-import", "bench-list", "bench-query"]
@@ -121,17 +121,23 @@ class TestGeneratedMcpSurface:
         assert sorted(t.name for t in tools) == TOOL_NAMES
         assert len(tools) == len(TOOL_NAMES)
 
-    def test_every_description_is_the_declared_prose_dedented(self, tracker):
+    def test_every_description_is_the_declared_prose_normalized(self, tracker):
         """`__doc__`, not `description=` — see the generator's module docstring.
 
         If the emitter ever passes `description=`, `_NormalizedDescriptions`
-        stops dedenting and this comparison is the thing that notices, because
-        the wire golden registers on a raw server and dedents by itself.
+        stops normalizing and this comparison is the thing that notices, because
+        the wire golden registers on a raw server and normalizes by itself.
+
+        The comparison is against `normalize_description`, the WHOLE composition,
+        not against `dedent_docstring` alone: since CB-156 the adapter also
+        re-emits Google-style `Args:`/`Returns:` sections as Markdown lists, and
+        comparing against only the first step would fail on every generated tool
+        whose prose declares arguments.
         """
         by_name = {t.name: t for t in listed(build_server(tracker))}
         for decl in SURFACE:
             facet = decl["mcp"]
-            assert by_name[facet["name"]].description == dedent_docstring(facet["doc"])
+            assert by_name[facet["name"]].description == normalize_description(facet["doc"])
 
     def test_input_schema_matches_the_declared_parameters(self, tracker):
         by_name = {t.name: t for t in listed(build_server(tracker))}

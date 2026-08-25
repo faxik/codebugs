@@ -19,7 +19,13 @@ from codebugs import db
 # `normalize_description` is the whole composition (dedent + CB-156's Markdown
 # sections); call it rather than its steps, so this side cannot normalize a
 # different amount than the server does.
-from codebugs.server import dedent_docstring, normalize_description
+from codebugs.server import normalize_description
+
+# Re-exported, not used here: `tests/test_boundary.py` asserts the golden is
+# dedent-stable with it, and `tests/test_server.py` pins that this module's name
+# IS the server's object — the CB-73 anti-drift check. Importing it here is what
+# makes that pin mean anything.
+from codebugs.server import dedent_docstring  # noqa: F401
 
 
 @contextmanager
