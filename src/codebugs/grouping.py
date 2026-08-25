@@ -16,8 +16,13 @@ surface at all:
     sprint / plan a batch of cards was filed under.
 
 Contract, identical to similarity.py's: ZERO SQL in this module — every row
-arrives through the findings.grouping_candidates accessor (module-ownership
-rule) — and READ-ONLY; nothing here changes identity, status, ids, or meta.
+arrives through the public accessor of the module that OWNS its table
+(module-ownership rule): finding rows through findings.grouping_candidates, and
+the declared distinct_from suppressions through relations.active_suppressions —
+and READ-ONLY; nothing here changes identity, status, ids, or meta. The second
+accessor is named here rather than left to be discovered because "every row
+arrives through grouping_candidates" was true when there was one source, and a
+contract stated for one source does not survive a second one unremarked.
 
 HUBS, and why a raw citation graph is useless. Connected components over the
 whole reference graph do not decompose this corpus: on the open set the largest
@@ -45,6 +50,7 @@ from codebugs.findings import (
     parse_meta,
     parse_tags,
 )
+from codebugs.relations import active_suppressions
 from codebugs.types import (
     FINDING_ID_PREFIX,
     is_text_filter_active,
@@ -228,6 +234,17 @@ def citation_report(
     References to ids outside the population (a fixed card, a foreign tracker)
     are COUNTED as dangling rather than dropped — the count is how the operator
     learns that a status filter cut the graph.
+
+    A DECLARED ``distinct_from`` SUPPRESSES THE COMPONENT, NOT THE EDGE (CB-62).
+    Note the two halves of "no link here is inferred" above: the MENTION is
+    hand-written, and the conclusion drawn from it — that the two cards are one
+    unit of work — is this module's guess. So a human's explicit "these are
+    different defects" (``relations_relate … distinct_from``) stops the two
+    cards being merged into one component, while the edge itself stays in the
+    output with its quoted context, because the reference really was written and
+    hiding it would destroy evidence rather than correct a conclusion. The two
+    graphs are NOT unified: ``filing_report``'s declared lineage is untouched,
+    for the reason spelled out at the suppression site.
     """
     if hub_degree is not None and hub_degree < 0:
         raise ValueError(f"hub_degree must be >= 0 or None, got {hub_degree}")
@@ -284,11 +301,44 @@ def citation_report(
         if hub_degree is not None
         else set()
     )
+    # DECLARED beats INFERRED, and ONLY in that direction (CB-62).
+    #
+    # A citation edge is INFERRED: this module found the text `CB-N` inside a
+    # card and guessed a relationship. A `distinct_from` edge is a human saying
+    # "these are different defects, do not confuse them". A guess must lose to a
+    # declaration, which is the whole reason `distinct_from` exists — and until
+    # this line it suppressed nothing anywhere in the package.
+    #
+    # WHAT THIS DOES NOT DO, said here because the next reader will otherwise
+    # read a partial suppression as an unfinished one. The two graphs are NOT
+    # unified. `filing_report`'s lineage edges (`meta.split_from` /
+    # `split_children`) are themselves DECLARED, so suppressing one with the
+    # other would not be a declaration overriding a guess — it would be two
+    # declarations contradicting each other, which is a question about WHICH
+    # graph owns the truth. `split_from` currently has two independent
+    # representations, a relation type in `finding_relations` and a meta key
+    # this module reads, and reconciling them is CB-163: a decision that is
+    # deliberately waiting for measured demand rather than being taken here as
+    # a side effect. Read once per traversal, never per edge (CB-31's rule).
+    suppressed = active_suppressions(conn)
+    suppressed_edges: list[dict[str, Any]] = []
     dsu = DSU(list(by_id))
     for a, b in edges:
         if a in hubs or b in hubs:
             continue
+        # The edge SURVIVES — it is evidence a human wrote the reference — and
+        # only the union is skipped. It is reported separately because with the
+        # pair in no component there is nowhere else it could appear, and
+        # `relations.unrelate`'s own docstring names the hazard: "a suppression
+        # that should not exist is invisible by construction". A wrong
+        # `distinct_from` must therefore be visible in the very report it
+        # silences. `[]` means "looked, nothing suppressed", never "no such
+        # channel" — the `attention` / `stripped_meta_keys` discipline.
+        if (a, b) in suppressed:
+            suppressed_edges.append({"a": a, "b": b, "mentions": edges[(a, b)]})
+            continue
         dsu.union(a, b)
+    suppressed_edges.sort(key=lambda e: (e["a"], e["b"]))
 
     grouped: dict[str, list[str]] = defaultdict(list)
     for cid in by_id:
@@ -365,6 +415,8 @@ def citation_report(
         "edges_total": len(edges),
         "self_references": self_refs,
         "dangling_total": dangling,
+        "suppressed_edges": suppressed_edges,
+        "suppressed_total": len(suppressed_edges),
         "components": components,
         "components_total": components_total,
         "cards_in_components": cards_in_components,
@@ -668,6 +720,16 @@ def register_tools(mcp, conn_factory) -> None:
         the components either side of it stay separate. References to ids
         outside the population are COUNTED as dangling, never dropped.
 
+        A pair you have declared DIFFERENT — relations_relate(a, "distinct_from",
+        b) — is never merged into one component here, in either order, and a
+        retracted declaration stops suppressing. The citation edge itself still
+        appears in the output with its quoted context: your declaration corrects
+        the conclusion this tool draws from the reference, not the fact that
+        somebody wrote it. This is the ONLY place distinct_from suppresses:
+        grouping_filing's declared lineage (split_from / split_children) is
+        untouched, because overriding one declaration with another is a
+        different question from overriding a guess.
+
         Args:
             status: Narrow/widen the population (default: live statuses; "all")
             category: Restrict to one category
@@ -852,9 +914,19 @@ def register_cli(sub, commands) -> None:
             f"populations={report['populations']} rows={report['rows_considered']} "
             f"hub_degree={report['hub_degree']} citations={report['citations_total']} "
             f"edges={report['edges_total']} dangling={report['dangling_total']} "
+            f"suppressed={report['suppressed_total']} "
             f"components={report['components_total']} "
             f"cards_in_components={report['cards_in_components']} hubs={len(report['hubs'])}"
         )
+        # Printed BEFORE the components, and unconditionally when non-empty: a
+        # declared distinct_from is the one thing in this report that makes
+        # cards NOT group, so a reader looking for a component that is missing
+        # must meet the reason before the list it is missing from.
+        for sup in report["suppressed_edges"]:
+            print(
+                f"suppressed {sup['a']} <-> {sup['b']} "
+                f"(declared distinct_from; {len(sup['mentions'])} mention(s))"
+            )
         if not report["components"]:
             print("No citation components.")
         for comp in report["components"]:
