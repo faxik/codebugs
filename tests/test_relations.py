@@ -272,3 +272,94 @@ def test_schema_is_registered_and_table_exists(conn):
         "SELECT name FROM sqlite_master WHERE type='table' AND name='finding_relations'"
     ).fetchone()
     assert row is not None
+
+
+# ------------------------------------------- active_suppressions (CB-62) ----
+
+
+class TestActiveSuppressionsProbe:
+    """`active_suppressions` must not answer "nobody declared anything" about a
+    ledger it could have read."""
+
+    @staticmethod
+    def _bare():
+        c = sqlite3.connect(":memory:")
+        c.row_factory = sqlite3.Row
+        return c
+
+    @pytest.mark.parametrize(
+        "ddl,label",
+        [
+            ("CREATE VIEW finding_relations AS SELECT 1 AS src_id, 1 AS dst_id",
+             "a VIEW of the name"),
+            ("CREATE TEMP TABLE finding_relations (src_id TEXT, dst_id TEXT)",
+             "a TEMP table, which lives in sqlite_temp_master"),
+            ("CREATE TABLE Finding_Relations (src_id TEXT, dst_id TEXT)",
+             "a name created in another case"),
+        ],
+    )
+    def test_premise_sqlite_master_disagrees_with_name_resolution(self, ddl, label):
+        """PREMISE, measured rather than argued: reading `sqlite_master` is NOT
+        the same question as resolving a name in a SELECT.
+
+        Each of these is queryable while
+        `SELECT 1 FROM sqlite_master WHERE type='table' AND name=...` finds
+        nothing — so a probe written that way would return the empty set about
+        a readable ledger, which is the silent-empty-answer failure the guard
+        exists to prevent. `PRAGMA table_info` agrees with the SELECT in every
+        case, which is why it is what the guard uses. A SQLite release that
+        changed either behaviour turns this red instead of quietly making the
+        comment above `active_suppressions`' probe false.
+        """
+        c = self._bare()
+        c.execute(ddl)
+        c.execute("SELECT * FROM finding_relations LIMIT 1").fetchall()  # queryable
+        assert c.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='finding_relations'"
+        ).fetchone() is None, f"premise gone: sqlite_master now sees {label}"
+        assert c.execute("PRAGMA table_info('finding_relations')").fetchall(), (
+            f"the guard's probe must see {label}"
+        )
+        c.close()
+
+    def test_the_guard_reads_a_ledger_a_catalogue_probe_would_have_missed(self):
+        """The premise tests above show that `sqlite_master` and name resolution
+        disagree; this one shows the GUARD is on the right side of that
+        disagreement.
+
+        Reverting its probe to the catalogue read turns this red and leaves
+        those premise tests green — a premise pinned without its consumer is a
+        premise, not a gate, which is the distinction this repository keeps
+        paying for.
+        """
+        c = self._bare()
+        c.execute(
+            "CREATE TEMP TABLE finding_relations "
+            "(id INTEGER PRIMARY KEY, src_id TEXT, rel TEXT, dst_id TEXT, "
+            " created_at TEXT, source TEXT, note TEXT, retracted_at TEXT, "
+            " retracted_by TEXT, retracted_reason TEXT)"
+        )
+        c.execute(
+            "INSERT INTO finding_relations (src_id, rel, dst_id, created_at, source) "
+            "VALUES ('CB-9', 'distinct_from', 'CB-10', '2026-01-01T00:00:00Z', 't')"
+        )
+        assert relations.active_suppressions(c) == {("CB-10", "CB-9")}
+        c.close()
+
+    def test_an_absent_ledger_is_an_empty_set_not_an_error(self):
+        """The §4(3) decision itself: no ledger means nobody declared anything."""
+        c = self._bare()
+        assert relations.active_suppressions(c) == set()
+        c.close()
+
+    def test_a_present_ledger_is_read_and_canonicalised(self, conn):
+        f1 = findings.add_finding(conn, description="one side of a declared pair",
+                                  severity="low", category="correctness",
+                                  file="a.py", new_category=True)["id"]
+        f2 = findings.add_finding(conn, description="the other side of that pair",
+                                  severity="low", category="correctness",
+                                  file="a.py")["id"]
+        relations.relate(conn, f1, "distinct_from", f2, source="test")
+        assert relations.active_suppressions(conn) == {tuple(sorted((f1, f2)))}
+

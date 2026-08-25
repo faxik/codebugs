@@ -294,6 +294,66 @@ def query_relations(
     return {"count": len(rows), "relations": rows}
 
 
+def active_suppressions(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+    """The live ``distinct_from`` pairs, as canonically ordered tuples.
+
+    ``query_relations``' docstring already calls ``rel="distinct_from"`` with no
+    entity "the active-suppressions view"; this is that view as an API, for a
+    reader that needs a MEMBERSHIP TEST rather than a row list. It exists here,
+    and not at the caller, for two reasons that both come from this repository's
+    own rules: this module owns ``finding_relations`` (module ownership), and the
+    one caller today — ``grouping.citation_report`` — carries a ``ZERO SQL in
+    this module`` contract in its header, so neither the query nor the existence
+    probe below could be written there.
+
+    ORDERING IS LEXICOGRAPHIC, and it is applied AGAIN here even though
+    ``_orient`` already wrote the row that way. Not because the table might lie,
+    but because a reader whose correctness rests on another function's invariant
+    is one unreviewed INSERT away from a suppression that silently does not
+    fire — and a suppression that silently does not fire is the exact failure a
+    suppression exists to prevent. Python's ``sorted()`` over strings IS
+    ``_orient``'s order (``"CB-100" < "CB-9"``, because ``"1" < "9"``); sorting
+    by the NUMBER in the id is a different order and would diverge silently.
+
+    A MISSING TABLE MEANS "nobody has declared anything" — not "I could not
+    look", and that distinction is the whole reason this probes instead of
+    swallowing ``OperationalError``. A suppression is an AFFIRMATIVE
+    declaration, so where no ledger exists there are none, and answering the
+    empty set is the true answer rather than a degraded one. Swallowing the
+    exception would also absorb a disk error, an unreadable page, a corrupted
+    file — "the guard reported clean because it could not look", which this
+    repository has filed several cards against, and those still propagate here
+    because nothing is caught. Reachable because ``db.connect`` is not the only
+    way to hold a connection: a caller that built its own with
+    ``findings.ensure_schema`` alone has findings and no ledger, which is
+    exactly what ``tests/test_grouping.py``'s fixture does.
+
+    THE PROBE ASKS THE SAME QUESTION THE QUERY WILL, which is why it is
+    ``PRAGMA table_info`` and not a read of ``sqlite_master``. A
+    ``sqlite_master`` row is a fact about MAIN's persistent catalogue; name
+    resolution in a ``SELECT`` is a different thing, and the two disagree in
+    four MEASURED states — a VIEW of this name, a TEMP table (which lives in
+    ``sqlite_temp_master``), a table present only in an ATTACHed schema, and a
+    name created in another case, since SQLite resolves case-insensitively while
+    ``name = 'finding_relations'`` is a case-SENSITIVE string compare. In every
+    one of them the ``SELECT`` below succeeds while the catalogue read says no,
+    so the guard would have answered "nobody declared anything" about a ledger
+    it could perfectly well have read — the silent-empty-answer failure this
+    function exists to avoid, reintroduced inside its own fix. ``PRAGMA
+    table_info`` returns a row per column for a table or a view and nothing for
+    an unresolvable name, following the same temp → main → attached search the
+    query does, so the two cannot disagree. Pinned as a premise test, like the
+    git and argparse behaviours elsewhere in this tree.
+    """
+    if not conn.execute("PRAGMA table_info('finding_relations')").fetchall():
+        return set()
+    rows = query_relations(conn, rel="distinct_from")["relations"]
+    return {
+        (lo, hi)
+        for lo, hi in (sorted((r["src_id"], r["dst_id"])) for r in rows)
+    }
+
+
 import json  # noqa: E402
 from codebugs.db import (  # noqa: E402
     register_cli_provider,

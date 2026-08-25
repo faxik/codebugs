@@ -9,7 +9,7 @@ import sqlite3
 
 import pytest
 
-from codebugs import findings, grouping
+from codebugs import findings, grouping, relations
 
 
 @pytest.fixture()
@@ -210,6 +210,255 @@ class TestCitationComponents:
         rep = grouping.citation_report(conn)
         # The description still cites; only the unreadable meta is skipped.
         assert rep["components_total"] == 1
+
+
+class TestDistinctFromSuppression:
+    """A DECLARED `distinct_from` beats an INFERRED citation edge (CB-62).
+
+    Every fixture here creates its own suppressions. When this landed the live
+    tracker held ZERO live `distinct_from` rows, so there is no corpus to lean
+    on and nothing in this class is evidence about real data.
+    """
+
+    @pytest.fixture()
+    def rel_conn(self):
+        c = sqlite3.connect(":memory:")
+        c.row_factory = sqlite3.Row
+        findings.ensure_schema(c)
+        relations.ensure_schema(c)
+        yield c
+        c.close()
+
+    @staticmethod
+    def _cited_pair(conn):
+        """CB-9 cites CB-10, with ids whose LEXICOGRAPHIC and NUMERIC orders
+        disagree — which is what makes the canonicalisation observable.
+
+        `relations._orient` canonicalises a symmetric pair with `src <= dst` on
+        the STRING, and `citation_report` keys its edges with `sorted()`, the
+        same order. `"CB-10" < "CB-9"` because `"1" < "9"`, so the canonical
+        pair is ("CB-10", "CB-9") while reading the numbers says the opposite.
+        A CB-1/CB-2 pair, where the two orders agree, would let an
+        implementation that sorted by the NUMBER pass this whole class.
+        """
+        add(conn, "the card that the other one refers to", finding_id="CB-10")
+        add(conn, "a different defect whose text mentions CB-10 in passing",
+            finding_id="CB-9")
+        assert sorted(["CB-9", "CB-10"]) == ["CB-10", "CB-9"], (
+            "fixture invalid: these ids must make lexicographic and numeric "
+            "order disagree, or the canonical order is never exercised"
+        )
+        return "CB-9", "CB-10"
+
+    def test_a_citation_edge_alone_makes_one_component(self, rel_conn):
+        """The BASELINE half of the oracle. Without it, the suppression test
+        below is satisfied by any change that breaks grouping altogether."""
+        self._cited_pair(rel_conn)
+        rep = grouping.citation_report(rel_conn)
+        assert rep["components_total"] == 1
+        assert {m["id"] for m in rep["components"][0]["members"]} == {"CB-9", "CB-10"}
+        assert rep["suppressed_total"] == 0
+
+    def test_a_declared_distinct_from_keeps_the_cards_apart(self, rel_conn):
+        src, dst = self._cited_pair(rel_conn)
+        relations.relate(rel_conn, src, "distinct_from", dst, source="test")
+        rep = grouping.citation_report(rel_conn)
+        assert rep["components_total"] == 0
+        # The EDGE survives; only the conclusion drawn from it is dropped.
+        assert rep["edges_total"] == 1
+        assert rep["citations_total"] == 1
+        assert rep["suppressed_total"] == 1
+        (sup,) = rep["suppressed_edges"]
+        assert (sup["a"], sup["b"]) == ("CB-10", "CB-9")
+        assert sup["mentions"][0]["src"] == "CB-9"
+        assert "CB-10" in sup["mentions"][0]["context"], (
+            "the quoted evidence must survive the suppression"
+        )
+
+    def test_a_retracted_suppression_stops_suppressing(self, rel_conn):
+        """Reads the LIVE relation, not any relation. Passing
+        `include_retracted=True` in `relations.active_suppressions` turns this
+        red."""
+        src, dst = self._cited_pair(rel_conn)
+        relations.relate(rel_conn, src, "distinct_from", dst, source="test")
+        relations.unrelate(rel_conn, src, "distinct_from", dst, retracted_by="test")
+        rep = grouping.citation_report(rel_conn)
+        assert rep["components_total"] == 1
+        assert rep["suppressed_total"] == 0
+
+    def test_the_declaration_holds_in_either_direction(self, rel_conn):
+        """Declared the other way round, and it still suppresses.
+
+        PINS PRESERVED BEHAVIOUR rather than catching a mutant, and says so
+        because a reader cannot otherwise tell this from a broken test:
+        `relate` canonicalises at write time, so this passes with or without
+        the read-side `sorted()`. The test that discriminates that line is
+        `test_a_non_canonically_stored_pair_still_suppresses`.
+        """
+        src, dst = self._cited_pair(rel_conn)
+        relations.relate(rel_conn, dst, "distinct_from", src, source="test")
+        assert grouping.citation_report(rel_conn)["components_total"] == 0
+
+    def test_a_non_canonically_stored_pair_still_suppresses(self, rel_conn):
+        """The READ side canonicalises too, so its correctness does not rest on
+        the write side having done so.
+
+        `relate` cannot produce this row today — it calls `_orient` before the
+        INSERT — so the row is written directly. That is the point of the test,
+        not a claim that the table lies: a reader whose correctness depends on
+        another module's invariant is one unreviewed INSERT away from a
+        suppression that silently does not fire. Deleting the `sorted()` from
+        `relations.active_suppressions` turns THIS test red and leaves every
+        other test in this class green.
+        """
+        src, dst = self._cited_pair(rel_conn)
+        rel_conn.execute(
+            "INSERT INTO finding_relations (src_id, rel, dst_id, created_at, source) "
+            "VALUES (?, 'distinct_from', ?, '2026-01-01T00:00:00Z', 'test')",
+            (src, dst),
+        )
+        rel_conn.commit()
+        stored = rel_conn.execute(
+            "SELECT src_id, dst_id FROM finding_relations"
+        ).fetchone()
+        assert (stored["src_id"], stored["dst_id"]) != tuple(sorted((src, dst))), (
+            "fixture invalid: the row must be stored NON-canonically, or this "
+            "test cannot exercise the read-side canonicalisation"
+        )
+        assert grouping.citation_report(rel_conn)["components_total"] == 0
+
+    def test_a_third_card_citing_both_defeats_the_declaration_visibly(self, rel_conn):
+        """THE HONEST SCOPE, pinned so the prose cannot drift away from it.
+
+        Dropping one edge does not cut a graph. Declare A and B distinct while a
+        third card cites both, and all three stay in one component — with the
+        suppressed edge then listed BOTH in `suppressed_edges` and among that
+        component's own edges. What makes that a limitation rather than a lie is
+        that the report says so: `still_grouped` on the entry, counted by
+        `still_grouped_total`. Two-node fixtures cannot see any of this, which is
+        why the rest of this class is not enough on its own.
+        """
+        a = add(rel_conn, "the opening card of a chain that gets cross-referenced")
+        b = add(rel_conn, f"a separate defect whose text happens to mention {a}")
+        c = add(rel_conn, f"a triage note naming both {a} and {b} in one breath")
+        relations.relate(rel_conn, a, "distinct_from", b, source="test")
+        rep = grouping.citation_report(rel_conn)
+        assert rep["suppressed_total"] == 1
+        assert rep["still_grouped_total"] == 1
+        (sup,) = rep["suppressed_edges"]
+        assert sup["still_grouped"] is True
+        assert rep["components_total"] == 1
+        assert {m["id"] for m in rep["components"][0]["members"]} == {a, b, c}
+
+    def test_a_declaration_on_a_hub_edge_is_still_reported(self, rel_conn):
+        """The hub rule and the declaration are two different reasons not to
+        join, and the ORDER they are asked in decides what the report can SAY.
+
+        Asked hub-first, a declaration touching a landmark card never reaches
+        the ledger comparison at all, so `suppressed_total` answers `0` with the
+        declaration alive in the ledger — "no such channel" wearing the face of
+        "looked, nothing fired". The grouping is identical either way, so only
+        this assertion separates the two. Moving the suppression branch back
+        below the hub branch turns this test red.
+        """
+        hub = add(rel_conn, "the landmark card that every neighbourhood points at")
+        citers = [
+            add(rel_conn, f"the alpha report, which points at {hub}"),
+            add(rel_conn, f"the beta report, which also points at {hub}"),
+            add(rel_conn, f"the gamma report, pointing at {hub} as well"),
+            add(rel_conn, f"the delta report, likewise pointing at {hub}"),
+        ]
+        assert grouping.citation_report(rel_conn)["hubs"] == [hub], (
+            "fixture invalid: the landmark must actually exceed hub_degree, or "
+            "the hub branch is never the one that would have swallowed the edge"
+        )
+        relations.relate(rel_conn, hub, "distinct_from", citers[0], source="test")
+        rep = grouping.citation_report(rel_conn)
+        assert rep["suppressed_total"] == 1
+        (sup,) = rep["suppressed_edges"]
+        assert {sup["a"], sup["b"]} == {hub, citers[0]}
+
+    def test_a_reciprocally_cited_pair_is_suppressed_too(self, rel_conn):
+        """One EDGE can carry several mentions, and every other fixture here
+        carries exactly one.
+
+        Two cards that cite EACH OTHER produce two mentions collapsed onto one
+        edge key by `edges[tuple(sorted(...))]`, and that is an ordinary shape
+        — `tests/test_grouping_surface.py` already has a test built on it. The
+        gap this closes was found by cross-model review: narrowing the branch to
+        `... and len(edges[(a, b)]) == 1` left the whole class green while a
+        mutually-cited declared-distinct pair was joined anyway.
+        """
+        a = add(rel_conn, "the first card, which points at the second one")
+        b = add(rel_conn, f"the second card, which points back at {a}")
+        findings.update_finding(rel_conn, a, append_note=f"see also {b}")
+        relations.relate(rel_conn, a, "distinct_from", b, source="test")
+        rep = grouping.citation_report(rel_conn)
+        (sup,) = rep["suppressed_edges"]
+        assert len(sup["mentions"]) == 2, (
+            "fixture invalid: the pair must cite each other, or this edge "
+            "carries one mention like every other fixture in the class"
+        )
+        assert rep["components_total"] == 0
+        assert rep["still_grouped_total"] == 0
+
+    def test_suppressed_edges_come_back_in_a_stable_order(self, rel_conn):
+        """Every other list in this report is ordered deliberately; with one
+        suppressed pair in the fixture the sort line is unobservable, so it
+        takes two."""
+        a = add(rel_conn, "the first card of the first declared-distinct pair")
+        b = add(rel_conn, f"the second card of that pair, mentioning {a}")
+        c = add(rel_conn, "the first card of the second declared-distinct pair")
+        d = add(rel_conn, f"the second card of that other pair, mentioning {c}")
+        relations.relate(rel_conn, a, "distinct_from", b, source="test")
+        relations.relate(rel_conn, c, "distinct_from", d, source="test")
+        rep = grouping.citation_report(rel_conn)
+        assert rep["suppressed_total"] == 2
+        pairs = [(e["a"], e["b"]) for e in rep["suppressed_edges"]]
+        assert pairs == sorted(pairs)
+        assert pairs == sorted([tuple(sorted((a, b))), tuple(sorted((c, d)))])
+
+    def test_filing_lineage_is_not_suppressed(self, rel_conn):
+        """The NON-SPREAD oracle, and it is as mandatory as the others.
+
+        `split_from` is DECLARED, so suppressing it with `distinct_from` would
+        be two declarations contradicting each other rather than a declaration
+        beating a guess. Which of the two graphs owns that truth is CB-163,
+        deliberately not answered here as a side effect.
+        """
+        add(rel_conn, "the parent card of a deliberate split", finding_id="CB-10")
+        add(rel_conn, "the follow-up carved out of the parent card",
+            finding_id="CB-9", meta={"split_from": "CB-10"})
+        before = grouping.filing_report(rel_conn)
+        relations.relate(rel_conn, "CB-9", "distinct_from", "CB-10", source="test")
+        after = grouping.filing_report(rel_conn)
+        assert before["lineages_total"] == 1
+        assert after["lineages_total"] == 1
+        assert {m["id"] for m in after["lineages"][0]["members"]} == {"CB-9", "CB-10"}
+
+    def test_a_tracker_with_no_relations_table_reports_no_suppressions(self, conn):
+        """The §4(3) DECISION, pinned: an ABSENT ledger means "nobody declared
+        anything", never "I could not look".
+
+        A suppression is an AFFIRMATIVE declaration, so where no ledger exists
+        there are none and the empty set is the true answer rather than a
+        degraded one — which is why this is an explicit probe and not a
+        swallowed `OperationalError`, since that same exception is also what a
+        disk error looks like. The plain `conn` fixture IS this tracker
+        (findings schema, no relations schema), which is the measurement that
+        ruled out simply trusting `db.connect()`'s schema registry: a caller
+        holding its own connection never went through it.
+        """
+        assert conn.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' "
+            "AND name='finding_relations'"
+        ).fetchone()[0] == 0
+        a = add(conn, "the card that the other one refers to")
+        add(conn, f"another card that mentions {a} in passing")
+        rep = grouping.citation_report(conn)
+        assert rep["components_total"] == 1
+        assert rep["suppressed_total"] == 0
+        assert relations.active_suppressions(conn) == set()
 
 
 class TestTagPivots:

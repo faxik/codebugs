@@ -16,6 +16,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   removing one of those tools will fail the test suite instead of silently leaving the agent with
   a working loop that recommends a call which no longer exists.
 
+### Changed
+- **Telling the tracker that two cards are different defects now stops the citation
+  report merging them (CB-62).** `grouping_citations` groups cards by the `CB-…`
+  references people write in card text, on the assumption that a reference means the
+  two cards are one piece of work. That assumption is sometimes wrong — a card can
+  mention another to contrast with it, or to point at a trap — and until now there was
+  no way to say so: `relations_relate(a, "distinct_from", b)` recorded your judgement
+  and the report ignored it. It no longer does — that reference stops joining the two
+  cards, whichever order you declared the pair in, and retracting the declaration
+  (`relations_unrelate`) brings the grouping straight back.
+
+  **The reference itself is still reported.** Somebody did write it, and hiding it
+  would destroy evidence rather than correct a conclusion, so the citation stays
+  visible with its quoted context — under a new `suppressed_edges` list, and on the
+  `codebugs grouping-citations` header line as `suppressed=N`. That is deliberate: a
+  `distinct_from` written by mistake would otherwise be invisible in the one report it
+  silences, and you would only see two cards that mysteriously never group.
+
+  **What it does NOT promise, because dropping one reference does not split a group.**
+  If a third card cites both of yours, the two are still in one component through that
+  third card. The report says so rather than letting you assume otherwise: each entry
+  carries `still_grouped`, the header line shows `still_grouped=N`, and the CLI marks
+  such a pair `STILL GROUPED`. So the guarantee is "this reference no longer counts",
+  not "these two can never appear together" — separating them for real would mean
+  deciding where the third card goes, which is a question nobody has asked yet.
+
+  **`grouping_filing` is untouched**, and that is a decision rather than an omission.
+  It groups cards by the split lineage you recorded on purpose; overriding one thing
+  you declared with another thing you declared is a different question — which of the
+  two records wins — and it is not answered here.
+
 ### Fixed
 - **The paragraph opening the 0.2.0 notes below made four wrong claims about that
   release, and has been corrected (CB-191).** It counted two strict CLI arguments where
