@@ -115,23 +115,48 @@ def add_requirement(
     tags: list[str] | None = None,
     meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Add a single requirement."""
+    """Add a single requirement.
+
+    Returns the row THIS call wrote, captured from the INSERT's own ``RETURNING``
+    inside ``db.txn`` (CB-117 — the same shape as CB-111's fix to
+    ``merge.abandon_session``). This used to close with a bare ``conn.commit()``
+    followed by a fresh ``SELECT * FROM requirements WHERE id = ?``, so a write
+    from another connection (``update_requirement`` is exposed over MCP the same
+    way) landing in the window between the commit and that SELECT was reported as
+    this call's own result. Unlike CB-111's abandon_session, there was never a
+    benign period here: the whole dict always went straight to the MCP client, so
+    the race was live from the start, not merely a future hazard.
+
+    Do not restore ``conn.commit()``: ``db.txn`` yields ``False`` under an ambient
+    transaction, and committing then would commit the caller's unrelated pending
+    work (CB-24 consequence (1)).
+
+    ``fetchone()`` on the ``RETURNING`` cursor, and the ``row_to_dict`` conversion,
+    both stay INSIDE the ``db.txn`` block — deliberately, unlike
+    ``update_requirement`` (CB-24 consequence (2)), where the conversion is moved
+    OUTSIDE because it can fail on a row this call did not write. That risk does
+    not apply here: this is a fresh INSERT, and the stored ``tags``/``meta`` are
+    the exact JSON strings this call just serialized two lines below, never a
+    previously-stored value another writer could have left malformed.
+    """
     priority = resolve_priority(priority)
     status = resolve_requirement_status(status)
 
     now = utc_now()
-    conn.execute(
-        """INSERT INTO requirements (id, section, description, priority, status,
-           source, test_coverage, tags, meta, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            req_id, section, description, priority, status,
-            source, test_coverage, json.dumps(tags or []),
-            json.dumps(meta or {}), now, now,
-        ),
-    )
-    conn.commit()
-    return db.row_to_dict(conn.execute("SELECT * FROM requirements WHERE id = ?", (req_id,)).fetchone())
+    with db.txn(conn):
+        row = conn.execute(
+            """INSERT INTO requirements (id, section, description, priority, status,
+               source, test_coverage, tags, meta, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               RETURNING *""",
+            (
+                req_id, section, description, priority, status,
+                source, test_coverage, json.dumps(tags or []),
+                json.dumps(meta or {}), now, now,
+            ),
+        ).fetchone()
+        result = db.row_to_dict(row)
+    return result
 
 
 def batch_add_requirements(

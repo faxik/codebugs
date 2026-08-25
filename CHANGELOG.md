@@ -7,6 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **Adding a requirement (`reqs_add`) now always returns exactly what you just wrote
+  (CB-117).** It used to write the row, then read it back from the database in a
+  separate step; in the rare case another request changed or removed that same
+  requirement in between, you could get back someone else's version instead of your
+  own, with nothing in the response to warn you. It now returns the written row
+  directly, so what you see is always your own write.
 - **The mutation-testing scripts under `tests/manual/` (`mutate_cb69.py`, `mutate_cb31.py`)
   now refuse to run on a dirty tree instead of silently overwriting uncommitted work
   (CB-173).** Each script writes a broken version of a source file to disk, runs the
