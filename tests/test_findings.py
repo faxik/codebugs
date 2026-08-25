@@ -1,6 +1,7 @@
 """Tests for the findings domain — CRUD, query, stats, migrations."""
 
 import ast
+import contextlib
 import csv
 import json
 import os
@@ -3701,6 +3702,90 @@ class TestGroupingAxes:
         report = grouping.tag_report(conn, status="open")
         assert {t["tag"]: t["count"] for t in report["tags"]} == {"c": 2}
 
+    def test_a_NaN_written_by_the_ordinary_write_path_does_not_hide_a_row(self, conn):
+        """THE BLOCKING FINDING of this unit's adversarial review, and it broke
+        the one claim the whole axis was built to make.
+
+        `json_valid(X)` with no flags means canonical RFC-8259, which rejects
+        `NaN`/`Infinity`. Python's `json.loads` accepts them and `json.dumps`
+        WRITES them by default — so this package's own `add_finding` stores
+        `{"x": NaN}`, and CLAUDE.md's CB-82 entry ratifies exactly that value as
+        supported. The guard was therefore STRICTER THAN THE ENGINE IT GUARDS:
+        the row vanished from every meta axis — including for a sibling key
+        holding a perfectly good string — while `grouping.tag_report` counted it,
+        because that goes through `json.loads`. Two shipped tools, one corpus,
+        different answers: the exact divergence this axis exists to prevent,
+        reintroduced by its own safety check.
+
+        MUTANT this kills: dropping the `_JSON5` flag from either guard."""
+        from codebugs import grouping
+
+        self._file(conn, "CB-1", tags=["realtag"], meta={"found_by": "ruff"})
+        self._file(conn, "CB-2", tags=["realtag"], meta={"found_by": "ruff", "x": float("nan")})
+        stored = conn.execute("SELECT meta FROM findings WHERE id = 'CB-2'").fetchone()["meta"]
+        assert "NaN" in stored, f"premise: the write path stores NaN, got {stored!r}"
+
+        by_meta = findings.query_findings(conn, group_by="meta:found_by")
+        assert {g["group_key"]: g["count"] for g in by_meta["groups"]} == {"ruff": 2}
+        assert by_meta["ungrouped_rows"] == 0
+
+        by_tag = findings.query_findings(conn, status="open", group_by="tag")
+        report = grouping.tag_report(conn, status="open")
+        assert {g["group_key"]: g["count"] for g in by_tag["groups"]} == {
+            t["tag"]: t["count"] for t in report["tags"]
+        }
+        assert by_tag["ungrouped_rows"] == report["rows_untagged"]
+
+    def test_a_control_character_in_a_meta_key_is_refused_as_input(self, conn):
+        """Adversarial review. SQLite's path is a C string, so it TRUNCATES at a
+        NUL: measured, `json_extract('{"a":"WRONG_A"}', '$.a\\0b')` answers
+        `'WRONG_A'` — the key `a\\0b` silently reads its neighbour `a`, which is
+        the dotted-key failure exactly. A LEADING NUL is worse still: the path
+        collapses to `'$.'` and SQLite raises `OperationalError`, the
+        environmental class the EMPTY key is already refused to avoid, escaping a
+        domain function that promises `ValueError` and reaching the CLI as a raw
+        traceback because `domain_errors()` classifies neither."""
+        for key in ("\x00a", "a\x00b", "a\tb", "a\nb"):
+            with pytest.raises(ValueError, match="CB-167"):
+                findings.query_findings(conn, group_by=f"meta:{key}")
+            with pytest.raises(ValueError, match="CB-167"):
+                findings.get_stats(conn, group_by=f"meta:{key}")
+
+    def test_the_deferred_short_circuit_keeps_the_grouped_shape(self, conn):
+        """The tool description promises the four disclosure keys on EVERY
+        grouped response, and a promise with "always" in it has to survive its
+        own short circuits (adversarial review).
+
+        `status="deferred"` is a pseudo-status resolved in the MCP wrapper to an
+        id restriction; with nothing deferred it short-circuits, and that arm
+        used to return an UNGROUPED empty page even when the caller asked for
+        groups — so the promised keys were simply absent. The wrapper is called
+        as a plain function here, which is what the branch under test is."""
+        captured = {}
+
+        class _Recorder:
+            def tool(self, *_a, **_k):
+                def deco(fn):
+                    captured[fn.__name__] = fn
+                    return fn
+
+                return deco
+
+        @contextlib.contextmanager
+        def factory():
+            yield conn
+
+        findings.register_tools(_Recorder(), factory)
+        self._file(conn, "CB-1", tags=["a"])
+        result = captured["query"](status="deferred", group_by="tag")
+        assert result["grouped"] is True
+        assert result["groups"] == []
+        for key in ("population", "ungrouped_rows", "multi_group_rows", "nonscalar_value_rows"):
+            assert result[key] == 0, (key, result)
+        # A bad axis must still be refused on this path rather than answered.
+        with pytest.raises(ValueError, match="CB-167"):
+            captured["query"](status="deferred", group_by="meta:a.b")
+
     def test_the_meta_axis_groups_by_a_top_level_key(self, conn):
         self._file(conn, "CB-1", meta={"found_by": "ruff"})
         self._file(conn, "CB-2", meta={"found_by": "ruff"})
@@ -3710,13 +3795,36 @@ class TestGroupingAxes:
         assert result["ungrouped_rows"] == 0
         assert result["multi_group_rows"] == 0
 
-    def test_a_key_holding_a_space_proves_the_path_is_BOUND(self, conn):
-        """MUTANT this kills: interpolating the path into the SQL text instead of
-        binding it. `json_extract(meta, $.found by)` is a syntax error, so an
-        interpolated build dies here while the bound one answers."""
-        self._file(conn, "CB-1", meta={"found by": "ruff"})
-        result = findings.query_findings(conn, group_by="meta:found by")
-        assert {g["group_key"]: g["count"] for g in result["groups"]} == {"ruff": 1}
+    def test_a_key_holding_an_APOSTROPHE_proves_the_path_is_BOUND(self, conn):
+        """MUTANT this kills: interpolating the path into the SQL text.
+
+        THE FIRST VERSION OF THIS TEST USED A SPACE AND KILLED NOTHING, and the
+        correction is the point. Its docstring argued that
+        `json_extract(meta, $.found by)` is a syntax error — but nobody writes an
+        interpolation that way, because the string would not assemble at all. The
+        realistic one is QUOTED, `json_extract(meta, '$.found by')`, and that is
+        perfectly valid SQL: measured, bound and interpolated return the same
+        answer for a spaced key, so the test could not tell them apart. Found by
+        adversarial review.
+
+        An apostrophe is the discriminator, and it is also the real reason the
+        path is bound rather than a stylistic preference: interpolated, the key
+        `found'by` closes the literal and yields
+        `sqlite3.OperationalError: near "by": syntax error` — a quoting break,
+        which is the doorway an injection walks through. Note the apostrophe is
+        deliberately NOT in `_META_PATH_METACHARS`: it is not path GRAMMAR, it is
+        SQL grammar, and binding is what makes it harmless, so the key is
+        accepted and answered rather than refused.
+
+        The space is kept as a second case, now honestly labelled: it proves the
+        key survives a character that needs no quoting, not that the path is bound.
+        """
+        self._file(conn, "CB-1", meta={"found'by": "ruff"})
+        self._file(conn, "CB-2", meta={"found by": "human"})
+        quoted = findings.query_findings(conn, group_by="meta:found'by")
+        assert {g["group_key"]: g["count"] for g in quoted["groups"]} == {"ruff": 1}
+        spaced = findings.query_findings(conn, group_by="meta:found by")
+        assert {g["group_key"]: g["count"] for g in spaced["groups"]} == {"human": 1}
 
     def test_an_absent_key_and_a_null_value_are_both_ungrouped(self, conn):
         """One answer to one question: neither row carries a value on this axis.
@@ -3955,6 +4063,23 @@ class TestGroupingAxesCliContract:
         r = self._run(project, "stats", "--by", "meta:n")
         assert r.returncode == 0, r.stderr
         assert "Traceback" not in r.stderr
+
+    def test_stats_with_no_groups_still_reports_the_population(self, project):
+        """Adversarial review: `stats` said "(no findings)" over a NON-EMPTY
+        tracker whenever an axis put every row outside every group.
+
+        Measured on the live tracker before the fix: `stats --by meta:loc`
+        printed "(no findings)" at exit 0 over 172 cards, 169 of which carry that
+        key — as a container, so none could be grouped by it. The early `return`
+        jumped past the disclosure line, i.e. past the one thing that could have
+        said so. A success-shaped false statement about the corpus, the CB-15 /
+        CB-16 family — and this unit's own subject besides, since the sibling
+        `query` verb answered the same question truthfully all along."""
+        r = self._run(project, "stats", "--by", "meta:absent_everywhere")
+        assert r.returncode == 0, r.stderr
+        assert "no findings" not in r.stdout, r.stdout
+        assert "population 3 row(s)" in r.stdout, r.stdout
+        assert "3 in no group" in r.stdout, r.stdout
 
     def test_an_unknown_axis_on_stats_is_one_line_not_a_traceback(self, project):
         """CB-170. MUTANT this kills: removing the `domain_errors()` wrapper."""

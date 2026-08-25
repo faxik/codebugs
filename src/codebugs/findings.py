@@ -2684,6 +2684,30 @@ _META_PATH_METACHARS = '.["]'
 # shape `reconcile.live_source_clause` is built on.
 _META_SCALAR_TEST = "json_type(meta, ?) IN ('text','integer','real','true','false')"
 
+# THE GUARD MUST NOT BE STRICTER THAN THE ENGINE IT GUARDS, and the first draft
+# of it was — found by adversarial review, and it defeated this work's central
+# claim rather than some edge case.
+#
+# `json_valid(X)` with no flags means canonical RFC-8259, which REJECTS `NaN`,
+# `Infinity` and `-Infinity`. Python's `json.loads` ACCEPTS them and — this is
+# the part that makes it live rather than theoretical — `json.dumps` WRITES them
+# by default, so this package's own write path puts them in the column: measured,
+# `add_finding(meta={"x": float("nan")})` stores `{"x": NaN}`. CLAUDE.md's CB-82
+# entry ratifies exactly that value as supported ("meta={"x": nan} … stores and
+# round-trips fine today").
+#
+# So an unguarded `json_valid` excluded such a row from EVERY meta axis — even
+# for a key sitting right beside the NaN and holding a perfectly good string —
+# while `grouping.tag_report` counted it, because `parse_tags` goes through
+# `json.loads`. Two shipped tools, one corpus, different answers: the divergence
+# this whole axis exists to prevent, reintroduced by its own safety check.
+#
+# Flag 6 is JSON5 (2) | JSONB (4). Measured on SQLite 3.46.1: `json_valid` says 0
+# for `{"k": NaN}` at flags 0/1/4/8 and 1 at flags 2/6, while `json_type`,
+# `json_extract` and `json_each` all read that same document happily. The guard
+# now matches what they accept instead of a stricter standard they do not apply.
+_JSON5 = 6
+
 
 class _GroupAxis(NamedTuple):
     kind: str  # "column" | "tag" | "meta"
@@ -2715,7 +2739,17 @@ def _resolve_group_axis(group_by: str) -> _GroupAxis:
                 f"Invalid group_by: {group_by!r}. '{GROUP_META_PREFIX}' needs a key, "
                 f"e.g. '{GROUP_META_PREFIX}found_by'"
             )
-        bad = sorted({c for c in key if c in _META_PATH_METACHARS})
+        # A CONTROL character is refused for the SAME reason a dot is, and NUL is
+        # the one that proves it (adversarial review). SQLite's path is a C
+        # string, so it TRUNCATES at a NUL: measured, `json_extract('{"a":"WRONG_A"}',
+        # '$.a' + chr(0) + 'b')` answers `'WRONG_A'` — the key `a\0b` silently
+        # reads the neighbouring key `a`, which is the dotted-key failure exactly.
+        # And a LEADING NUL leaves the bare path `'$.'`, which raises
+        # `sqlite3.OperationalError` — the environmental exception class the empty
+        # key is refused to avoid, escaping a domain function that promises
+        # `ValueError` and reaching the CLI as a raw traceback, since
+        # `domain_errors()` classifies neither.
+        bad = sorted({c for c in key if c in _META_PATH_METACHARS or ord(c) < 0x20})
         if bad:
             raise ValueError(
                 f"Invalid group_by: {group_by!r}. A meta key containing "
@@ -2787,7 +2821,7 @@ def _membership_sql(
         # change a shipped filter's behaviour on an unmeasured population.
         inner = (
             f"SELECT {cols}, tags FROM findings {where} {more} "
-            "CASE WHEN json_valid(tags) THEN json_type(tags) = 'array' ELSE 0 END"
+            f"CASE WHEN json_valid(tags, {_JSON5}) THEN json_type(tags) = 'array' ELSE 0 END"
         )
         return (
             "SELECT DISTINCT f.id AS id, f.severity AS severity, "
@@ -2826,11 +2860,11 @@ def _membership_sql(
     path = axis.meta_path
     return (
         "SELECT id, severity, occurrence_count, "
-        "CASE WHEN json_valid(meta) THEN (CASE json_type(meta, ?) "
+        f"CASE WHEN json_valid(meta, {_JSON5}) THEN (CASE json_type(meta, ?) "
         "WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' "
         "ELSE CAST(json_extract(meta, ?) AS TEXT) END) END AS group_key "
         f"FROM findings {where} {more} "
-        f"CASE WHEN json_valid(meta) THEN {_META_SCALAR_TEST} ELSE 0 END",
+        f"CASE WHEN json_valid(meta, {_JSON5}) THEN {_META_SCALAR_TEST} ELSE 0 END",
         [path, path, *params, path],
     )
 
@@ -2891,7 +2925,7 @@ def _axis_counts(
     }
     if axis.kind == "meta":
         counts["nonscalar_value_rows"] = conn.execute(
-            "SELECT COALESCE(SUM(CASE WHEN json_valid(meta) THEN "
+            f"SELECT COALESCE(SUM(CASE WHEN json_valid(meta, {_JSON5}) THEN "
             "(CASE WHEN json_type(meta, ?) IN ('object','array') THEN 1 ELSE 0 END) "
             f"ELSE 0 END), 0) AS c FROM findings {where}",
             [axis.meta_path, *params],
@@ -4112,6 +4146,28 @@ def register_tools(mcp, conn_factory) -> None:
                 )
                 if not deferred_ids:
                     # MUST NOT fall through as `ids=[]` — that reads as "no filter".
+                    #
+                    # The SHAPE has to follow `group_by`, and it did not until
+                    # adversarial review: this arm returned an ungrouped empty
+                    # page even when the caller asked for groups, so the four
+                    # disclosure keys this tool's own description promises on
+                    # every grouped response were simply absent. A promise with
+                    # the word "always" in it has to survive its own short
+                    # circuits (CB-62). The counts are all zero here honestly —
+                    # the population really is empty — which is a different
+                    # statement from "no such channel", exactly as `attention: []`
+                    # is a different statement from a missing `attention`.
+                    if group_by:
+                        _resolve_group_axis(group_by)  # refuse a bad axis first
+                        return {
+                            "grouped": True,
+                            "group_by": group_by,
+                            "groups": [],
+                            "population": 0,
+                            "ungrouped_rows": 0,
+                            "multi_group_rows": 0,
+                            "nonscalar_value_rows": 0,
+                        }
                     return {
                         "grouped": False,
                         "total": 0,
@@ -4672,7 +4728,16 @@ def register_cli(sub, commands) -> None:
 
         groups = result["groups"]
         if not groups:
-            print("(no findings)")
+            # "(no findings)" was a FALSE statement about the corpus the moment a
+            # non-partitioning axis existed, and the disclosure line was exactly
+            # what it skipped past (adversarial review). Measured on the live
+            # tracker: `stats --by meta:loc` printed "(no findings)" at exit 0
+            # over 172 cards, 169 of which carry that key — as a container, so
+            # none of them could be grouped by it. The sibling `query` verb told
+            # the truth on the same question, which is this unit's own subject:
+            # one decision, two hand-written readers, drifted.
+            print("(no groups)")
+            print(_group_disclosure(result))
             return
 
         header = f"{'':30s} {'critical':>8s} {'high':>8s} {'medium':>8s} {'low':>8s} {'total':>8s}"
