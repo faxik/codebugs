@@ -51,7 +51,9 @@ registers itself.
 from __future__ import annotations
 
 import inspect
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import Field
 
 # The annotation vocabulary. See the module docstring for why it is here and not
 # in the declaration file.
@@ -66,6 +68,21 @@ OPT_TEXT_OR_ARRAY = str | list | None
 #: Every tool in this package answers with a JSON object, so the return
 #: annotation is the generator's, not the declaration's.
 RESULT = dict[str, Any]
+
+#: What a declared `type=bool` parameter actually becomes (CB-154). Strictness
+#: is a property of the GENERATOR, not of the declaration grammar: a
+#: declaration writes the bare builtin `bool` (see the module docstring's
+#: "types that need neither spelling" note), and `_signature` below is the one
+#: place that widens it to the same `Annotated[bool, Field(strict=True)]` form
+#: every hand-written strict-bool MCP parameter in this package already uses
+#: (CB-151). Pydantic refuses any non-bool JSON scalar (1.0, "true", ...) at
+#: the validation boundary before the tool body runs, and — measured on T-52 —
+#: its JSON Schema is byte-identical to a plain `bool` field's, so no golden
+#: moves for a parameter that would have been declared `bool` either way. The
+#: declaration grammar gains no new syntax: an author who writes `type=bool`
+#: can no longer opt out of strictness, which is deliberate (CB-154 §3) — no
+#: declaration anywhere asks for a coercible bool today.
+STRICT_BOOL = Annotated[bool, Field(strict=True)]
 
 _REQUIRED = object()
 
@@ -148,6 +165,15 @@ def _signature(params) -> tuple[inspect.Signature, dict[str, Any]]:
     A parameter with no `default` key is REQUIRED — absence is the declaration,
     because a sentinel default written in the declaration file would be a value
     the grammar cannot express and the counter would book as data.
+
+    Every declared `bool` is widened to `STRICT_BOOL` here (CB-154) — the ONLY
+    place this happens, so a declaration can write the bare builtin and still
+    get the same coercion-proof contract every hand-written strict-bool MCP
+    parameter in this package carries. Compared by identity (`is bool`), not by
+    membership in a Union: a declaration file cannot spell a Union at all (see
+    the module docstring), so `spec["type"]` is always exactly one of the bare
+    builtins or one of the named vocabulary constants above, never something
+    `bool` merely appears inside.
     """
     seen: set[str] = set()
     sig_params: list[inspect.Parameter] = []
@@ -158,6 +184,8 @@ def _signature(params) -> tuple[inspect.Signature, dict[str, Any]]:
             raise DeclarationError(f"parameter {name!r} declared twice")
         seen.add(name)
         annotation = spec["type"]
+        if annotation is bool:
+            annotation = STRICT_BOOL
         default = spec.get("default", _REQUIRED)
         kind = inspect.Parameter.POSITIONAL_OR_KEYWORD
         if default is _REQUIRED:
