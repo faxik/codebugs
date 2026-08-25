@@ -2895,13 +2895,18 @@ def _axis_counts(
 def _group_cell(value: Any) -> str:
     """A group key as TEXT, for display only.
 
-    The five column axes could only ever yield text, so nothing needed this
-    before. `meta:<key>` can yield an integer or a float, because that is what
-    the value honestly is and the domain layer hands it back unflattened — which
-    then meets a `sorted()` that refuses to order an int against a str and an
-    `f"{grp:30s}"` that refuses to format an int at all. Stringifying belongs
-    here, at the presentation edge, and not in the query: collapsing 1 and "1"
-    into one group would be a claim about the data.
+    INSURANCE, and a mutant that deletes it SURVIVES — said that way round
+    because the first draft of this claimed it was load-bearing and no test can
+    discriminate it. Every group key IS already a string today, by three separate
+    mechanisms: the five column axes are `NOT NULL` TEXT columns, the tag axis
+    filters `je.type = 'text'`, and the meta axis CASTs. So `sorted()` and
+    `f"{grp:30s}"` would both be safe without this.
+
+    It stays because that invariant lives in three places and a sixth axis added
+    without a CAST would crash a shipped verb rather than misprint one row —
+    `sorted()` refuses to order an int against a str, and `f"{grp:30s}"` refuses
+    an int outright. One line at the presentation edge makes that unrepresentable
+    instead of requiring the next author to rediscover it.
     """
     return str(value)
 
@@ -4667,10 +4672,8 @@ def register_cli(sub, commands) -> None:
         print(header)
         print("-" * len(header))
         totals = {"critical": 0, "high": 0, "medium": 0, "low": 0, "total": 0}
-        # Keyed by TEXT, and both halves of that are load-bearing now that a
-        # group key can come from JSON: `json_extract` hands back a real integer
-        # for a numeric meta value, which `sorted()` refuses to order against a
-        # string and `f"{grp:30s}"` refuses to format at all.
+        # Keyed by TEXT. Insurance rather than a fix — see `_group_cell`, which
+        # explains why no test can discriminate it today and why it stays.
         for grp in sorted(groups, key=_group_cell):
             d = groups[grp]
             print(

@@ -3918,9 +3918,15 @@ class TestGroupingAxesCliContract:
         assert "a" in r.stdout
 
     def test_stats_renders_a_numeric_group_key(self, project):
-        """`f"{grp:30s}"` raises TypeError on the integer `json_extract` returns,
-        and `sorted()` over mixed types raises too — reachable the moment a meta
-        value is a number, which on the live tracker it is."""
+        """A COMPOSITION pin, and it is worth saying which mutants it does and
+        does not catch. `f"{grp:30s}"` raises TypeError on an integer and
+        `sorted()` refuses to order one against a string, so this verb crashes
+        outright if a numeric meta value ever reaches it as a number. TWO
+        independent mechanisms stop that — the `CAST` in the membership SQL and
+        `_group_cell` at the print — so removing EITHER one leaves this test
+        green, and only removing both turns it red. It is here because a crash in
+        a shipped verb is the failure, and neither mechanism alone is the
+        contract."""
         r = self._run(project, "stats", "--by", "meta:n")
         assert r.returncode == 0, r.stderr
         assert "Traceback" not in r.stderr
