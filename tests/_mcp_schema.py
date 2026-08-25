@@ -13,19 +13,32 @@ from contextlib import contextmanager
 from typing import Any
 
 from codebugs import db
-# ONE definition, and it lives in src now (CB-73): the server emits normalized
-# descriptions, so a second copy here would be one drift away from the gate and
-# the server disagreeing about the thing they exist to keep in agreement.
-# `normalize_description` is the whole composition (dedent + CB-156's Markdown
-# sections); call it rather than its steps, so this side cannot normalize a
-# different amount than the server does.
-from codebugs.server import normalize_description
 
-# Re-exported, not used here: `tests/test_boundary.py` asserts the golden is
-# dedent-stable with it, and `tests/test_server.py` pins that this module's name
-# IS the server's object — the CB-73 anti-drift check. Importing it here is what
-# makes that pin mean anything.
-from codebugs.server import dedent_docstring  # noqa: F401
+# THE PRODUCTION REGISTRAR, not a reconstruction of it (CB-164). This module used
+# to build a BARE `MCPServer`, register providers on it, and then call
+# `normalize_description` on the result by hand. The two happened to agree, so
+# the golden looked like a gate on what clients receive — and it was not one: the
+# snapshot went past the adapter and redid its work, so a defect IN the adapter
+# could never move the file. Measured by the T-63 manager on CB-156: with the
+# adapter reverted to dedent-only, "golden stayed GREEN". Worse, the shape was
+# already written down as a HAZARD in `surfacegen.py`'s docstring ("a generated
+# tool passing `description=` would therefore match the golden byte for byte and
+# still ship un-dedented text to clients — CB-73 resurrected behind the very gate
+# built to catch it") and guarded by nothing but a convention. Prose cannot
+# enforce prose. Registering through the same adapter the server uses makes the
+# snapshot a record of what actually goes on the wire, so a tool that passes its
+# own `description=` lands in the golden UNNORMALIZED and CB-156's gate in
+# `tests/test_boundary.py` names it.
+from codebugs.server import _NormalizedDescriptions
+
+# Re-exported, not called here — and BOTH of them are load-bearing as names.
+# `tests/test_boundary.py` asserts the golden is dedent-stable with
+# `dedent_docstring`, and `tests/test_server.py` pins that THIS module's two
+# attributes ARE the server's objects (the CB-73 anti-drift check: the gate and
+# the server must not be able to disagree about what "normalized" means).
+# `normalize_description` stopped having a call site here when the adapter took
+# the job over; deleting the import would silently disarm that pin.
+from codebugs.server import dedent_docstring, normalize_description  # noqa: F401
 
 
 @contextmanager
@@ -58,12 +71,19 @@ def collect_tool_schemas(providers=None) -> list[dict[str, Any]]:
             # tool-name collision across providers — which this gate therefore
             # cannot catch. Names are all distinct today, so the two agree.
             server = MCPServer(provider.name)
-            provider.register_fn(server, _conn)
+            # Through the adapter, exactly as `server.main` does — never onto the
+            # bare server with a normalization pass bolted on afterwards. See the
+            # import comment: doing it by hand is what made this snapshot a
+            # reconstruction of the wire instead of a record of it (CB-164).
+            provider.register_fn(_NormalizedDescriptions(server), _conn)
             for t in await server.list_tools():
                 all_tools.append(
                     {
                         "name": t.name,
-                        "description": normalize_description(t.description or ""),
+                        # Verbatim. Whatever normalization this description did or
+                        # did not receive is now a FACT about the registration
+                        # path, which is the only thing worth snapshotting.
+                        "description": t.description or "",
                         # mcp 2.0 renamed the attribute to input_schema; the wire
                         # field is still inputSchema, so the golden keeps that name.
                         "inputSchema": t.input_schema,

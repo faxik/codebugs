@@ -32,7 +32,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   than a list of arguments, and turning prose into bullets would invent a structure the
   text does not have.
 
-### Fixed
 - **`codebugs add` now records the revision the card was filed at (CB-144).** A card
   filed from the CLI used to store `reported_at_commit = NULL` forever: the automatic
   HEAD capture existed only in the MCP `add` / `batch_add` tools, and the CLI handler
