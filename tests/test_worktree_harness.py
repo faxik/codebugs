@@ -3219,7 +3219,13 @@ class TestCascadeMintGateReachabilityRecord:
 
     def test_the_reachability_record_is_present(self) -> None:
         text = self.REGISTRY.read_text(encoding="utf-8")
-        assert "CB-150" in text and "Т-65" in text, (
+        # T-70/CB-150: the bare tokens "CB-150" and "Т-65" alone are VACUOUS —
+        # both already occur in the registry before this record ever existed
+        # (the CB-145 paragraph mentions CB-150, and the allocation-line list
+        # further down mints and later corrects Т-65), so a check for the bare
+        # tokens passes even with the record deleted. Anchor on text unique to
+        # the record's own opening line instead.
+        assert "CB-150 / Т-65" in text and "предикат описывает канон" in text, (
             "the CB-150/T-65 reachability record is missing from the registry "
             "header — deleting it re-opens a question that was already answered "
             "by measurement (see tools/pre-commit-hook.sh's CASCADE-IDS MINT "
@@ -3244,6 +3250,9 @@ class TestCascadeMintGateReachabilityRecord:
             "someone else's hands."
         )
         assert os.access(script, os.X_OK), "the probe script is not executable"
+
+
+class TestClaimsWiringStructure:
     """The scripts must reach the claims ledger, not flip a status field.
 
     Before CB-58 the "claim" was `codebugs update --status in_progress`: no
