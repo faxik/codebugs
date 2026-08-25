@@ -3660,7 +3660,7 @@ class TestGroupingAxes:
         groups = {
             g["group_key"] for g in findings.query_findings(conn, group_by="meta:k")["groups"]
         }
-        assert groups == {42, "true", "false"}
+        assert groups == {"42", "true", "false"}
 
     def test_a_meta_key_with_a_dot_is_refused_and_names_the_card(self, conn):
         """SQLite reads `$.a.b` as a PATH: on `{"a.b": 1, "a": {"b": 2}}` it

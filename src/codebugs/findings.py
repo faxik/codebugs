@@ -2787,10 +2787,21 @@ def _membership_sql(
     # holding a space cannot reach the SQL text as syntax — and no `# noqa: S608`
     # is owed for it either.
     #
-    # A JSON boolean is rendered as the WORD: `json_extract` hands back 1/0 for
-    # true/false, which would silently merge `true` with the integer 1. The
-    # cheaper collision is chosen deliberately and it is the string spelled
-    # "true", which is rarer in a value column than the number 1.
+    # A GROUP KEY IS ALWAYS TEXT, and this is the only axis that could have made
+    # it otherwise — a column key is text and a tag is filtered to `type='text'`.
+    # `json_extract` would hand back a real integer for a numeric value, and the
+    # two readers would then disagree about it: `query` returns a LIST of groups
+    # and would keep 1 and "1" apart, while `get_stats` returns a dict KEYED by
+    # the group and JSON coerces an integer key to a string on the way out,
+    # merging them. One tool, two answers to one question, decided by which verb
+    # you called — so the key is cast once, here, and both readers see the same
+    # groups. The cost is the other collision, named rather than hidden: a
+    # numeric 1 and the string "1" share a group.
+    #
+    # A JSON boolean is spelled as the WORD for the same reason and it is NOT the
+    # cast doing it: `json_extract` answers 1/0 for true/false, so casting alone
+    # would merge `true` into the number 1 — a likelier neighbour than the string
+    # "true", which is what it collides with instead.
     #
     # PARAMETER ORDER IS TEXTUAL, as everywhere else in this file: two path
     # placeholders in the SELECT, then the caller's WHERE values, then one more
@@ -2801,21 +2812,23 @@ def _membership_sql(
         "SELECT id, severity, occurrence_count, "
         "CASE WHEN json_valid(meta) THEN (CASE json_type(meta, ?) "
         "WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' "
-        "ELSE json_extract(meta, ?) END) END AS group_key "
+        "ELSE CAST(json_extract(meta, ?) AS TEXT) END) END AS group_key "
         f"FROM findings {where} {more} "
         f"CASE WHEN json_valid(meta) THEN {_META_SCALAR_TEST} ELSE 0 END",
         [path, path, *params, path],
     )
 
 
-def _grouped_counts(
+def _axis_counts(
     conn: sqlite3.Connection,
     *,
     axis: _GroupAxis,
     conditions: list[str],
     params: list[Any],
-) -> tuple[list[sqlite3.Row], dict[str, int]]:
-    """Group counts plus the four numbers that keep them honest.
+    member_sql: str,
+    member_params: list[Any],
+) -> dict[str, int]:
+    """The four numbers that keep a set of group counts honest.
 
     ``population`` — rows matching the filters.
     ``ungrouped_rows`` — rows this axis put in NO group. Never derivable from the
@@ -2843,13 +2856,6 @@ def _grouped_counts(
     population = conn.execute(f"SELECT COUNT(*) AS c FROM findings {where}", params).fetchone()[
         "c"
     ]
-    member_sql, member_params = _membership_sql(axis, conditions=conditions, params=params)
-
-    rows = conn.execute(
-        f"SELECT group_key, COUNT(*) AS count FROM ({member_sql}) "
-        "GROUP BY group_key ORDER BY count DESC, group_key ASC",
-        member_params,
-    ).fetchall()
     spread = conn.execute(
         "SELECT COUNT(*) AS grouped, "
         "COALESCE(SUM(CASE WHEN n > 1 THEN 1 ELSE 0 END), 0) AS multi FROM "
@@ -2874,7 +2880,7 @@ def _grouped_counts(
             f"ELSE 0 END), 0) AS c FROM findings {where}",
             [axis.meta_path, *params],
         ).fetchone()["c"]
-    return rows, counts
+    return counts
 
 
 def _group_cell(value: Any) -> str:
@@ -3055,7 +3061,20 @@ def query_findings(
                 "resolve_anchors is not available with group_by: a grouped result "
                 "carries counts, not findings, so there is nothing to annotate"
             )
-        rows, counts = _grouped_counts(conn, axis=axis, conditions=conditions, params=params)
+        member_sql, member_params = _membership_sql(axis, conditions=conditions, params=params)
+        rows = conn.execute(
+            f"SELECT group_key, COUNT(*) AS count FROM ({member_sql}) "
+            "GROUP BY group_key ORDER BY count DESC, group_key ASC",
+            member_params,
+        ).fetchall()
+        counts = _axis_counts(
+            conn,
+            axis=axis,
+            conditions=conditions,
+            params=params,
+            member_sql=member_sql,
+            member_params=member_params,
+        )
         return {
             "grouped": True,
             "group_by": group_by,
@@ -3261,7 +3280,14 @@ def get_stats(
             ORDER BY grp, severity""",
         member_params,
     ).fetchall()
-    _, counts = _grouped_counts(conn, axis=axis, conditions=[], params=[])
+    counts = _axis_counts(
+        conn,
+        axis=axis,
+        conditions=[],
+        params=[],
+        member_sql=member_sql,
+        member_params=member_params,
+    )
 
     groups: dict[str, dict[str, int]] = {}
     for r in rows:

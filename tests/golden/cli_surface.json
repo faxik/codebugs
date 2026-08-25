@@ -3112,7 +3112,7 @@
         "default": null,
         "deprecated": false,
         "dest": "group_by",
-        "help": "Group by: file|category|severity|status|source",
+        "help": "Group by: severity|category|status|file|source|tag|meta:<key>. tag and meta:<key> do not partition \u2014 a card with two tags is in both groups and one with none is in no group; the footer reports both",
         "metavar": null,
         "nargs": null,
         "option_strings": [
@@ -4916,7 +4916,7 @@
         "default": null,
         "deprecated": false,
         "dest": "by",
-        "help": "Group by: severity|category|status|file|source",
+        "help": "Group by: severity|category|status|file|source|tag|meta:<key>. tag and meta:<key> do not partition \u2014 a card with two tags is cross-tabulated under both, so TOTAL exceeds the finding count",
         "metavar": null,
         "nargs": null,
         "option_strings": [
