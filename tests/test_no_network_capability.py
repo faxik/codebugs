@@ -9,9 +9,11 @@ rather than by a promise that ages.
 
 WHAT IS CHECKED, STATED AT THE WIDTH IT IS TRUE. This asserts a property of
 THIS PACKAGE'S OWN SOURCE: no module under ``src/codebugs/`` imports a name
-through which a socket can be opened, and none of them reaches for a module by
-computed name. It deliberately does NOT claim "codebugs cannot reach the
-network". Three limits, each named rather than discovered later:
+through which a socket can be opened, and none of them loads code from a string
+at run time (``__import__``, ``importlib.import_module``, ``exec``, ``eval``) —
+because the first check reads import STATEMENTS, and none of those four is one.
+It deliberately does NOT claim "codebugs cannot reach the network". Three
+limits, each named rather than discovered later:
 
 * The ``mcp`` dependency carries a network transport of its own (``server.py``
   says so — an HTTP mode exists; this project runs over stdio). A dependency's
@@ -154,22 +156,33 @@ def _capability_imports(rel: str, source: str) -> list[tuple[str, str]]:
     return hits
 
 
-def _dynamic_import_calls(rel: str, source: str) -> list[str]:
-    """``__import__`` / ``importlib.import_module`` -- imports a name gate cannot read.
+#: Ways to reach code by NAME at run time. Everything above reads import
+#: statements, and an import statement is the one thing none of these is.
+_UNREADABLE_BY_NAME = frozenset({"__import__", "exec", "eval"})
+_UNREADABLE_BY_ATTRIBUTE = frozenset({"import_module"})
 
-    Measured on the tree this landed on: zero occurrences in ``src/codebugs/``.
-    Without this, one computed import would walk straight past everything above
-    while the file kept claiming the package imports no network capability.
+
+def _reaches_code_by_name(rel: str, source: str) -> list[str]:
+    """``__import__`` / ``importlib.import_module`` / ``exec`` / ``eval``.
+
+    The check above reads import STATEMENTS. Each of these acquires a module
+    from a string instead, so one of them would walk straight past it while
+    this file kept reporting that the package imports no network capability —
+    a guard reporting clean because it could not look.
+
+    Measured on the tree this landed on: **zero** occurrences of any of the
+    four in ``src/codebugs/``, which is what makes refusing them free rather
+    than a rule somebody has to work around on day one.
     """
     found = []
     for node in ast.walk(ast.parse(source)):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if isinstance(func, ast.Name) and func.id == "__import__":
-            found.append(f"{rel}: __import__(...)")
-        elif isinstance(func, ast.Attribute) and func.attr == "import_module":
-            found.append(f"{rel}: importlib.import_module(...)")
+        if isinstance(func, ast.Name) and func.id in _UNREADABLE_BY_NAME:
+            found.append(f"{rel}: {func.id}(...)")
+        elif isinstance(func, ast.Attribute) and func.attr in _UNREADABLE_BY_ATTRIBUTE:
+            found.append(f"{rel}: ....{func.attr}(...)")
     return found
 
 
@@ -192,14 +205,15 @@ class TestNoNetworkCapability:
             "visible binding."
         )
 
-    def test_no_package_module_imports_by_computed_name(self):
+    def test_no_package_module_reaches_for_code_by_name(self):
         found = []
         for rel, path in _package_modules():
-            found.extend(_dynamic_import_calls(rel, path.read_text(encoding="utf-8")))
+            found.extend(_reaches_code_by_name(rel, path.read_text(encoding="utf-8")))
         assert not found, (
-            f"dynamic import(s) in src/codebugs/: {found}. A computed import is "
-            "invisible to the check above, so it would let the package acquire a "
-            "network capability while this gate still reported clean."
+            f"run-time code loading in src/codebugs/: {found}. The check above "
+            "reads import STATEMENTS, and none of these is one, so any of them "
+            "would let the package acquire a network capability while this gate "
+            "still reported clean."
         )
 
 
@@ -258,10 +272,21 @@ class TestTheGateItself:
             f"the module sweep did not find the package's own files: {sorted(names)[:5]}"
         )
 
-    def test_dynamic_import_detection_is_not_vacuous(self):
-        assert _dynamic_import_calls("victim.py", "importlib.import_module('socket')")
-        assert _dynamic_import_calls("victim.py", "__import__('socket')")
-        assert not _dynamic_import_calls("victim.py", "from codebugs import db")
+    @pytest.mark.parametrize(
+        "mutant",
+        [
+            "importlib.import_module('socket')",
+            "__import__('socket')",
+            "exec('import socket')",
+            "eval(\'__import__(\"socket\")\')",
+        ],
+    )
+    def test_run_time_code_loading_is_caught(self, mutant):
+        assert _reaches_code_by_name("victim.py", mutant), mutant
+
+    def test_that_detection_is_not_indiscriminate(self):
+        assert not _reaches_code_by_name("victim.py", "from codebugs import db")
+        assert not _reaches_code_by_name("victim.py", "conn.execute('SELECT 1')")
 
 
 class TestDeclaredExceptionsCannotRot:
