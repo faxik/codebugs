@@ -83,6 +83,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   had already been applied here, left out that an un-folded older tracker files a
   duplicate instead of counting a repeat report, and pointed at a "BREAKING" section
   that does not exist. The release itself is unchanged; only its description was wrong.
+- **Exporting to your own terminal's redirect no longer corrupts the file (CB-143).**
+  `codebugs export-csv /dev/stdout > out.csv` used to report success and leave a broken
+  CSV behind: the final "Exported N findings" confirmation landed on top of the file's
+  own header, silently, with no error and no warning. `reqs-export /dev/stdout > out.md`
+  carried the identical defect. The confirmation now goes to your terminal (stderr)
+  instead of into the file whenever the destination is your own standard output;
+  exporting to an ordinary file or path is unchanged.
 
 ## [0.2.0] — 2026-08-25
 
