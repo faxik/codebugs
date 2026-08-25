@@ -1192,6 +1192,24 @@ class TestListItemsBoundLimit:
         with pytest.raises(ValueError, match="must be an integer"):
             sweep.list_items(conn, sweep_id, limit=bad)
 
+    def test_the_limit_sits_after_the_filter_parameters(self, conn):
+        """A limit bound into the wrong POSITION still yields valid SQL that
+        answers with the wrong rows, and only a query carrying BOTH a filter and
+        a limit can see it. `params` here already holds sweep_id, then state,
+        then tag before the limit is appended.
+        """
+        sw = sweep.create_sweep(conn)
+        sweep.add_items(conn, sw["sweep_id"], ["a.py", "b.py", "c.py"], tags=["t1"])
+        sweep.add_items(conn, sw["sweep_id"], ["d.py"], tags=["t2"])
+
+        by_tag = sweep.list_items(conn, sw["sweep_id"], tag="t1", limit=2)["items"]
+        assert [i["item"] for i in by_tag] == ["a.py", "b.py"]
+
+        narrow = sweep.list_items(
+            conn, sw["sweep_id"], state="pending", tag="t2", limit=2
+        )["items"]
+        assert [i["item"] for i in narrow] == ["d.py"]
+
     def test_the_limit_is_bound_never_interpolated(self, tmp_path):
         c = sqlite3.connect(str(tmp_path / "t.db"), factory=RecordingConnection)
         c.row_factory = sqlite3.Row

@@ -1451,6 +1451,54 @@ class TestBoundRowLimit:
         c.close()
 
 
+class TestLimitParameterPosition:
+    """A bound parameter must sit at the FRAGMENT'S OWN TEXTUAL POSITION.
+
+    This is the half of CB-161 that no unfiltered test can see. `bench.query`
+    builds two parameter lists in one function — `run_params` for the matched-runs
+    statement and `res_params` for the results statement — and appends its date
+    filters to the first before the limit is added; `list_runs` appends its
+    benchmark filter first; `list_items` appends sweep, state and tag first. Bind
+    the limit into the wrong list, or splice it ahead of those, and the query is
+    still valid SQL that quietly answers with the wrong rows. Every case here
+    therefore carries a WHERE filter AND a limit; drop the filter and the test
+    goes blind, which is exactly how the analogous `rank_case_sql` splice bug
+    survived its own unfiltered tests.
+    """
+
+    @staticmethod
+    def _seed(conn):
+        for n, date in enumerate(
+            ("2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"), start=1
+        ):
+            bench.import_csv(
+                conn, benchmark="b", csv_data=SAMPLE_CSV, date=date, run_id=f"BE-{n}"
+            )
+        bench.import_csv(
+            conn, benchmark="other", csv_data=SAMPLE_CSV, date="2026-01-05", run_id="BE-9"
+        )
+
+    def test_query_honours_benchmark_and_dates_and_limit_together(self, conn):
+        self._seed(conn)
+        result = bench.query(
+            conn, benchmark="b", date_from="2026-01-02", date_to="2026-01-04", last_n=2
+        )
+        assert result["run_ids"] == ["BE-4", "BE-3"], result["run_ids"]
+
+    def test_list_runs_honours_the_benchmark_filter_and_the_limit_together(self, conn):
+        self._seed(conn)
+        result = bench.list_runs(conn, benchmark="b", last_n=2)
+        assert [r["run_id"] for r in result["runs"]] == ["BE-4", "BE-3"]
+
+    def test_list_runs_with_no_filter_still_limits_across_benchmarks(self, conn):
+        """The other arm: with no benchmark the limit is the ONLY parameter, so
+        this is what would break if the limit were bound only alongside a filter.
+        """
+        self._seed(conn)
+        result = bench.list_runs(conn, last_n=2)
+        assert [r["run_id"] for r in result["runs"]] == ["BE-9", "BE-4"]
+
+
 class TestUnroutableLastNIsRefused:
     """CB-162 — `last_n` without `benchmark` refuses instead of vanishing.
 
