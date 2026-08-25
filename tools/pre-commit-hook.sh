@@ -374,6 +374,24 @@ fi
 # this real gate over one corpus of registries and requires that the id the tool
 # hands out is exactly the id this gate accepts, and that its neighbours are
 # refused.
+#
+# CB-150 / T-65 (2026-08-25): THIS GATE JUDGES EXACTLY ONE TRANSITION — the two
+# `git show` calls below — and never walks history (`git log`/`git rev-list`/
+# `git merge-base` do not appear anywhere in this file). Measured: it refuses
+# 12 of the real historical transitions of the registry (all pre-dating this
+# gate; the set of refused indices has not grown as the registry has grown from
+# 52 to 73 transitions since T-47 first measured it — see the registry's own
+# header for the numbers and the reproducible probe script beside the T-65
+# brief). Every operation that could legitimately touch this registry today —
+# mass edit, line reorder, restore, multi-line mint, non-max+1, first mint,
+# merge (clean and conflicted; a merge never even reaches this function) — was
+# run for real in a throwaway repo, and NONE of them produces an achievable
+# FALSE refusal today. A baseline-SHA exemption (the shape `main-invariants.yml`
+# uses) was considered and rejected: it would exempt transitions before a named
+# commit, but this gate never judges a range — only the one transition being
+# committed right now, which is always after any baseline that has already
+# landed. Full reasoning and the reproducible measurement: registry header,
+# `.claude/plans/T65-cb150-probe.sh`.
 _CASCADE_REGISTRY=".claude/plans/CASCADE-IDS.md"
 _CASCADE_MINT_TOOL="tools/cascade-mint.sh"
 # One ERE alternation per family. The label used in messages is the first

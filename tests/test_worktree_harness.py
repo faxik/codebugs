@@ -3202,7 +3202,48 @@ class TestCascadeMintGateDeletion:
         assert TestCascadeMintGate._commit(repo).returncode == 0
 
 
-class TestClaimsWiringStructure:
+class TestCascadeMintGateReachabilityRecord:
+    """CB-150 / T-65: the registry header must keep RECORDING the reachability
+    measurement, not just have carried it once. This is a text pin, not a
+    behavioural one — T-65's whole point was that the gate's BEHAVIOUR stays
+    untouched (see TestCascadeMintGate / TestCascadeMintGateDeletion above,
+    still green) while the REACHABILITY of a false refusal gets measured and
+    written down so the next reader does not reopen the question.
+
+    Deliberately reads the real registry at REPO_ROOT, not a fixture: the
+    record this pins IS the registry's own header, and a fixture copy could
+    drift from it silently.
+    """
+
+    REGISTRY = REPO_ROOT / ".claude" / "plans" / "CASCADE-IDS.md"
+
+    def test_the_reachability_record_is_present(self) -> None:
+        text = self.REGISTRY.read_text(encoding="utf-8")
+        assert "CB-150" in text and "Т-65" in text, (
+            "the CB-150/T-65 reachability record is missing from the registry "
+            "header — deleting it re-opens a question that was already answered "
+            "by measurement (see tools/pre-commit-hook.sh's CASCADE-IDS MINT "
+            "GATE comment and .claude/plans/T65-cb150-probe.sh)."
+        )
+        assert "достижимых сегодня" in text and "НОЛЬ" in text, (
+            "the record must state the reachability VERDICT (zero achievable "
+            "false refusals today), not just mention the card id."
+        )
+        assert "baseline-SHA" in text or "Форма (b)" in text, (
+            "the record must say form (b) was considered and explicitly "
+            "rejected, with its reason — a rejected form left unnamed is "
+            "cheaper to silently reintroduce than one that is on record."
+        )
+
+    def test_the_probe_script_is_persisted_and_executable(self) -> None:
+        script = REPO_ROOT / ".claude" / "plans" / "T65-cb150-probe.sh"
+        assert script.is_file(), (
+            "the reproducible measurement script referenced by the registry "
+            "header and the gate comment must actually be checked in beside "
+            "them — a script only described in prose cannot be reproduced by "
+            "someone else's hands."
+        )
+        assert os.access(script, os.X_OK), "the probe script is not executable"
     """The scripts must reach the claims ledger, not flip a status field.
 
     Before CB-58 the "claim" was `codebugs update --status in_progress`: no
