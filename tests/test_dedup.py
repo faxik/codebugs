@@ -2138,3 +2138,27 @@ class TestDescriptionWriteGuard:
             )
         }
         assert callers == {"add_finding", "batch_add_findings"}
+
+    def test_an_indented_quotation_of_the_leak_is_not_cut(self, conn):
+        """Third false-positive oracle: the ONLY test that isolates column zero.
+
+        Found by mutation testing, not by review: relaxing `line.startswith("<")`
+        to `line.strip().startswith("<")` left the other eleven tests GREEN. The
+        CB-90 fixture cannot catch it, because that card is already refused by the
+        "everything after the marker is envelope" conjunct — its quotation is
+        followed by more prose. The shape that isolates column zero is a card
+        ENDING on an indented quotation, which is exactly what someone filing a
+        card about this very leak would write.
+
+        Prose quotes markup by INDENTING it. A leak is pasted at column zero:
+        measured, all 114 envelope lines across the 80 contaminated rows are
+        unindented, and CB-90's own quoted example is indented four spaces.
+        """
+        text = (
+            "Cards on the peer tracker end like this:\n\n"
+            "    ...end of the real prose.</description>\n"
+            '    <parameter name="source">claude'
+        )
+        r = _add(conn, desc=text)
+        assert r["description"] == text
+        assert r["stripped_description_tail"] is False
