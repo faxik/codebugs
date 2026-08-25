@@ -65,11 +65,22 @@ def collect_tool_schemas(providers=None) -> list[dict[str, Any]]:
     async def collect():
         all_tools = []
         for provider in providers:
-            # One server PER PROVIDER, deliberately. The real server (server.py)
-            # builds a single shared one; switching to that topology here would
-            # change the golden, and it is the only thing that would surface a
-            # tool-name collision across providers — which this gate therefore
-            # cannot catch. Names are all distinct today, so the two agree.
+            # One server PER PROVIDER, and the reason this comment used to give
+            # for it was false (CB-178). It said switching to the real server's
+            # single shared topology "would change the golden". Measured: it
+            # would not — 13 providers, 83 tools, every name distinct, and the
+            # two collections are byte-identical to each other and to the
+            # checked-in golden.
+            #
+            # What the split actually costs is the one state where the two
+            # topologies differ, and naming it is the point: on a tool-name
+            # collision across providers a shared server keeps ONE tool and logs
+            # "Tool already exists", while this collection records BOTH under the
+            # same name (measured: 1 entry vs 2). The snapshot would then show a
+            # surface the server does not serve, and a gate that compares one
+            # snapshot against another cannot name that as a collision. Changing
+            # the topology is out of scope here; the cost is stated rather than
+            # justified away.
             server = MCPServer(provider.name)
             # Through the adapter, exactly as `server.main` does — never onto the
             # bare server with a normalization pass bolted on afterwards. See the
