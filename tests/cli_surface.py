@@ -62,12 +62,23 @@ generic primitive applied one level up, not a second mechanism (brief §2).
 THE PRICE IS NAMED AND PAID FAIL-CLOSED. `_choices_actions` is a PRIVATE
 argparse attribute (leading underscore, undocumented), so a future Python or
 an alternative argparse implementation could rename, restructure or drop it.
-`_verb_actions_by_dest` refuses loudly — `MissingChoicesActionsError` — rather
+`_verb_actions_by_identity` refuses loudly — `MissingChoicesActionsError` — rather
 than silently falling back to a snapshot with no verb help, because that
-silent fallback is exactly the defect this module exists to close. The
-`dest`-as-verb-name assumption gets the same treatment: a verb present in
-`sub.choices` with no matching pseudo-action also refuses, rather than
-skipping the verb's `verb_action` key.
+silent fallback is exactly the defect this module exists to close. A verb
+present in `sub.choices` with no resolvable pseudo-action also refuses,
+rather than skipping the verb's `verb_action` key.
+
+A VERB REGISTERED WITH AN ALIAS FALSE-REFUSED HERE ONCE, AND THE FIX IS
+KEYED ON PARSER IDENTITY, NOT ON NAME (CB-168). `sub.add_parser("real",
+aliases=["alias1"])` is an ordinary, documented argparse feature that puts
+BOTH names in `sub.choices` behind exactly ONE pseudo-action, whose `.dest`
+is the primary name — an alias's name never equals any pseudo-action's
+`.dest`. Matching every name against `.dest` therefore refused every alias,
+with a message that blamed a broken naming assumption in a future argparse
+version rather than the ordinary feature that had actually fired. See
+`_verb_actions_by_identity`'s own docstring for the fix: group every name in
+`sub.choices` by the IDENTITY of the parser object it points to (an alias
+and its primary are the same object), not by name equality.
 """
 
 from __future__ import annotations
@@ -158,23 +169,51 @@ def _serialize_action(action: argparse.Action) -> dict[str, Any]:
 
 
 class MissingChoicesActionsError(Exception):
-    """Raised loudly when argparse cannot supply per-verb `help=` text (CB-152).
+    """Raised loudly when argparse cannot supply per-verb `help=` text (CB-152, CB-168).
 
     See the module docstring's "VERB-LEVEL `help=`" section for the mechanism.
     This exists so a Python/argparse change that removes or empties
-    `sub._choices_actions` — or breaks the `dest == verb name` assumption —
-    turns into a loud collection failure instead of a snapshot silently
-    missing verb help again, which is the exact defect CB-152 closes.
+    `sub._choices_actions` — or breaks the parser-identity relation this
+    snapshot now keys on (CB-168) — turns into a loud collection failure
+    instead of a snapshot silently missing verb help again, which is the
+    exact defect CB-152 closes.
     """
 
 
-def _verb_actions_by_dest(sub: argparse._SubParsersAction) -> dict[str, argparse.Action]:
-    """The `_ChoicesPseudoAction` for every verb in `sub`, keyed by `.dest`.
+def _verb_actions_by_identity(sub: argparse._SubParsersAction) -> dict[str, argparse.Action]:
+    """The `_ChoicesPseudoAction` covering every NAME in `sub.choices` — verb and alias.
 
-    Fail-closed on both ways this private mechanism could stop holding: the
-    list itself missing/empty while verbs exist, and a verb whose `dest`
-    does not match any pseudo-action's `dest` (the assumption this function
-    is built on).
+    KEYED ON PARSER-OBJECT IDENTITY, NOT ON `dest == name` (CB-168). The prior
+    version matched each verb by asserting its own name equalled some
+    pseudo-action's `.dest`, which holds for every plain verb but breaks for
+    an aliased one: `sub.add_parser("real", aliases=["alias1"])` puts BOTH
+    names in `sub.choices` (measured: `sub.choices is sub._name_parser_map`)
+    but registers exactly ONE pseudo-action, whose `.dest` is the PRIMARY
+    name ("real") — an alias's name never equals any pseudo-action's `.dest`,
+    so the old assumption refused every alias, loudly but for the wrong
+    reason (its message blamed a broken Python/argparse version when the
+    normal, documented `aliases=` feature had simply fired).
+
+    The relation this now uses is the one argparse itself encodes: an alias
+    and its primary parser are the SAME OBJECT
+    (`sub.choices["real"] is sub.choices["alias1"]`, verified on the pinned
+    interpreter). So: resolve each pseudo-action's `.dest` to its own parser
+    once, then group every name in `sub.choices` by that parser's identity.
+    An alias inherits its primary's pseudo-action exactly — same `dest`,
+    `metavar`, `help` — which is also this module's answer to what an alias
+    reports in the snapshot: byte-identical `verb_action` (and `actions`,
+    since it is literally the same subparser) to its primary, because
+    argparse does not itself distinguish them beyond the name key, and a
+    separate "alias_of" marker would encode information argparse does not
+    track.
+
+    Fail-closed on three ways this private mechanism could stop holding: the
+    list itself missing/empty while verbs exist; a pseudo-action whose
+    `.dest` names no parser in `sub.choices` at all (the dest-names-a-real-
+    verb assumption this is still built on, one level up from name
+    equality); and a name in `sub.choices` whose parser identity matches no
+    pseudo-action (the CB-152 case: a verb registered with no discoverable
+    help).
     """
     choices_actions = getattr(sub, "_choices_actions", None)
     if sub.choices and not choices_actions:
@@ -185,15 +224,29 @@ def _verb_actions_by_dest(sub: argparse._SubParsersAction) -> dict[str, argparse
             "each verb's own `help=` text (CB-152); refusing rather than "
             "silently producing a snapshot with no verb help."
         )
-    by_dest = {a.dest: a for a in choices_actions}
-    missing = sorted(set(sub.choices) - set(by_dest))
+    action_by_parser: dict[argparse.ArgumentParser, argparse.Action] = {}
+    for a in choices_actions:
+        parser = sub.choices.get(a.dest)
+        if parser is None:
+            raise MissingChoicesActionsError(
+                f"pseudo-action dest {a.dest!r} names no parser in sub.choices — "
+                "the dest-names-a-registered-verb assumption this snapshot "
+                "relies on (CB-152/CB-168) no longer holds."
+            )
+        action_by_parser[parser] = a
+    by_name = {
+        name: action_by_parser[parser]
+        for name, parser in sub.choices.items()
+        if parser in action_by_parser
+    }
+    missing = sorted(set(sub.choices) - set(by_name))
     if missing:
         raise MissingChoicesActionsError(
-            f"no pseudo-action in sub._choices_actions matches verb(s) {missing} "
-            "by `.dest` — the dest-equals-verb-name assumption this snapshot "
-            "relies on (CB-152) no longer holds."
+            f"no pseudo-action in sub._choices_actions resolves to verb(s) {missing} "
+            "via parser identity — the relation this snapshot relies on "
+            "(CB-168) no longer holds for these names."
         )
-    return by_dest
+    return by_name
 
 
 def collect_cli_surface(mode: str = "all") -> dict[str, Any]:
@@ -217,7 +270,7 @@ def collect_cli_surface(mode: str = "all") -> dict[str, Any]:
     """
     db._ensure_modules_loaded()
     _parser, sub, commands = cli.build_parser(mode=mode)
-    verb_actions = _verb_actions_by_dest(sub)
+    verb_actions = _verb_actions_by_identity(sub)
     verbs: dict[str, Any] = {}
     for name, subparser in sub.choices.items():
         verbs[name] = {
