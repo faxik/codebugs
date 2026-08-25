@@ -392,6 +392,20 @@ fi
 # committed right now, which is always after any baseline that has already
 # landed. Full reasoning and the reproducible measurement: registry header,
 # `.claude/plans/T65-cb150-probe.sh`.
+#
+# CB-150 / T-70 (2026-08-25) — THE ZERO ABOVE IS CONDITIONAL, NOT ABSOLUTE, and
+# an unconditional reading of it is WRONG. T-65 measured seven operations and
+# both merge forms ONE AT A TIME against a clean registry — never a SEQUENCE of
+# them. A COMPOSITION is reachable and does produce an achievable false
+# refusal: a branch mints a duplicate allocation line, `git merge --no-ff`
+# lands it on main (this gate never runs on a clean merge — see above), and the
+# next direct commit that tries to REPAIR the registry by removing the
+# duplicate is REFUSED, because from this gate's point of view a line is
+# missing that HEAD's blob still carries. That refused commit leaves the path
+# staged and a dirty main, which blocks `tools/worktree-finish.sh` in every
+# worktree of this clone (CB-130). This composition is filed as its own card,
+# **CB-181**, with an unchosen fix form and a mandatory archival replay before
+# it is touched — it is NOT fixed by this comment or by T-70.
 _CASCADE_REGISTRY=".claude/plans/CASCADE-IDS.md"
 _CASCADE_MINT_TOOL="tools/cascade-mint.sh"
 # One ERE alternation per family. The label used in messages is the first
