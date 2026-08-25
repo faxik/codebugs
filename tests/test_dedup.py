@@ -2162,3 +2162,70 @@ class TestDescriptionWriteGuard:
         r = _add(conn, desc=text)
         assert r["description"] == text
         assert r["stripped_description_tail"] is False
+
+    def test_the_cli_says_so_when_it_cuts_a_tail(self, tmp_project, monkeypatch, capsys):
+        """A silent strip is forbidden on EVERY surface, not just over the wire.
+
+        The CLI prints fixed lines rather than serializing the response, so the
+        response key alone does not reach a human — `_cmd_add` has to say it.
+        Found by adversarial review of this unit's own diff: the rule was stated
+        verbatim in a comment two lines above the meta-key note, and the tail was
+        cut silently anyway. It costs the caller MORE than the meta note does —
+        meta keys are machinery output the caller never authored, while a cut
+        tail removes bytes the caller typed.
+        """
+        import sys as _sys
+
+        monkeypatch.setattr(
+            _sys,
+            "argv",
+            [
+                "codebugs", "--tracker-root", tmp_project, "add",
+                "-s", "low", "-c", "bug", "-f", "a.py", "-d", CONTAMINATED,
+                "--new-category",
+            ],
+        )
+        from codebugs import cli
+
+        cli.main()
+        err = capsys.readouterr().err
+        assert "cut from the description" in err
+
+    def test_the_cli_is_silent_when_it_cuts_nothing(self, tmp_project, monkeypatch, capsys):
+        """The other half: the note must not fire on a clean description, or it
+        stops carrying information."""
+        import sys as _sys
+
+        monkeypatch.setattr(
+            _sys,
+            "argv",
+            [
+                "codebugs", "--tracker-root", tmp_project, "add",
+                "-s", "low", "-c", "bug", "-f", "a.py", "-d", CLEAN_PROSE,
+                "--new-category",
+            ],
+        )
+        from codebugs import cli
+
+        cli.main()
+        assert "cut from the description" not in capsys.readouterr().err
+
+    def test_a_fenced_quotation_of_the_leak_is_not_cut(self, conn):
+        """The second documented escape, pinned so the docstring's claim is true.
+
+        A card ending on a VERBATIM, unindented, unfenced quotation of the leak
+        is genuinely indistinguishable from the leak and IS cut — a residual this
+        unit names rather than papers over. Both ordinary ways of quoting markup
+        escape it, and this pins the fence: the closing ``` line does not start
+        with `<`, so the all-envelope conjunct refuses.
+        """
+        text = (
+            "Cards on the peer tracker end like this:\n\n"
+            "```\n"
+            "...end of the real prose.</description>\n"
+            '<parameter name="source">claude\n'
+            "```"
+        )
+        r = _add(conn, desc=text)
+        assert r["description"] == text
+        assert r["stripped_description_tail"] is False

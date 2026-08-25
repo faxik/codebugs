@@ -340,6 +340,19 @@ def _strip_tool_call_tail(description: str) -> tuple[str, bool]:
     vacuously-true "every line" over an empty set, the "guard reporting clean
     because it could not look" shape.
 
+    **The residual that CANNOT be closed here, named rather than claimed away.**
+    A card that ENDS on a verbatim, unindented, unfenced quotation of the leak is
+    cut, and the bytes lost are the evidence the card exists to record. Adversarial
+    review constructed two (76 and 38 bytes). This is not a hole to be patched: at
+    that point the quotation is BYTE-IDENTICAL to the thing it quotes — unmatched
+    closing tag, terminal, envelope at column zero — so no predicate reading only
+    the text can separate them, and any conjunct that refused it would refuse the
+    real leak too. Both ordinary ways of quoting markup already escape: a fenced
+    block ends on a ``` line and an indented block is not at column zero, and each
+    is verified by a test. The CLI note and the response key are what make the
+    cut recoverable when it does misfire — the caller is told, and still holds
+    the text it sent.
+
     Non-text input is returned unchanged. `description` has no type validation on
     this path today, and adding one here would be an unrequested behaviour change
     riding along inside a contamination fix (CB-82's lesson).
@@ -4672,6 +4685,20 @@ def register_cli(sub, commands) -> None:
             print(
                 f"Note: meta keys {stripped} were stripped before filing — they "
                 f"are identity-machinery output, not caller input.",
+                file=sys.stderr,
+            )
+        # CB-90, and it is the SAME rule as the note above rather than a second
+        # one: the description reaching the database is not the description that
+        # was typed, so the human surface has to say so or the strip is silent.
+        # This costs the caller MORE than the meta note does — meta keys are
+        # machinery output the caller never authored, whereas a cut tail takes
+        # away bytes the caller DID type — so if either note were optional it
+        # would be the other one. Adversarial review of this unit found it
+        # missing while the comment above already stated the rule verbatim.
+        if result.get("stripped_description_tail"):
+            print(
+                "Note: a trailing tool-call fragment was cut from the description "
+                "before filing — the stored text ends at the last line of your prose.",
                 file=sys.stderr,
             )
 
