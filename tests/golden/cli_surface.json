@@ -184,7 +184,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "add",
+      "help": "Add a finding",
+      "metavar": "add",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "anchor-recapture": {
     "actions": [
@@ -366,7 +380,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "anchor-recapture",
+      "help": "Rebuild stored location anchors (dry run by default)",
+      "metavar": "anchor-recapture",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "anchor-resolve": {
     "actions": [
@@ -500,7 +528,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "anchor-resolve",
+      "help": "Resolve stored location anchors to lines on HEAD",
+      "metavar": "anchor-resolve",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "bench-delete": {
     "actions": [
@@ -554,7 +596,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "bench-delete",
+      "help": "Delete a run or benchmark",
+      "metavar": "bench-delete",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "bench-import": {
     "actions": [
@@ -671,7 +727,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "bench-import",
+      "help": "Import benchmark results from CSV/JSON",
+      "metavar": "bench-import",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "bench-list": {
     "actions": [
@@ -723,7 +793,21 @@
         "type": "int"
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "bench-list",
+      "help": "List benchmarks or runs",
+      "metavar": "bench-list",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "bench-query": {
     "actions": [
@@ -893,7 +977,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "bench-query",
+      "help": "Query and pivot benchmark results",
+      "metavar": "bench-query",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "blockers-add": {
     "actions": [
@@ -995,7 +1093,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "blockers-add",
+      "help": "Defer an item by adding a blocker",
+      "metavar": "blockers-add",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "blockers-check": {
     "actions": [
@@ -1017,7 +1129,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "blockers-check",
+      "help": "Scan for actionable items",
+      "metavar": "blockers-check",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "blockers-query": {
     "actions": [
@@ -1107,7 +1233,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "blockers-query",
+      "help": "List blockers with filters",
+      "metavar": "blockers-query",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "blockers-resolve": {
     "actions": [
@@ -1160,7 +1300,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "blockers-resolve",
+      "help": "Cancel or resolve a blocker",
+      "metavar": "blockers-resolve",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "categories": {
     "actions": [
@@ -1182,7 +1336,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "categories",
+      "help": "List all categories with counts",
+      "metavar": "categories",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "categories-normalize": {
     "actions": [
@@ -1252,7 +1420,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "categories-normalize",
+      "help": "Fold stored category spellings to canon and re-key auto:v1 fingerprints (CB-61)",
+      "metavar": "categories-normalize",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "claim": {
     "actions": [
@@ -1404,7 +1586,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "claim",
+      "help": "Claim a finding or requirement",
+      "metavar": "claim",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "claims": {
     "actions": [
@@ -1513,7 +1709,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "claims",
+      "help": "List live claims",
+      "metavar": "claims",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "export-csv": {
     "actions": [
@@ -1549,7 +1759,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "export-csv",
+      "help": "Export findings to CSV",
+      "metavar": "export-csv",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "get": {
     "actions": [
@@ -1617,7 +1841,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "get",
+      "help": "Fetch a single finding by ID",
+      "metavar": "get",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "grouping-citations": {
     "actions": [
@@ -1767,7 +2005,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "grouping-citations",
+      "help": "Components of the hand-written CB-id reference graph (read-only; nodes above --hub-degree become anchors, not connectors)",
+      "metavar": "grouping-citations",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "grouping-filing": {
     "actions": [
@@ -1869,7 +2121,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "grouping-filing",
+      "help": "Split lineages (traversed against the whole tracker, not grouped) and sprint/plan filing events (read-only)",
+      "metavar": "grouping-filing",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "grouping-tags": {
     "actions": [
@@ -1987,7 +2253,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "grouping-tags",
+      "help": "Tag counts, co-occurrence (Jaccard beside raw count) and near-duplicate labels across tags AND categories (read-only)",
+      "metavar": "grouping-tags",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "import-csv": {
     "actions": [
@@ -2023,7 +2303,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "import-csv",
+      "help": "Import findings from CSV",
+      "metavar": "import-csv",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "init": {
     "actions": [
@@ -2075,7 +2369,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "init",
+      "help": "Create a .codebugs/ tracker in this directory",
+      "metavar": "init",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "merge-abandon": {
     "actions": [
@@ -2111,7 +2419,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "merge-abandon",
+      "help": "Abandon a stale session",
+      "metavar": "merge-abandon",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "merge-claims": {
     "actions": [
@@ -2147,7 +2469,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "merge-claims",
+      "help": "List claimed files for a session",
+      "metavar": "merge-claims",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "merge-sessions": {
     "actions": [
@@ -2185,7 +2521,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "merge-sessions",
+      "help": "List merge sessions",
+      "metavar": "merge-sessions",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "merge-status": {
     "actions": [
@@ -2207,7 +2557,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "merge-status",
+      "help": "Merge coordination dashboard",
+      "metavar": "merge-status",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "milestone-audit": {
     "actions": [
@@ -2293,7 +2657,21 @@
         "type": "int"
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "milestone-audit",
+      "help": "Show audit log",
+      "metavar": "milestone-audit",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "milestone-list": {
     "actions": [
@@ -2347,7 +2725,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "milestone-list",
+      "help": "List milestones",
+      "metavar": "milestone-list",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "milestone-mark-branch": {
     "actions": [
@@ -2397,7 +2789,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "milestone-mark-branch",
+      "help": "Flag an item as living on a feature branch (not yet integrated)",
+      "metavar": "milestone-mark-branch",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "milestone-mark-integrated": {
     "actions": [
@@ -2447,7 +2853,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "milestone-mark-integrated",
+      "help": "Mark an item as merged to main; clears branch-only, records done_commit",
+      "metavar": "milestone-mark-integrated",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "milestone-reconcile": {
     "actions": [
@@ -2485,7 +2905,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "milestone-reconcile",
+      "help": "Close stream items whose source finding/requirement is already terminal",
+      "metavar": "milestone-reconcile",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "milestone-status": {
     "actions": [
@@ -2521,7 +2955,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "milestone-status",
+      "help": "Show milestone rollup",
+      "metavar": "milestone-status",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "query": {
     "actions": [
@@ -2722,7 +3170,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "query",
+      "help": "Search findings",
+      "metavar": "query",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "recent": {
     "actions": [
@@ -2792,7 +3254,21 @@
         "type": "int"
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "recent",
+      "help": "Findings TOUCHED (updated_at) at or after a date \u2014 not a close-time query",
+      "metavar": "recent",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "relations-query": {
     "actions": [
@@ -2869,7 +3345,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "relations-query",
+      "help": "List relations touching a finding",
+      "metavar": "relations-query",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "relations-relate": {
     "actions": [
@@ -2972,7 +3462,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "relations-relate",
+      "help": "Assert a relation between two findings",
+      "metavar": "relations-relate",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "relations-unrelate": {
     "actions": [
@@ -3075,7 +3579,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "relations-unrelate",
+      "help": "Retract a relation (tombstone)",
+      "metavar": "relations-unrelate",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "release": {
     "actions": [
@@ -3211,7 +3729,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "release",
+      "help": "Release a claim",
+      "metavar": "release",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "reqs-add": {
     "actions": [
@@ -3360,7 +3892,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "reqs-add",
+      "help": "Add a requirement",
+      "metavar": "reqs-add",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "reqs-export": {
     "actions": [
@@ -3396,7 +3942,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "reqs-export",
+      "help": "Export as markdown",
+      "metavar": "reqs-export",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "reqs-get": {
     "actions": [
@@ -3432,7 +3992,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "reqs-get",
+      "help": "Fetch a single requirement by ID",
+      "metavar": "reqs-get",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "reqs-import": {
     "actions": [
@@ -3468,7 +4042,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "reqs-import",
+      "help": "Import from REQUIREMENTS.md",
+      "metavar": "reqs-import",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "reqs-query": {
     "actions": [
@@ -3602,7 +4190,21 @@
         "type": "int"
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "reqs-query",
+      "help": "Search requirements",
+      "metavar": "reqs-query",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "reqs-stats": {
     "actions": [
@@ -3640,7 +4242,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "reqs-stats",
+      "help": "Requirements cross-tab",
+      "metavar": "reqs-stats",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "reqs-summary": {
     "actions": [
@@ -3662,7 +4278,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "reqs-summary",
+      "help": "Requirements dashboard",
+      "metavar": "reqs-summary",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "reqs-update": {
     "actions": [
@@ -3778,7 +4408,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "reqs-update",
+      "help": "Update a requirement",
+      "metavar": "reqs-update",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "reqs-verify": {
     "actions": [
@@ -3832,7 +4476,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "reqs-verify",
+      "help": "Verify requirements for issues",
+      "metavar": "reqs-verify",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "resolve-trailers": {
     "actions": [
@@ -3902,7 +4560,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "resolve-trailers",
+      "help": "Flip findings from Resolves:/Tightens: commit trailers in a git range",
+      "metavar": "resolve-trailers",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "restore-csv": {
     "actions": [
@@ -3938,7 +4610,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "restore-csv",
+      "help": "Restore an export VERBATIM (ids, statuses, counts) into an empty tracker",
+      "metavar": "restore-csv",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "similarity-check": {
     "actions": [
@@ -4056,7 +4742,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "similarity-check",
+      "help": "Preview what the file-time annotator would stamp",
+      "metavar": "similarity-check",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "similarity-report": {
     "actions": [
@@ -4174,7 +4874,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "similarity-report",
+      "help": "Offline similarity grouping report (backfill dry run)",
+      "metavar": "similarity-report",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "stats": {
     "actions": [
@@ -4212,7 +4926,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "stats",
+      "help": "Cross-tabulated summary",
+      "metavar": "stats",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "summary": {
     "actions": [
@@ -4234,7 +4962,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "summary",
+      "help": "Dashboard overview",
+      "metavar": "summary",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "sweep-add": {
     "actions": [
@@ -4300,7 +5042,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "sweep-add",
+      "help": "Add items to a sweep",
+      "metavar": "sweep-add",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "sweep-archive": {
     "actions": [
@@ -4336,7 +5092,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "sweep-archive",
+      "help": "Archive an entire sweep",
+      "metavar": "sweep-archive",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "sweep-archive-items": {
     "actions": [
@@ -4434,7 +5204,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "sweep-archive-items",
+      "help": "Selectively archive entries (soft-delete)",
+      "metavar": "sweep-archive-items",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "sweep-create": {
     "actions": [
@@ -4536,7 +5320,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "sweep-create",
+      "help": "Create a new sweep",
+      "metavar": "sweep-create",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "sweep-list": {
     "actions": [
@@ -4574,7 +5372,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "sweep-list",
+      "help": "List sweeps",
+      "metavar": "sweep-list",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "sweep-list-items": {
     "actions": [
@@ -4690,7 +5502,21 @@
         "type": "int"
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "sweep-list-items",
+      "help": "List entries in a sweep",
+      "metavar": "sweep-list-items",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "sweep-mark": {
     "actions": [
@@ -4772,7 +5598,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "sweep-mark",
+      "help": "Mark items as processed or transition state",
+      "metavar": "sweep-mark",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "sweep-next": {
     "actions": [
@@ -4840,7 +5680,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "sweep-next",
+      "help": "Get next batch of unprocessed items",
+      "metavar": "sweep-next",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "sweep-status": {
     "actions": [
@@ -4876,7 +5730,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "sweep-status",
+      "help": "Sweep progress overview",
+      "metavar": "sweep-status",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "triage-inbox": {
     "actions": [
@@ -4914,7 +5782,21 @@
         "type": "int"
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "triage-inbox",
+      "help": "List items in stream/triage",
+      "metavar": "triage-inbox",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "update": {
     "actions": [
@@ -5015,7 +5897,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "update",
+      "help": "Update a finding",
+      "metavar": "update",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "where": {
     "actions": [
@@ -5037,7 +5933,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "where",
+      "help": "Show which tracker this process is bound to, and why",
+      "metavar": "where",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "who-holds": {
     "actions": [
@@ -5089,7 +5999,21 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "who-holds",
+      "help": "Who holds this entity",
+      "metavar": "who-holds",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   },
   "wip-status": {
     "actions": [
@@ -5127,6 +6051,20 @@
         "type": null
       }
     ],
-    "has_handler": true
+    "has_handler": true,
+    "verb_action": {
+      "action_class": "_ChoicesPseudoAction",
+      "choices": null,
+      "const": null,
+      "default": null,
+      "deprecated": false,
+      "dest": "wip-status",
+      "help": "Show agent capacity snapshot",
+      "metavar": "wip-status",
+      "nargs": null,
+      "option_strings": [],
+      "required": false,
+      "type": null
+    }
   }
 }
