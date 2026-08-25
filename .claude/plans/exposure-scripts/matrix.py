@@ -1046,7 +1046,18 @@ def main() -> int:
 
     if not args.check:
         print(BAR)
-        print("CAPABILITY x SURFACE MATRIX  --  HYBRID: registry for existence, AST for size")
+        if args.ast_only:
+            # CB-155: this banner used to print the HYBRID label unconditionally,
+            # so a report captured under --ast-only and read back later looked
+            # registry-truth when the registry half never ran -- the exact class
+            # of self-description lie CB-153 closed one level up (module
+            # docstring, "THE HYBRID BOUNDARY"). Name the actual mode instead.
+            print(
+                "CAPABILITY x SURFACE MATRIX  --  AST-ONLY: AST for existence and size "
+                "(pre-CB-153 behaviour)"
+            )
+        else:
+            print("CAPABILITY x SURFACE MATRIX  --  HYBRID: registry for existence, AST for size")
         print(BAR)
         print(f"root              : {args.root}")
         print(f"python            : {sys.version.split()[0]}")
@@ -1452,6 +1463,13 @@ def main() -> int:
     print(BAR)
     print("(sourced from tracker cards and CLAUDE.md, NOT from this script.")
     print(" A mismatch is either a script bug or a stale card -- both are findings.)")
+    if args.ast_only:
+        # CB-155's "заодно": under --ast-only the rows below judge AST-VISIBLE
+        # coverage (the registry half never ran), so a MISMATCH here does not
+        # mean what it means in the default hybrid run -- say so, rather than
+        # let a reader compare across modes as if they were the same claim.
+        print("(--ast-only: rows below judge AST-visible coverage only, not registry")
+        print(" coverage -- a MISMATCH here is not the same claim as in the hybrid run.)")
     print()
 
     def check(label: str, got: bool, want: bool, detail: str = "") -> None:

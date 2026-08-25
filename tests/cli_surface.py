@@ -39,6 +39,35 @@ module names no domain anywhere. `mode="all"` reaches every provider currently
 in `db.get_cli_providers()` — the registry, not an enumeration — so a domain
 that forgot to register, or one added tomorrow, changes this function's output
 without anyone updating a list here.
+
+VERB-LEVEL `help=` IS CAPTURED TOO, AND IT LIVES ON A DIFFERENT OBJECT THAN
+EVERY OTHER ATTRIBUTE HERE (CB-152). Everything above snapshots `subparser.
+_actions` — the arguments *inside* one verb. But the string a user sees next
+to the VERB'S OWN NAME in `codebugs --help` (`sub.add_parser("blockers-add",
+help="...")`) is not one of those actions: argparse stores it on a
+`_ChoicesPseudoAction` that lives on the PARENT parser's `sub._choices_actions`
+list, one per verb, keyed by `.dest` (measured equal to the verb name for
+every one of the 67 verbs here). Before this, removing or rewording a verb's
+own `help=` changed nothing this snapshot could see — CB-146's own motivating
+case, reopened as CB-152 because the snapshot it produced covered the
+argument level and missed this one.
+
+The fix reuses `_serialize_action` UNCHANGED on the pseudo-action, rather than
+inventing a second serializer: measured on 3.14.4, a `_ChoicesPseudoAction`'s
+`vars()` returns the SAME eleven keys as an ordinary action's `vars()` minus
+`container` (which `_serialize_action` already treats as the one structural
+exclusion, never present on a pseudo-action at all) — so this is the same
+generic primitive applied one level up, not a second mechanism (brief §2).
+
+THE PRICE IS NAMED AND PAID FAIL-CLOSED. `_choices_actions` is a PRIVATE
+argparse attribute (leading underscore, undocumented), so a future Python or
+an alternative argparse implementation could rename, restructure or drop it.
+`_verb_actions_by_dest` refuses loudly — `MissingChoicesActionsError` — rather
+than silently falling back to a snapshot with no verb help, because that
+silent fallback is exactly the defect this module exists to close. The
+`dest`-as-verb-name assumption gets the same treatment: a verb present in
+`sub.choices` with no matching pseudo-action also refuses, rather than
+skipping the verb's `verb_action` key.
 """
 
 from __future__ import annotations
@@ -128,27 +157,73 @@ def _serialize_action(action: argparse.Action) -> dict[str, Any]:
     return out
 
 
+class MissingChoicesActionsError(Exception):
+    """Raised loudly when argparse cannot supply per-verb `help=` text (CB-152).
+
+    See the module docstring's "VERB-LEVEL `help=`" section for the mechanism.
+    This exists so a Python/argparse change that removes or empties
+    `sub._choices_actions` — or breaks the `dest == verb name` assumption —
+    turns into a loud collection failure instead of a snapshot silently
+    missing verb help again, which is the exact defect CB-152 closes.
+    """
+
+
+def _verb_actions_by_dest(sub: argparse._SubParsersAction) -> dict[str, argparse.Action]:
+    """The `_ChoicesPseudoAction` for every verb in `sub`, keyed by `.dest`.
+
+    Fail-closed on both ways this private mechanism could stop holding: the
+    list itself missing/empty while verbs exist, and a verb whose `dest`
+    does not match any pseudo-action's `dest` (the assumption this function
+    is built on).
+    """
+    choices_actions = getattr(sub, "_choices_actions", None)
+    if sub.choices and not choices_actions:
+        raise MissingChoicesActionsError(
+            "sub._choices_actions is missing or empty while "
+            f"{len(sub.choices)} verb(s) are registered in sub.choices. This "
+            "snapshot depends on that PRIVATE argparse attribute to capture "
+            "each verb's own `help=` text (CB-152); refusing rather than "
+            "silently producing a snapshot with no verb help."
+        )
+    by_dest = {a.dest: a for a in choices_actions}
+    missing = sorted(set(sub.choices) - set(by_dest))
+    if missing:
+        raise MissingChoicesActionsError(
+            f"no pseudo-action in sub._choices_actions matches verb(s) {missing} "
+            "by `.dest` — the dest-equals-verb-name assumption this snapshot "
+            "relies on (CB-152) no longer holds."
+        )
+    return by_dest
+
+
 def collect_cli_surface(mode: str = "all") -> dict[str, Any]:
     """Every verb's every action, captured through the REAL `cli.py` path.
 
-    Returns `{verb_name: {"actions": [...], "has_handler": bool}}`. `actions`
-    is a LIST, in argparse's own insertion order — never sorted — so swapping
-    two `add_argument` calls within one verb changes the snapshot (brief
-    mutant #6); the top-level dict's key order does not matter, because the
-    golden is dumped with `sort_keys=True`, which only reorders dict keys and
-    never touches list element order.
+    Returns `{verb_name: {"actions": [...], "has_handler": bool,
+    "verb_action": {...}}}`. `actions` is a LIST, in argparse's own insertion
+    order — never sorted — so swapping two `add_argument` calls within one
+    verb changes the snapshot (brief mutant #6); the top-level dict's key
+    order does not matter, because the golden is dumped with `sort_keys=True`,
+    which only reorders dict keys and never touches list element order.
 
     `has_handler` catches a verb registered into `sub` (visible in `--help`)
     whose entry into `commands` was skipped — a verb that would raise `KeyError`
     the moment a user actually invoked it despite looking wired.
+
+    `verb_action` is the verb's own `_ChoicesPseudoAction`, serialized with the
+    same `_serialize_action` used for every argument action (CB-152) — the
+    string a user sees next to the verb's name in `codebugs --help`, and
+    everything else argparse tracks about it.
     """
     db._ensure_modules_loaded()
     _parser, sub, commands = cli.build_parser(mode=mode)
+    verb_actions = _verb_actions_by_dest(sub)
     verbs: dict[str, Any] = {}
     for name, subparser in sub.choices.items():
         verbs[name] = {
             "actions": [_serialize_action(a) for a in subparser._actions],
             "has_handler": name in commands,
+            "verb_action": _serialize_action(verb_actions[name]),
         }
     return verbs
 
