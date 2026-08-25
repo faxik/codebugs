@@ -65,7 +65,8 @@ def require_clean_tree(paths, *, cwd, allow_dirty=False):
         raise DirtyTreeError(
             f"could not ask git about {str_paths} ({exc!r}); refusing to "
             "mutate rather than assume the tree is clean. Commit or stash "
-            "these files first, or pass allow_dirty=True to proceed anyway."
+            "these files first, or pass --allow-dirty (or set "
+            "CODEBUGS_MUTATION_ALLOW_DIRTY=1) to proceed anyway."
         ) from exc
 
     if proc.returncode != 0:
@@ -73,7 +74,8 @@ def require_clean_tree(paths, *, cwd, allow_dirty=False):
             f"git status exited {proc.returncode} for {str_paths}: "
             f"{proc.stderr.strip()!r}; refusing to mutate rather than "
             "assume the tree is clean. Commit or stash these files first, "
-            "or pass allow_dirty=True to proceed anyway."
+            "or pass --allow-dirty (or set CODEBUGS_MUTATION_ALLOW_DIRTY=1) "
+            "to proceed anyway."
         )
 
     dirty = proc.stdout.strip()
@@ -81,7 +83,11 @@ def require_clean_tree(paths, *, cwd, allow_dirty=False):
         names = ", ".join(str(Path(p).name) for p in str_paths)
         raise DirtyTreeError(
             f"uncommitted changes in mutation target(s) [{names}]:\n{dirty}\n"
-            "Commit or stash them first, or pass allow_dirty=True to "
-            "proceed anyway — the probe would otherwise overwrite them and "
-            "the restore in `finally` would restore the WRONG original."
+            "Commit or stash them first, or pass --allow-dirty (or set "
+            "CODEBUGS_MUTATION_ALLOW_DIRTY=1) to proceed anyway — a run "
+            "that completes normally restores this content correctly, but "
+            "a run that gets interrupted (killed, timed out) leaves the "
+            "mutation stranded on disk, and cleaning that up with "
+            "`git checkout --` would discard these "
+            "uncommitted changes along with it."
         )
