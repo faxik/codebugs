@@ -3636,13 +3636,16 @@ class TestGroupingAxes:
         assert result["nonscalar_value_rows"] == 0
 
     def test_a_container_value_is_ungrouped_AND_named_separately(self, conn):
-        """Measured on the live tracker: the key `loc` is an object on 168 of 171
-        rows. Folding that into `ungrouped_rows` would report those rows as
-        carrying no value when they carry one this axis cannot rank."""
-        self._file(conn, "CB-1", meta={"loc": "a.py:1"})
-        self._file(conn, "CB-2", meta={"loc": {"file": "b.py"}})
-        self._file(conn, "CB-3", meta={"loc": ["c.py"]})
-        result = findings.query_findings(conn, group_by="meta:loc")
+        """Measured on the live tracker: `loc` is a container on 168 of 171 rows,
+        `forms_not_chosen` on 5, `sites` on 3. Folding those into
+        `ungrouped_rows` would report the rows as carrying no value when they
+        carry one this axis cannot rank. (The fixture uses `sites` rather than
+        `loc` because the anchor machinery consumes a `loc` key on the add
+        path — which is beside the point being pinned here.)"""
+        self._file(conn, "CB-1", meta={"sites": "a.py:1"})
+        self._file(conn, "CB-2", meta={"sites": {"file": "b.py"}})
+        self._file(conn, "CB-3", meta={"sites": ["c.py"]})
+        result = findings.query_findings(conn, group_by="meta:sites")
         assert [g["group_key"] for g in result["groups"]] == ["a.py:1"]
         assert result["ungrouped_rows"] == 2
         assert result["nonscalar_value_rows"] == 2

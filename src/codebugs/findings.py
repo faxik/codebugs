@@ -2627,6 +2627,291 @@ def _enrich_read(
     db.run_read_enrichers(conn, rows, resolve=resolve, project_dir=root)
 
 
+# --- Grouping axes (CB-62) ----------------------------------------------------
+#
+# ONE definition, read by `query_findings` AND `get_stats`. Before this the two
+# functions carried hand-written twins of the same set in DIFFERENT orders
+# (`file, category, severity, status, source` against `severity, category,
+# status, file, source`) — one decision written down twice, which is the shape
+# this work exists to remove. The order below is now the single one, and it is
+# what both the MCP descriptions and the CLI `help=` enumerate.
+#
+# TWO of the seven axes are NOT columns, and that is the whole design problem.
+# The five column axes PARTITION the population: every row lands in exactly one
+# group and the counts sum to the total. `tag` and `meta:<key>` do neither — a
+# row with two tags is in two groups, and a row carrying no value on the axis is
+# in none and would simply VANISH from the answer. Both facts are therefore
+# reported as numbers beside the groups rather than left for a reader to infer;
+# see `_grouped_counts`.
+GROUP_COLUMNS: tuple[str, ...] = ("severity", "category", "status", "file", "source")
+GROUP_TAG = "tag"
+GROUP_META_PREFIX = "meta:"
+
+# What the axis line says on every surface. Built from the tuple above so the
+# prose and the code cannot drift; both goldens snapshot the rendered text.
+GROUP_AXES_HELP = f"{', '.join(GROUP_COLUMNS)}, {GROUP_TAG}, {GROUP_META_PREFIX}<key>"
+
+# Characters SQLite's JSON-path grammar spends on structure. A key containing
+# one cannot be named by the naive `"$." + key` this package builds, and the
+# failure is SILENT: measured on SQLite 3.46, `json_extract('{"a.b":1,"a":{"b":2}}',
+# '$.a.b')` answers 2 — the NESTED value — while `'$."a.b"'` answers 1. So the
+# path a caller gets is not the key a caller asked for.
+#
+# `.` and `[` are measured broken (wrong value, or None). `"` measured WORKS
+# under naive concatenation on this version and is refused anyway, because it is
+# the grammar's own quoting character and NO escape form addresses it (`$."q\"k"`
+# and `$."q"k"` both answer None), so a key holding one could not be expressed by
+# the quoted spelling any eventual fix must use — refusing it now keeps that
+# decision free rather than shipping a behaviour that would have to break. `]` is
+# inert today and is refused with its partner so the rule is one sentence.
+#
+# THE COST IS REAL AND WAS MEASURED, not assumed away: of 313 distinct top-level
+# meta keys on the live tracker, TWO carry a dot (`misassigned_to_1.81`,
+# `misassigned_to_1.98`) and none carry the other three. Those two keys cannot be
+# grouped by until CB-167 decides the grammar.
+_META_PATH_METACHARS = '.["]'
+
+# What counts as a value this axis can rank. Positive enumeration on purpose:
+# `json_type` answers NULL for an absent key, and `NULL NOT IN (...)` is NULL,
+# which `WHERE` excludes — so a negative list would depend on NULL semantics to
+# get the common case right. A row is grouped only on affirmative proof, the same
+# shape `reconcile.live_source_clause` is built on.
+_META_SCALAR_TEST = "json_type(meta, ?) IN ('text','integer','real','true','false')"
+
+
+class _GroupAxis(NamedTuple):
+    kind: str  # "column" | "tag" | "meta"
+    column: str | None
+    meta_path: str | None
+
+
+def _resolve_group_axis(group_by: str) -> _GroupAxis:
+    """The one place a `group_by` value becomes an axis. Raises on anything else.
+
+    The refusal for a dotted key NAMES CB-167 deliberately. The two `meta_key`
+    FILTERS in `query_findings` build their path the same naive way and are left
+    untouched by this change: their consumer population — callers who may be
+    relying on the accidental nesting traversal — is NOT measured, and changing a
+    shipped surface on an unmeasured population is a worse trade than declaring
+    the asymmetry. So the divergence is stated at the one place a user meets it.
+    """
+    if group_by in GROUP_COLUMNS:
+        return _GroupAxis("column", group_by, None)
+    if group_by == GROUP_TAG:
+        return _GroupAxis("tag", None, None)
+    if group_by.startswith(GROUP_META_PREFIX):
+        key = group_by[len(GROUP_META_PREFIX) :]
+        if not key:
+            # `json_extract(doc, '$.')` raises OperationalError — an
+            # environmental exception class escaping a domain function, which no
+            # CLI arm classifies. Refuse as input, which is what it is.
+            raise ValueError(
+                f"Invalid group_by: {group_by!r}. '{GROUP_META_PREFIX}' needs a key, "
+                f"e.g. '{GROUP_META_PREFIX}found_by'"
+            )
+        bad = sorted({c for c in key if c in _META_PATH_METACHARS})
+        if bad:
+            raise ValueError(
+                f"Invalid group_by: {group_by!r}. A meta key containing "
+                f"{', '.join(repr(c) for c in bad)} cannot be told apart from a JSON "
+                "path here — SQLite reads '$.a.b' as a nested lookup, not as the "
+                "top-level key 'a.b' — and the grammar for naming such a key has not "
+                "been decided (CB-167). Every other key is groupable."
+            )
+        return _GroupAxis("meta", None, f"$.{key}")
+    raise ValueError(f"Invalid group_by: {group_by}. Must be one of ({GROUP_AXES_HELP})")
+
+
+def _membership_sql(
+    axis: _GroupAxis, *, conditions: list[str], params: list[Any]
+) -> tuple[str, list[Any]]:
+    """The relation `(finding, group_key)` — ONE row per row-in-a-group, per axis.
+
+    This is the single place an axis becomes SQL. Both readers aggregate over it
+    and neither knows how any axis works, so the two of them cannot disagree
+    about ordering, about NULL, or about what a duplicate means — which is the
+    failure that made two hand-written axis lists drift apart in the first place.
+    Reducing every axis to this one shape is also what lets `get_stats` keep its
+    severity cross-tab with no second implementation of anything.
+
+    THE TAG BRANCH IS A ROW-WISE TRANSLATION OF ``parse_tags`` and must stay one
+    — that function is what `grouping.tag_report` counts through, and two shipped
+    tools reporting different totals for one corpus is precisely the divergence
+    this axis was built to avoid. Line for line: `json_valid` for its
+    `except (TypeError, ValueError)`, `json_type(...) = 'array'` for its
+    `isinstance(tags, list)`, `je.type = 'text'` for its `isinstance(t, str)`,
+    and `SELECT DISTINCT` for the `set()` that deduplicates within a row.
+
+    That DISTINCT is load-bearing twice over. Without it `["a","a"]` would be
+    counted twice, disagreeing with `grouping-tags`; and the occurrence SUM in
+    `get_stats` would double for the same row while its finding count did not,
+    so one group's two numbers would describe different populations.
+    """
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    more = "AND" if conditions else "WHERE"
+    cols = "id, severity, occurrence_count"
+
+    if axis.kind == "column":
+        return (
+            f"SELECT {cols}, {axis.column} AS group_key FROM findings {where}",
+            list(params),
+        )
+
+    if axis.kind == "tag":
+        # The guard has to sit INSIDE the subquery: `json_each` RAISES on
+        # malformed JSON, aborting the whole report over one hand-edited row, and
+        # a WHERE clause in the outer query would be applied to rows the
+        # table-valued function has already been handed. Measured on SQLite 3.46
+        # that this survives the flattening the planner does anyway, and
+        # `test_a_row_whose_tags_do_not_parse_is_ungrouped_not_fatal` pins it.
+        #
+        # CASE, not `AND`: this file already records that SQLite documents CASE
+        # branches as lazy and does NOT promise `AND` short-circuits, which is
+        # why the `commit` filter above is written the same way.
+        #
+        # The subquery is also what keeps the caller's WHERE unambiguous —
+        # `json_each` exposes a column named `id`, so an unqualified `id = ?`
+        # beside it fails outright with "ambiguous column name" (measured).
+        inner = (
+            f"SELECT {cols}, tags FROM findings {where} {more} "
+            "CASE WHEN json_valid(tags) THEN json_type(tags) = 'array' ELSE 0 END"
+        )
+        return (
+            "SELECT DISTINCT f.id AS id, f.severity AS severity, "
+            "f.occurrence_count AS occurrence_count, je.value AS group_key "
+            f"FROM ({inner}) f JOIN json_each(f.tags) je WHERE je.type = 'text'",
+            list(params),
+        )
+
+    # axis.kind == "meta". The path is BOUND, never interpolated, so a key
+    # holding a space cannot reach the SQL text as syntax — and no `# noqa: S608`
+    # is owed for it either.
+    #
+    # A JSON boolean is rendered as the WORD: `json_extract` hands back 1/0 for
+    # true/false, which would silently merge `true` with the integer 1. The
+    # cheaper collision is chosen deliberately and it is the string spelled
+    # "true", which is rarer in a value column than the number 1.
+    #
+    # PARAMETER ORDER IS TEXTUAL, as everywhere else in this file: two path
+    # placeholders in the SELECT, then the caller's WHERE values, then one more
+    # for the scalar test. Prepending or appending as a block would bind the
+    # path to a filter's placeholder and corrupt exactly the FILTERED queries.
+    path = axis.meta_path
+    return (
+        "SELECT id, severity, occurrence_count, "
+        "CASE WHEN json_valid(meta) THEN (CASE json_type(meta, ?) "
+        "WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' "
+        "ELSE json_extract(meta, ?) END) END AS group_key "
+        f"FROM findings {where} {more} "
+        f"CASE WHEN json_valid(meta) THEN {_META_SCALAR_TEST} ELSE 0 END",
+        [path, path, *params, path],
+    )
+
+
+def _grouped_counts(
+    conn: sqlite3.Connection,
+    *,
+    axis: _GroupAxis,
+    conditions: list[str],
+    params: list[Any],
+) -> tuple[list[sqlite3.Row], dict[str, int]]:
+    """Group counts plus the four numbers that keep them honest.
+
+    ``population`` — rows matching the filters.
+    ``ungrouped_rows`` — rows this axis put in NO group. Never derivable from the
+        groups themselves, and "none" and "forty" are different facts about a
+        corpus, so it is reported even when it is zero.
+    ``multi_group_rows`` — rows this axis put in more than one group. Non-zero
+        means the counts DOUBLE-COUNT and do not sum to the population.
+    ``nonscalar_value_rows`` — a SUBSET of ``ungrouped_rows``: the key is present
+        but holds an object or an array, so there is no single value to group by.
+        It is named apart from the rest because on the live tracker the key `loc`
+        is a container on 168 of 171 rows, and reporting those as "carries no
+        value" would be a different, wrong statement about the corpus.
+
+    All four are present on every axis. `[]`-discipline, as `attention` and
+    `stripped_meta_keys` already do it here: a key that appears only sometimes
+    teaches a reader to test for presence, at which point presence encodes a
+    second fact.
+
+    The numbers come from the membership relation, never from a second reading of
+    the axis — so a change to how an axis groups moves the groups and the numbers
+    describing them together, and cannot leave one telling the truth about a
+    population the other no longer has.
+    """
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    population = conn.execute(f"SELECT COUNT(*) AS c FROM findings {where}", params).fetchone()[
+        "c"
+    ]
+    member_sql, member_params = _membership_sql(axis, conditions=conditions, params=params)
+
+    rows = conn.execute(
+        f"SELECT group_key, COUNT(*) AS count FROM ({member_sql}) "
+        "GROUP BY group_key ORDER BY count DESC, group_key ASC",
+        member_params,
+    ).fetchall()
+    spread = conn.execute(
+        "SELECT COUNT(*) AS grouped, "
+        "COALESCE(SUM(CASE WHEN n > 1 THEN 1 ELSE 0 END), 0) AS multi FROM "
+        f"(SELECT id, COUNT(*) AS n FROM ({member_sql}) GROUP BY id)",
+        member_params,
+    ).fetchone()
+
+    counts = {
+        "population": population,
+        # Absent, JSON null, malformed JSON and — for the meta axis — a container
+        # value all land here: one answer to one question, the row carries no
+        # value on this axis. Derived by subtraction from the SAME relation the
+        # groups came from, so no row can be counted in both or in neither.
+        "ungrouped_rows": population - spread["grouped"],
+        "multi_group_rows": spread["multi"],
+        "nonscalar_value_rows": 0,
+    }
+    if axis.kind == "meta":
+        counts["nonscalar_value_rows"] = conn.execute(
+            "SELECT COALESCE(SUM(CASE WHEN json_valid(meta) THEN "
+            "(CASE WHEN json_type(meta, ?) IN ('object','array') THEN 1 ELSE 0 END) "
+            f"ELSE 0 END), 0) AS c FROM findings {where}",
+            [axis.meta_path, *params],
+        ).fetchone()["c"]
+    return rows, counts
+
+
+def _group_cell(value: Any) -> str:
+    """A group key as TEXT, for display only.
+
+    The five column axes could only ever yield text, so nothing needed this
+    before. `meta:<key>` can yield an integer or a float, because that is what
+    the value honestly is and the domain layer hands it back unflattened — which
+    then meets a `sorted()` that refuses to order an int against a str and an
+    `f"{grp:30s}"` that refuses to format an int at all. Stringifying belongs
+    here, at the presentation edge, and not in the query: collapsing 1 and "1"
+    into one group would be a claim about the data.
+    """
+    return str(value)
+
+
+def _group_disclosure(result: dict[str, Any]) -> str:
+    """The line that stops right numbers from being read with the wrong meaning.
+
+    A reader who has only ever grouped by a column has learned, correctly and
+    silently, that the counts sum to the population. `tag` breaks that in both
+    directions at once — a two-tag card is counted twice and an untagged one not
+    at all — and the table alone cannot show either. Printed on EVERY grouped
+    result, including the column axes where all three numbers are zero: "no rows
+    without tags" and "forty rows without tags" are different facts about a
+    corpus, and a line that appears only when it is non-zero cannot report the
+    first one.
+    """
+    return (
+        f"population {result['population']} row(s) — "
+        f"{result['ungrouped_rows']} in no group, "
+        f"{result['multi_group_rows']} in more than one group, "
+        f"{result['nonscalar_value_rows']} with a non-scalar value; "
+        "the counts partition the population only while those three are 0."
+    )
+
+
 def query_findings(
     conn: sqlite3.Connection,
     *,
@@ -2760,13 +3045,7 @@ def query_findings(
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
     if group_by:
-        valid_groups = ("file", "category", "severity", "status", "source")
-        if group_by not in valid_groups:
-            raise ValueError(f"Invalid group_by: {group_by}. Must be one of {valid_groups}")
-        rows = conn.execute(
-            f"SELECT {group_by} as group_key, COUNT(*) as count FROM findings {where} GROUP BY {group_by} ORDER BY count DESC",
-            params,
-        ).fetchall()
+        axis = _resolve_group_axis(group_by)
         if resolve_anchors:
             # CB-28: forward where a path exists, refuse only where none could.
             # A grouped result has no rows to annotate, so nothing here can
@@ -2776,7 +3055,13 @@ def query_findings(
                 "resolve_anchors is not available with group_by: a grouped result "
                 "carries counts, not findings, so there is nothing to annotate"
             )
-        return {"grouped": True, "group_by": group_by, "groups": [dict(r) for r in rows]}
+        rows, counts = _grouped_counts(conn, axis=axis, conditions=conditions, params=params)
+        return {
+            "grouped": True,
+            "group_by": group_by,
+            "groups": [dict(r) for r in rows],
+            **counts,
+        }
 
     count = conn.execute(f"SELECT COUNT(*) as c FROM findings {where}", params).fetchone()["c"]
 
@@ -2954,18 +3239,29 @@ def get_stats(
     *,
     group_by: str = "severity",
 ) -> dict[str, Any]:
-    """Aggregated counts. Returns cross-tabulated stats."""
-    valid_groups = ("severity", "category", "status", "file", "source")
-    if group_by not in valid_groups:
-        raise ValueError(f"Invalid group_by: {group_by}. Must be one of {valid_groups}")
+    """Aggregated counts. Returns cross-tabulated stats.
+
+    The axis vocabulary is `_resolve_group_axis`'s, shared byte for byte with
+    `query_findings` — the two used to carry hand-written twins of one set in
+    different orders, with nothing holding them together.
+
+    The three disclosure numbers ride along for the same reason they do there:
+    with `tag` on the axis the printed TOTAL exceeds the number of findings,
+    because a two-tag card is counted under both of its tags. That is not an
+    error, and a reader has no way to know it from the table alone.
+    """
+    axis = _resolve_group_axis(group_by)
+    member_sql, member_params = _membership_sql(axis, conditions=[], params=[])
 
     rows = conn.execute(
-        f"""SELECT {group_by} as grp, severity, COUNT(*) as cnt,
+        f"""SELECT group_key as grp, severity, COUNT(*) as cnt,
                    SUM(occurrence_count) as occ
-            FROM findings
+            FROM ({member_sql})
             GROUP BY grp, severity
-            ORDER BY grp, severity"""
+            ORDER BY grp, severity""",
+        member_params,
     ).fetchall()
+    _, counts = _grouped_counts(conn, axis=axis, conditions=[], params=[])
 
     groups: dict[str, dict[str, int]] = {}
     for r in rows:
@@ -2985,7 +3281,7 @@ def get_stats(
         groups[grp]["total"] += r["cnt"]
         groups[grp]["occurrences"] += r["occ"]
 
-    return {"group_by": group_by, "groups": groups}
+    return {"group_by": group_by, "groups": groups, **counts}
 
 
 def get_summary(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -3721,9 +4017,25 @@ def register_tools(mcp, conn_factory) -> None:
                  the first-observed or manually assigned release ref (BT-4);
                  per-occurrence refs in the ring are not consulted.
             fingerprint: Filter by identity fingerprint (exact match)
-            group_by: Group results by: file, category, severity, status, source
-                      (source groups count FIRST reporters — the column is
-                      frozen at first report)
+            group_by: Group results by: severity, category, status, file, source,
+                      tag, meta:<key> (source groups count FIRST reporters — the
+                      column is frozen at first report).
+                      `tag` and `meta:<key>` do NOT partition the population: a
+                      card with two tags is counted under both, and a card
+                      carrying no value on the axis is in no group at all. The
+                      response therefore always carries `population`,
+                      `ungrouped_rows`, `multi_group_rows` and
+                      `nonscalar_value_rows` beside `groups`; the counts sum to
+                      the population only while the last three are 0.
+                      `meta:<key>` reads the AUTHORED top-level meta, like
+                      `meta_key` does, and a key holding `.`, `[`, `]` or `"` is
+                      REFUSED — SQLite cannot tell such a name from a path
+                      (CB-167). A key that is absent, JSON null, or holds an
+                      object/array is ungrouped rather than invented.
+                      OVERLAPS `grouping_tags` DELIBERATELY and differently:
+                      that tool is a tag census with pair co-occurrence over
+                      `status`/`category` only; this is a distribution that
+                      composes with every filter on this tool.
             limit: Max results (default 100)
             offset: Pagination offset
             resolve_anchors: Resolve each result's location anchor against the
@@ -3860,9 +4172,16 @@ def register_tools(mcp, conn_factory) -> None:
         """Aggregated cross-tabulated counts.
 
         Args:
-            group_by: Group by: severity, category, status, file, source
-                      (source buckets count FIRST reporters — the column is
-                      frozen at first report, BT-4)
+            group_by: Group by: severity, category, status, file, source, tag,
+                      meta:<key> (source buckets count FIRST reporters — the
+                      column is frozen at first report, BT-4).
+                      With `tag` or `meta:<key>` the rows do NOT partition: a
+                      card with two tags is cross-tabulated under both of them,
+                      so the totals exceed the number of findings. `population`,
+                      `ungrouped_rows`, `multi_group_rows` and
+                      `nonscalar_value_rows` ride beside `groups` on every axis
+                      and are what make that readable. A meta key holding `.`,
+                      `[`, `]` or `"` is refused (CB-167).
         """
         with conn_factory() as conn:
             return get_stats(conn, group_by=group_by)
@@ -4170,8 +4489,12 @@ def register_cli(sub, commands) -> None:
             conn.close()
 
         if result.get("grouped"):
-            data = [{"group": r["group_key"], "count": str(r["count"])} for r in result["groups"]]
+            data = [
+                {"group": _group_cell(r["group_key"]), "count": str(r["count"])}
+                for r in result["groups"]
+            ]
             print(format_table(data, ["group", "count"]))
+            print(_group_disclosure(result))
         else:
             findings = result["findings"]
             if not findings:
@@ -4280,9 +4603,25 @@ def register_cli(sub, commands) -> None:
         print(json.dumps(result, indent=2, sort_keys=True))
 
     def _cmd_stats(args: argparse.Namespace) -> None:
+        from codebugs.cli import domain_errors
+
         conn = db.connect()
-        result = get_stats(conn, group_by=args.by or "severity")
-        conn.close()
+        try:
+            # CB-170. This handler used to call `get_stats` bare and close the
+            # connection on the line after, outside any `finally` — so an
+            # unknown `--by` printed a raw traceback AND leaked the connection,
+            # while the sibling `_cmd_query` in this same file had closed both
+            # halves back at CB-19. Fixed here rather than left for the sweep
+            # because this change is what makes an unknown axis MORE likely: the
+            # vocabulary just grew a `meta:<key>` form that refuses on a key
+            # a caller can perfectly reasonably type.
+            #
+            # Ordering is `domain_errors()`': json.JSONDecodeError re-raises
+            # first, and only then does bad input print one line and exit 1.
+            with domain_errors():
+                result = get_stats(conn, group_by=args.by or "severity")
+        finally:
+            conn.close()
 
         groups = result["groups"]
         if not groups:
@@ -4293,10 +4632,14 @@ def register_cli(sub, commands) -> None:
         print(header)
         print("-" * len(header))
         totals = {"critical": 0, "high": 0, "medium": 0, "low": 0, "total": 0}
-        for grp in sorted(groups):
+        # Keyed by TEXT, and both halves of that are load-bearing now that a
+        # group key can come from JSON: `json_extract` hands back a real integer
+        # for a numeric meta value, which `sorted()` refuses to order against a
+        # string and `f"{grp:30s}"` refuses to format at all.
+        for grp in sorted(groups, key=_group_cell):
             d = groups[grp]
             print(
-                f"{grp:30s} {d['critical']:>8d} {d['high']:>8d} {d['medium']:>8d} {d['low']:>8d} {d['total']:>8d}"
+                f"{_group_cell(grp):30s} {d['critical']:>8d} {d['high']:>8d} {d['medium']:>8d} {d['low']:>8d} {d['total']:>8d}"
             )
             for k in totals:
                 totals[k] += d[k]
@@ -4304,6 +4647,7 @@ def register_cli(sub, commands) -> None:
         print(
             f"{'TOTAL':30s} {totals['critical']:>8d} {totals['high']:>8d} {totals['medium']:>8d} {totals['low']:>8d} {totals['total']:>8d}"
         )
+        print(_group_disclosure(result))
 
     def _cmd_summary(args: argparse.Namespace) -> None:
         conn = db.connect()
@@ -4625,7 +4969,14 @@ def register_cli(sub, commands) -> None:
     p.add_argument("--file", "-f", help="Filter by file (substring)")
     p.add_argument("--source", help="Filter by source")
     p.add_argument("--fingerprint", help="Filter by identity fingerprint (exact)")
-    p.add_argument("--group-by", help="Group by: file|category|severity|status|source")
+    p.add_argument(
+        "--group-by",
+        help=(
+            "Group by: severity|category|status|file|source|tag|meta:<key>. "
+            "tag and meta:<key> do not partition — a card with two tags is in "
+            "both groups and one with none is in no group; the footer reports both"
+        ),
+    )
     p.add_argument("--limit", type=int, help="Max results")
     p.add_argument(
         "--resolve-anchors",
@@ -4700,7 +5051,14 @@ def register_cli(sub, commands) -> None:
     )
 
     p = sub.add_parser("stats", help="Cross-tabulated summary")
-    p.add_argument("--by", help="Group by: severity|category|status|file|source")
+    p.add_argument(
+        "--by",
+        help=(
+            "Group by: severity|category|status|file|source|tag|meta:<key>. "
+            "tag and meta:<key> do not partition — a card with two tags is "
+            "cross-tabulated under both, so TOTAL exceeds the finding count"
+        ),
+    )
 
     sub.add_parser("summary", help="Dashboard overview")
     sub.add_parser("categories", help="List all categories with counts")
