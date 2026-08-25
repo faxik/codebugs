@@ -395,11 +395,20 @@ class TestInterpreterIndependentDescriptions:
     def test_the_adapter_emits_the_whole_composition_not_just_the_dedent(self):
         """The seam-level mutant this class exists to catch (CB-156).
 
-        The wire golden is generated through `tests/_mcp_schema`, NOT through this
-        adapter, so a mutant that reverted the adapter alone to `dedent_docstring`
-        would leave the golden gate perfectly green while every real client went
-        back to receiving a run-on paragraph. That is a gate that cannot fire, so
-        the adapter's own output is asserted here."""
+        A mutant that reverts the adapter alone to `dedent_docstring` sends every
+        real client back to receiving a run-on paragraph. Since CB-164 the wire
+        golden is generated THROUGH this adapter, so that mutant now turns
+        `TestMcpWireSchema::test_schema_matches_golden` red as well — measured by
+        running it, 74 of the 83 snapshotted tools drift and every one of them
+        differs on `description`.
+
+        So this is no longer the only thing standing between that mutant and a
+        green suite, and this docstring used to claim it was ("would leave the
+        golden gate perfectly green" — CB-178). It is kept for what the golden
+        gate cannot say: a snapshot comparison fails as "the snapshot moved,
+        regenerate if intentional", which routes the reader towards regenerating,
+        while this asserts the adapter's own output against `normalize_description`
+        and names the seam that broke."""
         srv = MCPServer("composed")
         self._register(server._NormalizedDescriptions(srv), TestMarkdownSections.GOOGLE)
         emitted = asyncio.run(srv.list_tools())[0].description

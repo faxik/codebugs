@@ -151,10 +151,18 @@ def markdown_sections(doc: str) -> str:
 def normalize_description(doc: str) -> str:
     """The ONE composition of every normalization a description gets before the wire.
 
-    `_NormalizedDescriptions` (the server) and `tests/_mcp_schema` (the generator
-    and the gate) both call THIS, never the two steps in sequence, so the three
-    cannot drift about what "normalized" means — the same reason `dedent_docstring`
-    has exactly one definition (CB-73).
+    `_NormalizedDescriptions` is the only caller on the production path, and the
+    render gate in `tests/test_boundary.py` calls THIS same function to judge what
+    it finds — never the two steps in sequence — so the server and the gate cannot
+    drift about what "normalized" means. Same reason `dedent_docstring` has exactly
+    one definition (CB-73).
+
+    The golden GENERATOR gets this composition BY CONSTRUCTION rather than by a
+    call of its own: since CB-164 `tests/_mcp_schema` registers through the adapter
+    below and imports this name only so the two objects' identity can be pinned
+    (`tests/test_server.py::test_the_normalizer_has_exactly_one_definition`). This
+    docstring used to say the generator called this function; that stopped being
+    true when the adapter took the job over (CB-178).
     """
     return markdown_sections(dedent_docstring(doc))
 

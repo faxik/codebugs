@@ -589,10 +589,13 @@ class TestMcpWireSchema:
         The collector used to build a BARE server and apply `normalize_description`
         by hand, so the snapshot was a RECONSTRUCTION of the wire rather than a
         record of it. `src/codebugs/surfacegen.py` already named the hazard that
-        follows, and guarded it with nothing but a convention: "A generated tool
-        passing `description=` would therefore match the golden byte for byte and
-        still ship un-dedented text to clients — CB-73 resurrected behind the very
-        gate built to catch it."
+        follows, and guarded it with nothing but a convention. Its docstring read,
+        until CB-178 brought it up to date: "A generated tool passing
+        `description=` would therefore match the golden byte for byte and still
+        ship un-dedented text to clients — CB-73 resurrected behind the very gate
+        built to catch it." That sentence is quoted here as the hazard's original
+        statement; it is deliberately no longer the text in that file, because
+        this test is what makes it false.
 
         Registering through the production adapter closes it. An explicit
         `description=` WINS over `__doc__` by `_NormalizedDescriptions`' own

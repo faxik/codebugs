@@ -35,13 +35,23 @@ A stringly-typed declaration would also hand the prose counter a payload of
 "code written inside string literals", which is precisely the accounting the
 pilot must not do.
 
-WHY `__doc__` AND NOT `description=`. `server._NormalizedDescriptions` dedents a
-tool's docstring only when the caller passes no `description=`, while the golden
-collector registers on a RAW server and dedents by itself. A generated tool
-passing `description=` would therefore match the golden byte for byte and still
-ship un-dedented text to clients — CB-73 resurrected behind the very gate built
-to catch it. So the emitter sets `__doc__` (and `__name__`, which the golden
-reads through `inputSchema.title`) and passes no description.
+WHY `__doc__` AND NOT `description=`. `server._NormalizedDescriptions` normalizes
+a tool's docstring only when the caller passes no `description=` — an explicit one
+WINS, by the adapter's own documented rule, because a caller that passed one has
+already said what the client should see. A generated tool passing `description=`
+would therefore ship un-normalized text to clients, so the emitter sets `__doc__`
+(and `__name__`, which the golden reads through `inputSchema.title`) and passes no
+description.
+
+WHAT ENFORCES THAT, because until CB-164 the answer was "this paragraph, and
+nothing else". The golden collector no longer builds its own bare server and
+normalizes by hand: `tests/_mcp_schema.py` registers through the production
+adapter, so such a tool now lands in `tests/golden/mcp_schema.json` UNNORMALIZED
+— the snapshot moves and CB-156's render gate names it as a violation. Pinned by
+`test_a_tool_passing_its_own_description_lands_in_the_snapshot_unnormalized`, in
+`tests/test_boundary.py::TestMcpWireSchema`, which quotes what this paragraph
+asserted before CB-178 and is the reason that assertion is now false: it promised
+such a tool would pass the gate UNNOTICED, and it is noticed.
 
 SCOPE. Generic: it knows nothing about any domain module, holds no schema, and
 issues no queries of any kind. It is imported BY a domain module and never
