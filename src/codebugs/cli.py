@@ -10,7 +10,7 @@ import signal
 import sqlite3
 import sys
 
-from codebugs import db
+from codebugs import __version__, db
 
 
 @contextlib.contextmanager
@@ -199,6 +199,19 @@ def build_parser(mode: str = "all", pre_parser: argparse.ArgumentParser | None =
             "files your first finding; `codebugs query` or `codebugs recent` shows "
             "what is already in the queue."
         ),
+    )
+    # Declared on the TOP-LEVEL parser this function builds, not on `pre_parser`
+    # (the `--mode`/`--tracker-root` parent). `pre_parser` is shared with every
+    # subcommand via `parents=[...]`, so an option declared there answers for
+    # every verb — `codebugs add --version` would print the version for a verb
+    # that never declared it. It also cannot be declared on both: argparse
+    # raises an option-string conflict when a parent and its child both define
+    # the same flag.
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"codebugs {__version__}",
+        help="Show the version of this codebugs and exit",
     )
     sub = parser.add_subparsers(dest="command")
     commands: dict = {}
