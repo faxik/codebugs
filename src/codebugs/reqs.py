@@ -1179,12 +1179,19 @@ def register_cli(sub, commands) -> None:
             # place for regular-file and device destinations; see CB-55, which
             # owns the consolidation of these six arms and carries this note.
             try:
-                with atomic_write(args.file) as f:
+                with atomic_write(args.file) as (f, in_place):
                     f.write(md)
             except OSError as e:
                 print(f"codebugs: {e}", file=sys.stderr)
                 sys.exit(1)
-            print(f"Exported to {args.file}")
+            # CB-143, twin of findings._cmd_export_csv: when `args.file` is an
+            # alias of this process's own stdout, `atomic_write` wrote the
+            # markdown through a fresh open of the same inode, a second and
+            # independent file offset. Printing this line to `sys.stdout` — the
+            # inherited descriptor, still at offset 0 — would overwrite the
+            # start of the file we just wrote. `in_place` is the same
+            # classification `atomic_write` already made, not recomputed here.
+            print(f"Exported to {args.file}", file=sys.stderr if in_place else sys.stdout)
         else:
             print(md)
 
