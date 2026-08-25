@@ -125,8 +125,14 @@ class TestGeneratedMcpSurface:
         """`__doc__`, not `description=` — see the generator's module docstring.
 
         If the emitter ever passes `description=`, `_NormalizedDescriptions`
-        stops normalizing and this comparison is the thing that notices, because
-        the wire golden registers on a raw server and normalizes by itself.
+        stops normalizing — an explicit description wins by the adapter's own
+        rule. Since CB-164 the wire golden registers through that same adapter,
+        so such a tool moves `tests/golden/mcp_schema.json` too; this docstring
+        used to claim the golden collector registered outside the adapter and
+        normalized on its own, which stopped being true then (CB-178). It is kept
+        because it fails AT THE DECLARATION, naming the tool and the prose it was
+        built from, rather than as a whole-snapshot drift whose remedy line
+        offers to regenerate the snapshot.
 
         The comparison is against `normalize_description`, the WHOLE composition,
         not against `dedent_docstring` alone: since CB-156 the adapter also
