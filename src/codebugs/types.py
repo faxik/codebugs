@@ -361,13 +361,24 @@ def validate_batch_payload(value: object, *, label: str) -> list[Any]:
 def require_row_limit(label: str, value: object) -> int | None:
     """Accept ``None`` (no limit) or a NON-NEGATIVE integer row limit, else ``ValueError``.
 
-    Three callers across two modules build a ``LIMIT`` clause — ``bench.query``,
-    ``bench.list_runs`` and ``sweep.list_items`` — and CB-161 found each of them
-    interpolating the caller's value into SQL text with a guard of its own. The
-    check lives HERE rather than three times over because a predicate that is
-    duplicated rather than shared is one drift away from disagreeing with itself
-    (the same reason ``is_sql_identifier`` is the only copy of its pattern), and
-    because ``types`` is the module every domain module may already import.
+    CB-161 found three callers — ``bench.query``, ``bench.list_runs`` and
+    ``sweep.list_items`` — each interpolating the caller's value into SQL text
+    behind a guard of its own. The check lives HERE rather than three times over
+    because a predicate that is duplicated rather than shared is one drift away
+    from disagreeing with itself (the same reason ``is_sql_identifier`` is the
+    only copy of its pattern), and because ``types`` is the module every domain
+    module may already import.
+
+    **SCOPE, STATED SO NOBODY READS THIS AS THE CLASS BEING CLOSED.** These are
+    the three sites CB-161 measured, not every place in the package that takes a
+    row limit. Others BIND their value already — ``findings.query_findings``,
+    ``reqs.query_requirements`` and ``sweep.next_batch`` among them — so they were
+    never part of CB-161's interpolation class, but they do NOT validate it, and a
+    negative limit there still means "no limit" to SQLite (measured on this tree:
+    ``codebugs query --limit -1`` prints every row and exits 0). Routing those
+    through this function is a separate, larger change with its own behaviour
+    consequences; adding a call here does not make it happen, and this docstring
+    is not a claim that it has.
 
     **Zero is legal and means zero rows.** That is not a free choice: on
     ``sweep.list_items`` a zero ALREADY produced ``LIMIT 0``, i.e. no rows, so a
@@ -390,6 +401,21 @@ def require_row_limit(label: str, value: object) -> int | None:
     value further along. The type is read as ``type(value)`` rather than through
     ``isinstance`` per CB-75: CPython honours a ``__class__`` property, so
     ``isinstance`` is spoofable.
+
+    **That bool refusal is a LIBRARY-LEVEL guard and cannot fire on the MCP
+    surface — said here because a guard described more widely than it reaches is
+    the defect this package keeps paying for.** These parameters are declared
+    ``surfacegen.OPT_INT`` (``int | None``), and pydantic's lax mode converts a
+    JSON ``false`` to ``0`` and ``true`` to ``1`` BEFORE any tool body runs, so
+    this function is handed an ordinary integer and has nothing left to refuse
+    (measured on a real ``TypeAdapter``: ``False -> 0``, ``True -> 1``,
+    ``"5" -> 5``, while ``2.7`` is refused by pydantic itself). That is exactly
+    the coercion CB-151 fixed for parameters declared ``bool``, by giving them
+    ``Annotated[bool, Field(strict=True)]``; the mirror-image treatment for
+    ``OPT_INT`` would narrow every integer parameter in the package and is not
+    this card's change. The CLI is unaffected either way — both flags are
+    ``type=int``. What the guard DOES reach on every surface is the negative
+    value, which is the half that silently returned everything.
 
     The CANONICAL integer is returned and the caller binds THAT, never the
     object it was handed. Validating one view while consuming another is not a

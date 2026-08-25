@@ -1275,12 +1275,45 @@ class TestArchiveItemsRefusesAnIgnoredFilter:
         result = sweep.archive_items(conn, sweep_id, where_status="pending")
         assert result["archived"] == 2
 
-    def test_the_refusal_happens_before_the_write_lock_is_taken(self, conn):
+    def test_the_refusal_happens_before_the_write_lock_is_taken(self, tmp_path):
         """Decidable from the arguments alone, so it must not open `db.txn`.
 
         A refusal that takes the write lock makes every concurrent writer wait
         on a call that was never going to write anything.
+
+        THE ASSERTION HAD TO BE THE STATEMENT LOG, and the obvious one is
+        vacuous: `assert not conn.in_transaction` after the raise holds whether
+        the refusal ran BEFORE `db.txn` or INSIDE it, because `db.txn` rolls
+        back on its way out. Adversarial review moved the refusal inside the
+        transaction and that assertion stayed green — it was really pinning
+        "before `_resolve_sweep`", not "before the lock". `db.txn` issues
+        `BEGIN IMMEDIATE` through `conn.execute`, so the recorded template log
+        answers the question actually being asked.
         """
+        c = sqlite3.connect(str(tmp_path / "t.db"), factory=RecordingConnection)
+        c.row_factory = sqlite3.Row
+        sweep.ensure_schema(c)
+        sw = sweep.create_sweep(c)["sweep_id"]
+        sweep.add_items(c, sw, ["a.py"])
+        c.sql_log.clear()
+
         with pytest.raises(ValueError, match="silently"):
-            sweep.archive_items(conn, "SW-does-not-exist", items=[], where_status="TODO")
-        assert not conn.in_transaction
+            sweep.archive_items(c, sw, items=[], where_status="pending")
+
+        assert not any("BEGIN IMMEDIATE" in s for s in c.sql_log), c.sql_log
+        c.close()
+
+    def test_a_legitimate_archive_does_take_the_write_lock(self, tmp_path):
+        """The other arm, without which the test above is satisfied by a
+        function that never opens a transaction at all."""
+        c = sqlite3.connect(str(tmp_path / "t.db"), factory=RecordingConnection)
+        c.row_factory = sqlite3.Row
+        sweep.ensure_schema(c)
+        sw = sweep.create_sweep(c)["sweep_id"]
+        sweep.add_items(c, sw, ["a.py"])
+        c.sql_log.clear()
+
+        sweep.archive_items(c, sw, where_status="pending")
+
+        assert any("BEGIN IMMEDIATE" in s for s in c.sql_log), c.sql_log
+        c.close()

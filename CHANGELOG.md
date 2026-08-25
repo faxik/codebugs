@@ -36,10 +36,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   read — that combination is now refused. An empty item list on its own is still
   perfectly legal and still answers `archived: 0`.
 
-  **One narrowing, stated because it can break a working call.** A limit written as a
-  string (`"5"`) or as a fraction (`2.7`) used to be accepted — interpolated as text in
-  one place, rounded down by a cast in another — and is now an error. Passing `True` is
-  likewise refused. Pass a whole number, or omit the argument entirely for no limit.
+  **One narrowing, and exactly where it can reach you.** A limit written as a string
+  (`"5"`), as a fraction (`2.7`), or as `true`/`false` used to be accepted by these
+  functions — interpolated as text in one place, rounded down by a cast in another — and
+  is now an error. **If you call codebugs as a Python library, that is a change you can
+  trip over; through the MCP tools or the CLI it is not**, because both surfaces already
+  declare these arguments as integers and convert or reject before the tracker sees them
+  (measured: over MCP a JSON `"5"` arrives as `5` and `false` as `0`, while `2.7` was
+  refused there before this change too; on the command line `--last-n`/`--limit` are
+  `type=int`). What DOES reach every surface is the pair above: a `0` now means none, and
+  a negative number is refused.
 - **Telling the tracker that two cards are different defects now stops the citation
   report merging them (CB-62).** `grouping_citations` groups cards by the `CB-…`
   references people write in card text, on the assumption that a reference means the

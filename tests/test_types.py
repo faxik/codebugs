@@ -388,3 +388,34 @@ class TestRequireRowLimit:
 
         with pytest.raises(ValueError, match="must not be negative"):
             types.require_row_limit("last_n", Sneaky(-4))
+
+    def test_premise_the_mcp_boundary_coerces_before_this_guard_can_see_it(self):
+        """PREMISE, not behaviour of this module — and the reason the bool and
+        string refusals are documented as LIBRARY-LEVEL rather than universal.
+
+        These limits are declared `surfacegen.OPT_INT` on the MCP surface, and
+        pydantic's lax mode converts a JSON `false` to `0` before any tool body
+        runs, so `require_row_limit` is handed an ordinary integer and has
+        nothing left to refuse. Adversarial review measured this against a real
+        server and it is what corrected the CHANGELOG's original flat claim that
+        `True` is refused.
+
+        Pinned so that the day somebody makes `OPT_INT` strict — the mirror of
+        CB-151's `Annotated[bool, Field(strict=True)]` — this turns red and the
+        prose that depends on it is rewritten instead of quietly going stale.
+        """
+        from pydantic import TypeAdapter, ValidationError
+
+        from codebugs.surfacegen import OPT_INT
+
+        adapter = TypeAdapter(OPT_INT)
+        assert adapter.validate_python(False) == 0
+        assert adapter.validate_python(True) == 1
+        assert adapter.validate_python("5") == 5
+        with pytest.raises(ValidationError):
+            adapter.validate_python(2.7)
+        # The half that DOES survive the boundary and reaches the guard:
+        assert adapter.validate_python(-1) == -1
+        assert types.require_row_limit("last_n", 0) == 0
+        with pytest.raises(ValueError, match="must not be negative"):
+            types.require_row_limit("last_n", adapter.validate_python(-1))
