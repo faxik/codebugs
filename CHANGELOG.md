@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-08-25
+
+The first cut since 0.1.0, mostly about the tracker telling the truth. Repeat reports
+of one defect now land on one card that keeps up with them: a later, worse report
+raises its severity, new tags join it, category spellings stop forking. The backlog
+gained answers you used to assemble by hand — what changed since a date, grouping by
+tag or metadata key, how cards cite and split from each other, and where a card's code
+went after a rename. Most of the rest is commands that stopped claiming unearned
+success: a failed export no longer destroys the one it replaced, a broken import leaves
+nothing behind, dropped filters filter again, tracebacks became one line. A CSV export
+is finally a backup, and an agent connecting over MCP is told the recommended loop. Not
+here: what a finding IS did not change, so nothing needs migrating; the corpus-wide
+clean-ups run only with `--apply` and neither has been run; requirements got fixes but
+no new capability; two CLI arguments became strict (see BREAKING).
+
 ### Fixed
 - **`reqs_embed` and `reqs_batch_embed` now refuse a vector that would break search,
   and `reqs_search_similar` no longer fails outright when it meets one (CB-174).**
