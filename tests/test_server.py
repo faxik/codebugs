@@ -398,9 +398,9 @@ class TestInterpreterIndependentDescriptions:
         A mutant that reverts the adapter alone to `dedent_docstring` sends every
         real client back to receiving a run-on paragraph. Since CB-164 the wire
         golden is generated THROUGH this adapter, so that mutant now turns
-        `TestMcpWireSchema::test_schema_matches_golden` red as well — measured by
-        running it, 74 of the 83 snapshotted tools drift and every one of them
-        differs on `description`.
+        `tests/test_boundary.py::TestMcpWireSchema::test_schema_matches_golden`
+        red as well — measured by running it, 74 of the 83 snapshotted tools
+        drift and every one of them differs on `description`.
 
         So this is no longer the only thing standing between that mutant and a
         green suite, and this docstring used to claim it was ("would leave the

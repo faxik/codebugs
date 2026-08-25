@@ -44,9 +44,10 @@ would therefore ship un-normalized text to clients, so the emitter sets `__doc__
 description.
 
 WHAT ENFORCES THAT, because until CB-164 the answer was "this paragraph, and
-nothing else". The golden collector no longer builds its own bare server and
-normalizes by hand: `tests/_mcp_schema.py` registers through the production
-adapter, so such a tool now lands in `tests/golden/mcp_schema.json` UNNORMALIZED
+nothing else". The golden collector no longer registers onto a bare server and
+normalizes the result by hand: `tests/_mcp_schema.py` registers through the
+production adapter (it still constructs the server — one per provider — but
+wraps it), so such a tool now lands in `tests/golden/mcp_schema.json` UNNORMALIZED
 — the snapshot moves and CB-156's render gate names it as a violation. Pinned by
 `test_a_tool_passing_its_own_description_lands_in_the_snapshot_unnormalized`, in
 `tests/test_boundary.py::TestMcpWireSchema`, which quotes what this paragraph
