@@ -306,14 +306,14 @@ class TestFixGuards:
         before = os.stat(target).st_ino
 
         with open(target, "a"):  # this process now holds the inode open
-            with fsio.atomic_write(str(target)) as (f, in_place):
+            with fsio.atomic_write(str(target)) as (f, dest):
                 f.write("replacement")
 
         assert os.stat(target).st_ino == before, (
             "the inode was replaced while a descriptor still pointed at it"
         )
         assert target.read_text() == "replacement"
-        assert in_place is True, (
+        assert dest.in_place is True, (
             "CB-143: a caller (export-csv/reqs-export) steers its post-write "
             "diagnostic off this exact flag — it must be True here or that "
             "diagnostic would go to the wrong stream"
@@ -368,9 +368,9 @@ class TestCompatibility:
         """mkstemp creates 0600, so without the chmod a brand-new export would
         be private where `open(w)` made it umask-derived."""
         target = tmp_path / "fresh.txt"
-        with fsio.atomic_write(str(target)) as (f, in_place):
+        with fsio.atomic_write(str(target)) as (f, dest):
             f.write("x")
-        assert in_place is False, "a brand-new file is never written in place"
+        assert dest.in_place is False, "a brand-new file is never written in place"
         old = os.umask(0)
         os.umask(old)
         assert stat.S_IMODE(os.stat(target).st_mode) == 0o666 & ~old
@@ -379,9 +379,9 @@ class TestCompatibility:
         target = tmp_path / "kept.txt"
         target.write_text(PREVIOUS)
         target.chmod(0o640)
-        with fsio.atomic_write(str(target)) as (f, in_place):
+        with fsio.atomic_write(str(target)) as (f, dest):
             f.write("x")
-        assert in_place is False, "a plain regular file is replaced, not written in place"
+        assert dest.in_place is False, "a plain regular file is replaced, not written in place"
         assert stat.S_IMODE(os.stat(target).st_mode) == 0o640
 
     def test_a_symlink_destination_stays_a_symlink_and_its_target_receives_content(
@@ -392,12 +392,12 @@ class TestCompatibility:
         link = tmp_path / "link.txt"
         link.symlink_to(real)
 
-        with fsio.atomic_write(str(link)) as (f, in_place):
+        with fsio.atomic_write(str(link)) as (f, dest):
             f.write("through the link")
 
         assert os.path.islink(link), "the link was replaced by a regular file"
         assert real.read_text() == "through the link"
-        assert in_place is False, "a symlink to a plain file is replaced through, not held-open"
+        assert dest.in_place is False, "a symlink to a plain file is replaced through, not held-open"
 
     def test_a_fifo_destination_is_written_through_not_replaced(self, tmp_path):
         import threading
@@ -412,10 +412,10 @@ class TestCompatibility:
 
         t = threading.Thread(target=reader)
         t.start()
-        with fsio.atomic_write(str(fifo)) as (f, in_place):
+        with fsio.atomic_write(str(fifo)) as (f, dest):
             f.write("streamed")
         t.join(timeout=5)
-        assert in_place is True, "a FIFO is stream-like and must be written through"
+        assert dest.in_place is True, "a FIFO is stream-like and must be written through"
         assert stat.S_ISFIFO(os.stat(fifo).st_mode), "the FIFO node was replaced"
         assert received == ["streamed"]
 
@@ -703,3 +703,163 @@ class TestCB143DiagnosticDoesNotCorruptTheFile:
             f"a plain-file export must still confirm on stdout, got stdout={r.stdout!r}"
         )
         assert outfile.exists() and outfile.stat().st_size > 0
+
+    def test_export_csv_to_the_same_literal_path_as_its_own_redirect_stays_intact(
+        self, populated, tmp_path
+    ):
+        """Oracle row 6 (`export-csv out.csv > out.csv`): the destination
+        ARGUMENT is the same literal path the shell redirected stdout to, not
+        a `/dev/stdout` alias — a second way to reach the identical
+        held-open-inode branch `test_an_inode_this_process_holds_open_is_
+        written_in_place` exercises directly on `fsio`. This is a Group-C-
+        style guard: unaffected by CB-194 and must stay green through it,
+        because today's classification here is already correct (stderr) and
+        must not move."""
+        outfile = tmp_path / "out.csv"
+        r = self._redirected_to_file(populated, outfile, "export-csv", str(outfile))
+        assert r.returncode == 0, r.stderr
+
+        with open(outfile, newline="") as f:
+            rows = list(csv.reader(f))
+        assert rows, "the export produced no rows at all — the file is empty"
+        assert rows[0] == list(findings._RESTORE_COLUMNS), f"header corrupted: {rows[0]!r}"
+
+        assert b"Exported" in r.stderr, r.stderr
+
+
+# --------------------------------------------------------------------------
+# Group E — CB-194. `atomic_write` used to return a single `in_place` bit,
+# and both CLI export handlers steered their confirmation to "stderr if
+# in_place else stdout" without ever asking whether STDERR ITSELF was the
+# destination. Two of the nine oracle rows (§5 of the brief) therefore
+# corrupted the file: row 7 (only stderr aliases the destination — the
+# handler picked stderr anyway) and rows 8/9 (both streams alias it, so
+# EITHER choice corrupts). MUST fail against the pre-fix tree; see each
+# docstring for the exact reproduction this repository measured before the
+# fix (Python 3.14, this host).
+# --------------------------------------------------------------------------
+
+
+class TestCB194BothStreamsCanAliasTheDestination:
+    """Oracle rows 7, 8, 9. Rows 1-6 are guarded above and deliberately not
+    repeated here — this class exists for the three rows that were wrong."""
+
+    @staticmethod
+    def _run_single_redirect(project, *args, stderr_path):
+        """`2> out.csv`, stdout left as a pipe so it can be inspected —
+        mirrors oracle row 7 exactly: only fd 2 is redirected to a file."""
+        with open(stderr_path, "wb") as errf:
+            return subprocess.run(
+                [sys.executable, "-m", "codebugs.cli", "--tracker-root", str(project), *args],
+                stdout=subprocess.PIPE,
+                stderr=errf,
+                env={**os.environ, "PYTHONPATH": os.path.join(os.getcwd(), "src")},
+            )
+
+    @staticmethod
+    def _run_combined_redirect(project, *args, combined_path):
+        """`> out.csv 2>&1`: ONE file object handed to BOTH stdout and
+        stderr, so the subprocess module dup2's both from the SAME
+        underlying fd — sharing one file OFFSET, exactly like the shell
+        construct it reproduces. Passing two SEPARATE opens of the same path
+        would give each its own offset and hide exactly the defect this
+        class exists to catch."""
+        with open(combined_path, "wb") as f:
+            return subprocess.run(
+                [sys.executable, "-m", "codebugs.cli", "--tracker-root", str(project), *args],
+                stdout=f,
+                stderr=f,
+                env={**os.environ, "PYTHONPATH": os.path.join(os.getcwd(), "src")},
+            )
+
+    def test_export_csv_to_dev_stderr_redirected_to_a_file_confirms_on_stdout(
+        self, populated, tmp_path
+    ):
+        """Row 7: `export-csv /dev/stderr 2> out.csv`. Measured on the
+        pre-fix tree: rc=0, the file BEGINS with
+        `Exported 0 findings to /dev/stderr\\nscription,source,tags,...` —
+        the confirmation, chosen unconditionally by `in_place`, landed on the
+        one channel that IS the destination and clipped the header's first
+        eight characters (`id,de` of `id,description,...`). The fix must
+        route the confirmation to stdout instead — the one channel here that
+        is NOT an alias of the destination.
+        """
+        outfile = tmp_path / "out.csv"
+        r = self._run_single_redirect(
+            populated, "export-csv", "/dev/stderr", stderr_path=outfile
+        )
+        assert r.returncode == 0, r.stderr
+
+        with open(outfile, newline="") as f:
+            rows = list(csv.reader(f))
+        assert rows, "the export produced no rows at all — the file is empty"
+        assert rows[0] == list(findings._RESTORE_COLUMNS), f"header corrupted: {rows[0]!r}"
+
+        assert b"Exported" in r.stdout, (
+            "stderr IS the destination here, so the confirmation has nowhere "
+            f"to go but stdout — got stdout={r.stdout!r}"
+        )
+
+    def test_reqs_export_to_dev_stderr_redirected_to_a_file_confirms_on_stdout(
+        self, populated, tmp_path
+    ):
+        """Row 7's twin on the OTHER export surface (§6.2 of the brief: a
+        test on one surface is not coverage of the other — `reqs.py`
+        duplicates the same channel-selection logic `findings.py` does, in
+        its own call site)."""
+        outfile = tmp_path / "out.md"
+        r = self._run_single_redirect(
+            populated, "reqs-export", "/dev/stderr", stderr_path=outfile
+        )
+        assert r.returncode == 0, r.stderr
+
+        content = outfile.read_text()
+        assert content.startswith("# Requirements"), f"markdown header corrupted: {content[:80]!r}"
+        assert "Exported to" not in content, "no confirmation text may land inside the file"
+
+        assert b"Exported" in r.stdout, (
+            "stderr IS the destination here, so the confirmation has nowhere "
+            f"to go but stdout — got stdout={r.stdout!r}"
+        )
+
+    def test_export_csv_to_dev_stdout_combined_with_stderr_prints_nothing(
+        self, populated, tmp_path
+    ):
+        """Row 8: `export-csv /dev/stdout > out.csv 2>&1`. BOTH channels are
+        the destination, so CB-194 §5 requires silence — there is no third
+        channel, and any byte printed lands inside the exported file itself.
+        Measured on the pre-fix tree: rc=0, a header corrupted the same way
+        as row 7's.
+        """
+        outfile = tmp_path / "out.csv"
+        r = self._run_combined_redirect(
+            populated, "export-csv", "/dev/stdout", combined_path=outfile
+        )
+        assert r.returncode == 0
+
+        with open(outfile, newline="") as f:
+            rows = list(csv.reader(f))
+        assert rows, "the export produced no rows at all — the file is empty"
+        assert rows[0] == list(findings._RESTORE_COLUMNS), f"header corrupted: {rows[0]!r}"
+        assert not any("Exported" in ",".join(row) for row in rows), (
+            "no confirmation text may appear anywhere in the file — there is "
+            "no channel left that is not the destination"
+        )
+
+    def test_reqs_export_to_dev_stderr_combined_with_stdout_prints_nothing(
+        self, populated, tmp_path
+    ):
+        """Row 9's shape on the OTHER export surface: `reqs-export
+        /dev/stderr > out.md 2>&1`. Both streams alias the destination via
+        the same dup'd fd, so silence is required here too — and this is the
+        surface CB-143's own fix left un-fixed for CB-194's exact defect
+        class (§1 of the brief)."""
+        outfile = tmp_path / "out.md"
+        r = self._run_combined_redirect(
+            populated, "reqs-export", "/dev/stderr", combined_path=outfile
+        )
+        assert r.returncode == 0
+
+        content = outfile.read_text()
+        assert content.startswith("# Requirements"), f"markdown header corrupted: {content[:80]!r}"
+        assert "Exported to" not in content, "no confirmation text may land inside the file"

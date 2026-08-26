@@ -83,13 +83,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   had already been applied here, left out that an un-folded older tracker files a
   duplicate instead of counting a repeat report, and pointed at a "BREAKING" section
   that does not exist. The release itself is unchanged; only its description was wrong.
-- **Exporting to your own terminal's redirect no longer corrupts the file (CB-143).**
-  `codebugs export-csv /dev/stdout > out.csv` used to report success and leave a broken
-  CSV behind: the final "Exported N findings" confirmation landed on top of the file's
-  own header, silently, with no error and no warning. `reqs-export /dev/stdout > out.md`
-  carried the identical defect. The confirmation now goes to your terminal (stderr)
-  instead of into the file whenever the destination is your own standard output;
-  exporting to an ordinary file or path is unchanged.
+- **Exporting to your own terminal's redirect no longer corrupts the file (CB-143,
+  corrected and completed by CB-194 below).** `codebugs export-csv /dev/stdout >
+  out.csv` used to report success and leave a broken CSV behind: the final "Exported N
+  findings" confirmation landed on top of the file's own header, silently, with no
+  error and no warning. `reqs-export /dev/stdout > out.md` carried the identical
+  defect. The confirmation is steered off the file whenever the destination is your own
+  standard output; exporting to an ordinary file or path is unchanged. (This entry
+  originally said the confirmation "now goes to your terminal (stderr)" — true only
+  when stdout, not stderr, is the redirected one; see CB-194 for the case that made
+  that unconditional claim wrong.)
+- **Exporting to your own STANDARD ERROR — or to both streams merged into one file —
+  no longer corrupts the file either (CB-194).** CB-143 fixed the common shape
+  (`export-csv /dev/stdout > out.csv`) by moving the confirmation to your terminal's
+  standard error, but that repair assumed standard error was always a safe place to
+  print: `codebugs export-csv /dev/stderr 2> out.csv` redirects standard error itself,
+  so the "fixed" confirmation landed right back inside the file it was steered away
+  from, corrupting the header exactly as before. The same collision happens either way
+  round when a shell merges both streams into the export file, as `2>&1` does
+  (`export-csv /dev/stdout > out.csv 2>&1` or the `/dev/stderr` equivalent) — there,
+  the confirmation has no channel left that is not the file itself. `export-csv` and
+  `reqs-export` now check, for each export, which of your two terminal streams (if
+  either) is actually the file you asked for, and print the one-line confirmation to
+  whichever stream is NOT that file. In the one case where both streams turn out to be
+  the same file, no confirmation line is printed at all, because there is nowhere
+  honest left to put it. Every other destination — an ordinary file, a path, a plain
+  redirect of only one stream — is unaffected; this changes only where the one-line
+  confirmation goes for these two specific shapes, including "nowhere" in the last one.
 
 ## [0.2.0] — 2026-08-25
 
