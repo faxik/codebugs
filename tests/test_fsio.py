@@ -863,3 +863,47 @@ class TestCB194BothStreamsCanAliasTheDestination:
         content = outfile.read_text()
         assert content.startswith("# Requirements"), f"markdown header corrupted: {content[:80]!r}"
         assert "Exported to" not in content, "no confirmation text may land inside the file"
+
+    def test_export_csv_to_dev_stdout_piped_with_stderr_merged_prints_nothing(
+        self, populated
+    ):
+        """A shape OUTSIDE the brief's nine-row oracle, found while verifying
+        the fix rather than specified up front: `export-csv /dev/stdout 2>&1
+        | cat` — the destination is a real ANONYMOUS PIPE (not a redirected
+        file), shared between stdout and stderr by `2>&1`.
+
+        A pipe has no shared OFFSET, so `TestBaselineDefect`'s "two writers
+        clobber a fixed byte position" story does not apply — the
+        confirmation lands sequentially, appended after the CSV rather than
+        overwritten into its header. Measured on the CB-143-only tree
+        (commit 4dfa381, before this card): the combined stream ends with a
+        stray `Exported 1 findings to /dev/stdout` line trailing the CSV
+        rows — not a corrupted header, but a corrupted STREAM: a consumer
+        piping this into `sort` or a CSV parser downstream receives a
+        non-CSV line as if it were data.
+
+        This is the same identity question `diagnostic_stream` already
+        answers for a real file (§3 of the brief: `os.stat` on the ORIGINAL
+        `/dev/stdout` path reaches a pipe's own identity via the kernel's
+        magic-symlink handling, even where `realpath` cannot spell one), so
+        no separate mechanism was built for it — this test exists to PIN
+        that the existing one generalizes, not to add a tenth mechanism.
+        """
+        p = subprocess.Popen(
+            [sys.executable, "-m", "codebugs.cli", "--tracker-root", str(populated),
+             "export-csv", "/dev/stdout"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env={**os.environ, "PYTHONPATH": os.path.join(os.getcwd(), "src")},
+        )
+        out, _ = p.communicate(timeout=10)
+        assert p.returncode == 0
+
+        text = out.decode()
+        rows = list(csv.reader(text.splitlines()))
+        assert rows, "the export produced no rows at all — the stream is empty"
+        assert rows[0] == list(findings._RESTORE_COLUMNS), f"header corrupted: {rows[0]!r}"
+        assert "Exported" not in text, (
+            "both stdout and stderr are the same pipe here, so no confirmation "
+            f"has anywhere honest to go — got {text!r}"
+        )
