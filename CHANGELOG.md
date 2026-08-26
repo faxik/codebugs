@@ -77,19 +77,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   two records wins — and it is not answered here.
 
 ### Fixed
-- **The paragraph opening the 0.2.0 notes below made four wrong claims about that
+- **The relation commands now tell you what went wrong in one line instead of a page of
+  traceback (CB-193).** Naming a card that does not exist — `codebugs relations-relate
+  CB-1 distinct_from CB-2 --source probe` on a tracker with no `CB-1` — used to end in a
+  Python stack trace; it now says `codebugs: No such finding: CB-1` and stops, the way
+  most other commands in the package already did. Retracting a relation that is not there
+  behaves the same way. `relations-query` was brought into line at the same time, though
+  in its case nothing you can type reaches that path today — its `--rel` is checked by the
+  argument parser before the command runs. The exit code is `1`, as it already was, so
+  scripts that test it are unaffected; what changes is what a person reads.
+
+  **Scope, stated because the rest is real**: this is one module, not the class. Other
+  commands still answer a bad argument with a stack trace — `milestone-list --kind
+  nonsense`, `merge-sessions --status nonsense`, and `blockers-add` naming a card that
+  does not exist all still do. The sweep of the remaining handlers stays on CB-170, where
+  it already was.
   release, and has been corrected (CB-191).** It counted two strict CLI arguments where
   there is one, said neither corpus-wide clean-up had been run when the category fold
   had already been applied here, left out that an un-folded older tracker files a
   duplicate instead of counting a repeat report, and pointed at a "BREAKING" section
   that does not exist. The release itself is unchanged; only its description was wrong.
-- **Exporting to your own terminal's redirect no longer corrupts the file (CB-143).**
-  `codebugs export-csv /dev/stdout > out.csv` used to report success and leave a broken
-  CSV behind: the final "Exported N findings" confirmation landed on top of the file's
-  own header, silently, with no error and no warning. `reqs-export /dev/stdout > out.md`
-  carried the identical defect. The confirmation now goes to your terminal (stderr)
-  instead of into the file whenever the destination is your own standard output;
-  exporting to an ordinary file or path is unchanged.
+- **Exporting to your own terminal's redirect no longer corrupts the file (CB-143,
+  corrected and completed by CB-194 below).** `codebugs export-csv /dev/stdout >
+  out.csv` used to report success and leave a broken CSV behind: the final "Exported N
+  findings" confirmation landed on top of the file's own header, silently, with no
+  error and no warning. `reqs-export /dev/stdout > out.md` carried the identical
+  defect. The confirmation is steered off the file whenever the destination is your own
+  standard output; exporting to an ordinary file or path is unchanged. (This entry
+  originally said the confirmation "now goes to your terminal (stderr)" — true only
+  when stdout, not stderr, is the redirected one; see CB-194 for the case that made
+  that unconditional claim wrong.)
+- **Exporting to your own STANDARD ERROR — or to both streams merged into one file —
+  no longer corrupts the file either (CB-194).** CB-143 fixed the common shape
+  (`export-csv /dev/stdout > out.csv`) by moving the confirmation to your terminal's
+  standard error, but that repair assumed standard error was always a safe place to
+  print: `codebugs export-csv /dev/stderr 2> out.csv` redirects standard error itself,
+  so the "fixed" confirmation landed right back inside the file it was steered away
+  from, corrupting the header exactly as before. The same collision happens either way
+  round when a shell merges both streams into the export file, as `2>&1` does
+  (`export-csv /dev/stdout > out.csv 2>&1` or the `/dev/stderr` equivalent) — there,
+  the confirmation has no channel left that is not the file itself. `export-csv` and
+  `reqs-export` now check, for each export, which of your two terminal streams (if
+  either) is actually the file you asked for, and print the one-line confirmation to
+  whichever stream is NOT that file. In the one case where both streams turn out to be
+  the same file, no confirmation line is printed at all, because there is nowhere
+  honest left to put it. Every other destination — an ordinary file, a path, a plain
+  redirect of only one stream — is unaffected; this changes only where the one-line
+  confirmation goes for these two specific shapes, including "nowhere" in the last one.
 - **A read-only MCP call no longer waits on — or fails behind — someone else's write
   (CB-195).** Opening a connection always re-seeded two tables (the merge-lock row, the
   four default milestones) with an unconditional insert, even though the row was
