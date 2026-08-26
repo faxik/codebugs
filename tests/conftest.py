@@ -50,6 +50,15 @@ def _hermeticity_refusal(basetemp: str, foreign_root: str) -> str:
 
     A gate with no way out is a wall rather than a diagnostic, so both exits
     are spelled out with the real paths filled in.
+
+    ORDER IS LOAD-BEARING, and so is the warning on `--basetemp` (CB-214).
+    Whoever reads this has just been told the suite will not run; they are in a
+    hurry and they copy the first line that fits. So the exits run from safe to
+    destructive — `TMPDIR`, which only ADDS a subtree to the place it names,
+    before `--basetemp`, which pytest empties by deleting the named directory
+    recursively, before deleting a directory by hand. Measured 2026-08-26 on
+    this tree's pytest: a file placed in the directory named by `--basetemp` is
+    gone after one run, and the same file under `TMPDIR` survives untouched.
     """
     return (
         "\n"
