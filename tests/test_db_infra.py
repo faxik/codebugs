@@ -1124,6 +1124,11 @@ class TestWhereCommand:
         Before this fix `where` printed a clean binding for every one of the
         three states the owner reproduced, while `stats` on the same tracker
         refused with a precise "for writing" message.
+
+        CB-182: the warning moved from stderr to stdout, alongside the rest of
+        the table (`root:`/`database:`/the sibling "no database there yet"
+        note) — it is asserted IN stdout and explicitly ABSENT from stderr, so
+        this test would catch a regression in either direction.
         """
         db.init_project(str(tmp_path))
         findings_path = tmp_path / ".codebugs" / "findings.db"
@@ -1133,12 +1138,15 @@ class TestWhereCommand:
         finally:
             findings_path.chmod(0o644)
         assert proc.returncode == 0, proc.stderr
-        assert "may not be writable" in proc.stderr
+        assert "may not be writable" in proc.stdout
+        assert "may not be writable" not in proc.stderr
 
     @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
     def test_warns_when_the_directory_is_unwritable(self, tmp_path):
         """The state that decides the mechanism — see TestWritabilityProbe:
         the FILE's own bits stay writable-looking, only the DIRECTORY refuses.
+
+        CB-182: same stream move as the file-unwritable sibling above.
         """
         db.init_project(str(tmp_path))
         codebugs_dir = tmp_path / ".codebugs"
@@ -1148,7 +1156,8 @@ class TestWhereCommand:
         finally:
             codebugs_dir.chmod(0o755)
         assert proc.returncode == 0, proc.stderr
-        assert "may not be writable" in proc.stderr
+        assert "may not be writable" in proc.stdout
+        assert "may not be writable" not in proc.stderr
 
     def test_is_quiet_about_writability_on_a_nonempty_writable_tracker(self, tmp_path):
         """Half the oracle, and the one most likely to pass vacuously: a
@@ -1222,6 +1231,169 @@ class TestWhereCommand:
             text=True,
         )
         assert proc.returncode == 0, proc.stderr
+
+
+class TestCb182WhereWritabilityStreamParity:
+    """CB-182 oracle (L3-BRIEF-DIR-1-T88-cb182-where-stream-asymmetry.md §3).
+
+    `_cmd_where` used to print its two parenthetical continuations of the
+    three-line table on DIFFERENT streams for no reason tied to what either
+    one says: the "no database there yet" note (CB-23) went to stdout, while
+    the "may not be writable" note (CB-100) went to stderr, even though
+    neither is an error (the exit code stays 0 on both). `codebugs where
+    2>/dev/null` — the ordinary way to get a clean view or feed a script — was
+    therefore silently dropping the writability warning and fully restoring
+    the CB-100 defect that warning exists to close.
+
+    Every row below captures the two output streams SEPARATELY and, where the
+    oracle names the `2>/dev/null` form, redirects the REAL file descriptor 2
+    to `/dev/null` before exec via `_where_devnull_stderr` — not merely a
+    combined-capture test that ignores `proc.stderr`, which would stay green
+    whether or not the warning had moved streams and is exactly the
+    "green by construction" trap the brief warns about.
+    """
+
+    def _where(self, cwd, *args, env=None):
+        environ = {**os.environ, **(env or {})}
+        return subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", *args, "where"],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            env=environ,
+        )
+
+    def _where_devnull_stderr(self, cwd, *args, env=None):
+        """The literal `codebugs where 2>/dev/null` a human types: stderr is
+        redirected to the real null device before exec, so its bytes never
+        reach a pipe this test could read even if it wanted to."""
+        environ = {**os.environ, **(env or {})}
+        with open(os.devnull, "wb") as devnull:
+            return subprocess.run(
+                [sys.executable, "-m", "codebugs.cli", *args, "where"],
+                cwd=str(cwd),
+                stdout=subprocess.PIPE,
+                stderr=devnull,
+                text=True,
+                env=environ,
+            )
+
+    # --- rows 1/2: a healthy tracker — must be silent on both forms --------
+
+    def test_row1_healthy_plain(self, tmp_path):
+        db.init_project(str(tmp_path))
+        proc = self._where(tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        assert "source:" in proc.stdout
+        assert "root:" in proc.stdout
+        assert "database:" in proc.stdout
+        assert "may not be writable" not in proc.stdout
+        assert "may not be writable" not in proc.stderr
+        assert "no database there yet" not in proc.stdout
+
+    def test_row2_healthy_stderr_to_devnull(self, tmp_path):
+        db.init_project(str(tmp_path))
+        proc = self._where_devnull_stderr(tmp_path)
+        assert proc.returncode == 0
+        assert str(tmp_path) in proc.stdout
+        assert "may not be writable" not in proc.stdout
+        assert "no database there yet" not in proc.stdout
+
+    # --- rows 3/4: `.codebugs/` exists, no database yet (CB-23 control) ----
+
+    def test_row3_no_database_yet_plain(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".codebugs").mkdir(parents=True)
+        proc = self._where(repo)
+        assert proc.returncode == 0, proc.stderr
+        assert "no database there yet" in proc.stdout
+
+    def test_row4_no_database_yet_stderr_to_devnull(self, tmp_path):
+        """Control: this branch already printed to stdout before CB-182, so
+        it must be unaffected — the oracle's own check that this row was
+        already right."""
+        repo = tmp_path / "repo"
+        (repo / ".codebugs").mkdir(parents=True)
+        proc = self._where_devnull_stderr(repo)
+        assert proc.returncode == 0
+        assert "no database there yet" in proc.stdout
+
+    # --- rows 5/6: database FILE unwritable — the core of CB-182 -----------
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
+    def test_row5_file_unwritable_plain(self, tmp_path):
+        db.init_project(str(tmp_path))
+        findings_path = tmp_path / ".codebugs" / "findings.db"
+        findings_path.chmod(0o000)
+        try:
+            proc = self._where(tmp_path)
+        finally:
+            findings_path.chmod(0o644)
+        assert proc.returncode == 0, proc.stderr
+        assert "may not be writable" in proc.stdout
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
+    def test_row6_file_unwritable_stderr_to_devnull(self, tmp_path):
+        """THE red test named by the brief (§4.1): on unfixed `main` this
+        warning printed to stderr, so under a REAL `2>/dev/null` it vanished
+        and an unwritable tracker looked healthy again — CB-100 fully
+        restored through this one ordinary invocation form. Must be red
+        before the fix in `_cmd_where`, green after.
+        """
+        db.init_project(str(tmp_path))
+        findings_path = tmp_path / ".codebugs" / "findings.db"
+        findings_path.chmod(0o000)
+        try:
+            proc = self._where_devnull_stderr(tmp_path)
+        finally:
+            findings_path.chmod(0o644)
+        assert proc.returncode == 0
+        assert "may not be writable" in proc.stdout
+
+    # --- rows 7/8: a declared root that does not resolve — untouched -------
+
+    def test_row7_unresolved_root_is_a_real_error_plain(self, tmp_path):
+        """The error branch is explicitly NOT in scope for CB-182 (brief §2):
+        it stays an error, in stderr, at exit 1."""
+        proc = self._where(tmp_path)
+        assert proc.returncode == 1
+        assert "(unresolved)" in proc.stdout
+        assert proc.stderr.strip() != ""
+
+    def test_row8_unresolved_root_stdout_survives_stderr_redirect(self, tmp_path):
+        proc = self._where_devnull_stderr(tmp_path)
+        assert proc.returncode == 1
+        assert "root:" in proc.stdout
+        assert "(unresolved)" in proc.stdout
+
+    # --- row 9: a DIFFERENT way to make the tracker unwritable -------------
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
+    def test_row9_directory_unwritable_agrees_with_file_unwritable(self, tmp_path):
+        """CB-182 §3 mandates this row explicitly and by name: reproduce the
+        'unwritable' state by a DIFFERENT mechanism than rows 5/6 — permission
+        bits on the `.codebugs/` DIRECTORY rather than on the database file —
+        because a prior unit's oracle in this same direction enumerated call
+        forms and its acceptance found an ordinary one missing from the list
+        (see brief §3). A rule expressed as an enumeration checks the
+        author's imagination, not the program's behaviour; this row is the
+        antidote. Both invocation forms must agree with each other and with
+        the file-based rows above — if they diverge, that is a finding to
+        escalate, not a brief mismatch to paper over (brief §6).
+        """
+        db.init_project(str(tmp_path))
+        codebugs_dir = tmp_path / ".codebugs"
+        codebugs_dir.chmod(0o555)
+        try:
+            proc_plain = self._where(tmp_path)
+            proc_devnull = self._where_devnull_stderr(tmp_path)
+        finally:
+            codebugs_dir.chmod(0o755)
+        assert proc_plain.returncode == 0, proc_plain.stderr
+        assert proc_devnull.returncode == 0
+        assert "may not be writable" in proc_plain.stdout
+        assert "may not be writable" not in proc_plain.stderr
+        assert "may not be writable" in proc_devnull.stdout
 
 
 class TestInitUnderADeclaredRoot:

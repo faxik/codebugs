@@ -77,6 +77,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   two records wins — and it is not answered here.
 
 ### Fixed
+- **`codebugs where` no longer loses its writability warning when stderr is redirected
+  or discarded (CB-182).** The warning that a tracker's database may not be writable
+  (added for CB-100) printed to stderr, while its neighbour on the same three-line
+  table — the note that a `.codebugs/` directory has no database in it yet — printed to
+  stdout, even though neither one is an error and the exit code stays `0` on both.
+  `codebugs where 2>/dev/null`, the ordinary way to get a clean view or feed a script,
+  therefore made the writability warning vanish entirely and quietly brought back the
+  exact problem CB-100 was meant to fix: an unwritable tracker looking healthy. The
+  warning now prints alongside the rest of the table, in stdout, like its neighbour.
+  The branch for a genuinely unresolved tracker root is unchanged — that one really is
+  an error and stays in stderr, at exit `1`.
 - **The relation commands now tell you what went wrong in one line instead of a page of
   traceback (CB-193).** Naming a card that does not exist — `codebugs relations-relate
   CB-1 distinct_from CB-2 --source probe` on a tracker with no `CB-1` — used to end in a
