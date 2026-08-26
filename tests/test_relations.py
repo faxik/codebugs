@@ -15,11 +15,14 @@ earlier revision of that plan:
 """
 
 import argparse
+import ast
+import inspect
 import os
 import pathlib
 import sqlite3
 import subprocess
 import sys
+import textwrap
 
 import pytest
 
@@ -515,3 +518,55 @@ class TestRelationsCliErrorBoundary:
             with pytest.raises(sqlite3.ProgrammingError):
                 c.execute("SELECT 1")
 
+    @pytest.mark.parametrize("handler_name", [
+        "_cmd_relations_relate",
+        "_cmd_relations_unrelate",
+        "_cmd_relations_query",
+    ])
+    def test_the_print_stays_outside_the_wrapper(self, handler_name):
+        """Placement is pinned STRUCTURALLY, because behaviour cannot see it.
+
+        `print` into a closed stream raises `ValueError` (measured). Inside
+        `domain_errors` that would be caught and reported as bad input at exit
+        1 — over a write that already committed, which is the CB-15/CB-16 lie
+        arriving through the mechanism built to prevent it. It is unreachable
+        TODAY only because CB-134's gate refuses a closed stdout at the process
+        entry, so no test can discriminate the placement by running the code:
+        moving the `print` under the `with` passes all three verb tests, the
+        connection pin, and the whole suite. This repository's answer to that
+        shape is a structural pin (CB-41's SQL-side deadline, CB-174's
+        "Placement is pinned STRUCTURALLY"), not a comment asking the next
+        editor to be careful.
+
+        NON-VACUITY: the second assertion is what keeps this honest — deleting
+        the `print` outright would satisfy "no print inside the wrapper" while
+        removing the handler's entire output.
+        """
+        handler = getattr(relations, handler_name)
+        tree = ast.parse(textwrap.dedent(inspect.getsource(handler)))
+
+        def _calls(node):
+            return {
+                n.func.id
+                for n in ast.walk(node)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            }
+
+        wrappers = [
+            w for w in ast.walk(tree)
+            if isinstance(w, ast.With)
+            and any(
+                isinstance(i.context_expr, ast.Call)
+                and isinstance(i.context_expr.func, ast.Name)
+                and i.context_expr.func.id == "domain_errors"
+                for i in w.items
+            )
+        ]
+        assert len(wrappers) == 1, f"{handler_name} must wrap exactly one region"
+
+        inside = set().union(*(_calls(stmt) for stmt in wrappers[0].body))
+        assert "print" not in inside, (
+            f"{handler_name} prints INSIDE domain_errors: a post-commit reporting "
+            "failure would be reported as bad input"
+        )
+        assert "print" in _calls(tree), f"{handler_name} must still print its result"

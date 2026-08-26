@@ -77,17 +77,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   two records wins — and it is not answered here.
 
 ### Fixed
-- **The three relation commands now tell you what went wrong in one line instead of a
-  page of traceback (CB-193).** `relations-relate`, `relations-unrelate` and
-  `relations-query` were the only commands left that printed a Python stack trace at you
-  when something was simply wrong with what you asked for. Naming a card that does not
-  exist — `codebugs relations-relate CB-1 distinct_from CB-2 --source probe` on a tracker
-  with no `CB-1` — used to end in twelve lines of internals; it now says
-  `codebugs: No such finding: CB-1` and stops, exactly like every other command in the
-  package. Retracting a relation that is not there behaves the same way. The exit code is
-  `1`, as it already was, so scripts that check it are unaffected — what changes is what
-  a person reads. This is one module brought into line with the rest; it does not
-  guarantee that no future command will be written without the same handling.
+- **The relation commands now tell you what went wrong in one line instead of a page of
+  traceback (CB-193).** Naming a card that does not exist — `codebugs relations-relate
+  CB-1 distinct_from CB-2 --source probe` on a tracker with no `CB-1` — used to end in a
+  Python stack trace; it now says `codebugs: No such finding: CB-1` and stops, the way
+  most other commands in the package already did. Retracting a relation that is not there
+  behaves the same way. `relations-query` was brought into line at the same time, though
+  in its case nothing you can type reaches that path today — its `--rel` is checked by the
+  argument parser before the command runs. The exit code is `1`, as it already was, so
+  scripts that test it are unaffected; what changes is what a person reads.
+
+  **Scope, stated because the rest is real**: this is one module, not the class. Other
+  commands still answer a bad argument with a stack trace — `milestone-list --kind
+  nonsense`, `merge-sessions --status nonsense`, and `blockers-add` naming a card that
+  does not exist all still do. The sweep of the remaining handlers stays on CB-170, where
+  it already was.
   release, and has been corrected (CB-191).** It counted two strict CLI arguments where
   there is one, said neither corpus-wide clean-up had been run when the category fold
   had already been applied here, left out that an un-folded older tracker files a
