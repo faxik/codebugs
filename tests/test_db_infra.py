@@ -1659,20 +1659,62 @@ class TestCb182WhereWritabilityStreamParity:
         assert "may not be writable" in proc.stdout
 
     # --- rows 7/8: a declared root that does not resolve — untouched -------
+    #
+    # THESE TWO ROWS USED TO BUILD A DIFFERENT STATE FROM THE ONE THEY NAME, and
+    # that is CB-204's second half. They ran `where` in a bare `tmp_path` with
+    # NOTHING declared, so what they actually built was "the WALK finds no
+    # tracker anywhere above" — which produces the same `(unresolved)` line only
+    # for as long as the machine happens to have no `.codebugs/` above pytest's
+    # temporary root. On the day one appeared in `/tmp`, the walk resolved, `where`
+    # exited 0, and both rows failed while asserting something true about the
+    # product. A test green by construction of the ENVIRONMENT is a false
+    # witness, not a coverage gap.
+    #
+    # They now declare the root through the channel the name promises. That
+    # channel OUTRANKS the walk (`_db_path`: argument, then `--tracker-root`,
+    # then `CODEBUGS_ROOT`, then discovery), so the outcome no longer depends on
+    # what is or is not above the temporary tree — and the `foreign_above`
+    # parameter proves exactly that by putting a tracker there on purpose and
+    # demanding an identical verdict.
 
-    def test_row7_unresolved_root_is_a_real_error_plain(self, tmp_path):
+    @pytest.mark.parametrize("foreign_above", [False, True])
+    def test_row7_unresolved_root_is_a_real_error_plain(self, tmp_path, foreign_above):
         """The error branch is explicitly NOT in scope for CB-182 (brief §2):
         it stays an error, in stderr, at exit 1."""
-        proc = self._where(tmp_path)
+        cwd, declared = self._unresolved_root_stage(tmp_path, foreign_above)
+        proc = self._where(cwd, "--tracker-root", str(declared))
         assert proc.returncode == 1
         assert "(unresolved)" in proc.stdout
         assert proc.stderr.strip() != ""
 
-    def test_row8_unresolved_root_stdout_survives_stderr_redirect(self, tmp_path):
-        proc = self._where_devnull_stderr(tmp_path)
+    @pytest.mark.parametrize("foreign_above", [False, True])
+    def test_row8_unresolved_root_stdout_survives_stderr_redirect(self, tmp_path, foreign_above):
+        cwd, declared = self._unresolved_root_stage(tmp_path, foreign_above)
+        proc = self._where_devnull_stderr(cwd, "--tracker-root", str(declared))
         assert proc.returncode == 1
         assert "root:" in proc.stdout
         assert "(unresolved)" in proc.stdout
+
+    def _unresolved_root_stage(self, tmp_path, foreign_above):
+        """Build "a declared root that does not resolve", and nothing else.
+
+        `--tracker-root` names a directory holding no `.codebugs/`, which fails
+        closed by design (CB-23: on a NAMED root the tracker is the file, not the
+        directory). With `foreign_above` the invocation additionally stands under
+        a tracker the walk would happily find — the state that used to decide
+        these rows, and that must now decide nothing.
+        """
+        declared = tmp_path / "declared-but-empty"
+        declared.mkdir()
+        stage = tmp_path / ("under-a-foreign-tracker" if foreign_above else "clean")
+        cwd = stage / "here"
+        cwd.mkdir(parents=True)
+        if foreign_above:
+            (stage / ".codebugs").mkdir()
+            assert db._find_db_root(str(cwd)) == str(stage.resolve()), (
+                "premise: without the declaration the walk really would resolve here"
+            )
+        return cwd, declared
 
     # --- row 9: a DIFFERENT way to make the tracker unwritable -------------
 
@@ -1995,95 +2037,709 @@ class TestConnectDoesNotWaitOnUnconditionalSchemaSeedWrite:
         )
 
 
-class TestEnsureSchemaHasNoUnconditionalDml:
-    """CB-195 structural ratchet: no `ensure_schema` may run DML it did not first
-    gate behind a read.
+class TestSchemaInitRunsNoUncheckedDml:
+    """CB-202, repairing CB-195's own ratchet: no schema-init function may
+    execute DML that no read of its own can stop.
 
-    Read by AST, not by regex — this repo's own `test_fsio.py` tells the story
-    of a grep-based ratchet that matched a phrase inside its own module's
-    docstrings; the AST sees only real calls. This ratchet is easy to defeat by
-    accident (reverting the CB-195 read-before-write guard is a one-line
-    change and the symptom is invisible without concurrency), so it exists to
-    catch that regression even when nobody is running a lock-contention test
-    at the time.
+    WHY THIS WAS REWRITTEN. The first version of this ratchet keyed on the
+    SPELLING — a string LITERAL sitting in the `conn.execute(...)` call — and an
+    isolated acceptor defeated it in one line by moving the same
+    `INSERT OR IGNORE` into the module's schema CONSTANT, which the already
+    present `for stmt in MERGE_SCHEMA.split(";"): conn.execute(stmt)` loop then
+    ran. All three of its tests stayed green with the defect fully restored.
+    That was not a hole (the behavioural contention test went red) but an
+    OVERPROMISE, which this repository treats as worse than an absent guard: it
+    withdraws attention and gives nothing back. Measured over the tree, the
+    literal rule was worse than "easy to bypass" — it was blind to the shape
+    EVERY schema-init function in the package actually uses: all ten of them
+    execute their DDL through a loop over a module-level constant, and not one
+    passes a literal to that call.
 
-    "Unconditional" is defined structurally: a `conn.execute(...)` call whose
-    SQL argument is a literal string starting with INSERT/UPDATE/DELETE/REPLACE,
-    that is not nested inside any `ast.If` within the function body. A DML call
-    that IS nested under an `if` is, by construction, conditional on something
-    the function read first — which is exactly the CB-195 shape (read the seed
-    row, write only if it is missing).
+    THE PRIMITIVE. "Does this function execute a string it did not itself
+    check?" Two halves, and the acceptor broke the first:
+
+      1. WHICH TEXTS CAN RUN. The SQL argument is RESOLVED, not pattern-matched:
+         through a literal, a module-level string or tuple-of-strings constant,
+         a function-local binding, `.split(";")`, `.strip()`, the leading
+         constant of an f-string or of a `+` concatenation, and the loop
+         variable of a `for` over any of those. `executescript` blobs are split
+         into statements, so a DML buried in the MIDDLE of a rebuild script is
+         seen; `executemany` is judged like `execute` (the old rule did not even
+         name that attribute).
+      2. WAS IT CHECKED — BY A READ. A DML text is acceptable when it is
+         reachable only through a branch whose test could have come from the
+         database, or after a GUARD CLAUSE (an `if` that can
+         `return`/`raise`/`continue`) of that same kind. "Nested under an `if`"
+         is NOT sufficient, and discovering that is what turned this rewrite
+         from a bigger resolver into a different rule: the schema loop every
+         module already writes is `for stmt in SCHEMA.split(";"): if stmt:
+         conn.execute(stmt)`, so the acceptor's insert lands inside an `if` —
+         a truthiness test on a Python string, which checks nothing about the
+         tracker. A read counts when it is in the test itself, in a
+         module-local function the test calls, or in a name the test reads that
+         was bound from one of those. All three occur in this tree
+         (`merge.ensure_schema`, `sweep._migrate`, `reqs._migrate_to_lowercase`
+         respectively), and the guard-clause half is not tidiness either:
+         `reqs._migrate_to_lowercase` and `findings._migrate_statuses` are
+         honest code in exactly that shape, so without it widening the scope to
+         helpers would have painted correct code red on the first run.
+
+    SCOPE is derived from the registry rather than from a name. `_open` runs
+    whatever `db.register_schema(...)` registered, and whatever THAT calls, on
+    every single `db.connect()`. So the entry points are the functions named in
+    those registration calls, and the audited set is their transitive
+    MODULE-LOCAL closure. That closure is 27 execute sites wider than the old
+    rule's, in `findings._migrate_statuses`, `reqs._migrate_to_lowercase` and
+    `sweep._migrate` — none of which the old rule read at all.
+
+    FAIL-CLOSED where it cannot see: an execute whose SQL argument does not
+    resolve, an f-string that begins with an interpolation, and a statement
+    leading with `WITH` (a CTE can front a DML) are all treated as possibly-DML,
+    so they must be conditional or they are reported. A `register_schema` call
+    whose function argument is not a plain name fails the test outright rather
+    than silently shrinking the audited set.
+
+    WHAT IT DOES NOT SEE, stated because a ratchet promising more than it checks
+    is the defect this class exists to repair:
+
+      - A string reaching the function as an ARGUMENT or from ANOTHER module is
+        unresolvable, so it is refused when unconditional — but if the caller
+        hands it to a branch, the DML is waved through unread.
+      - `getattr(conn, "execute")(...)`, a cursor stored in a container, or any
+        other indirection that hides the attribute name.
+      - RELEVANCE. The read test says a read INFLUENCED the branch, never that
+        the branch is ABOUT this statement: `if row is None or True:` passes,
+        and a guard clause is accepted as excusing every statement after it in
+        the function, however unrelated.
+      - Taint is by NAME within one function. A read whose result travels
+        through a container element, a returned tuple unpacked elsewhere, or an
+        attribute is not followed, so such a branch reads as unchecked — the
+        fail-closed direction, but a possible false refusal for a future shape.
+      - Only `src/codebugs/` and only module-local calls: a schema-init function
+        delegating to another module's helper is followed no further, and a
+        function it calls there counts as neither a reader nor an executor.
+
+    Deliberate: this is an ACCIDENT-STOPPER. Reverting the CB-195 read-before-
+    write guard is a one-line change whose symptom is invisible without
+    concurrency, and that is the regression this catches. Someone determined to
+    write an unconditional insert can still spell it in a way no source reader
+    could classify.
     """
 
-    _DML_PREFIXES = ("INSERT", "UPDATE", "DELETE", "REPLACE")
+    _DML_VERBS = frozenset({"INSERT", "UPDATE", "DELETE", "REPLACE", "UPSERT"})
+    _AMBIGUOUS_VERBS = frozenset({"WITH"})  # a CTE may front an INSERT/UPDATE/DELETE
+    _EXEC_ATTRS = ("execute", "executescript", "executemany")
 
-    def _unconditional_dml_calls(self, node: ast.FunctionDef) -> list[str]:
+    # ---------------------------------------------------------------- helpers
+
+    @staticmethod
+    def _leading_verb(sql: str) -> str:
+        """First SQL keyword, with leading comments and whitespace removed."""
+        s = sql
+        while True:
+            s = s.lstrip()
+            if s.startswith("--"):
+                nl = s.find("\n")
+                if nl == -1:
+                    return ""
+                s = s[nl + 1 :]
+                continue
+            if s.startswith("/*"):
+                end = s.find("*/")
+                if end == -1:
+                    return ""
+                s = s[end + 2 :]
+                continue
+            break
+        parts = s.split(maxsplit=1)
+        return parts[0].upper() if parts else ""
+
+    @classmethod
+    def _module_constants(cls, tree: ast.Module) -> dict[str, list[tuple[str, bool]]]:
+        """Module-level names bound to a string, or to a sequence of strings.
+
+        Elements are resolved one by one rather than required to be literals:
+        `findings._POST_MIGRATION_INDEXES` builds its first entry by
+        concatenation, and rejecting the whole tuple for that would have made
+        every statement in it unreadable — a fail-closed refusal of honest DDL.
+        """
+        out: dict[str, list[tuple[str, bool]]] = {}
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                targets, value = [node.target], node.value
+            else:
+                continue
+            if isinstance(value, ast.Tuple | ast.List) and value.elts:
+                per_element = [cls._resolve(e, {}, {}) for e in value.elts]
+                if any(r is None for r in per_element):
+                    continue
+                resolved = [pair for r in per_element for pair in r]
+            else:
+                resolved = cls._resolve(value, {}, {})
+            if not resolved:
+                continue
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    out[t.id] = resolved
+        return out
+
+    @classmethod
+    def _resolve(cls, node, consts, binds) -> list[tuple[str, bool]] | None:
+        """Texts an expression can evaluate to, as (text, is_complete) pairs.
+
+        `is_complete=False` means only a leading prefix is known — enough to read
+        the verb, never enough to split a script. `None` means unresolvable, and
+        every caller treats that fail-closed.
+        """
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return [(node.value, True)]
+        if isinstance(node, ast.Name):
+            if node.id in binds:
+                return binds[node.id]
+            if node.id in consts:
+                return consts[node.id]
+            return None
+        if isinstance(node, ast.JoinedStr):
+            head = node.values[0] if node.values else None
+            if isinstance(head, ast.Constant) and isinstance(head.value, str):
+                return [(head.value, False)]
+            return None
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = cls._resolve(node.left, consts, binds)
+            return None if left is None else [(t, False) for t, _ in left]
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            base = cls._resolve(node.func.value, consts, binds)
+            if base is None:
+                return None
+            if node.func.attr == "split" and len(node.args) == 1:
+                sep = node.args[0]
+                if not (isinstance(sep, ast.Constant) and isinstance(sep.value, str)):
+                    return None
+                out: list[tuple[str, bool]] = []
+                for text, complete in base:
+                    if not complete:
+                        return None
+                    out.extend((piece, True) for piece in text.split(sep.value))
+                return out
+            if node.func.attr == "strip" and not node.args:
+                return [(t.strip(), c) for t, c in base]
+        return None
+
+    @staticmethod
+    def _can_exit(node: ast.If | ast.While) -> bool:
+        """Does this branch contain a statement that leaves the straight line?"""
+        for body in (node.body, node.orelse):
+            for st in body:
+                for n in ast.walk(st):
+                    if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                        continue
+                    if isinstance(n, ast.Return | ast.Raise | ast.Continue):
+                        return True
+        return False
+
+    @classmethod
+    def _reading_functions(cls, funcs: dict[str, ast.FunctionDef]) -> set[str]:
+        """Module-local functions that touch the database at all.
+
+        A branch fed by `_existing_columns(conn, "t")` is fed by a read; the read
+        simply happens one frame down. `sweep._migrate` is that shape, so without
+        this the ratchet would redden on correct code.
+        """
+        direct = set()
+        for name, fn in funcs.items():
+            for n in ast.walk(fn):
+                if (
+                    isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Attribute)
+                    and n.func.attr in cls._EXEC_ATTRS
+                ):
+                    direct.add(name)
+                    break
+        readers = set(direct)
+        changed = True
+        while changed:
+            changed = False
+            for name, fn in funcs.items():
+                if name in readers:
+                    continue
+                for n in ast.walk(fn):
+                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+                        if n.func.id in readers:
+                            readers.add(name)
+                            changed = True
+                            break
+        return readers
+
+    @classmethod
+    def _is_read_derived(cls, expr, tainted: set[str], readers: set[str]) -> bool:
+        """Could this expression's value have come from the database?
+
+        THIS is what makes the ratchet key on the primitive rather than on the
+        shape of an `if`. The acceptor's bypass survives a "nested under a
+        branch" rule for a reason worth stating: the schema loop's own
+        `if stmt:` is a truthiness test on a Python string, which checks nothing
+        about the tracker. A write is CHECKED only when a read could have stopped
+        it, so the branch's test must carry a read — directly, through a
+        module-local function that reads, or through a name bound from one.
+        """
+        for n in ast.walk(expr):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+                if n.func.attr in cls._EXEC_ATTRS:
+                    return True
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in readers:
+                return True
+            if isinstance(n, ast.Name) and n.id in tainted:
+                return True
+        return False
+
+    @staticmethod
+    def _own_expressions(st: ast.stmt) -> list[ast.AST]:
+        """Expressions evaluated by this statement itself, excluding its bodies."""
+        if isinstance(st, ast.If | ast.While):
+            return [st.test]
+        if isinstance(st, ast.For | ast.AsyncFor):
+            return [st.iter]
+        if isinstance(st, ast.With | ast.AsyncWith):
+            return [item.context_expr for item in st.items]
+        if isinstance(st, ast.Try):
+            return []
+        return [st]
+
+    @classmethod
+    def _judge(cls, call, consts, binds, checked, offenders, where):
+        texts = cls._resolve(call.args[0], consts, binds) if call.args else None
+        attr = call.func.attr
+        if texts is None:
+            if not checked:
+                offenders.append(f"{where}:{call.lineno}: .{attr}(<unreadable SQL>)")
+            return
+        statements: list[str] = []
+        for text, complete in texts:
+            if attr == "executescript":
+                if not complete:
+                    if not checked:
+                        offenders.append(f"{where}:{call.lineno}: .{attr}(<partial script>)")
+                    continue
+                statements.extend(text.split(";"))
+            else:
+                statements.append(text)
+        for sql in statements:
+            if not sql.strip():
+                continue
+            verb = cls._leading_verb(sql)
+            suspicious = verb in cls._DML_VERBS or verb in cls._AMBIGUOUS_VERBS or verb == ""
+            if suspicious and not checked:
+                offenders.append(f"{where}:{call.lineno}: .{attr}({sql.strip()[:70]!r})")
+
+    @classmethod
+    def _scan(cls, stmts, ctx, binds, tainted, checked, offenders, where):
+        """Walk one statement list in order.
+
+        `checked` says a read could have stopped everything from here down —
+        either we are inside a read-derived branch, or a read-derived guard
+        clause has already been passed at this level. `tainted` carries the
+        names whose values came from the database.
+        """
+        consts, readers = ctx
+        binds, tainted = dict(binds), set(tainted)
+        for st in stmts:
+            if isinstance(st, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                continue
+            for expr in cls._own_expressions(st):
+                for node in ast.walk(expr):
+                    if (
+                        isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr in cls._EXEC_ATTRS
+                    ):
+                        cls._judge(node, consts, binds, checked, offenders, where)
+
+            if isinstance(st, ast.Assign):
+                resolved = cls._resolve(st.value, consts, binds)
+                reads = cls._is_read_derived(st.value, tainted, readers)
+                for t in st.targets:
+                    for name_node in ast.walk(t):
+                        if isinstance(name_node, ast.Name):
+                            binds[name_node.id] = resolved
+                            tainted.discard(name_node.id)
+                            if reads:
+                                tainted.add(name_node.id)
+            elif isinstance(st, ast.If):
+                inner = checked or cls._is_read_derived(st.test, tainted, readers)
+                cls._scan(st.body, ctx, binds, tainted, inner, offenders, where)
+                cls._scan(st.orelse, ctx, binds, tainted, inner, offenders, where)
+                if inner and cls._can_exit(st):
+                    checked = True
+            elif isinstance(st, ast.While):
+                inner = checked or cls._is_read_derived(st.test, tainted, readers)
+                cls._scan(st.body, ctx, binds, tainted, inner, offenders, where)
+                cls._scan(st.orelse, ctx, binds, tainted, inner, offenders, where)
+            elif isinstance(st, ast.For | ast.AsyncFor):
+                loop_binds = dict(binds)
+                loop_tainted = set(tainted)
+                items = cls._resolve(st.iter, consts, binds)
+                reads = cls._is_read_derived(st.iter, tainted, readers)
+                for name_node in ast.walk(st.target):
+                    if isinstance(name_node, ast.Name):
+                        loop_binds[name_node.id] = items
+                        loop_tainted.discard(name_node.id)
+                        if reads:
+                            loop_tainted.add(name_node.id)
+                cls._scan(st.body, ctx, loop_binds, loop_tainted, checked, offenders, where)
+                cls._scan(st.orelse, ctx, binds, tainted, checked, offenders, where)
+            elif isinstance(st, ast.Try):
+                cls._scan(st.body, ctx, binds, tainted, checked, offenders, where)
+                for handler in st.handlers:
+                    cls._scan(handler.body, ctx, binds, tainted, True, offenders, where)
+                cls._scan(st.orelse, ctx, binds, tainted, checked, offenders, where)
+                cls._scan(st.finalbody, ctx, binds, tainted, checked, offenders, where)
+            elif isinstance(st, ast.With | ast.AsyncWith):
+                cls._scan(st.body, ctx, binds, tainted, checked, offenders, where)
+
+    @staticmethod
+    def _closure(entry: str, funcs: dict[str, ast.FunctionDef]) -> list[ast.FunctionDef]:
+        """The entry point plus every module-local function it can reach."""
+        seen: list[str] = []
+        stack = [entry]
+        while stack:
+            name = stack.pop()
+            if name in seen or name not in funcs:
+                continue
+            seen.append(name)
+            for n in ast.walk(funcs[name]):
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in funcs:
+                    stack.append(n.func.id)
+        return [funcs[n] for n in seen]
+
+    @classmethod
+    def _entry_point_names(cls, src: Path) -> tuple[set[str], list[str]]:
+        """Names registered with `register_schema`, plus any call we cannot read."""
+        names: set[str] = set()
+        unreadable: list[str] = []
+        for py in sorted(src.rglob("*.py")):
+            tree = ast.parse(py.read_text(), filename=str(py))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                called = (
+                    func.attr
+                    if isinstance(func, ast.Attribute)
+                    else func.id
+                    if isinstance(func, ast.Name)
+                    else None
+                )
+                if called != "register_schema":
+                    continue
+                arg = node.args[1] if len(node.args) > 1 else None
+                for kw in node.keywords:
+                    if kw.arg == "ensure_fn":
+                        arg = kw.value
+                if isinstance(arg, ast.Name):
+                    names.add(arg.id)
+                else:
+                    unreadable.append(f"{py.relative_to(src)}:{node.lineno}")
+        return names, unreadable
+
+    def _audit(self, src: Path) -> tuple[list[str], list[str]]:
+        """Report (offenders, audited function labels) over a package tree."""
+        names, unreadable = self._entry_point_names(src)
+        assert not unreadable, (
+            "a register_schema() call names its schema-init function in a way this "
+            "ratchet cannot read, so the audited set would silently shrink:\n"
+            + "\n".join(unreadable)
+        )
+        assert names, "no register_schema() call found — the ratchet would audit nothing"
+
+        offenders: list[str] = []
+        audited: list[str] = []
+        for py in sorted(src.rglob("*.py")):
+            tree = ast.parse(py.read_text(), filename=str(py))
+            consts = self._module_constants(tree)
+            funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+            rel = py.relative_to(src)
+            ctx = (consts, self._reading_functions(funcs))
+            for entry in sorted(names & funcs.keys()):
+                for fn in self._closure(entry, funcs):
+                    label = f"{rel}::{fn.name}"
+                    if label in audited:
+                        continue
+                    audited.append(label)
+                    self._scan(fn.body, ctx, {}, set(), False, offenders, label)
+        return offenders, audited
+
+    def _offenders_in(self, source: str, entry: str = "ensure_schema") -> list[str]:
+        """Run the detector over one synthetic module — the oracle harness."""
+        tree = ast.parse(source)
+        consts = self._module_constants(tree)
+        funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        ctx = (consts, self._reading_functions(funcs))
+        offenders: list[str] = []
+        for fn in self._closure(entry, funcs):
+            self._scan(fn.body, ctx, {}, set(), False, offenders, fn.name)
+        return offenders
+
+    @staticmethod
+    def _old_ratchet_offenders(source: str) -> list[str]:
+        """The predicate CB-202 replaces, kept only to pin what this unit bought.
+
+        Verbatim shape of the deleted rule: a string LITERAL in the call, leading
+        with a DML verb, not lexically nested under an `ast.If`.
+        """
         offenders = []
 
-        def walk(n: ast.AST, under_if: bool) -> None:
+        def walk(n, under_if):
             if isinstance(n, ast.If):
                 for child in ast.iter_child_nodes(n):
                     walk(child, True)
                 return
-            if isinstance(n, ast.Call):
-                func = n.func
-                if isinstance(func, ast.Attribute) and func.attr in ("execute", "executescript"):
-                    if n.args and isinstance(n.args[0], ast.Constant) and isinstance(
-                        n.args[0].value, str
-                    ):
-                        sql = n.args[0].value.strip().upper()
-                        if sql.startswith(self._DML_PREFIXES) and not under_if:
-                            offenders.append(f"{node.name}:{n.lineno}: {sql[:60]!r}")
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+                if n.func.attr in ("execute", "executescript"):
+                    first = n.args[0] if n.args else None
+                    if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                        sql = first.value.strip().upper()
+                        if sql.startswith(("INSERT", "UPDATE", "DELETE", "REPLACE")):
+                            if not under_if:
+                                offenders.append(f"{n.lineno}: {sql[:60]!r}")
             for child in ast.iter_child_nodes(n):
                 walk(child, under_if)
 
-        walk(node, False)
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.FunctionDef) and node.name == "ensure_schema":
+                walk(node, False)
         return offenders
 
-    def test_no_ensure_schema_runs_unconditional_dml(self):
-        src = Path(db.__file__).parent
-        offenders = []
-        for py in sorted(src.rglob("*.py")):
-            tree = ast.parse(py.read_text(), filename=str(py))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.FunctionDef) and node.name == "ensure_schema":
-                    found = self._unconditional_dml_calls(node)
-                    offenders.extend(f"{py.relative_to(src)}:{o}" for o in found)
+    # ------------------------------------------------------- the ratchet itself
 
+    def test_no_schema_init_runs_unchecked_dml(self):
+        offenders, _ = self._audit(Path(db.__file__).parent)
         assert offenders == [], (
-            "an ensure_schema() runs unconditional DML on every db.connect() — "
-            "this reintroduces CB-195's write-lock-on-read defect:\n" + "\n".join(offenders)
+            "a schema-init function executes DML that no read of its own can stop, so "
+            "every db.connect() takes SQLite's write lock — this is CB-195's "
+            "write-lock-on-read defect:\n" + "\n".join(offenders)
         )
 
-    def test_the_ratchet_actually_finds_the_pre_fix_shape(self):
-        """Premise pin: prove the detector is non-vacuous against the exact
-        pre-fix code shape, so a change to the detector itself cannot silently
-        stop discriminating (the CB-140 lesson: a check that stops catching its
-        own mutant is worse than no check, because it still looks green).
+    def test_the_audited_set_reaches_the_helpers_the_old_rule_could_not_see(self):
+        """Non-vacuity, as a composition rather than a count.
+
+        The two functions CB-195 actually repaired must be in the audited set,
+        and so must the migration helpers reachable from a schema-init entry
+        point — those are 27 execute sites the name-keyed rule never read.
         """
-        src = """
+        _, audited = self._audit(Path(db.__file__).parent)
+        for required in (
+            "merge.py::ensure_schema",
+            "milestones/_schema.py::ensure_schema",
+            "findings.py::_migrate_statuses",
+            "reqs.py::_migrate_to_lowercase",
+            "sweep.py::_migrate",
+        ):
+            assert required in audited, f"{required} is outside the audited set: {audited}"
+
+    # ------------------- oracle: ONE state, reached by DIFFERENT spellings ----
+
+    def test_dml_as_a_literal_in_the_call_is_flagged(self):
+        """The exact pre-fix shape. The old rule caught this one, and only this."""
+        source = """
 def ensure_schema(conn):
     conn.execute("CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY)")
     conn.execute("INSERT OR IGNORE INTO t (id) VALUES (1)")
-    conn.commit()
 """
-        tree = ast.parse(src)
-        (node,) = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
-        found = self._unconditional_dml_calls(node)
-        assert found, "detector failed to flag the exact pre-fix unconditional INSERT shape"
+        assert self._offenders_in(source)
+        assert self._old_ratchet_offenders(source), "premise: the old rule saw this spelling"
 
-    def test_the_ratchet_does_not_flag_a_guarded_insert(self):
-        """Mirror premise: a DML statement nested under an `if` must NOT be
-        flagged, or this ratchet would refuse the very fix it exists to check.
+    def test_dml_moved_into_the_schema_constant_is_flagged(self):
+        """THE PURCHASE OF THIS UNIT — the acceptor's one-line bypass.
+
+        Identical end state, reached by putting the insert in the module's
+        schema constant that the existing loop already executes. The old rule is
+        green here; that difference is what CB-202 bought, so it is asserted in
+        both directions rather than described.
         """
-        src = """
+        source = '''
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY);
+INSERT OR IGNORE INTO t (id) VALUES (1)
+"""
+
+
+def ensure_schema(conn):
+    for stmt in SCHEMA.split(";"):
+        stmt = stmt.strip()
+        if stmt:
+            conn.execute(stmt)
+'''
+        assert self._offenders_in(source), "the acceptor's bypass is still invisible"
+        assert self._old_ratchet_offenders(source) == [], (
+            "premise: the rule CB-202 replaces was GREEN on this state — if it is not, "
+            "this unit's motivating measurement no longer reproduces"
+        )
+
+    def test_dml_in_a_constant_tuple_of_statements_is_flagged(self):
+        source = '''
+_POST_MIGRATION_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS ix_t ON t (id)",
+    "INSERT OR IGNORE INTO t (id) VALUES (1)",
+)
+
+
+def ensure_schema(conn):
+    for stmt in _POST_MIGRATION_INDEXES:
+        conn.execute(stmt)
+'''
+        assert self._offenders_in(source)
+
+    def test_dml_built_as_an_fstring_is_flagged(self):
+        source = """
+def ensure_schema(conn):
+    table = "t"
+    conn.execute(f"INSERT OR IGNORE INTO {table} (id) VALUES (1)")
+"""
+        assert self._offenders_in(source)
+
+    def test_dml_buried_in_the_middle_of_an_executescript_is_flagged(self):
+        """`executescript` commits implicitly and carries many statements, so a
+        rule reading only the blob's first verb sees a CREATE and stops."""
+        source = '''
+def ensure_schema(conn):
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY);
+        INSERT OR IGNORE INTO t (id) VALUES (1);
+        CREATE INDEX IF NOT EXISTS ix_t ON t (id)
+    """)
+'''
+        assert self._offenders_in(source)
+        assert self._old_ratchet_offenders(source) == [], (
+            "premise: leading-verb matching on the whole blob read this as a CREATE"
+        )
+
+    def test_dml_through_executemany_is_flagged(self):
+        source = """
+def ensure_schema(conn):
+    conn.executemany("INSERT OR IGNORE INTO t (id) VALUES (?)", [(1,), (2,)])
+"""
+        assert self._offenders_in(source)
+        assert self._old_ratchet_offenders(source) == [], (
+            "premise: the old rule did not even name the executemany attribute"
+        )
+
+    def test_dml_inside_a_helper_called_by_the_entry_point_is_flagged(self):
+        source = """
+def ensure_schema(conn):
+    _migrate(conn)
+
+
+def _migrate(conn):
+    conn.execute("INSERT OR IGNORE INTO t (id) VALUES (1)")
+"""
+        assert self._offenders_in(source)
+        assert self._old_ratchet_offenders(source) == [], (
+            "premise: a name-keyed rule never reads the helper"
+        )
+
+    def test_dml_held_in_a_local_variable_is_flagged(self):
+        source = """
+def ensure_schema(conn):
+    sql = "INSERT OR IGNORE INTO t (id) VALUES (1)"
+    conn.execute(sql)
+"""
+        assert self._offenders_in(source)
+        assert self._old_ratchet_offenders(source) == [], (
+            "premise: the old rule read only the literal sitting in the call"
+        )
+
+    def test_a_branch_not_fed_by_a_read_does_not_excuse_dml(self):
+        """The half that actually defeats the acceptor's bypass.
+
+        `if stmt:` is the guard the real schema loop already carries, so a rule
+        content with "nested under an `if`" waves the insert straight through.
+        A write is checked only when a READ could have stopped it.
+        """
+        source = """
+def ensure_schema(conn, wanted):
+    if wanted:
+        conn.execute("INSERT OR IGNORE INTO t (id) VALUES (1)")
+"""
+        assert self._offenders_in(source)
+        assert self._old_ratchet_offenders(source) == [], (
+            "premise: nesting under any `if` satisfied the rule CB-202 replaces"
+        )
+
+    def test_a_cte_fronted_write_is_flagged(self):
+        source = """
+def ensure_schema(conn):
+    conn.execute("WITH src AS (SELECT 1 AS id) INSERT INTO t (id) SELECT id FROM src")
+"""
+        assert self._offenders_in(source)
+
+    def test_unreadable_sql_is_refused_rather_than_certified(self):
+        """Fail-closed: what the resolver cannot read, it does not wave through."""
+        source = """
+def ensure_schema(conn):
+    _apply(conn, "INSERT OR IGNORE INTO t (id) VALUES (1)")
+
+
+def _apply(conn, sql):
+    conn.execute(sql)
+"""
+        assert self._offenders_in(source)
+
+    # --------------------------- oracle: honest code must stay green ---------
+
+    def test_a_read_gated_insert_is_not_flagged(self):
+        """The CB-195 fix's own shape — the mirror premise. A ratchet that
+        reddens on correct code is removed by the first person it obstructs."""
+        source = """
 def ensure_schema(conn):
     conn.execute("CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY)")
     if conn.execute("SELECT 1 FROM t WHERE id = 1").fetchone() is None:
         conn.execute("INSERT OR IGNORE INTO t (id) VALUES (1)")
-    conn.commit()
 """
-        tree = ast.parse(src)
-        (node,) = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
-        found = self._unconditional_dml_calls(node)
-        assert found == [], f"a guarded INSERT was wrongly flagged as unconditional: {found}"
+        assert self._offenders_in(source) == []
+
+    def test_a_guard_clause_makes_the_rest_of_the_function_conditional(self):
+        """`reqs._migrate_to_lowercase`'s real shape, reduced.
+
+        The write is not nested under anything; it is guarded by two early
+        returns fed by a read. Widening the scope to helpers without this half
+        would have painted correct code red on the very first run.
+        """
+        source = '''
+def ensure_schema(conn):
+    _migrate_to_lowercase(conn)
+
+
+def _migrate_to_lowercase(conn):
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE name='t'").fetchone()
+    if row is None:
+        return
+    if "'must'" in row[0]:
+        return
+    conn.executescript("""
+        CREATE TABLE t_new (id INTEGER PRIMARY KEY);
+        INSERT INTO t_new SELECT id FROM t;
+        DROP TABLE t
+    """)
+'''
+        assert self._offenders_in(source) == []
+
+    def test_pure_ddl_and_reads_are_not_flagged(self):
+        source = '''
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY);
+CREATE INDEX IF NOT EXISTS ix_t ON t (id)
+"""
+
+
+def ensure_schema(conn):
+    for stmt in SCHEMA.split(";"):
+        stmt = stmt.strip()
+        if stmt:
+            conn.execute(stmt)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(t)").fetchall()}
+    if "extra" not in cols:
+        conn.execute("ALTER TABLE t ADD COLUMN extra TEXT")
+'''
+        assert self._offenders_in(source) == []

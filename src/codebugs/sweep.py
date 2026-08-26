@@ -355,7 +355,15 @@ def next_batch(
 
     Excludes archived items (F5). "Unprocessed" means `processed = 0`, which
     mirrors `state NOT IN terminal_states`.
+
+    ``limit=None`` keeps its meaning here — fall back to the sweep's own
+    ``default_batch_size`` — which is why this site needs a validator that
+    accepts ``None`` rather than a bare non-negative check.
     """
+    # CB-196, before `_resolve_sweep` so a bad limit refuses without first
+    # spending a lookup: validate the argument before anything is resolved.
+    limit = require_row_limit("limit", limit)
+
     sweep_id = _resolve_sweep(conn, sweep_ref)
 
     row = conn.execute(

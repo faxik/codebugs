@@ -25,6 +25,7 @@ from codebugs.types import (
     is_vocabulary_filter_active,
     normalize_category,
     rank_case_sql,
+    require_row_limit,
     resolve_finding_status,
     resolve_severity,
     severity_rank,
@@ -3164,6 +3165,16 @@ def query_findings(
     With the flag on, the page is resolved in ONE pass — the per-tree context is
     built once for the whole population, never per row.
     """
+    # CB-196. Validated HERE, at the top, and specifically ABOVE the `ids`
+    # widening below: that widening runs only inside `if ids:` and rewrites a
+    # caller's `-1` to `len(ids)`, so a check placed after it would be a gate
+    # that cannot fire for exactly the calls that carry an id list, while still
+    # firing for the bare call. One argument, two verdicts, decided by an
+    # unrelated parameter. Validating the ARGUMENT rather than the derived value
+    # is also this package's standing rule (CB-82): a refusal must cost no
+    # partial work.
+    limit = require_row_limit("limit", limit)
+
     conditions: list[str] = []
     params: list[Any] = []
 
@@ -4289,7 +4300,10 @@ def register_tools(mcp, conn_factory) -> None:
                       that tool is a tag census with pair co-occurrence over
                       `status`/`category` only; this is a distribution that
                       composes with every filter on this tool.
-            limit: Max results (default 100)
+            limit: Max results (default 100). 0 means NO results, EXCEPT when
+                      `id`/`ids` is given, where the id list sets a floor and a
+                      smaller limit is raised to fit it. A negative value is an
+                      error (it used to mean "no limit").
             offset: Pagination offset
             resolve_anchors: Resolve each result's location anchor against the
                       repository HEAD, so a card whose code moved reports its
@@ -4301,6 +4315,16 @@ def register_tools(mcp, conn_factory) -> None:
                       default.
         """
         with conn_factory() as conn:
+            # CB-196. The `deferred` branch below RETURNS without ever reaching
+            # `query_findings`, so the domain guard cannot see that call: with no
+            # deferred rows in the tracker, `limit=-1` used to come back at exit 0
+            # echoing `"limit": -1`, while the identical call on a tracker that
+            # HAS one refused. One argument, two verdicts, decided by whether the
+            # tracker happens to hold a deferred row — the same shape this
+            # function's own comment condemns for the `ids` widening. This is the
+            # SHARED predicate called at one more site, not a second predicate.
+            limit = require_row_limit("limit", limit)
+
             deferred_ids: list[str] | None = None
             if status == "deferred":
                 # `deferred` is a PSEUDO-status: resolve it to an id restriction and
@@ -5286,7 +5310,11 @@ def register_cli(sub, commands) -> None:
             "both groups and one with none is in no group; the footer reports both"
         ),
     )
-    p.add_argument("--limit", type=int, help="Max results")
+    p.add_argument(
+        "--limit",
+        type=int,
+        help="Max results (0 for none unless --id/--ids is given; negative is an error)",
+    )
     p.add_argument(
         "--resolve-anchors",
         dest="resolve_anchors",

@@ -166,6 +166,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     first open onward. Checking first keeps the steady-state path to four WAL
     reads, none of which can block on a concurrent writer.
 
+    The boundary of "steady state" is measured beside `merge.ensure_schema`'s
+    own docstring (CB-202) and applies here identically: while a seed row is
+    missing, this insert runs and a reading `db.connect()` waits out a foreign
+    writer's whole hold — 734ms against a 700ms hold, versus 0.8ms once the rows
+    exist. One open per tracker, and not a residual defect.
+
     The race on an EMPTY database is harmless: two connections opening
     concurrently both see a row missing, both attempt the insert, and
     `OR IGNORE` drops the loser. This is NOT the read-modify-write shape

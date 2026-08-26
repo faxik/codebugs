@@ -385,7 +385,14 @@ CLI_CONTRACT = {
         "Get next batch of unprocessed items",
         [
             ("sweep", [], None, "_StoreAction", None, "Sweep ID (SW-N) or name"),
-            ("limit", ["--limit"], None, "_StoreAction", None, "Batch size override"),
+            (
+                "limit",
+                ["--limit"],
+                None,
+                "_StoreAction",
+                None,
+                "Batch size override (0 for none; negative is an error)",
+            ),
             (
                 "tags",
                 ["--tags"],

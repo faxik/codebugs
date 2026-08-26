@@ -290,11 +290,19 @@ def main() -> None:
         print(f"codebugs: {e}", file=sys.stderr)
         sys.exit(1)
     except sqlite3.OperationalError as e:
-        # Contention is not a crash. db.connect() WRITES during schema init
-        # (merge.ensure_schema's INSERT OR IGNORE), so a database held by another
-        # writer for longer than busy_timeout used to kill every verb with a
-        # traceback before its own code ran. Exit 5 means "retry", uniformly.
-        # Anything that is not BUSY/LOCKED is a real error and still propagates.
+        # Contention is not a crash, and this arm is still needed — but NARROWER
+        # than the sentence that used to stand here, which read "db.connect()
+        # WRITES during schema init" as a live fact. CB-195 made those seed
+        # inserts conditional on the seed row being missing, so on a tracker that
+        # has been opened before, connect() takes no write lock at all and a
+        # reading verb no longer contends with anyone. What survives is the FIRST
+        # open of a tracker (and any tracker whose seed rows were removed): there
+        # the insert really does run, so a foreign writer holding the lock makes
+        # connect() wait out the whole hold and, past busy_timeout, raise here
+        # before the verb's own code runs. Measured on this tree: 734ms under a
+        # 700ms foreign hold with the seed row absent, against 0.8ms with it
+        # present. Exit 5 means "retry", uniformly, and anything that is not
+        # BUSY/LOCKED is a real error and still propagates.
         if not db.is_contention(e):
             raise
         print(f"codebugs: database busy, retry shortly ({e})", file=sys.stderr)

@@ -6,7 +6,66 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **A negative `--limit` is now an error instead of silently meaning "no limit" (CB-196).**
+  On `query`, `reqs-query` and `sweep-next` — and on their tool equivalents `query`,
+  `reqs_query` and `codesweep_next` — asking for `--limit -1` used to print the ENTIRE
+  table and exit 0. SQLite reads a negative limit as no limit at all, so the one argument
+  you use to bound a result was quietly doing the opposite of what you asked, with nothing
+  anywhere to tell you. It now refuses with a one-line message and exit 1.
+  **What it costs you:** if you were using a negative number as a way to say "give me
+  everything", drop the flag instead — omitting it is what "no limit" means on `sweep-next`,
+  and on `query`/`reqs-query` it gives you the default page of 100. **`--limit 0` is
+  unchanged and still legal**: it means zero rows — except when you also pass
+  `--id`/`--ids`, where the id list you named sets a floor and a smaller limit is
+  raised to fit it. That was always true; it is now written on the flag.
+  The refusal also covers `--status deferred`, which answers from a different code
+  path and used to accept a negative limit at exit 0 whenever no deferred rows
+  existed — so the same flag no longer gets two different verdicts depending on
+  what the tracker happens to contain.
+  This does NOT close the class. `recent --limit -1` still returns everything at exit 0,
+  along with several internal paths, and nothing mechanical catches a new one — that is
+  tracked as CB-208.
+- **The "a read never waits on a write" improvement now states its one exception, because it
+  has one (CB-202).** Since 0.2.1, a call that only reads the tracker no longer stalls behind
+  another session's write. That holds from the *second* time a tracker is opened onward. The
+  very first open of a brand-new tracker still has to create the few rows the tracker needs to
+  exist, and creating them is a write — so if another session happens to be writing at that
+  exact moment, that first open waits for it, just as everything did before. Measured: with
+  another session holding the database for 0.7 seconds, the first open takes 0.73 seconds and
+  every open after it takes under a thousandth of a second. In practice this is one moment per
+  tracker, right after `codebugs init`, and there is no way to avoid it — you cannot skip a
+  write by checking first when the thing you are checking for is not there yet. It is written
+  down here because "a read never waits" read as unconditional, and it is not.
+- **Running the test suite under a stray `.codebugs/` directory now stops immediately with one
+  explanation instead of roughly a thousand unrelated-looking failures (CB-204).** This affects
+  anyone who runs `pytest` on this project, and nothing about the tracker's own behaviour.
+  `codebugs` finds its database by walking up from where it is called — intended behaviour, and
+  not changed here — but that means a `.codebugs/` directory sitting anywhere above pytest's
+  temporary directory captures every test that meant to build a throwaway tracker of its own.
+  An empty `/tmp/.codebugs` left behind by some other tool did exactly that twice in one day, and
+  both times the run looked like a large, sudden breakage of the code. Measured: 1071 of 2739
+  tests fail or error in that state. The suite now asks the product's own directory walk one
+  question before any test runs, and if the answer is "yes, there is a tracker above you", it
+  refuses in under a second, names the directory it found, and tells you the two ways out —
+  delete the stray directory, or point pytest's temporary root somewhere else with
+  `--basetemp` or `TMPDIR`. It stays silent on a healthy machine, including the case where a
+  tracker sits above a `.git` directory and is therefore genuinely out of reach.
+
 ### Fixed
+- **The safety net protecting that improvement was checking less than it promised (CB-202).**
+  A test in this repository exists to catch the one-line mistake that would silently bring the
+  old stalling behaviour back — the symptom is invisible unless two sessions happen to collide,
+  so nobody would notice until it hurt. An independent reviewer restored the defect completely
+  and the test stayed green, because it was looking for the mistake written one particular way
+  rather than for the mistake itself. It now checks what actually matters: whether the tracker's
+  start-up code writes anything without first looking to see whether the write is needed — no
+  matter how that write is spelled, including when it is hidden in a block of setup instructions
+  or in a helper called from somewhere else. The test also states, in its own text, the cases it
+  still cannot see, so the next person to rely on it knows exactly how far it reaches. Nothing
+  about how codebugs behaves changes here; what changes is that the promise above is now
+  actually guarded.
+
 - **`codebugs where` no longer tells you a tracker is missing when it simply could not
   look at one.** If the permissions on a `.codebugs/` directory stopped the tool from
   entering it — for instance because the directory lost its execute bit — `where` printed
