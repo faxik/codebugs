@@ -18,6 +18,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   tracker, right after `codebugs init`, and there is no way to avoid it — you cannot skip a
   write by checking first when the thing you are checking for is not there yet. It is written
   down here because "a read never waits" read as unconditional, and it is not.
+- **Running the test suite under a stray `.codebugs/` directory now stops immediately with one
+  explanation instead of roughly a thousand unrelated-looking failures (CB-204).** This affects
+  anyone who runs `pytest` on this project, and nothing about the tracker's own behaviour.
+  `codebugs` finds its database by walking up from where it is called — intended behaviour, and
+  not changed here — but that means a `.codebugs/` directory sitting anywhere above pytest's
+  temporary directory captures every test that meant to build a throwaway tracker of its own.
+  An empty `/tmp/.codebugs` left behind by some other tool did exactly that twice in one day, and
+  both times the run looked like a large, sudden breakage of the code. Measured: 1071 of 2739
+  tests fail or error in that state. The suite now asks the product's own directory walk one
+  question before any test runs, and if the answer is "yes, there is a tracker above you", it
+  refuses in under a second, names the directory it found, and tells you the two ways out —
+  delete the stray directory, or point pytest's temporary root somewhere else with
+  `--basetemp` or `TMPDIR`. It stays silent on a healthy machine, including the case where a
+  tracker sits above a `.git` directory and is therefore genuinely out of reach.
 
 ### Fixed
 - **The safety net protecting that improvement was checking less than it promised (CB-202).**

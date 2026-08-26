@@ -1351,20 +1351,62 @@ class TestCb182WhereWritabilityStreamParity:
         assert "may not be writable" in proc.stdout
 
     # --- rows 7/8: a declared root that does not resolve — untouched -------
+    #
+    # THESE TWO ROWS USED TO BUILD A DIFFERENT STATE FROM THE ONE THEY NAME, and
+    # that is CB-204's second half. They ran `where` in a bare `tmp_path` with
+    # NOTHING declared, so what they actually built was "the WALK finds no
+    # tracker anywhere above" — which produces the same `(unresolved)` line only
+    # for as long as the machine happens to have no `.codebugs/` above pytest's
+    # temporary root. On the day one appeared in `/tmp`, the walk resolved, `where`
+    # exited 0, and both rows failed while asserting something true about the
+    # product. A test green by construction of the ENVIRONMENT is a false
+    # witness, not a coverage gap.
+    #
+    # They now declare the root through the channel the name promises. That
+    # channel OUTRANKS the walk (`_db_path`: argument, then `--tracker-root`,
+    # then `CODEBUGS_ROOT`, then discovery), so the outcome no longer depends on
+    # what is or is not above the temporary tree — and the `foreign_above`
+    # parameter proves exactly that by putting a tracker there on purpose and
+    # demanding an identical verdict.
 
-    def test_row7_unresolved_root_is_a_real_error_plain(self, tmp_path):
+    @pytest.mark.parametrize("foreign_above", [False, True])
+    def test_row7_unresolved_root_is_a_real_error_plain(self, tmp_path, foreign_above):
         """The error branch is explicitly NOT in scope for CB-182 (brief §2):
         it stays an error, in stderr, at exit 1."""
-        proc = self._where(tmp_path)
+        cwd, declared = self._unresolved_root_stage(tmp_path, foreign_above)
+        proc = self._where(cwd, "--tracker-root", str(declared))
         assert proc.returncode == 1
         assert "(unresolved)" in proc.stdout
         assert proc.stderr.strip() != ""
 
-    def test_row8_unresolved_root_stdout_survives_stderr_redirect(self, tmp_path):
-        proc = self._where_devnull_stderr(tmp_path)
+    @pytest.mark.parametrize("foreign_above", [False, True])
+    def test_row8_unresolved_root_stdout_survives_stderr_redirect(self, tmp_path, foreign_above):
+        cwd, declared = self._unresolved_root_stage(tmp_path, foreign_above)
+        proc = self._where_devnull_stderr(cwd, "--tracker-root", str(declared))
         assert proc.returncode == 1
         assert "root:" in proc.stdout
         assert "(unresolved)" in proc.stdout
+
+    def _unresolved_root_stage(self, tmp_path, foreign_above):
+        """Build "a declared root that does not resolve", and nothing else.
+
+        `--tracker-root` names a directory holding no `.codebugs/`, which fails
+        closed by design (CB-23: on a NAMED root the tracker is the file, not the
+        directory). With `foreign_above` the invocation additionally stands under
+        a tracker the walk would happily find — the state that used to decide
+        these rows, and that must now decide nothing.
+        """
+        declared = tmp_path / "declared-but-empty"
+        declared.mkdir()
+        stage = tmp_path / ("under-a-foreign-tracker" if foreign_above else "clean")
+        cwd = stage / "here"
+        cwd.mkdir(parents=True)
+        if foreign_above:
+            (stage / ".codebugs").mkdir()
+            assert db._find_db_root(str(cwd)) == str(stage.resolve()), (
+                "premise: without the declaration the walk really would resolve here"
+            )
+        return cwd, declared
 
     # --- row 9: a DIFFERENT way to make the tracker unwritable -------------
 
