@@ -3734,7 +3734,24 @@ def _plan_category_fold(
         # instead would make the mechanical fold refuse itself. The proof rests on
         # `_existing_categories`' keying, so it breaks if that keying ever changes;
         # `tests/test_category_fold.py::TestDerivedFoldIsNotGated` pins it.
-        existing = _existing_categories(conn)
+        # The gate is handed the NORMALIZED form as the display value for every
+        # category, and that is not tidiness — without it the two refusals of this
+        # one command CONTRADICT each other. `_gate_category`'s messages name
+        # `existing[key]`, the STORED spelling, which is right for `add`, where the
+        # caller's category is normalized at the boundary: told "use the existing
+        # spelling 'Process-Improvement'", an observer types it and it works. A fold
+        # target has no such boundary — `_validate_fold_map` REFUSES a target that is
+        # not already canonical — so on a pre-CB-60 corpus (exactly the corpus this
+        # command exists for) the near-miss branch advised 'Process-Improvement' and
+        # the next run refused that very value as non-canonical, and the "nearest
+        # existing" list could name three values of which none was a legal target.
+        # Measured, and found by adversarial review rather than by the measurement
+        # that was supposed to find it: a fixture whose stored spellings are already
+        # canonical cannot exhibit it. Swapping the VALUES changes no decision — the
+        # accept/reject test and the distance ranking both read the KEYS, which are
+        # already the normalized forms — so this only makes every name the refusal
+        # prints a value the command will actually accept.
+        existing = {norm: norm for norm in _existing_categories(conn)}
         # First bad target wins: `_gate_category` raises, and it is used verbatim
         # rather than re-implemented as a collector ("a check duplicated rather than
         # shared is one edit from disagreeing with itself"). The cost is real and
@@ -3863,8 +3880,15 @@ def normalize_categories(
     open). A typo in a TARGET is a different matter and is refused outright, see
     ``new_category`` below.
 
-    ``new_category`` is PERMISSION TO MINT, exactly as on ``add_finding`` (CB-60),
-    and it applies to the whole map at once. A target this tracker does not
+    ``new_category`` is PERMISSION TO MINT — the same flag name and the same
+    meaning as on ``add_finding`` (CB-60), and it applies to the whole map at once.
+    It is NOT the same in its after-effect, and the difference is stated because the
+    name invites the assumption: an observation that mints stamps
+    ``meta.category_minted`` on the row it files, and a fold stamps nothing, so
+    ``query(meta_key="category_minted")`` does not count a name minted this way. A
+    report key for it was considered and refused by the direction — an unknown target
+    is refused without the flag, so nothing is minted by accident, and with the flag
+    the intent has been stated. A target this tracker does not
     already hold is refused without it (CB-223): the operation exists to REDUCE
     the number of category names, so a typo that quietly invents one more is the
     failure it must not have. The refusal names the nearest existing categories,
@@ -5202,7 +5226,9 @@ def register_cli(sub, commands) -> None:
         # collision is a fact about the DATA and the report is the channel for it.
         # This says nothing about the run's other outcomes: a bad target (CB-223) and
         # a non-canonical one are facts about the INPUT, and both refuse by exception
-        # in BOTH modes, so a dry run does not universally exit 0.
+        # on the dry run just as they do under `--apply`, so a dry run does not
+        # universally exit 0. (Note "dry run vs --apply" here is a different axis from
+        # the "two modes" the docstrings name, which is derived-vs-explicit-map.)
         # `--apply` that stopped wrote nothing, so it must not look like success.
         if args.apply and report["stopped"]:
             sys.exit(1)

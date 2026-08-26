@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
+import re
 import sys
 
 import pytest
@@ -538,6 +539,41 @@ class TestFoldTargetMustExist:
         assert "near-miss" in str(exc.value)
         assert repr(MERGE_TO) in str(exc.value)
 
+    def test_every_name_the_refusal_prints_is_a_value_this_command_accepts(self, conn):
+        """The COMPOSITION of the two refusals, which neither one can establish.
+
+        `_gate_category` was written for `add`, where the caller's category is
+        normalized at the boundary, so naming the STORED spelling is helpful there.
+        A fold target gets no such boundary — `_validate_fold_map` refuses a target
+        that is not already canonical — so naming a stored spelling here advised a
+        value the very next run rejects. Reproduced on a pre-CB-60 corpus, which is
+        exactly the corpus this command exists for; a fixture whose stored spellings
+        are already canonical cannot exhibit it, which is why the fixture below
+        stores a VARIANT.
+
+        The assertion is deliberately not "the message contains X": it takes the
+        names out of both refusal branches and FEEDS THEM BACK to the command, which
+        is the only form that cannot drift from what the command accepts.
+        """
+        _insert_raw(conn, fid="CB-1", category=VARIANT)
+        _insert_raw(conn, fid="CB-2", category=MERGE_FROM, description=DESC_B)
+
+        # (a) the near-miss branch: one letter short of the canonical form.
+        with pytest.raises(ValueError) as near:
+            findings.normalize_categories(conn, fold_map={MERGE_FROM: CANON[:-1]})
+        advised = re.findall(r"'([^']*)'", str(near.value))
+        # (b) the wholly-new branch: its "nearest existing" list.
+        with pytest.raises(ValueError) as new:
+            findings.normalize_categories(conn, fold_map={MERGE_FROM: "zz_unrelated_name"})
+        listed = re.findall(r"'([^']*)'", str(new.value))
+
+        candidates = [n for n in advised + listed if n not in (CANON[:-1], "zz_unrelated_name")]
+        assert candidates, "the refusals named nothing at all — the check would be vacuous"
+        for name in candidates:
+            # Accepted means: not refused as non-canonical, and not refused as an
+            # unknown target. Any name a refusal offers must clear BOTH.
+            findings.normalize_categories(conn, fold_map={MERGE_FROM: name})
+
     def test_the_flag_permits_the_mint_rather_than_walling_it_off(self, conn):
         """Row 5. A gate with no way out is a wall, not a diagnostic — so the same
         call with permission must actually land the new name."""
@@ -580,7 +616,10 @@ class TestFoldTargetMustExist:
         assert "no categories yet" in str(exc.value)
 
     def test_folding_into_the_empty_category_stays_ungated(self, conn):
-        """`""` is a legal, deliberately ungated category everywhere else (CB-60),
+        """PIN OF PRESERVED BEHAVIOUR — green before this unit too, and said out loud
+        so a reader does not take it for a regression test on a defect that shipped.
+
+        `""` is a legal, deliberately ungated category everywhere else (CB-60),
         and the new gate must not have quietly made it a mint. A tracker whose
         rows all carry `""` is a legitimate state to fold INTO."""
         _insert_raw(conn, fid="CB-1", category=MERGE_FROM)
@@ -593,7 +632,10 @@ class TestFoldTargetMustExist:
         assert _categories(conn) == [""]
 
     def test_a_name_held_only_by_a_terminal_row_is_still_an_existing_target(self, conn):
-        """`_existing_categories` reads the whole table, terminal rows included — a
+        """PIN OF PRESERVED BEHAVIOUR, like the empty-category test above: green on
+        the parent commit as well, because there was no gate there to refuse it.
+
+        `_existing_categories` reads the whole table, terminal rows included — a
         category used only by fixed cards still EXISTS. Pinned because the new gate
         is the first caller for which "exists" decides a refusal rather than a
         warning, so a future status filter there would become a false refusal."""
@@ -710,6 +752,16 @@ class TestCliMergeSurface:
         assert ABSENT_TARGET in out and MERGE_FROM in out
 
 
+def _tool_error():
+    """The SDK's wrapper type. Named rather than `Exception`: a bare `Exception`
+    would pass on an import error or a typo in the tool name, so the trap would
+    stop discriminating exactly when it matters. Measured on this SDK — a domain
+    `ValueError` and a strict-bool refusal both arrive as `ToolError`."""
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    return ToolError
+
+
 class TestMcpMergeSurface:
     """Oracle rows 9 and 10, through the REAL `MCPServer` + `call_tool` pipeline.
 
@@ -754,7 +806,7 @@ class TestMcpMergeSurface:
         _insert_raw(conn, fid="CB-1", category=MERGE_FROM)
         mcp = self._mcp(tmp_project)
 
-        with pytest.raises(Exception) as exc:
+        with pytest.raises(_tool_error()) as exc:
             self._call(
                 mcp,
                 "categories_normalize",
@@ -793,7 +845,7 @@ class TestMcpMergeSurface:
         _insert_raw(conn, fid="CB-1", category=VARIANT)
         mcp = self._mcp(tmp_project)
 
-        with pytest.raises(Exception):
+        with pytest.raises(_tool_error()):
             self._call(mcp, "categories_normalize", apply=1.0)
 
         assert _categories(conn) == [VARIANT]
@@ -805,7 +857,7 @@ class TestMcpMergeSurface:
         _insert_raw(conn, fid="CB-1", category=MERGE_FROM)
         mcp = self._mcp(tmp_project)
 
-        with pytest.raises(Exception):
+        with pytest.raises(_tool_error()):
             self._call(
                 mcp,
                 "categories_normalize",
