@@ -1425,9 +1425,16 @@ class TestTheWalkIsThreeValued:
         monkeypatch.chdir(deep)
         info = self._bind(deep, lambda: _wall_traverse_bit(project))
         assert info["error"], "the walk must still find nothing — that half is unchanged"
-        assert "or any parent;" not in info["error"], (
-            "the bare absence claim survived a route with an unexamined candidate"
-        )
+        # THE HEAD CLAUSE, asserted as a literal, and it had to be. The first
+        # version of this line read `"or any parent;" not in ...` — a NEGATIVE
+        # about the old spelling — and a mutant that deleted the qualifier while
+        # leaving the caveat appended SURVIVED it, because the caveat starts with
+        # an em dash and the semicolon never returned. The test was weaker than
+        # its own name: it pinned "a caveat is present", which mutant 5 already
+        # covers, and not "the absence claim is qualified", which is this test's
+        # whole subject. The sibling test on a healthy route asserts the
+        # UNqualified spelling, so the pair pins both directions.
+        assert "or any parent that could be examined" in info["error"]
         assert "could not be examined" in info["error"]
         assert str(project / ".codebugs") in info["error"]
         assert info["unexamined"], "the key must carry what the message names"
