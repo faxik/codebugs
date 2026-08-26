@@ -7,6 +7,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **Marking sweep items now refuses `--state` together with `--undo`, instead of silently
+  doing the opposite of what you asked (CB-197).** `codesweep_mark` takes two ways of saying
+  where an item should go: `state="done"` names one state outright, and `processed=True/False`
+  is the older shorthand for "the first finished state" / "the first unfinished one". If you
+  sent both, the whole `processed` argument was thrown away without a word. The worst case is
+  the one that reads like success: `state="done", processed=False` marked the item **done** —
+  exactly the opposite of the `processed=False` you passed — and returned a normal result. The
+  tool's own description did warn you ("Ignored if `state` is set"), but a documented wrong
+  answer is still a wrong answer, so the call is now refused with one line naming both values.
+  On the command line the same pair is `sweep-mark … --state done --undo`, which now exits 1.
+  **What it costs you:** if your client always fills in `processed` — many do, because a
+  generated wrapper substitutes the default for every argument — those calls will start
+  failing as soon as they also pass `state`. The argument is now optional, so the fix is to
+  leave it out; leaving it out means what it always did (the first finished state). **If your
+  wrapper cannot omit an argument, send `null` instead** — that is exactly what "not supplied"
+  now is, and it is accepted beside a `state`. `state` on its own, `processed: true`/`false`
+  on its own, and passing neither are all unchanged.
+  **One more change, small but worth knowing because it is a reversal:** sending
+  `processed: null` on its own used to be rejected outright by the tool (the parameter was a
+  strict boolean, and `null` was not one). It is now accepted and means "not supplied", i.e.
+  the first *finished* state. If you call the Python function directly rather than through the
+  tool, `processed=None` used to be treated as false and marked the item *unfinished* — it now
+  marks it finished, the opposite. Nothing in this repository or its sibling tools passed that
+  value, which is why the change is being made rather than worked around, but a caller that
+  did would silently get the other answer.
+  **The refusal does not care whether the two values agree.** `state="done"` beside
+  `processed=True` is refused as well, even where `done` really is the first finished state.
+  That agreement is a coincidence of how one sweep's lifecycle happens to be ordered, and a
+  rule that quietly permitted the pair on some sweeps and refused it on others would be
+  harder to rely on than one that always says no.
 - **A negative `--limit` is now an error instead of silently meaning "no limit" (CB-196).**
   On `query`, `reqs-query` and `sweep-next` — and on their tool equivalents `query`,
   `reqs_query` and `codesweep_next` — asking for `--limit -1` used to print the ENTIRE

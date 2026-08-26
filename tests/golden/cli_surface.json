@@ -5572,7 +5572,7 @@
         "default": false,
         "deprecated": false,
         "dest": "undo",
-        "help": "Map to first non-terminal state",
+        "help": "Map to first non-terminal state (not with --state)",
         "metavar": null,
         "nargs": 0,
         "option_strings": [
@@ -5588,7 +5588,7 @@
         "default": null,
         "deprecated": false,
         "dest": "state",
-        "help": "Explicit target state (validated against lifecycle)",
+        "help": "Explicit target state (validated against lifecycle; not with --undo)",
         "metavar": null,
         "nargs": null,
         "option_strings": [

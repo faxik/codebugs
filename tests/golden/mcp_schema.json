@@ -1438,7 +1438,7 @@
     "name": "codesweep_list_items"
   },
   {
-    "description": "Mark items by state transition.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- items: Item identifiers to mark\n- processed: Legacy mode \u2014 True maps to first terminal state, False to first non-terminal state. Ignored if `state` is set.\n- state: Explicit target state. Validated against the sweep's `lifecycle` and `transitions` DAG (if declared).\n",
+    "description": "Mark items by state transition.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- items: Item identifiers to mark\n- processed: Legacy mode \u2014 True maps to first terminal state, False to first non-terminal state. Omit it entirely (the default) to get the same effect as True. MUTUALLY EXCLUSIVE with `state`: sending both is an error, including when the two happen to agree, because `state` names one state and `processed` names a class of them.\n- state: Explicit target state. Validated against the sweep's `lifecycle` and `transitions` DAG (if declared). Mutually exclusive with `processed` \u2014 send one or the other, never both.\n",
     "inputSchema": {
       "properties": {
         "items": {
@@ -1449,9 +1449,16 @@
           "type": "array"
         },
         "processed": {
-          "default": true,
-          "title": "Processed",
-          "type": "boolean"
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Processed"
         },
         "state": {
           "anyOf": [

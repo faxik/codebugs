@@ -525,6 +525,164 @@ class TestLifecycle:
         result = sweep.mark_items(conn, sw["sweep_id"], ["x"], processed=False)
         assert result["state"] == "a"
 
+    # --- CB-197: `processed` and `state` are mutually exclusive -----------------
+    #
+    # Before CB-197 `processed` was simply UNREAD whenever `state` was set, so
+    # `state="done", processed=False` wrote `processed=1` — the opposite of what
+    # was asked — and returned a success payload. The tests below are the oracle
+    # for the refusal that replaced that. Three of them are PINS of behaviour this
+    # change deliberately PRESERVES, and each says so in its own docstring: read
+    # them as "this still works", not as guards on the new rule.
+
+    def test_supplying_both_refuses_when_they_contradict(self, conn):
+        sw = sweep.create_sweep(conn, lifecycle=["a", "b"], terminal_states=["b"])
+        sweep.add_items(conn, sw["sweep_id"], ["x"])
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            sweep.mark_items(conn, sw["sweep_id"], ["x"], state="b", processed=False)
+
+    def test_supplying_both_refuses_even_when_they_agree(self, conn):
+        """LOAD-BEARING, and the one an implementation is likeliest to miss.
+
+        The trigger is the FACT OF SUPPLY, never a disagreement of values. A
+        "do they contradict?" check would pass this call, and would be a second,
+        hidden rule: `state="b"` happens to agree with `processed=True` only
+        because `b` is `terminal_states[0]` in THIS sweep, and nothing makes a
+        caller's named terminal state the first one. The next test builds exactly
+        such a sweep, where the same pair genuinely disagrees, so the two together
+        show the verdict does not move with the lifecycle.
+        """
+        sw = sweep.create_sweep(conn, lifecycle=["a", "b"], terminal_states=["b"])
+        sweep.add_items(conn, sw["sweep_id"], ["x"])
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            sweep.mark_items(conn, sw["sweep_id"], ["x"], state="b", processed=True)
+
+    def test_the_agreement_that_would_have_excused_it_is_an_accident(self, conn):
+        """`state=<a terminal state that is not the FIRST one>, processed=True`.
+
+        Same argument pair as the test above, one lifecycle apart: here `d` is
+        terminal but `c` is `terminal_states[0]`, so a contradiction-based check
+        would refuse this call and permit the previous one — one rule producing
+        two verdicts for one caller intent. Both refuse.
+        """
+        sw = sweep.create_sweep(
+            conn, lifecycle=["a", "b", "c", "d"], terminal_states=["c", "d"]
+        )
+        sweep.add_items(conn, sw["sweep_id"], ["x"])
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            sweep.mark_items(conn, sw["sweep_id"], ["x"], state="d", processed=True)
+
+    def test_the_refusal_runs_before_the_transaction_opens(self, conn):
+        """A refusal decidable from the arguments must not take the write lock.
+
+        The discriminator is WHICH error comes back for a sweep that does not
+        exist: `_resolve_sweep` runs inside `db.txn`, so a refusal placed further
+        down (the obvious spot is the `state is not None` branch) reports the
+        missing sweep instead — and holds the write lock to do it. Measured
+        against exactly that mutant: `ValueError: Sweep not found: SW-NOSUCH`.
+
+        So the `match=` is load-bearing and the exception TYPE is not: both
+        refusals are `ValueError` (`_resolve_sweep` raises `ValueError`, not
+        `KeyError`), and a bare `pytest.raises(ValueError)` here would pass on
+        both placements — a test that cannot see the thing it is named for.
+        """
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            sweep.mark_items(conn, "SW-NOSUCH", ["x"], state="b", processed=True)
+
+    def test_the_refusal_writes_nothing(self, conn):
+        sw = sweep.create_sweep(conn, lifecycle=["a", "b"], terminal_states=["b"])
+        sweep.add_items(conn, sw["sweep_id"], ["x"])
+        with pytest.raises(ValueError):
+            sweep.mark_items(conn, sw["sweep_id"], ["x"], state="b", processed=False)
+        item = sweep.list_items(conn, sw["sweep_id"])["items"][0]
+        assert item["state"] == "a"
+        assert item["processed"] is False
+
+    def test_pin_state_alone_is_unchanged(self, conn):
+        """PIN of PRESERVED behaviour, not a guard on the new rule (CB-197).
+
+        This is the ordinary explicit-transition call and it must keep working
+        untouched — it is what a refusal keyed on the VALUE of `processed`
+        (rather than on its supply) would break, once the default stopped being
+        `None`.
+        """
+        sw = sweep.create_sweep(conn, lifecycle=["a", "b"], terminal_states=["b"])
+        sweep.add_items(conn, sw["sweep_id"], ["x"])
+        assert sweep.mark_items(conn, sw["sweep_id"], ["x"], state="b")["state"] == "b"
+
+    def test_pin_neither_argument_still_means_first_terminal(self, conn):
+        """PIN of PRESERVED behaviour (CB-197).
+
+        The bare `mark_items(conn, ref, items)` call, which means "mark
+        processed". It is what an XOR precedent — `bench._require_exactly_one`,
+        "exactly one of two", which the card named as the model — would have
+        REFUSED, and it is why this change is "not both" rather than XOR.
+        """
+        sw = sweep.create_sweep(
+            conn, lifecycle=["a", "b", "c"], terminal_states=["b", "c"]
+        )
+        sweep.add_items(conn, sw["sweep_id"], ["x"])
+        assert sweep.mark_items(conn, sw["sweep_id"], ["x"])["state"] == "b"
+
+    def test_pin_processed_false_alone_still_means_first_non_terminal(self, conn):
+        """PIN of PRESERVED behaviour (CB-197): the legacy unmark mode."""
+        sw = sweep.create_sweep(conn, lifecycle=["a", "b"], terminal_states=["b"])
+        sweep.add_items(conn, sw["sweep_id"], ["x"])
+        sweep.mark_items(conn, sw["sweep_id"], ["x"], state="b")
+        assert sweep.mark_items(conn, sw["sweep_id"], ["x"], processed=False)["state"] == "a"
+
+    def test_mark_items_signature_default_is_none_not_true(self):
+        """The default is what makes "not supplied" REPRESENTABLE (CB-197).
+
+        Restore `processed: bool = True` and the refusal below cannot fire at all
+        — every caller would look like one that supplied the argument, so the
+        `is not None` test would refuse everything or (if softened to a
+        contradiction test) refuse nothing consistently. Asserted on the signature
+        because no single behavioural test can distinguish "the default changed"
+        from "the refusal was deleted": both leave `state=` alone working.
+
+        The DEFAULT is asserted and the annotation's spelling deliberately is
+        not: `bool | None` and `Optional[bool]` are the same contract, and
+        `from __future__ import annotations` makes the attribute a string, so
+        an equality test there pins prose rather than behaviour.
+        """
+        import inspect
+
+        param = inspect.signature(sweep.mark_items).parameters["processed"]
+        assert param.default is None
+
+    def test_an_explicit_none_now_means_not_supplied_and_this_is_an_inversion(
+        self, conn
+    ):
+        """DECLARED behaviour change, not a preserved pin — CB-197.
+
+        `if processed:` read `None` as falsey, so an explicit `processed=None`
+        meant UNMARK (the first non-terminal state). It now means "not
+        supplied", which means MARK. Measured both ways while making the
+        change: `todo` before, `done` after — the opposite outcome behind a
+        success payload, which is this card's own defect shape and is why it is
+        pinned and written down rather than absorbed silently.
+
+        It is unavoidable given the ratified form: `None` is the only value the
+        MCP boundary can carry for "absent", since `build_tool` applies declared
+        defaults on every call. The cost was measured before being accepted — no
+        caller anywhere passes an explicit `None`, and over MCP the value was
+        previously refused outright by the strict-bool declaration.
+        """
+        sw = sweep.create_sweep(conn, lifecycle=["a", "b"], terminal_states=["b"])
+        sweep.add_items(conn, sw["sweep_id"], ["x"])
+        sweep.mark_items(conn, sw["sweep_id"], ["x"], state="b")
+
+        assert sweep.mark_items(conn, sw["sweep_id"], ["x"], processed=None)["state"] == "b"
+
+        # The other falsey non-bools are UNCHANGED, which is what makes `None`
+        # the single exception rather than a general narrowing.
+        for falsey in (0, "", []):
+            sweep.mark_items(conn, sw["sweep_id"], ["x"], state="b")
+            assert (
+                sweep.mark_items(conn, sw["sweep_id"], ["x"], processed=falsey)["state"]
+                == "a"
+            ), falsey
+
     def test_transition_dag_enforced(self, conn):
         sw = sweep.create_sweep(
             conn,

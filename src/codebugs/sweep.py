@@ -432,16 +432,59 @@ def mark_items(
     sweep_ref: str,
     items: list[str],
     *,
-    processed: bool = True,
+    processed: bool | None = None,
     state: str | None = None,
 ) -> dict[str, Any]:
     """Mark items by transitioning their state.
 
-    Two modes:
+    Two modes, and they are MUTUALLY EXCLUSIVE (CB-197):
     - `state="<name>"`: explicit state transition. Validated against the sweep's
       lifecycle, and against `transitions` DAG if declared.
     - `processed=True/False` (legacy): True transitions to the first terminal
       state, False transitions to the first non-terminal state.
+    - neither: same as `processed=True`, i.e. the first terminal state.
+
+    **Supplying BOTH raises `ValueError`, and the trigger is the FACT OF SUPPLY,
+    never a disagreement between the two values.** `state` names one state while
+    `processed` names a CLASS of states, so a contradiction has no resolution that
+    is not a guess about which the caller meant — CB-28's rule is "forward when a
+    path exists, refuse only when none could", and here none could. A *consistent*
+    pair (`state="done", processed=True` where `done` is terminal) is refused too:
+    the agreement is an accident of this sweep's lifecycle (nothing says the
+    terminal state a caller named is `terminal_states[0]`), and a "do they
+    contradict?" test would be a second, hidden rule whose verdict moves with the
+    lifecycle. Before this the whole `processed` argument was silently unread when
+    `state` was set, so `state="done", processed=False` wrote `processed=1` — the
+    opposite of what was asked, reported as success.
+
+    That is why the default is `None` and not `True`: "not supplied" has to be
+    REPRESENTABLE for the refusal to key on supply. Every caller that OMITS the
+    argument is unaffected. A caller that ASSEMBLES arguments programmatically
+    sends `processed=None` (not `True`) alongside a `state` — `_cmd_sweep_mark`
+    does exactly that when `--undo` is absent, and deliberately sends `False`
+    when it is present, so that `--state … --undo` reaches the refusal above
+    rather than being silently reconciled here.
+
+    **ONE BEHAVIOUR CHANGED BEYOND THE REFUSAL, AND IT IS AN INVERSION — named
+    here because leaving it unnamed would reproduce this card's own defect.**
+    An EXPLICIT `processed=None` used to be read by `if processed:`, where
+    `None` is falsey, so it meant *unmark* (the first NON-terminal state). It
+    now means *not supplied*, i.e. *mark* (the first terminal state). Measured
+    both ways: `todo` before, `done` after. That is the exact opposite outcome,
+    behind a success payload — so it is declared rather than absorbed.
+
+    It is unavoidable given the form: `None` is the only value the MCP boundary
+    can carry for "absent" (`surfacegen.build_tool` calls `apply_defaults`, so
+    the declared default is forwarded on every call), and a sentinel would have
+    to be JSON-serialisable to survive into the schema. The cost is bounded and
+    was measured before it was accepted: NO caller anywhere passes an explicit
+    `None`, and over MCP the value was previously UNREACHABLE — `processed` was
+    declared a strict `bool`, which refuses a JSON `null` outright. So the
+    change is real, is the opposite of what a hypothetical caller asked for,
+    and has an empty population today.
+
+    The refusal is raised BEFORE `db.txn` opens: it is decidable from the arguments
+    alone, and a refusal must not take the write lock.
 
     `processed` and `processed_at` are kept in sync with `state IN terminal_states`.
     Archived items raise — un-archive first via re-add or directly.
@@ -463,6 +506,15 @@ def mark_items(
     ``False`` under an ambient transaction so that committing would land the caller's
     work.
     """
+    if state is not None and processed is not None:
+        raise ValueError(
+            "processed and state are mutually exclusive: state names ONE state, "
+            "processed names a CLASS of states, so a call carrying both has no "
+            f"unambiguous target (got state={state!r}, processed={processed!r}). "
+            "Pass state= for an explicit transition, or processed= for the legacy "
+            "first-terminal/first-non-terminal mode, never both."
+        )
+
     with db.txn(conn):
         sweep_id = _resolve_sweep(conn, sweep_ref)
         lifecycle, terminal_states, transitions = _load_sweep_lifecycle(conn, sweep_id)
@@ -474,7 +526,17 @@ def mark_items(
                 )
             target_state = state
         else:
-            if processed:
+            # `None` (not supplied) reads as True — the pre-CB-197 default. Kept
+            # as `is None or` rather than a normalisation above, so the one place
+            # that decides "supplied?" is the refusal.
+            #
+            # Truthiness of every OTHER non-bool is unchanged — `0`, `""`, `[]`
+            # still unmark, as they did. `None` is the single exception and it
+            # INVERTS: it used to be falsey here and therefore meant unmark. See
+            # the docstring's "ONE BEHAVIOUR CHANGED" paragraph; an earlier
+            # version of this comment claimed non-bool truthiness was unchanged
+            # full stop, which was false for exactly the value this line adds.
+            if processed is None or processed:
                 target_state = terminal_states[0]
             else:
                 non_terminal = [s for s in lifecycle if s not in terminal_states]
@@ -960,9 +1022,19 @@ def _cmd_sweep_mark(args: argparse.Namespace) -> None:
     conn = db.connect()
     try:
         with domain_errors():
+            # `--undo` is `store_true`, so its ABSENCE is indistinguishable from
+            # "not asked for" — which is exactly the domain's `processed=None`.
+            # Passing `not args.undo` here (what this did before CB-197) supplies a
+            # bool on EVERY invocation, so with the new mutual-exclusion refusal a
+            # plain `sweep-mark X --state done` would refuse: the handler would have
+            # broken the ordinary verb while fixing the argument it drops. Sending
+            # `False` only when `--undo` was typed keeps every legitimate call
+            # working and routes `--state … --undo` — the one genuinely ambiguous
+            # combination — into the domain refusal, so ONE rule decides for the
+            # library, the CLI and MCP alike.
             result = mark_items(
                 conn, args.sweep, args.items,
-                processed=not args.undo, state=args.state,
+                processed=False if args.undo else None, state=args.state,
             )
             print(f"Marked {result['updated']} items -> state={result['state']}.")
     finally:

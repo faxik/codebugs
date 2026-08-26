@@ -95,6 +95,34 @@ RESULT = dict[str, Any]
 #: declaration anywhere asks for a coercible bool today.
 STRICT_BOOL = Annotated[bool, Field(strict=True)]
 
+#: An OPTIONAL strict bool — the vocabulary spelling of `bool | None` (CB-197).
+#: It carries `STRICT_BOOL` inside it rather than a bare `bool`, and that is the
+#: whole point: `_signature`'s widening is an IDENTITY test (`is bool`) and cannot
+#: reach inside a Union, so an `OPT_BOOL = bool | None` written the obvious way
+#: would have been the ONE non-strict bool on the whole surface — a coercion hole
+#: opened by adding a vocabulary entry.
+#:
+#: **That lax spelling WOULD have been caught, and an earlier draft of this
+#: comment claimed the opposite ("invisible to every existing test") as if it
+#: were a measurement.** Adversarial review measured it: `bool | None` puts a
+#: BARE `bool` in the Union, which `tests/test_strict_bool_gates.py`'s ratchet
+#: handles deliberately, so it turns that gate red. The direction of the real
+#: hazard is the reverse and subtler — the STRICT spelling chosen here is the
+#: one that ratchet could not originally see, because it tested Union members
+#: against the bare builtin by identity. That is fixed in the same change, and
+#: what remains uncovered without it is a Union carrying an ANNOTATED but
+#: NOT-strict bool. So this constant is right, and the reason it is right is
+#: not the one first written down. Measured
+#: on pydantic here: this annotation refuses `1`, `1.0`, `0` and `"true"` exactly
+#: as `STRICT_BOOL` does, accepts `None`, and its JSON Schema is
+#: `{"anyOf": [{"type": "boolean"}, {"type": "null"}]}` — byte-identical to a
+#: plain `bool | None`'s, so the golden records the optionality and nothing about
+#: the strictness (same property `STRICT_BOOL` itself has).
+#:
+#: Reach for this ONLY where "not supplied" must be distinguishable from `False`.
+#: A parameter that merely defaults to `False` stays a bare `bool`.
+OPT_BOOL = STRICT_BOOL | None
+
 _REQUIRED = object()
 
 
@@ -183,8 +211,15 @@ def _signature(params) -> tuple[inspect.Signature, dict[str, Any]]:
     parameter in this package carries. Compared by identity (`is bool`), not by
     membership in a Union: a declaration file cannot spell a Union at all (see
     the module docstring), so `spec["type"]` is always exactly one of the bare
-    builtins or one of the named vocabulary constants above, never something
-    `bool` merely appears inside.
+    builtins or one of the named vocabulary constants above.
+
+    **That USED to end "never something `bool` merely appears inside", and CB-197
+    made the sentence false**: `OPT_BOOL` is a named vocabulary constant with a
+    `bool` inside it. The identity test is still correct, and the reason has moved
+    from "cannot happen" to "handled at the other end" — a vocabulary constant
+    carrying a bool bakes its OWN strictness in (`OPT_BOOL` is built from
+    `STRICT_BOOL`, not from `bool`), because widening here could only ever reach
+    a bare annotation. Any future `bool`-bearing vocabulary entry owes the same.
     """
     seen: set[str] = set()
     sig_params: list[inspect.Parameter] = []
