@@ -40,6 +40,7 @@ from pathlib import Path
 import pytest
 
 from codebugs import db
+from tests.conftest import _hermeticity_refusal
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFTEST = REPO_ROOT / "tests" / "conftest.py"
@@ -239,6 +240,102 @@ class TestTheGuardUsesTheProductsOwnWalk:
         assert not ({"parent", "parents", "dirname"} & attrs), (
             "a parent climb next to the delegated walk is a second copy of the rule"
         )
+
+
+NOTE_ANCHOR = "Note the same refusal fires"
+
+
+class TestTheWayOutIsSafeToCopyInAHurry:
+    """CB-214: the exits are read by someone who has just been stopped.
+
+    The guard above is right to refuse, and right to offer a way out — a gate
+    with no way out is a wall rather than a diagnostic. But one of the two exits
+    it offered names a pytest flag that DELETES the directory it is given,
+    recursively and without a word. Measured 2026-08-26 on this tree's pytest:
+    a file and a whole subdirectory placed under a `--basetemp` path are gone
+    after one run, at exit 0 and under a cheerful `95 passed`, while the same
+    two under `TMPDIR` survive untouched and pytest merely ADDS its own subtree
+    beside them. The two exits nonetheless stood as equals, with the
+    directory-deleting one first, and whoever reads this message has just been
+    told the suite will not run: they are in a hurry and they copy the first
+    line that fits. `/some/other/place` is then an existing directory, because
+    that is how the word "place" reads.
+
+    So the repair is a property of the TEXT rather than of the guard's decision,
+    and that is why these rows read the message instead of running a session:
+    the exits run safe → destructive → deleting by hand, the deletion is named
+    where it is offered, and the emptiness check says what its own refusal
+    means. Each row is written so that undoing one of those three turns exactly
+    that row red.
+    """
+
+    def _message(self):
+        """Rendered with placeholder paths, so no row depends on this machine."""
+        return _hermeticity_refusal("/BASETEMP", "/FOREIGN")
+
+    def _ways_out(self):
+        """The two exits, cut off BEFORE the trailing note about this repository.
+
+        Cutting at the note rather than at the end of the string is deliberate,
+        not tidiness: that note mentions `--basetemp` as well, so folding it
+        into the last bullet would let a warning that lives only down there
+        satisfy a row asking about the ADVICE — a check that cannot fail.
+        """
+        msg = self._message()
+        assert NOTE_ANCHOR in msg, "the trailing note is the boundary these rows cut at"
+        bullets = msg[msg.index("ways out") : msg.index(NOTE_ANCHOR)].split("\n  * ")[1:]
+        assert len(bullets) == 2, f"the message must offer exactly two exits, found {len(bullets)}"
+        return bullets
+
+    def test_the_exits_run_from_safe_to_destructive(self):
+        safe, litter = self._ways_out()
+        assert "TMPDIR" in safe, "the first exit must be the one that destroys nothing"
+        assert "is litter" in litter, "and deleting a directory by hand must come after it"
+        assert safe.index("TMPDIR") < safe.index("--basetemp"), (
+            "inside the surviving exit the safe spelling must still be read first: "
+            "swapping those two lines is the same defect at a smaller grain, and a "
+            "hurried reader never reaches the second one"
+        )
+
+    def test_the_flag_that_deletes_says_so_where_it_is_offered(self):
+        """Named at the point of use, because that is the line being copied."""
+        safe, _litter = self._ways_out()
+        warning = safe[safe.index("--basetemp") :]
+        assert "DELETES" in warning, (
+            "`--basetemp` must state that pytest destroys the directory it names"
+        )
+        assert "recursively" in warning, "and that it goes the whole way down, not one level"
+        assert "mktemp -d" in warning, (
+            "and hand over a whole safe form to copy: a reader in a hurry copies "
+            "rather than composes, so advice that must be adapted is advice that "
+            "will be pointed at an existing directory"
+        )
+
+    def test_the_emptiness_check_says_what_its_own_refusal_means(self):
+        """The check answers correctly and LOOKS like a mistake (brief §2(3)).
+
+        `codebugs --tracker-root <dir> stats` over a `.codebugs/` holding no
+        database exits 1 saying `holds no findings.db`. That is the right answer
+        to the question asked — there is no tracker there, the directory is
+        litter — but at a glance it reads as "you typed the command wrong", and
+        the reader stops. No verb can be swapped in to avoid it: a DECLARED root
+        fails closed before any verb body runs (CB-23), measured the same day on
+        `stats`, `where`, `summary` and `categories` alike. So the message has to
+        carry the reading, in both directions.
+        """
+        _safe, litter = self._ways_out()
+        assert "holds no findings.db" in litter, "the answer the reader will actually see"
+        assert "not a typo" in litter, "said to be a confirmation rather than a mistake"
+        assert "prints statistics" in litter, (
+            "and the other direction too — a real tracker must not be deleted, so "
+            "an answer with rows in it has to be named as the stop signal"
+        )
+
+    def test_the_note_about_a_basetemp_inside_the_repository_survives_once(self):
+        """Untouched by this unit, and it must not have been duplicated either."""
+        msg = self._message()
+        assert msg.count(NOTE_ANCHOR) == 1
+        assert "not a false alarm" in msg
 
 
 def _git(*args, cwd):
