@@ -4300,8 +4300,10 @@ def register_tools(mcp, conn_factory) -> None:
                       that tool is a tag census with pair co-occurrence over
                       `status`/`category` only; this is a distribution that
                       composes with every filter on this tool.
-            limit: Max results (default 100). 0 means NO results. A negative
-                      value is an error (it used to mean "no limit").
+            limit: Max results (default 100). 0 means NO results, EXCEPT when
+                      `id`/`ids` is given, where the id list sets a floor and a
+                      smaller limit is raised to fit it. A negative value is an
+                      error (it used to mean "no limit").
             offset: Pagination offset
             resolve_anchors: Resolve each result's location anchor against the
                       repository HEAD, so a card whose code moved reports its
@@ -4313,6 +4315,16 @@ def register_tools(mcp, conn_factory) -> None:
                       default.
         """
         with conn_factory() as conn:
+            # CB-196. The `deferred` branch below RETURNS without ever reaching
+            # `query_findings`, so the domain guard cannot see that call: with no
+            # deferred rows in the tracker, `limit=-1` used to come back at exit 0
+            # echoing `"limit": -1`, while the identical call on a tracker that
+            # HAS one refused. One argument, two verdicts, decided by whether the
+            # tracker happens to hold a deferred row — the same shape this
+            # function's own comment condemns for the `ids` widening. This is the
+            # SHARED predicate called at one more site, not a second predicate.
+            limit = require_row_limit("limit", limit)
+
             deferred_ids: list[str] | None = None
             if status == "deferred":
                 # `deferred` is a PSEUDO-status: resolve it to an id restriction and
@@ -5299,7 +5311,9 @@ def register_cli(sub, commands) -> None:
         ),
     )
     p.add_argument(
-        "--limit", type=int, help="Max results (0 for none; negative is an error)"
+        "--limit",
+        type=int,
+        help="Max results (0 for none unless --id/--ids is given; negative is an error)",
     )
     p.add_argument(
         "--resolve-anchors",

@@ -1327,6 +1327,34 @@ class TestQueryRequirementsRowLimit:
         self._three(conn)
         assert len(reqs.query_requirements(conn, limit=2)["requirements"]) == 2
 
+    def test_zero_does_NOT_mean_zero_when_ids_are_given(self, conn):
+        """PIN of the same surprise as on findings, and of the surface sentence
+        that now carries it: the `ids` widening raises `limit=0` to `len(ids)`."""
+        self._three(conn)
+        result = reqs.query_requirements(conn, ids=["FR-0", "FR-1"], limit=0)
+        assert len(result["requirements"]) == 2
+        assert result["limit"] == 2
+
+    def test_the_deferred_shortcircuit_refuses_a_negative_limit_too(self, conn):
+        """Twin of the findings case: the `deferred` branch returns before
+        `query_requirements` runs, so it needed the guard of its own."""
+        import asyncio
+        from contextlib import contextmanager
+
+        from mcp.server.mcpserver import MCPServer
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        self._three(conn)
+
+        @contextmanager
+        def factory():
+            yield conn
+
+        mcp = MCPServer("cb196-reqs-deferred")
+        reqs.register_tools(mcp, factory)
+        with pytest.raises(ToolError, match="must not be negative"):
+            asyncio.run(mcp.call_tool("reqs_query", {"status": "deferred", "limit": -1}))
+
     def test_cli_reqs_query_refuses_a_negative_limit(self, tmp_path, monkeypatch, capsys):
         from codebugs import cli
 

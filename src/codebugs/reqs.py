@@ -853,13 +853,20 @@ def register_tools(mcp, conn_factory):
             source: Filter by source (substring match)
             tag: Filter by tag
             group_by: Group by: section, status, priority, source
-            limit: Max results (default 100). 0 means NO results. A negative
-                    value is an error (it used to mean "no limit").
+            limit: Max results (default 100). 0 means NO results, EXCEPT when
+                    `id`/`ids` is given, where the id list sets a floor and a
+                    smaller limit is raised to fit it. A negative value is an
+                    error (it used to mean "no limit").
             offset: Pagination offset
         """
         from codebugs import blockers
 
         with conn_factory() as conn:
+            # CB-196, the twin of the findings wrapper: the `deferred` branch
+            # returns without reaching `query_requirements`, so a negative limit
+            # used to be accepted at exit 0 whenever no deferred row existed.
+            limit = require_row_limit("limit", limit)
+
             deferred_ids: list[str] | None = None
             if status == "deferred":
                 # Pseudo-status resolved to an id restriction so the ordinary query
@@ -1233,7 +1240,9 @@ def register_cli(sub, commands) -> None:
     p.add_argument("--search", help="Search in description/ID")
     p.add_argument("--group-by", help="Group by: section|status|priority|source")
     p.add_argument(
-        "--limit", type=int, help="Max results (0 for none; negative is an error)"
+        "--limit",
+        type=int,
+        help="Max results (0 for none unless --id/--ids is given; negative is an error)",
     )
 
     p = sub.add_parser("reqs-get", help="Fetch a single requirement by ID")

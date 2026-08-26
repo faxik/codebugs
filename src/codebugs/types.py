@@ -377,20 +377,26 @@ def require_row_limit(label: str, value: object) -> int | None:
     so a negative limit meant "no limit" to SQLite and the caller silently
     received the whole table. Six sites now route through here.
 
-    **The class is still NOT closed, and these are the sites measured on this
-    tree as still carrying it.** ``findings.recent_findings`` binds an
-    unvalidated ``limit`` and is reachable from both surfaces (MCP ``recent``,
-    CLI ``recent --limit``), so ``recent --limit -1`` still returns every
-    matching row at exit 0. The three internal accessors
-    ``findings.similarity_candidates``, ``grouping_candidates`` and
-    ``anchor_candidates`` take ``limit: int | None`` and bind it unvalidated
-    too; no surface reaches them with a caller-controlled value today, which
-    bounds the exposure without removing the shape. Those are CB-208, which
-    also records two neighbours found by the same comb and NOT of this class:
-    ``embeddings.search_similar`` applies its limit as a Python SLICE, where a
-    negative value trims the tail instead of removing the bound, and
-    ``grouping``'s three report functions carry their own hand-written copy of
-    the negative check rather than sharing this one.
+    **The class is still NOT closed. The SHAPE is stated here; the inventory
+    lives on CB-208, and this paragraph deliberately does not enumerate it.**
+    The shape is: a function that takes a row limit, binds it into SQL, and
+    does not call this function — SQLite then reads a negative value as NO
+    limit and the caller silently receives everything. ``recent_findings`` is
+    the worked example worth naming, because it is reachable from both surfaces
+    (MCP ``recent``, CLI ``recent --limit``) and sits beside ``query_findings``
+    over the same table, so the two neighbouring verbs answer a negative limit
+    DIFFERENTLY. A second shape rides along and is NOT this one: a limit applied
+    as a Python SLICE (``rows[:limit]``), where a negative value silently trims
+    the TAIL instead of removing the bound.
+
+    An earlier draft of this paragraph listed "the sites measured on this tree"
+    and adversarial review then found six it had missed, two of them reachable
+    from a live surface. That is this repository's signature failure — *a rule
+    expressed as an enumeration gets fixed at the sites someone enumerated, and
+    the population is always larger than the list* — committed inside the very
+    paragraph written to stop someone reading the class as closed. A docstring
+    cannot hold a completeness claim about a population it does not gate, so it
+    no longer makes one.
 
     **And nothing MECHANICAL catches a seventh site**: ruff's ``S608`` is not
     enabled in this repository (CB-172), and it would not see these anyway,

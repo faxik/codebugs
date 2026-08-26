@@ -1349,8 +1349,14 @@ class TestNextBatchRowLimit:
     def test_the_refusal_precedes_resolving_the_sweep(self, conn):
         """The validator sits above `_resolve_sweep`, so a bad limit refuses
         without first spending a lookup — argument validation before anything is
-        resolved. The observable consequence is which error wins when BOTH the
-        ref and the limit are bad: `ValueError`, not the ref's `KeyError`."""
+        resolved.
+
+        The observable consequence is which MESSAGE wins when BOTH the ref and
+        the limit are bad: the limit's, not `Sweep not found`. Both are
+        `ValueError` (`_resolve_sweep` raises `ValueError`, not `KeyError` — an
+        earlier draft of this docstring said `KeyError` and was simply wrong),
+        so the `match=` string below is what actually discriminates, and the
+        exit code is 1 either way."""
         with pytest.raises(ValueError, match="must not be negative"):
             sweep.next_batch(conn, "SW-does-not-exist", limit=-1)
 

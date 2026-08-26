@@ -4166,6 +4166,48 @@ class TestQueryFindingsRowLimit:
         self._three(conn)
         assert len(findings.query_findings(conn, limit=2)["findings"]) == 2
 
+    def test_zero_does_NOT_mean_zero_when_ids_are_given(self, conn):
+        """PIN of a SURPRISE, and of the sentence the surface now carries.
+
+        The `ids` widening raises the limit to `len(ids)`, so `limit=0` returns
+        the whole id list rather than nothing. Adversarial review caught this
+        against CB-196's FIRST draft of the help text, which promised a flat
+        "0 means NO results" — true on the bare path and false here, a promise
+        the change itself introduced. The text now carries the exception, and
+        this test is what keeps the two in agreement.
+        """
+        self._three(conn)
+        got = findings.query_findings(conn, limit=100)["findings"]
+        ids = [f["id"] for f in got]
+        result = findings.query_findings(conn, ids=ids, limit=0)
+        assert len(result["findings"]) == len(ids)
+        assert result["limit"] == len(ids)
+
+    def test_the_deferred_shortcircuit_refuses_a_negative_limit_too(self, conn):
+        """The `deferred` pseudo-status RETURNS before `query_findings` is
+        called, so the domain guard cannot see that path: with no deferred rows
+        the call used to succeed at exit 0 echoing `"limit": -1`, while the
+        identical call on a tracker holding one refused. One argument, two
+        verdicts, decided by an unrelated fact about the data. Found by
+        adversarial review, not by the first draft of this class.
+        """
+        import asyncio
+        from contextlib import contextmanager
+
+        from mcp.server.mcpserver import MCPServer
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        self._three(conn)
+
+        @contextmanager
+        def factory():
+            yield conn
+
+        mcp = MCPServer("cb196-deferred")
+        findings.register_tools(mcp, factory)
+        with pytest.raises(ToolError, match="must not be negative"):
+            asyncio.run(mcp.call_tool("query", {"status": "deferred", "limit": -1}))
+
     def test_cli_query_refuses_a_negative_limit(self, tmp_project, monkeypatch, capsys):
         """Reached through the real verb, because the domain test above cannot
         see the parser-to-handler seam. One line on stderr, nothing on stdout,

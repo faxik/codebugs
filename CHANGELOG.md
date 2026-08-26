@@ -16,7 +16,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   **What it costs you:** if you were using a negative number as a way to say "give me
   everything", drop the flag instead — omitting it is what "no limit" means on `sweep-next`,
   and on `query`/`reqs-query` it gives you the default page of 100. **`--limit 0` is
-  unchanged and still legal**: it means zero rows, exactly as before.
+  unchanged and still legal**: it means zero rows — except when you also pass
+  `--id`/`--ids`, where the id list you named sets a floor and a smaller limit is
+  raised to fit it. That was always true; it is now written on the flag.
+  The refusal also covers `--status deferred`, which answers from a different code
+  path and used to accept a negative limit at exit 0 whenever no deferred rows
+  existed — so the same flag no longer gets two different verdicts depending on
+  what the tracker happens to contain.
   This does NOT close the class. `recent --limit -1` still returns everything at exit 0,
   along with several internal paths, and nothing mechanical catches a new one — that is
   tracked as CB-208.
