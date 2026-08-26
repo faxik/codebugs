@@ -965,7 +965,7 @@ def register_cli(sub, commands) -> None:
     import sys
     from codebugs import db
     from codebugs.fmt import format_table
-    from codebugs.fsio import atomic_write
+    from codebugs.fsio import atomic_write, diagnostic_stream
     from codebugs.types import REQUIREMENT_STATUSES, PRIORITIES
 
     def _cmd_reqs_add(args: argparse.Namespace) -> None:
@@ -1179,19 +1179,23 @@ def register_cli(sub, commands) -> None:
             # place for regular-file and device destinations; see CB-55, which
             # owns the consolidation of these six arms and carries this note.
             try:
-                with atomic_write(args.file) as (f, in_place):
+                with atomic_write(args.file) as (f, dest):
                     f.write(md)
             except OSError as e:
                 print(f"codebugs: {e}", file=sys.stderr)
                 sys.exit(1)
-            # CB-143, twin of findings._cmd_export_csv: when `args.file` is an
-            # alias of this process's own stdout, `atomic_write` wrote the
-            # markdown through a fresh open of the same inode, a second and
-            # independent file offset. Printing this line to `sys.stdout` — the
-            # inherited descriptor, still at offset 0 — would overwrite the
-            # start of the file we just wrote. `in_place` is the same
-            # classification `atomic_write` already made, not recomputed here.
-            print(f"Exported to {args.file}", file=sys.stderr if in_place else sys.stdout)
+            # CB-143/CB-194, twin of findings._cmd_export_csv: when `args.file`
+            # is an alias of this process's own stdout AND/OR stderr,
+            # `atomic_write` wrote the markdown through a fresh open of the
+            # same inode, a second and independent file offset. Printing this
+            # line to whichever inherited descriptor is ALSO that inode would
+            # land inside the file we just wrote. `diagnostic_stream` is the
+            # single place that turns `dest` into a channel choice — never
+            # recompute that choice here — and it can answer "print nothing"
+            # when both stdout and stderr are the destination.
+            stream = diagnostic_stream(dest)
+            if stream is not None:
+                print(f"Exported to {args.file}", file=stream)
         else:
             print(md)
 

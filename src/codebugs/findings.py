@@ -4517,7 +4517,7 @@ def register_cli(sub, commands) -> None:
     """Register findings CLI subcommands."""
     import argparse
     from codebugs.fmt import format_table
-    from codebugs.fsio import atomic_write
+    from codebugs.fsio import atomic_write, diagnostic_stream
 
     def _cmd_add(args: argparse.Namespace) -> None:
         # CB-129. Two spellings can name one `meta` field: a dedicated flag and a key
@@ -5210,7 +5210,7 @@ def register_cli(sub, commands) -> None:
         # unwritable directory, a read-only file), which is what CB-76 filed it
         # for.
         try:
-            with atomic_write(output, newline="") as (f, in_place):
+            with atomic_write(output, newline="") as (f, dest):
                 # ONE declaration for the header AND the rows (CB-97). They used to be
                 # two parallel positional lists, and adding the provenance columns to the
                 # header alone shifted every value after `meta` — the exported
@@ -5229,18 +5229,20 @@ def register_cli(sub, commands) -> None:
         except OSError as e:
             print(f"codebugs: {e}", file=sys.stderr)
             sys.exit(1)
-        # CB-143: when `output` is an alias of this process's own stdout,
-        # `atomic_write` wrote the CSV through a FRESH open of the same inode
-        # (its held-open-inode branch) — a second, independent file offset on
-        # the same underlying file. Printing this line to `sys.stdout` — the
-        # INHERITED descriptor, whose offset is still 0 — would land at the
-        # start of the file we just wrote and overwrite the header, exit 0,
-        # empty stderr. `in_place` is the SAME classification `atomic_write`
-        # already made (never recomputed here — see its docstring), so the
-        # confirmation goes to stderr exactly when the data channel and the
-        # diagnostic channel are the same inode.
+        # CB-143/CB-194: when `output` is an alias of this process's own
+        # stdout AND/OR stderr, `atomic_write` wrote the CSV through a FRESH
+        # open of the same inode (its in-place branch) — a second,
+        # independent file offset on the same underlying file. Printing this
+        # line to whichever inherited descriptor is ALSO that inode would
+        # land at the start (or, for the true dup'd-fd case, inside the
+        # middle) of the file we just wrote. `diagnostic_stream` is the
+        # single place that turns `dest` into a channel choice — never
+        # recompute that choice here, see its docstring — and it can answer
+        # "print nothing" when both stdout and stderr are the destination.
         msg = f"Exported {len(result['findings'])} findings to {output}"
-        print(msg, file=sys.stderr if in_place else sys.stdout)
+        stream = diagnostic_stream(dest)
+        if stream is not None:
+            print(msg, file=stream)
 
     p = sub.add_parser("add", help="Add a finding")
     p.add_argument("-s", "--severity", required=True, help="critical|high|medium|low")
