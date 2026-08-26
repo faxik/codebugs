@@ -3704,9 +3704,62 @@ def _fold_row_decision(
 
 
 def _plan_category_fold(
-    conn: sqlite3.Connection, fold_map: dict[str, str] | None
+    conn: sqlite3.Connection,
+    fold_map: dict[str, str] | None,
+    *,
+    new_category: bool = False,
 ) -> dict[str, Any]:
     """Read the whole population and decide. Writes nothing; the caller applies."""
+    if fold_map is not None:
+        # CB-223. An EXPLICIT target this tracker does not hold is a MINT, and it
+        # goes through the very gate an observation's category goes through. Without
+        # it a typo in a target silently created a new category name — in the one
+        # operation whose entire purpose is to REDUCE the number of names, and with
+        # nothing in the report saying so. The target is already normalized by
+        # construction (`_validate_fold_map` refuses a non-canonical one), which is
+        # exactly the input `_gate_category` documents itself as taking.
+        #
+        # The gate sits HERE, before the population scan, so it fires identically on
+        # the dry run and on `apply=True`: `_plan_category_fold` is what both modes
+        # call. A dry run whose whole job is to say what would happen must say
+        # "it would refuse". Note this validates the ARGUMENT, exactly as
+        # `_validate_fold_map` above it does, so a bad target is refused whether or
+        # not any stored row happens to match its source.
+        #
+        # THE DERIVED MODE (`fold_map is None`) IS NOT GATED, and that is a PROOF,
+        # not an exemption. Its targets are `normalize_category(stored)` over the
+        # stored spellings, and `_existing_categories` KEYS on exactly that
+        # normalized form — so every derived target is already a key of `existing`
+        # and the gate could only ever pass. Gating it against the RAW spellings
+        # instead would make the mechanical fold refuse itself. The proof rests on
+        # `_existing_categories`' keying, so it breaks if that keying ever changes;
+        # `tests/test_category_fold.py::TestDerivedFoldIsNotGated` pins it.
+        # The gate is handed the NORMALIZED form as the display value for every
+        # category, and that is not tidiness — without it the two refusals of this
+        # one command CONTRADICT each other. `_gate_category`'s messages name
+        # `existing[key]`, the STORED spelling, which is right for `add`, where the
+        # caller's category is normalized at the boundary: told "use the existing
+        # spelling 'Process-Improvement'", an observer types it and it works. A fold
+        # target has no such boundary — `_validate_fold_map` REFUSES a target that is
+        # not already canonical — so on a pre-CB-60 corpus (exactly the corpus this
+        # command exists for) the near-miss branch advised 'Process-Improvement' and
+        # the next run refused that very value as non-canonical, and the "nearest
+        # existing" list could name three values of which none was a legal target.
+        # Measured, and found by adversarial review rather than by the measurement
+        # that was supposed to find it: a fixture whose stored spellings are already
+        # canonical cannot exhibit it. Swapping the VALUES changes no decision — the
+        # accept/reject test and the distance ranking both read the KEYS, which are
+        # already the normalized forms — so this only makes every name the refusal
+        # prints a value the command will actually accept.
+        existing = {norm: norm for norm in _existing_categories(conn)}
+        # First bad target wins: `_gate_category` raises, and it is used verbatim
+        # rather than re-implemented as a collector ("a check duplicated rather than
+        # shared is one edit from disagreeing with itself"). The cost is real and
+        # named on `normalize_categories`: a ten-pair map with two typos takes two
+        # runs to clear, not one.
+        for target in dict.fromkeys(fold_map.values()):
+            _gate_category(existing, target, new_category=new_category)
+
     renames: list[dict[str, Any]] = []
     unverifiable: list[dict[str, Any]] = []
     counts = {
@@ -3794,8 +3847,18 @@ def normalize_categories(
     *,
     fold_map: dict[str, str] | None = None,
     apply: bool = False,
+    new_category: bool = False,
 ) -> dict[str, Any]:
-    """Fold stored category spellings to canon and re-key their `auto:v1` hashes (CB-61).
+    """Rename stored categories and re-key their `auto:v1` hashes (CB-61).
+
+    THIS DOES TWO THINGS, and the second is a working mode rather than a side
+    effect (CB-222 — the contract used to promise only the first, while the code
+    had always done both). **(1)** With no ``fold_map`` it folds every stored
+    SPELLING to its own canonical form, so pre-CB-60 rows stop forking identity
+    against the normalized spelling a new observation writes. **(2)** With a
+    ``fold_map`` it MERGES CATEGORY NAMES: any stored name may be renamed to any
+    canonical target, and the two names need not be spellings of each other. That
+    is how a tracker's rare category names are collapsed into its common ones.
 
     DRY RUN BY DEFAULT: with ``apply=False`` nothing is written and no write
     transaction is opened at all. ``apply=True`` performs the whole migration
@@ -3803,10 +3866,43 @@ def normalize_categories(
     the collision decision is made from that read, and either every rename lands
     or none does.
 
-    ``fold_map`` maps a STORED spelling to its canonical target; every target must
-    already satisfy ``normalize_category(t) == t``. ``None`` (the default) derives
-    the map mechanically — each stored spelling folds to its own normalized form.
-    ``{}`` is an explicit no-op, not the default.
+    ``fold_map`` maps a STORED CATEGORY NAME to the TARGET NAME it becomes. The
+    key is matched against the stored value exactly and may be any name the table
+    holds; the value must already satisfy ``normalize_category(t) == t``, because
+    folding to a non-canonical spelling only defers the fork. ``None`` (the
+    default) derives the map mechanically — each stored spelling folds to its own
+    normalized form. ``{}`` is an explicit no-op, not the default.
+
+    READ THE DRY RUN'S ``from -> to`` TABLE AGAINST YOUR OWN MAP BEFORE
+    ``apply=True``. A key that matches no stored category is accepted in silence
+    and appears NOWHERE in the report — not in ``renames``, not in any counter —
+    so a typo in a KEY is visible only as a pair missing from that table (CB-207,
+    open). A typo in a TARGET is a different matter and is refused outright, see
+    ``new_category`` below.
+
+    ``new_category`` is PERMISSION TO MINT — the same flag name and the same
+    meaning as on ``add_finding`` (CB-60), and it applies to the whole map at once.
+    It is NOT the same in its after-effect, and the difference is stated because the
+    name invites the assumption: an observation that mints stamps
+    ``meta.category_minted`` on the row it files, and a fold stamps nothing, so
+    ``query(meta_key="category_minted")`` does not count a name minted this way. A
+    report key for it was considered and refused by the direction — an unknown target
+    is refused without the flag, so nothing is minted by accident, and with the flag
+    the intent has been stated. A target this tracker does not
+    already hold is refused without it (CB-223): the operation exists to REDUCE
+    the number of category names, so a typo that quietly invents one more is the
+    failure it must not have. The refusal names the nearest existing categories,
+    or the canonical spelling when the target is a near-miss of one. It stops at
+    the FIRST bad target rather than collecting them all, so a ten-pair map with
+    two typos takes two runs to clear — the deliberate price of using the same
+    gate the observation path uses instead of writing a second one. The DERIVED
+    mode is never gated: its targets are normalized stored spellings, which the
+    existing-category index is keyed by, so the gate could only ever pass there.
+
+    BEFORE ``apply=True``, TAKE A BACKUP: ``export-csv`` writes the findings, and
+    ``restore-csv`` puts them back VERBATIM (ids, statuses, occurrence counts,
+    fingerprints) into an EMPTY tracker. Its boundary is real — milestone items
+    and the audit history are not part of a CSV export and are not restored.
 
     Fingerprint policy, per renamed row: a ``NULL`` hash and a SUPPLIED hash are
     left byte-identical (only the category is rewritten); an ``auto:v1`` hash is
@@ -3839,10 +3935,10 @@ def normalize_categories(
     """
     validated = _validate_fold_map(fold_map)
     if not apply:
-        return _plan_category_fold(conn, validated)
+        return _plan_category_fold(conn, validated, new_category=new_category)
 
     with db.txn(conn):
-        report = _plan_category_fold(conn, validated)
+        report = _plan_category_fold(conn, validated, new_category=new_category)
         if report["stopped"]:
             # Nothing was written, so there is nothing to roll back — the empty
             # transaction commits and the refusal is a plain return (the
@@ -4503,15 +4599,30 @@ def register_tools(mcp, conn_factory) -> None:
 
     @mcp.tool()
     def categories_normalize(
-        fold_map: dict | str | None = None, apply: bool = False
+        fold_map: dict | str | None = None,
+        apply: Annotated[bool, Field(strict=True)] = False,
+        new_category: Annotated[bool, Field(strict=True)] = False,
     ) -> dict[str, Any]:
-        """One-shot migration: fold stored category spellings to canon (CB-61).
+        """Rename stored categories and re-key their fingerprints (CB-61).
+
+        TWO MODES, and the second is a working mode rather than a side effect.
+        Without `fold_map` this folds every stored SPELLING to its canonical
+        form, for rows filed before write-time canonicalization existed, whose
+        stored `auto:v1` fingerprint still carries the old spelling and therefore
+        forks identity when the same defect is reported again. With a `fold_map`
+        it MERGES CATEGORY NAMES: any stored name may be renamed to any canonical
+        target, and the two need not be spellings of each other. That second mode
+        is how a tracker's rare category names are collapsed into its common ones.
 
         DRY RUN BY DEFAULT — without `apply=true` nothing is written and the
-        report tells you exactly what would change. New findings are already
-        canonicalized at write time; this exists for rows filed before that,
-        whose stored `auto:v1` fingerprint still carries the old spelling and
-        therefore forks identity when the same defect is reported again.
+        report tells you exactly what would change. READ ITS `from -> to` TABLE
+        AGAINST YOUR OWN MAP before applying: a key that matches no stored
+        category is accepted in silence and appears nowhere in the report, so a
+        typo in a KEY shows up only as a pair missing from that table. A typo in
+        a TARGET is refused instead — see `new_category`. Take an `export-csv`
+        backup before applying; `restore-csv` puts findings back verbatim into an
+        EMPTY tracker, but milestone items and audit history are not in a CSV
+        export and are not restored.
 
         Each renamed row's fingerprint is handled by kind: a `NULL` or a
         caller-SUPPLIED fingerprint is left byte-identical, an `auto:v1` one is
@@ -4525,16 +4636,26 @@ def register_tools(mcp, conn_factory) -> None:
         is a decision, not a migration step.
 
         Args:
-            fold_map: Optional {stored spelling: canonical target} map, as an
-                      object or a JSON string. Every target must already be
-                      canonical (casefold, hyphen/whitespace -> "_"). Omit it to
-                      fold every stored spelling to its own normalized form; `{}`
-                      is an explicit no-op.
+            fold_map: Optional {stored category name: canonical target name} map,
+                      as an object or a JSON string. The key is matched exactly
+                      against the stored value and may be any name the table
+                      holds. Every target must already be canonical (casefold,
+                      hyphen/whitespace -> "_"). Omit it to fold every stored
+                      spelling to its own normalized form; `{}` is an explicit
+                      no-op.
             apply: Write the changes. Default false (report only).
+            new_category: Permission to fold INTO a category this tracker does
+                          not hold yet, for the whole map at once. Without it
+                          such a target is refused, naming the nearest existing
+                          categories — an operation meant to REDUCE the number of
+                          category names must not invent one by typo. The refusal
+                          stops at the first bad target.
         """
         parsed = json.loads(fold_map) if isinstance(fold_map, str) else fold_map
         with conn_factory() as conn:
-            return normalize_categories(conn, fold_map=parsed, apply=apply)
+            return normalize_categories(
+                conn, fold_map=parsed, apply=apply, new_category=new_category
+            )
 
 
 def register_cli(sub, commands) -> None:
@@ -5088,7 +5209,12 @@ def register_cli(sub, commands) -> None:
             # json.JSONDecodeError re-raises (domain_errors, cli.py): a
             # corrupted stored row is not bad user input.
             with domain_errors():
-                report = normalize_categories(conn, fold_map=fold_map, apply=args.apply)
+                report = normalize_categories(
+                    conn,
+                    fold_map=fold_map,
+                    apply=args.apply,
+                    new_category=args.new_category,
+                )
         finally:
             conn.close()
 
@@ -5096,7 +5222,13 @@ def register_cli(sub, commands) -> None:
             print(json.dumps(report, indent=2, sort_keys=True))
         else:
             _print_fold_report(report)
-        # A dry run always exits 0 — it REPORTS a collision, it does not refuse.
+        # A COLLISION exits 0 on a dry run — it is REPORTED, not refused, because a
+        # collision is a fact about the DATA and the report is the channel for it.
+        # This says nothing about the run's other outcomes: a bad target (CB-223) and
+        # a non-canonical one are facts about the INPUT, and both refuse by exception
+        # on the dry run just as they do under `--apply`, so a dry run does not
+        # universally exit 0. (Note "dry run vs --apply" here is a different axis from
+        # the "two modes" the docstrings name, which is derived-vs-explicit-map.)
         # `--apply` that stopped wrote nothing, so it must not look like success.
         if args.apply and report["stopped"]:
             sys.exit(1)
@@ -5402,7 +5534,8 @@ def register_cli(sub, commands) -> None:
 
     p = sub.add_parser(
         "categories-normalize",
-        help="Fold stored category spellings to canon and re-key auto:v1 fingerprints (CB-61)",
+        help="Rename stored categories and re-key auto:v1 fingerprints: fold spellings "
+        "to canon, or MERGE category names into one another with --fold-map (CB-61)",
     )
     p.add_argument(
         "--apply",
@@ -5411,8 +5544,19 @@ def register_cli(sub, commands) -> None:
     )
     p.add_argument(
         "--fold-map",
-        help='JSON {"stored spelling": "canonical_target"}; omit to fold every '
-        "spelling to its own normalized form",
+        help='JSON {"stored category name": "canonical_target_name"} — the key may be '
+        "ANY name the table holds, not just a spelling of the target, so this is how "
+        "category names are merged; omit it to fold every stored spelling to its own "
+        "normalized form. Check the printed from->to table against your map before "
+        "--apply: a key matching no stored category is silently absent from it. Back up "
+        "with export-csv first (restore-csv reloads findings verbatim into an empty "
+        "tracker; milestone items and audit history are not in a CSV export)",
+    )
+    p.add_argument(
+        "--new-category",
+        action="store_true",
+        help="Permit folding INTO a category this tracker does not hold yet; without it "
+        "such a target is refused, naming the nearest existing ones (CB-223)",
     )
     p.add_argument("--json", action="store_true", help="Print the raw report as JSON")
 
