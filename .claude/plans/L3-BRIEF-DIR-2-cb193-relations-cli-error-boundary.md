@@ -221,3 +221,22 @@ note, retracted_at, retracted_by, retracted_reason`. Обходной путь �
    Плюс комментарий в коде, объясняющий, почему `print` снаружи.
 
 Вакуозности рецензент не нашёл; регрессий нет; поверхность MCP не тронута.
+
+### 9.1 Пост-мерж контроль (К-17, один прямой коммит на main — этот)
+
+Мерж **`b713df2`** приземлился с первого прогона: ни `exit 13`, ни `exit 15`, конфликта в
+`CHANGELOG.md` не случилось. Диффстат мерджа — четыре файла: `relations.py` (+28), новый класс в
+`tests/test_relations.py` (+207), `CHANGELOG.md` (+16/−7) и этот бриф (+70).
+
+Перемерено уже НА main, а не на ветке:
+
+- Сьют **2725 passed** (на базе `3c8147f` было 2718). `ruff check src/ tests/` под пином 0.15.7 —
+  `All checks passed!`.
+- **Оба голдена не сдвинулись**: `git diff --stat b713df2^1 b713df2 -- tests/golden/` пуст.
+- Живая проба на приземлённом main, на пустом временном трекере:
+  `relations-relate CB-1 distinct_from CB-2 --source probe` → `codebugs: No such finding: CB-1`,
+  rc=1; `relations-unrelate …` → `codebugs: No live distinct_from edge from CB-1 to CB-2 to
+  retract.`, rc=1. Traceback'а нет ни в одном.
+
+**CB-193 оставлена НЕ закрытой** — статус ставит уровень (2) после вердикта. Наследница **CB-198**
+(low, латентная, конвертация строки внутри `db.txn`) заведена и связана ребром `found_during`.
