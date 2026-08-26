@@ -450,6 +450,12 @@ def require_row_limit(label: str, value: object) -> int | None:
         raise ValueError(
             f"{label} must not be negative (SQLite reads a negative LIMIT as NO limit, "
             f"so it would silently return everything); got {canonical}. "
-            f"Use 0 for no rows, or omit it for no limit."
+            # NOT "omit it for no limit": true for CB-161's three sites, and
+            # FALSE for two of CB-196's, where omitting gives the default page
+            # of 100 rather than everything (and on `next_batch`, the sweep's
+            # own batch size). One shared predicate emits this line at six
+            # sites, so it must be true at all six or it is a message that
+            # misdescribes the very verb the reader just ran.
+            f"Use 0 for no rows, or omit it to take this call's own default."
         )
     return canonical
