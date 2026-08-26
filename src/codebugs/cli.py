@@ -129,10 +129,19 @@ def _cmd_where(args: argparse.Namespace) -> None:
         # is check-then-act), so this is worded as a warning to investigate, not
         # a verdict — and it is silent on True/None, on purpose: see
         # db.describe_root's docstring for why only the negative answer prints.
+        #
+        # CB-182: this used to print to stderr while the sibling "no database
+        # there yet" note two branches up prints to stdout — two parenthetical
+        # continuations of the same three-line table, split across streams for
+        # no reason tied to what either one says. Neither branch is an error
+        # (the exit code stays 0 on both), so `codebugs where 2>/dev/null` — the
+        # ordinary way to get a clean view or feed a script — used to make this
+        # warning vanish entirely, silently resurrecting the exact CB-100 defect
+        # this line exists to close. It now prints alongside the rest of the
+        # table, in stdout, like its sibling.
         print(
             "          (may not be writable — check permissions on the file "
-            "and its .codebugs/ directory)",
-            file=sys.stderr,
+            "and its .codebugs/ directory)"
         )
 
 
