@@ -19,10 +19,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   On the command line the same pair is `sweep-mark … --state done --undo`, which now exits 1.
   **What it costs you:** if your client always fills in `processed` — many do, because a
   generated wrapper substitutes the default for every argument — those calls will start
-  failing as soon as they also pass `state`. Stop sending `processed` alongside `state`; the
-  argument is now optional, and leaving it out means the same thing it always did (`True`,
-  the first finished state). Everything else is unchanged: `state` on its own, `processed` on
-  its own, and passing neither all behave exactly as before.
+  failing as soon as they also pass `state`. The argument is now optional, so the fix is to
+  leave it out; leaving it out means what it always did (the first finished state). **If your
+  wrapper cannot omit an argument, send `null` instead** — that is exactly what "not supplied"
+  now is, and it is accepted beside a `state`. `state` on its own, `processed: true`/`false`
+  on its own, and passing neither are all unchanged.
+  **One more change, small but worth knowing because it is a reversal:** sending
+  `processed: null` on its own used to be rejected outright by the tool (the parameter was a
+  strict boolean, and `null` was not one). It is now accepted and means "not supplied", i.e.
+  the first *finished* state. If you call the Python function directly rather than through the
+  tool, `processed=None` used to be treated as false and marked the item *unfinished* — it now
+  marks it finished, the opposite. Nothing in this repository or its sibling tools passed that
+  value, which is why the change is being made rather than worked around, but a caller that
+  did would silently get the other answer.
   **The refusal does not care whether the two values agree.** `state="done"` beside
   `processed=True` is refused as well, even where `done` really is the first finished state.
   That agreement is a coincidence of how one sweep's lifecycle happens to be ordered, and a

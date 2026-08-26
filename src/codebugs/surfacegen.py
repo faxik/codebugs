@@ -100,7 +100,19 @@ STRICT_BOOL = Annotated[bool, Field(strict=True)]
 #: whole point: `_signature`'s widening is an IDENTITY test (`is bool`) and cannot
 #: reach inside a Union, so an `OPT_BOOL = bool | None` written the obvious way
 #: would have been the ONE non-strict bool on the whole surface — a coercion hole
-#: opened by adding a vocabulary entry, invisible to every existing test. Measured
+#: opened by adding a vocabulary entry.
+#:
+#: **That lax spelling WOULD have been caught, and an earlier draft of this
+#: comment claimed the opposite ("invisible to every existing test") as if it
+#: were a measurement.** Adversarial review measured it: `bool | None` puts a
+#: BARE `bool` in the Union, which `tests/test_strict_bool_gates.py`'s ratchet
+#: handles deliberately, so it turns that gate red. The direction of the real
+#: hazard is the reverse and subtler — the STRICT spelling chosen here is the
+#: one that ratchet could not originally see, because it tested Union members
+#: against the bare builtin by identity. That is fixed in the same change, and
+#: what remains uncovered without it is a Union carrying an ANNOTATED but
+#: NOT-strict bool. So this constant is right, and the reason it is right is
+#: not the one first written down. Measured
 #: on pydantic here: this annotation refuses `1`, `1.0`, `0` and `"true"` exactly
 #: as `STRICT_BOOL` does, accepts `None`, and its JSON Schema is
 #: `{"anyOf": [{"type": "boolean"}, {"type": "null"}]}` — byte-identical to a

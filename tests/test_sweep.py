@@ -639,12 +639,49 @@ class TestLifecycle:
         contradiction test) refuse nothing consistently. Asserted on the signature
         because no single behavioural test can distinguish "the default changed"
         from "the refusal was deleted": both leave `state=` alone working.
+
+        The DEFAULT is asserted and the annotation's spelling deliberately is
+        not: `bool | None` and `Optional[bool]` are the same contract, and
+        `from __future__ import annotations` makes the attribute a string, so
+        an equality test there pins prose rather than behaviour.
         """
         import inspect
 
         param = inspect.signature(sweep.mark_items).parameters["processed"]
         assert param.default is None
-        assert param.annotation == "bool | None"
+
+    def test_an_explicit_none_now_means_not_supplied_and_this_is_an_inversion(
+        self, conn
+    ):
+        """DECLARED behaviour change, not a preserved pin — CB-197.
+
+        `if processed:` read `None` as falsey, so an explicit `processed=None`
+        meant UNMARK (the first non-terminal state). It now means "not
+        supplied", which means MARK. Measured both ways while making the
+        change: `todo` before, `done` after — the opposite outcome behind a
+        success payload, which is this card's own defect shape and is why it is
+        pinned and written down rather than absorbed silently.
+
+        It is unavoidable given the ratified form: `None` is the only value the
+        MCP boundary can carry for "absent", since `build_tool` applies declared
+        defaults on every call. The cost was measured before being accepted — no
+        caller anywhere passes an explicit `None`, and over MCP the value was
+        previously refused outright by the strict-bool declaration.
+        """
+        sw = sweep.create_sweep(conn, lifecycle=["a", "b"], terminal_states=["b"])
+        sweep.add_items(conn, sw["sweep_id"], ["x"])
+        sweep.mark_items(conn, sw["sweep_id"], ["x"], state="b")
+
+        assert sweep.mark_items(conn, sw["sweep_id"], ["x"], processed=None)["state"] == "b"
+
+        # The other falsey non-bools are UNCHANGED, which is what makes `None`
+        # the single exception rather than a general narrowing.
+        for falsey in (0, "", []):
+            sweep.mark_items(conn, sw["sweep_id"], ["x"], state="b")
+            assert (
+                sweep.mark_items(conn, sw["sweep_id"], ["x"], processed=falsey)["state"]
+                == "a"
+            ), falsey
 
     def test_transition_dag_enforced(self, conn):
         sw = sweep.create_sweep(

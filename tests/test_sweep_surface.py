@@ -231,9 +231,16 @@ class TestGeneratedMcpSurface:
         test (`is bool`), which cannot reach inside a Union — so an `OPT_BOOL`
         spelled as the obvious `bool | None` would have been the one coercible
         bool on the whole surface, accepting `1`, `0` and `"true"` where every
-        other bool parameter refuses them. Nothing else in the suite would have
-        noticed: the JSON Schema of the strict and lax spellings is identical
-        (measured), so the wire golden is blind to it.
+        other bool parameter refuses them.
+
+        **The wire golden is blind to the difference** — the JSON Schema of the
+        strict and lax spellings is byte-identical (measured) — but the suite as
+        a whole is NOT, and an earlier draft of this docstring said it was.
+        `tests/test_strict_bool_gates.py`'s ratchet handles a bare `bool` member
+        of a Union on purpose, so the lax spelling turns it red as well. This
+        test is therefore the SECOND guard on that spelling, not the only one;
+        it earns its place by naming the parameter and the four probe values,
+        where the ratchet reports a population-wide verdict.
         """
         srv = build_server(tracker)
         called(srv, "codesweep_create", {"name": "sb", "lifecycle": ["todo", "done"],

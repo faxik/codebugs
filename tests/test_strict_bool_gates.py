@@ -105,6 +105,16 @@ DECLARED_EXCEPTIONS: dict[tuple[str, str], str] = {
     # is no longer "undetermined": surfacegen.py and sweep_surface.py are
     # DIR-1 territory (BT-6 pilot artifacts), which is what let this unit
     # close the table rather than merely re-word it.
+    #
+    # CB-197 AMENDS THE PARAGRAPH ABOVE FOR ONE OF THOSE FOUR, and it is
+    # amended rather than rewritten because it stays true for the other three.
+    # `codesweep_mark.processed` is no longer declared `type=bool`: it is
+    # `surfacegen.OPT_BOOL`, so `_signature`'s widening -- an identity test on
+    # the bare builtin -- never touches it. It is strict for a THIRD reason the
+    # sentence above does not give: `OPT_BOOL` is BUILT from `STRICT_BOOL`, so
+    # strictness lives in the vocabulary constant instead of being applied by
+    # the generator. The row stays absent, and now for two different reasons
+    # depending on which of the four parameters you ask about.
 }
 
 

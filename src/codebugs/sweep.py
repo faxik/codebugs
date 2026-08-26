@@ -458,10 +458,30 @@ def mark_items(
     opposite of what was asked, reported as success.
 
     That is why the default is `None` and not `True`: "not supplied" has to be
-    REPRESENTABLE for the refusal to key on supply. Every caller that omits the
-    argument is unaffected; a caller that ASSEMBLES arguments programmatically
-    must now pass `processed=None` (not `True`) alongside a `state`, which is what
-    `_cmd_sweep_mark` does.
+    REPRESENTABLE for the refusal to key on supply. Every caller that OMITS the
+    argument is unaffected. A caller that ASSEMBLES arguments programmatically
+    sends `processed=None` (not `True`) alongside a `state` — `_cmd_sweep_mark`
+    does exactly that when `--undo` is absent, and deliberately sends `False`
+    when it is present, so that `--state … --undo` reaches the refusal above
+    rather than being silently reconciled here.
+
+    **ONE BEHAVIOUR CHANGED BEYOND THE REFUSAL, AND IT IS AN INVERSION — named
+    here because leaving it unnamed would reproduce this card's own defect.**
+    An EXPLICIT `processed=None` used to be read by `if processed:`, where
+    `None` is falsey, so it meant *unmark* (the first NON-terminal state). It
+    now means *not supplied*, i.e. *mark* (the first terminal state). Measured
+    both ways: `todo` before, `done` after. That is the exact opposite outcome,
+    behind a success payload — so it is declared rather than absorbed.
+
+    It is unavoidable given the form: `None` is the only value the MCP boundary
+    can carry for "absent" (`surfacegen.build_tool` calls `apply_defaults`, so
+    the declared default is forwarded on every call), and a sentinel would have
+    to be JSON-serialisable to survive into the schema. The cost is bounded and
+    was measured before it was accepted: NO caller anywhere passes an explicit
+    `None`, and over MCP the value was previously UNREACHABLE — `processed` was
+    declared a strict `bool`, which refuses a JSON `null` outright. So the
+    change is real, is the opposite of what a hypothetical caller asked for,
+    and has an empty population today.
 
     The refusal is raised BEFORE `db.txn` opens: it is decidable from the arguments
     alone, and a refusal must not take the write lock.
@@ -506,10 +526,16 @@ def mark_items(
                 )
             target_state = state
         else:
-            # `None` (not supplied) reads as True — the pre-CB-197 default. Kept as
-            # `is None or` rather than a normalisation above, so the one place that
-            # decides "supplied?" is the refusal, and truthiness of a non-bool is
-            # unchanged (not narrowing beyond the card).
+            # `None` (not supplied) reads as True — the pre-CB-197 default. Kept
+            # as `is None or` rather than a normalisation above, so the one place
+            # that decides "supplied?" is the refusal.
+            #
+            # Truthiness of every OTHER non-bool is unchanged — `0`, `""`, `[]`
+            # still unmark, as they did. `None` is the single exception and it
+            # INVERTS: it used to be falsey here and therefore meant unmark. See
+            # the docstring's "ONE BEHAVIOUR CHANGED" paragraph; an earlier
+            # version of this comment claimed non-bool truthiness was unchanged
+            # full stop, which was false for exactly the value this line adds.
             if processed is None or processed:
                 target_state = terminal_states[0]
             else:
