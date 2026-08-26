@@ -157,16 +157,31 @@ CREATE TABLE IF NOT EXISTS agent_capacity (
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """Create milestones tables + seed the 4 default rows. Idempotent."""
+    """Create milestones tables + seed the 4 default rows. Idempotent.
+
+    CB-195: read before seeding, same reasoning as `merge.ensure_schema` (see
+    there for the full argument). `db.connect()` runs this on EVERY open, so
+    an unconditional `INSERT OR IGNORE` per seed row took SQLite's write lock
+    on every steady-state open too, even though all four rows exist from the
+    first open onward. Checking first keeps the steady-state path to four WAL
+    reads, none of which can block on a concurrent writer.
+
+    The race on an EMPTY database is harmless: two connections opening
+    concurrently both see a row missing, both attempt the insert, and
+    `OR IGNORE` drops the loser. This is NOT the read-modify-write shape
+    `db.txn` exists for (CB-24) — the written values are constants from
+    `SEED_MILESTONES`, never computed from what was read.
+    """
     for stmt in MILESTONES_SCHEMA.split(";"):
         stmt = stmt.strip()
         if stmt:
             conn.execute(stmt)
     now = utc_now()
     for mid, kind, description in SEED_MILESTONES:
-        conn.execute(
-            """INSERT OR IGNORE INTO milestones
-               (id, kind, state, description, created_at) VALUES (?, ?, 'open', ?, ?)""",
-            (mid, kind, description, now),
-        )
+        if conn.execute("SELECT 1 FROM milestones WHERE id = ?", (mid,)).fetchone() is None:
+            conn.execute(
+                """INSERT OR IGNORE INTO milestones
+                   (id, kind, state, description, created_at) VALUES (?, ?, 'open', ?, ?)""",
+                (mid, kind, description, now),
+            )
     conn.commit()

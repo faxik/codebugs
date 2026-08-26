@@ -226,10 +226,73 @@ class TestTheFourShapesEndToEnd:
         )
 
     def test_B_read_only_database_file(self, project):
+        """Shape B, RENEGOTIATED after CB-195 (T-86) — the owner's decision,
+        recorded here rather than re-argued. This test used to carry a strict
+        `xfail`, and that was the wrong instrument: it read as honest but
+        actually asserted NOTHING for this shape, including the half of the
+        old assertion that is still true (a write still refuses cleanly at
+        exit 1 and corrupts nothing) — a guard that cannot fire is this
+        repo's own recurring defect, and `xfail` is one shape of it.
+
+        Before CB-195, `db.connect()` attempted an unconditional write on
+        EVERY open (`merge.ensure_schema`'s own seed insert), so a read-only
+        DB FILE refused EVERY verb, including a pure read — verified directly
+        against the pre-CB-195 tree: `stats` against this exact fixture used
+        to exit 1 with "cannot open findings.db ... for writing". That was
+        collateral damage of an accidental mechanism, never a designed
+        guarantee that reads must fail on an unwritable tracker — a
+        read-only tracker is, definitionally, a tracker you should still be
+        able to READ.
+
+        CB-195 removed that accidental write, and the three-way consequence
+        below was measured by the owner and reconfirmed independently before
+        landing:
+
+        1. A READ verb now SUCCEEDS on a read-only tracker file — new,
+           strictly better than before, and the property this test exists to
+           lock in: without an assertion here, a future change could quietly
+           reintroduce an unconditional write and take this back with no test
+           noticing.
+        2. A WRITE verb still refuses, exit 1, and writes NOTHING — the
+           safety guarantee CB-86 exists for is unchanged; verified below by
+           re-opening the tracker writable afterward and counting rows.
+        3. Only the REFUSAL MESSAGE narrowed, from `_assert_clean_refusal`'s
+           clean one-liner to a raw traceback, because the write now fails on
+           the domain's own INSERT — outside `_open()`'s classification —
+           instead of on the connect-time seed insert `_open()` classifies.
+           Tracked, not silently accepted: CB-199, left open by design,
+           because reconciling this needs an infrastructure-level decision
+           this test cannot make for it.
+        """
         os.chmod(project.dbfile, 0o444)
-        self._assert_clean_refusal(
-            _cli(project.dir, "add", "-f", "x.py", "-c", "t", "-s", "low", "-d", "shape B", "--new-category")
-        )
+        try:
+            read = _cli(project.dir, "stats")
+            write = _cli(
+                project.dir, "add", "-f", "x.py", "-c", "t", "-s", "low",
+                "-d", "shape B", "--new-category",
+            )
+        finally:
+            os.chmod(project.dbfile, 0o644)
+
+        # (1) reads succeed — the direct benefit CB-195 delivers here.
+        assert read.returncode == 0, (read.stdout, read.stderr)
+        assert "Traceback" not in read.stderr, read.stderr
+
+        # (2) a write still refuses at exit 1 and lands nothing — reopened
+        # writable (permissions restored above) to prove no partial row.
+        assert write.returncode == 1, (write.stdout, write.stderr)
+        conn = db.connect(str(project.dir))
+        try:
+            count = conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0]
+        finally:
+            conn.close()
+        assert count == 0, "a refused write must not land a partial row"
+
+        # (3) CB-199: the refusal message narrowed to a raw traceback rather
+        # than the clean one-liner the other three shapes still get. This is
+        # the honest, narrow substitute for the strict xfail this test used
+        # to carry — it pins what actually happens now, not a wish.
+        assert "OperationalError: attempt to write a readonly database" in write.stderr, write.stderr
 
     def test_C2_unopenable_database_on_the_walk_route(self, project):
         os.chmod(project.dbfile, 0o000)

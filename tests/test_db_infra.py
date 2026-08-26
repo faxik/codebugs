@@ -1,8 +1,12 @@
 """Tests for db.py infrastructure: connect, _find_db_root, _db_path, init_project."""
 
+import ast
 import os
+import sqlite3
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -1437,3 +1441,169 @@ class TestInitUnderTheTrackerRootFlag:
         assert (flagged / ".codebugs" / db.DB_FILE).is_file()
         assert not (env_root / ".codebugs").exists()
         assert not (here / ".codebugs").exists()
+
+
+class TestConnectDoesNotWaitOnUnconditionalSchemaSeedWrite:
+    """CB-195 (+ CB-192, the counter's own write, is exercised in test_server.py).
+
+    `db.connect()` runs every registered module's `ensure_schema` on EVERY open —
+    that is `_open`'s own loop over `_resolved_order()`. Two of those functions,
+    `merge.ensure_schema` and `milestones._schema.ensure_schema`, used to seed
+    their tables with an UNCONDITIONAL `INSERT OR IGNORE`. The row this inserts
+    exists from the very first open onward, so every later insert is a
+    guaranteed no-op — but SQLite still takes the write lock to attempt it, and a
+    write attempt honours `busy_timeout` even when the caller only wanted to
+    read. A purely-reading `db.connect()` therefore contended with ANY
+    concurrent writer holding that lock, for up to the full `busy_timeout`.
+
+    Rule (a) from CLAUDE.md's Testing section: the final state must
+    DISCRIMINATE fixed from unfixed code. Here that state is wall-clock time —
+    unfixed `db.connect()` blocks for roughly as long as the external writer
+    holds the lock (it tries its own write internally); fixed code reads
+    first, finds the row already there, and returns in low single-digit
+    milliseconds because WAL readers never block on a writer at all.
+    Rule (b): never wait unboundedly on a losing writer. There isn't one here —
+    the external holder is not blocked by anything, so it runs on a plain,
+    bounded sleep-then-release timer, and `db.connect()` itself is bounded by
+    that same interval even on the unfixed path (it cannot exceed
+    `busy_timeout=5000ms`, and the external hold below is far under that, so
+    the unfixed path is merely SLOW here, never an outright refusal — the
+    outright-refusal shape at longer holds is what CB-195's own brief measured
+    separately and is not re-measured by this test).
+    """
+
+    HOLD_SECONDS = 0.35
+    FAST_THRESHOLD_SECONDS = 0.15  # comfortably below HOLD_SECONDS, comfortably above noise
+
+    def _hold_write_lock(self, db_path, *, ready: threading.Event):
+        """Acquire SQLite's write lock via BEGIN IMMEDIATE and hold it briefly.
+
+        BEGIN IMMEDIATE alone acquires the RESERVED lock, before any write
+        statement is issued — exactly SQLite's documented purpose for it — so
+        no further statement is needed to reproduce contention.
+        """
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("BEGIN IMMEDIATE")
+        ready.set()
+        time.sleep(self.HOLD_SECONDS)
+        conn.execute("ROLLBACK")
+        conn.close()
+
+    def test_connect_returns_fast_while_an_external_writer_holds_the_lock(self, tmp_path):
+        db.init_project(str(tmp_path))
+        db_path = tmp_path / ".codebugs" / db.DB_FILE
+
+        ready = threading.Event()
+        holder = threading.Thread(target=self._hold_write_lock, args=(db_path,), kwargs={"ready": ready})
+        holder.start()
+        try:
+            assert ready.wait(timeout=5.0), "the external writer never acquired its lock"
+
+            start = time.perf_counter()
+            conn = db.connect(str(tmp_path))
+            elapsed = time.perf_counter() - start
+            conn.close()
+        finally:
+            holder.join(timeout=5.0)
+            assert not holder.is_alive()
+
+        assert elapsed < self.FAST_THRESHOLD_SECONDS, (
+            f"db.connect() took {elapsed:.3f}s while a foreign writer held the lock for "
+            f"{self.HOLD_SECONDS:.3f}s — a purely reading connect() should never wait on "
+            "someone else's write (CB-195): ensure_schema's seed insert is taking the "
+            "write lock on the steady-state path"
+        )
+
+
+class TestEnsureSchemaHasNoUnconditionalDml:
+    """CB-195 structural ratchet: no `ensure_schema` may run DML it did not first
+    gate behind a read.
+
+    Read by AST, not by regex — this repo's own `test_fsio.py` tells the story
+    of a grep-based ratchet that matched a phrase inside its own module's
+    docstrings; the AST sees only real calls. This ratchet is easy to defeat by
+    accident (reverting the CB-195 read-before-write guard is a one-line
+    change and the symptom is invisible without concurrency), so it exists to
+    catch that regression even when nobody is running a lock-contention test
+    at the time.
+
+    "Unconditional" is defined structurally: a `conn.execute(...)` call whose
+    SQL argument is a literal string starting with INSERT/UPDATE/DELETE/REPLACE,
+    that is not nested inside any `ast.If` within the function body. A DML call
+    that IS nested under an `if` is, by construction, conditional on something
+    the function read first — which is exactly the CB-195 shape (read the seed
+    row, write only if it is missing).
+    """
+
+    _DML_PREFIXES = ("INSERT", "UPDATE", "DELETE", "REPLACE")
+
+    def _unconditional_dml_calls(self, node: ast.FunctionDef) -> list[str]:
+        offenders = []
+
+        def walk(n: ast.AST, under_if: bool) -> None:
+            if isinstance(n, ast.If):
+                for child in ast.iter_child_nodes(n):
+                    walk(child, True)
+                return
+            if isinstance(n, ast.Call):
+                func = n.func
+                if isinstance(func, ast.Attribute) and func.attr in ("execute", "executescript"):
+                    if n.args and isinstance(n.args[0], ast.Constant) and isinstance(
+                        n.args[0].value, str
+                    ):
+                        sql = n.args[0].value.strip().upper()
+                        if sql.startswith(self._DML_PREFIXES) and not under_if:
+                            offenders.append(f"{node.name}:{n.lineno}: {sql[:60]!r}")
+            for child in ast.iter_child_nodes(n):
+                walk(child, under_if)
+
+        walk(node, False)
+        return offenders
+
+    def test_no_ensure_schema_runs_unconditional_dml(self):
+        src = Path(db.__file__).parent
+        offenders = []
+        for py in sorted(src.rglob("*.py")):
+            tree = ast.parse(py.read_text(), filename=str(py))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and node.name == "ensure_schema":
+                    found = self._unconditional_dml_calls(node)
+                    offenders.extend(f"{py.relative_to(src)}:{o}" for o in found)
+
+        assert offenders == [], (
+            "an ensure_schema() runs unconditional DML on every db.connect() — "
+            "this reintroduces CB-195's write-lock-on-read defect:\n" + "\n".join(offenders)
+        )
+
+    def test_the_ratchet_actually_finds_the_pre_fix_shape(self):
+        """Premise pin: prove the detector is non-vacuous against the exact
+        pre-fix code shape, so a change to the detector itself cannot silently
+        stop discriminating (the CB-140 lesson: a check that stops catching its
+        own mutant is worse than no check, because it still looks green).
+        """
+        src = """
+def ensure_schema(conn):
+    conn.execute("CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY)")
+    conn.execute("INSERT OR IGNORE INTO t (id) VALUES (1)")
+    conn.commit()
+"""
+        tree = ast.parse(src)
+        (node,) = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+        found = self._unconditional_dml_calls(node)
+        assert found, "detector failed to flag the exact pre-fix unconditional INSERT shape"
+
+    def test_the_ratchet_does_not_flag_a_guarded_insert(self):
+        """Mirror premise: a DML statement nested under an `if` must NOT be
+        flagged, or this ratchet would refuse the very fix it exists to check.
+        """
+        src = """
+def ensure_schema(conn):
+    conn.execute("CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY)")
+    if conn.execute("SELECT 1 FROM t WHERE id = 1").fetchone() is None:
+        conn.execute("INSERT OR IGNORE INTO t (id) VALUES (1)")
+    conn.commit()
+"""
+        tree = ast.parse(src)
+        (node,) = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+        found = self._unconditional_dml_calls(node)
+        assert found == [], f"a guarded INSERT was wrongly flagged as unconditional: {found}"

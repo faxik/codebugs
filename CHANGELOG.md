@@ -124,6 +124,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   honest left to put it. Every other destination — an ordinary file, a path, a plain
   redirect of only one stream — is unaffected; this changes only where the one-line
   confirmation goes for these two specific shapes, including "nowhere" in the last one.
+- **A read-only MCP call no longer waits on — or fails behind — someone else's write
+  (CB-195).** Opening a connection always re-seeded two tables (the merge-lock row, the
+  four default milestones) with an unconditional insert, even though the row was
+  already there from the very first time the tracker was created. SQLite still took a
+  write lock for that guaranteed no-op, so any call opening a fresh connection while
+  another session was mid-write could sit out the full five-second wait — and, under
+  longer contention, fail outright with "database is locked" for a call that never
+  needed to write anything. Both seeds now check first and write only when the row is
+  genuinely missing, so the ordinary case never touches the write lock at all.
+- **The tool-call counter now skips a row under long contention instead of delaying
+  your call (CB-192).** Recording how a tool call went used to share the same
+  five-second write-lock budget as everything else, so under sustained contention the
+  bookkeeping itself could hold up the response you were waiting for — and, at the far
+  end of that wait, still lose the row it was trying to record. The counter's own
+  connection now gives up after about 50ms (six times the slowest write this project
+  has measured in normal use) and drops the row rather than the call: you get your
+  answer promptly, and only pathological contention (a wedged writer, an unusually long
+  competing transaction) costs you one line of `codebugs usage` history, reported to
+  stderr exactly as any other recording failure already is.
+- **A tracker whose database file is read-only can now be READ, not just refused
+  (CB-195, CB-199).** This falls directly out of the same fix above: opening a
+  connection no longer writes anything on the ordinary path, so a `stats` or `query`
+  call against a read-only tracker file now succeeds instead of refusing outright —
+  before, a read-only tracker refused every single command, reads included, because
+  the removed unconditional insert happened to fail first and take the whole
+  connection down with it. Writing to a read-only tracker is, correctly, still
+  refused; the one narrowing worth knowing about is that the refusal message for that
+  specific case is currently a raw error rather than the clean one-line explanation
+  other unwritable-tracker cases give you (tracked as CB-199) — the command still
+  fails, still writes nothing, just with a less friendly message.
 
 ## [0.2.0] — 2026-08-25
 
