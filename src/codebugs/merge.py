@@ -87,6 +87,16 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     "database is locked". Checking first turns the steady-state path into a
     single WAL read, which never blocks on a writer at all.
 
+    THE OTHER SIDE OF "STEADY STATE", MEASURED RATHER THAN IMPLIED (CB-202).
+    The gain is real and complete once the row exists — but while it is MISSING,
+    which means the first open of any tracker and any tracker whose seed rows
+    were removed, this insert runs and a reading `db.connect()` waits out a
+    concurrent writer exactly as before. Measured on this tree against a 700ms
+    foreign hold: 734ms with the seed row absent, 0.8ms with it present. That is
+    not a residual defect — one open per tracker cannot be avoided by any
+    read-first rule — but it is a boundary a reader is entitled to know about
+    instead of inferring it from the words "steady state".
+
     The race on an EMPTY database is harmless and does not need `db.txn`:
     two connections opening concurrently against a fresh, seedless database
     both see the row missing, both attempt the insert, and SQLite's own

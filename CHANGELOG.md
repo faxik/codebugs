@@ -7,6 +7,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **The "a read never waits on a write" improvement now states its one exception, because it
+  has one (CB-202).** Since 0.2.1, a call that only reads the tracker no longer stalls behind
+  another session's write. That holds from the *second* time a tracker is opened onward. The
+  very first open of a brand-new tracker still has to create the few rows the tracker needs to
+  exist, and creating them is a write — so if another session happens to be writing at that
+  exact moment, that first open waits for it, just as everything did before. Measured: with
+  another session holding the database for 0.7 seconds, the first open takes 0.73 seconds and
+  every open after it takes under a thousandth of a second. In practice this is one moment per
+  tracker, right after `codebugs init`, and there is no way to avoid it — you cannot skip a
+  write by checking first when the thing you are checking for is not there yet. It is written
+  down here because "a read never waits" read as unconditional, and it is not.
 - **Running the test suite under a stray `.codebugs/` directory now stops immediately with one
   explanation instead of roughly a thousand unrelated-looking failures (CB-204).** This affects
   anyone who runs `pytest` on this project, and nothing about the tracker's own behaviour.
@@ -21,6 +32,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   delete the stray directory, or point pytest's temporary root somewhere else with
   `--basetemp` or `TMPDIR`. It stays silent on a healthy machine, including the case where a
   tracker sits above a `.git` directory and is therefore genuinely out of reach.
+
+### Fixed
+- **The safety net protecting that improvement was checking less than it promised (CB-202).**
+  A test in this repository exists to catch the one-line mistake that would silently bring the
+  old stalling behaviour back — the symptom is invisible unless two sessions happen to collide,
+  so nobody would notice until it hurt. An independent reviewer restored the defect completely
+  and the test stayed green, because it was looking for the mistake written one particular way
+  rather than for the mistake itself. It now checks what actually matters: whether the tracker's
+  start-up code writes anything without first looking to see whether the write is needed — no
+  matter how that write is spelled, including when it is hidden in a block of setup instructions
+  or in a helper called from somewhere else. The test also states, in its own text, the cases it
+  still cannot see, so the next person to rely on it knows exactly how far it reaches. Nothing
+  about how codebugs behaves changes here; what changes is that the promise above is now
+  actually guarded.
 
 ## [0.2.1] — 2026-08-26
 
