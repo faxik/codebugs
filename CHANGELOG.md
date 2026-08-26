@@ -101,8 +101,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   **Scope, stated because the rest is real**: this is one module, not the class. Other
   commands still answer a bad argument with a stack trace — `milestone-list --kind
   nonsense`, `merge-sessions --status nonsense`, and `blockers-add` naming a card that
-  does not exist all still do. The sweep of the remaining handlers stays on CB-170, where
-  it already was.
+  does not exist all still do. The sweep of the remaining handlers is tracked on CB-200.
+- **The paragraph opening the 0.2.0 notes below made four wrong claims about that
   release, and has been corrected (CB-191).** It counted two strict CLI arguments where
   there is one, said neither corpus-wide clean-up had been run when the category fold
   had already been applied here, left out that an un-folded older tracker files a
