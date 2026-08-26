@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-08-26
+
+This release is about two things: working alongside other sessions without getting in each
+other's way, and the tool telling you the truth about what it did. Before this, any call to the
+tracker — even one that only reads — could stall for several seconds, or fail outright, if
+another session happened to be writing at the same moment; a read call no longer waits on a
+write at all, and a tracker whose database file is read-only can finally be read instead of
+being refused outright. The second half closes three cases where the tool gave you no answer or
+the wrong one: exporting to your own standard output or standard error no longer corrupts the
+file you asked for; the warning that a tracker's database may not be writable no longer
+disappears when you redirect the error stream; and asking the program which version you are
+running now gets an answer from the program itself, not from the package manager.
+
 ### Added
 - **`codebugs --version` prints the version you are running (CB-191).** Asking which
   codebugs you had used to mean asking the package manager (`pip show`, `pipx list`)
