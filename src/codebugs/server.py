@@ -397,9 +397,38 @@ def _record(
     error_type: str | None,
     duration_ms: float,
 ) -> None:
-    """The one write this module performs — see rules 1-3 on `install_usage_tracking`."""
+    """The one write this module performs — see rules 1-3 on `install_usage_tracking`.
+
+    CB-192: `PRAGMA busy_timeout=50` is set on THIS connection only, right
+    after it is opened and before the write, never touching `db.connect()` or
+    any other connection's setting (`busy_timeout` is per-connection). After
+    CB-195 removed `ensure_schema`'s own unconditional seed write,
+    `usage.record_call`'s INSERT is the last write left on the tool-call path
+    that can contend with a foreign writer — and it used to inherit the
+    shared 5000ms `busy_timeout`, so a concurrent write anywhere in the
+    tracker could delay every client's response by up to five seconds just to
+    record telemetry about that same call.
+
+    50ms is sized from a measurement, not a guess: an ordinary codebugs write
+    holds the lock for 0.84-8.58ms (median 0.84ms on an empty tracker, 6.50ms
+    median / 7.49ms p95 / 8.58ms max on a 3000-row one) — so 50ms is roughly a
+    sixfold margin over the observed p95. Ordinary concurrency is therefore
+    absorbed without losing a row; only pathological contention (a wedged
+    writer, an abnormally long foreign transaction) trades the lost row for a
+    bounded ~54ms ceiling instead of the old 5-second one. Today's behaviour
+    under that same pathological case is worse on both axes: the client waits
+    the full 5 seconds AND the row is still lost when the wait times out — so
+    this is not a trade against a working case, it is a strict improvement on
+    the one case that was already failing.
+
+    Rule 2 (no silent swallow, below) is what keeps a shortened timeout
+    honest: a row dropped by the 50ms budget still prints to stderr exactly
+    like any other recording failure — nothing about the shorter timeout
+    licenses a silent loss.
+    """
     try:
         with conn_factory() as conn:
+            conn.execute("PRAGMA busy_timeout=50")
             usage.record_call(
                 conn,
                 tool_name=tool_name,

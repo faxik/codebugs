@@ -74,15 +74,37 @@ def _get_session(conn: sqlite3.Connection, session_id: str) -> sqlite3.Row:
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """Create the codemerge tables if they don't exist."""
+    """Create the codemerge tables if they don't exist.
+
+    CB-195: read before seeding the lock singleton. `db.connect()` runs this on
+    EVERY open (it is part of `_open`'s `_resolved_order()` loop), and the
+    id=1 row exists from the very first open onward — every later
+    `INSERT OR IGNORE` is a guaranteed no-op. SQLite still takes the write
+    lock to attempt an INSERT even when it will end up ignored (it cannot
+    know the outcome without starting a write), so the unconditional form
+    made a purely reading `db.connect()` contend with any concurrent writer
+    for up to the full `busy_timeout` — and, past it, fail outright with
+    "database is locked". Checking first turns the steady-state path into a
+    single WAL read, which never blocks on a writer at all.
+
+    The race on an EMPTY database is harmless and does not need `db.txn`:
+    two connections opening concurrently against a fresh, seedless database
+    both see the row missing, both attempt the insert, and SQLite's own
+    `OR IGNORE` conflict resolution silently drops the loser — this is NOT
+    the read-modify-write shape CLAUDE.md requires `db.txn` for (CB-24),
+    because nothing here is COMPUTED from what was read; the row's values
+    are constants, and the read only decides whether to skip a redundant
+    write.
+    """
     for stmt in MERGE_SCHEMA.split(";"):
         stmt = stmt.strip()
         if stmt:
             conn.execute(stmt)
-    conn.execute(
-        "INSERT OR IGNORE INTO codemerge_locks (id, session_id, acquired_at, expires_at) "
-        "VALUES (1, NULL, NULL, NULL)"
-    )
+    if conn.execute("SELECT 1 FROM codemerge_locks WHERE id = 1").fetchone() is None:
+        conn.execute(
+            "INSERT OR IGNORE INTO codemerge_locks (id, session_id, acquired_at, expires_at) "
+            "VALUES (1, NULL, NULL, NULL)"
+        )
     conn.commit()
 
 

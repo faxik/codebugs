@@ -22,7 +22,10 @@ import inspect
 import json
 import os
 import re
+import sqlite3
 import tempfile
+import threading
+import time
 import types
 from contextlib import contextmanager
 
@@ -362,6 +365,84 @@ class TestUsageAndStrictArgumentsComposition:
         assert len(rows) == 1
         assert rows[0]["tool_name"] == "update"
         assert rows[0]["success"] == 1
+
+
+class TestRecordDoesNotWaitOutTheSharedBusyTimeout:
+    """CB-192, the remainder left after CB-195 fixed `ensure_schema`'s own seed
+    write. `_record` opens a connection through the SAME `conn_factory` every
+    tool uses (rule 3 of `install_usage_tracking`'s docstring — never a second,
+    independently-resolved connection) and that factory's `db.connect()` sets
+    `busy_timeout=5000`. `usage.record_call`'s own INSERT is a legitimate write
+    with nothing to skip, so it still takes the write lock — and, under
+    CB-195's fix, it is now the LAST write left on this path that can contend
+    with a foreign writer for the shared 5-second timeout, holding up the
+    client's own tool-call response for it.
+
+    The fix shortens `busy_timeout` on the counter's OWN connection only,
+    right in `server._record`, after the connection is opened and before the
+    write — it never touches `db.connect()` or any other connection's
+    setting, since `PRAGMA busy_timeout` is per-connection.
+
+    Same discriminator as `TestConnectDoesNotWaitOnUnconditionalSchemaSeedWrite`
+    in `test_db_infra.py`: wall-clock time. Before the fix, `_record` blocks for
+    roughly as long as the foreign writer holds the lock (bounded here, well
+    under the shared 5000ms, so this is a SLOW pass rather than a failure —
+    the outright "database is locked" shape at longer holds is what the unit's
+    brief measured separately). After the fix it gives up in ~50ms and drops
+    the row, which `_record`'s existing rule 2 (no silent swallow) reports on
+    stderr exactly as it already does for any other recording failure.
+    """
+
+    HOLD_SECONDS = 0.3
+    FAST_THRESHOLD_SECONDS = 0.15
+
+    def _hold_write_lock(self, db_path, *, ready: threading.Event):
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("BEGIN IMMEDIATE")
+        ready.set()
+        time.sleep(self.HOLD_SECONDS)
+        conn.execute("ROLLBACK")
+        conn.close()
+
+    def test_record_returns_fast_while_a_foreign_writer_holds_the_lock(
+        self, tracker, capsys
+    ):
+        with tracker() as conn:
+            root = db.connection_root(conn)
+        assert root is not None
+        db_path = os.path.join(root, ".codebugs", db.DB_FILE)
+
+        ready = threading.Event()
+        holder = threading.Thread(
+            target=self._hold_write_lock, args=(db_path,), kwargs={"ready": ready}
+        )
+        holder.start()
+        try:
+            assert ready.wait(timeout=5.0), "the foreign writer never acquired its lock"
+
+            start = time.perf_counter()
+            server._record(
+                tracker,
+                tool_name="stats",
+                success=True,
+                error_type=None,
+                duration_ms=1.0,
+            )
+            elapsed = time.perf_counter() - start
+        finally:
+            holder.join(timeout=5.0)
+            assert not holder.is_alive()
+
+        assert elapsed < self.FAST_THRESHOLD_SECONDS, (
+            f"_record() took {elapsed:.3f}s while a foreign writer held the lock for "
+            f"{self.HOLD_SECONDS:.3f}s — the usage counter must not delay the client's "
+            "response by the shared 5000ms busy_timeout (CB-192): give its own "
+            "connection a short one instead"
+        )
+        # Rule 2 (no silent swallow) must still hold when the short timeout drops
+        # the row: `_record` already prints to stderr on any recording failure.
+        if _rows(tracker) == []:
+            assert "stats" in capsys.readouterr().err
 
 
 class TestPreflight:

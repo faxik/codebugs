@@ -90,6 +90,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   carried the identical defect. The confirmation now goes to your terminal (stderr)
   instead of into the file whenever the destination is your own standard output;
   exporting to an ordinary file or path is unchanged.
+- **A read-only MCP call no longer waits on — or fails behind — someone else's write
+  (CB-195).** Opening a connection always re-seeded two tables (the merge-lock row, the
+  four default milestones) with an unconditional insert, even though the row was
+  already there from the very first time the tracker was created. SQLite still took a
+  write lock for that guaranteed no-op, so any call opening a fresh connection while
+  another session was mid-write could sit out the full five-second wait — and, under
+  longer contention, fail outright with "database is locked" for a call that never
+  needed to write anything. Both seeds now check first and write only when the row is
+  genuinely missing, so the ordinary case never touches the write lock at all.
+- **The tool-call counter now skips a row under long contention instead of delaying
+  your call (CB-192).** Recording how a tool call went used to share the same
+  five-second write-lock budget as everything else, so under sustained contention the
+  bookkeeping itself could hold up the response you were waiting for — and, at the far
+  end of that wait, still lose the row it was trying to record. The counter's own
+  connection now gives up after about 50ms (six times the slowest write this project
+  has measured in normal use) and drops the row rather than the call: you get your
+  answer promptly, and only pathological contention (a wedged writer, an unusually long
+  competing transaction) costs you one line of `codebugs usage` history, reported to
+  stderr exactly as any other recording failure already is.
 
 ## [0.2.0] — 2026-08-25
 

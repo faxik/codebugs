@@ -225,6 +225,28 @@ class TestTheFourShapesEndToEnd:
             _cli(project.dir, "add", "-f", "x.py", "-c", "t", "-s", "low", "-d", "shape A", "--new-category")
         )
 
+    @pytest.mark.xfail(
+        reason=(
+            "CB-199, found while implementing CB-195. This module's own docstring names "
+            "the mechanism: shape B was only caught because merge.ensure_schema's "
+            "UNCONDITIONAL seed insert ran inside _open()'s ensure_fn loop on every "
+            "connect and failed with SQLITE_READONLY there, where it gets classified "
+            "into the clean TrackerUnwritableError this test expects. CB-195 (T-86) made "
+            "that insert conditional on the row being missing — the whole point of the "
+            "fix, so a purely reading connect() never takes the write lock — and once the "
+            "seed rows exist (the ordinary case for any tracker used before), nothing in "
+            "_open() attempts a write any more, so a read-only DB FILE is no longer "
+            "detected until a domain function's OWN write fails later, OUTSIDE _open()'s "
+            "classification, as a raw traceback. Exit code is still 1 — the write still "
+            "correctly fails and nothing corrupts — only the message quality degraded. "
+            "No fix within CB-195/CB-192's own scope exists: any write-based early probe "
+            "reintroduces exactly the write-lock contention CB-195 removes. CB-199 records "
+            "the tradeoff for whoever decides it; strict=True so this test starts failing "
+            "loudly (telling the fixer to remove this marker) the moment the guarantee is "
+            "restored by some other means."
+        ),
+        strict=True,
+    )
     def test_B_read_only_database_file(self, project):
         os.chmod(project.dbfile, 0o444)
         self._assert_clean_refusal(

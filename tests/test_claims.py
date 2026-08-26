@@ -805,10 +805,31 @@ class TestCliContract:
             blocker.close()
 
     def test_30_contention_never_crashes_any_verb(self, tmp_project, conn):
-        """CB-14. db.connect() WRITES during schema init (merge.ensure_schema's
-        INSERT OR IGNORE), so a held write lock used to kill EVERY verb with an
-        unhandled traceback before its own code ran — not just the claim verbs.
-        Contention is classified centrally now: exit 5, no traceback."""
+        """CB-14, UPDATED for CB-195 — the old assertion tested the bug's own
+        symptom as if it were the guarantee.
+
+        `db.connect()` used to WRITE during schema init on every open
+        (`merge.ensure_schema`'s unconditional `INSERT OR IGNORE`), so a held
+        write lock made EVERY verb contend — including these three, which
+        never write anything themselves — and this test's original assertion
+        (`returncode == 5`, "database busy") was pinning exactly that: a read
+        call failing because of someone else's write.
+
+        CB-195 removed that accidental write for the steady state (the seed
+        row already exists after the first open, so the insert is skipped),
+        and the DIRECT, INTENDED consequence is that a purely reading verb no
+        longer contends with a foreign writer at all — the whole reason the
+        server exists is to let several agents work in parallel, and refusing
+        a read merely because another agent is mid-write defeats that. So
+        `query`, `stats` and `get` must now SUCCEED (exit 0) under the exact
+        same held lock that used to make them fail.
+
+        CB-14's original point — a verb that genuinely needs to write still
+        classifies real contention cleanly, exit 5, no traceback — is
+        unchanged and is still covered immediately above this test by `claim`
+        and `release`, which hold under the identical lock (they write the
+        claims ledger, so contention there is real, not accidental).
+        """
         _finding(conn)
         blocker = db.connect(tmp_project)
         blocker.execute("BEGIN IMMEDIATE")
@@ -822,9 +843,8 @@ class TestCliContract:
                     text=True,
                     timeout=120,
                 )
-                assert r.returncode == 5, (verb, r.returncode, r.stdout, r.stderr)
+                assert r.returncode == 0, (verb, r.returncode, r.stdout, r.stderr)
                 assert "Traceback" not in r.stderr, (verb, r.stderr)
-                assert "database busy" in r.stderr, (verb, r.stderr)
         finally:
             blocker.execute("ROLLBACK")
             blocker.close()
