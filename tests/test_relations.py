@@ -14,7 +14,15 @@ earlier revision of that plan:
   which commits an ambient transaction (CB-40).
 """
 
+import argparse
+import ast
+import inspect
+import os
+import pathlib
 import sqlite3
+import subprocess
+import sys
+import textwrap
 
 import pytest
 
@@ -363,3 +371,202 @@ class TestActiveSuppressionsProbe:
         relations.relate(conn, f1, "distinct_from", f2, source="test")
         assert relations.active_suppressions(conn) == {tuple(sorted((f1, f2)))}
 
+
+# ------------------------------------------------- CLI error boundary ----
+
+
+class TestRelationsCliErrorBoundary:
+    """CB-193. All three `relations-*` handlers caught NOTHING, so a domain
+    `ValueError` reached the user as a raw traceback instead of the one stderr
+    line every other verb in the package prints. `grep -c domain_errors
+    src/codebugs/relations.py` was 0 while CLAUDE.md's error-handling rule says
+    the rule is encoded exactly once, in `cli.domain_errors()`, and every CLI
+    handler that touches a domain call routes through it.
+
+    THERE ARE THREE TESTS BECAUSE THERE ARE THREE HANDLERS. A check that
+    validates elements cannot validate their composition: with one test, an
+    unwrapped second verb passes unnoticed, which is precisely the shape this
+    repository keeps paying for.
+
+    NON-VACUITY, stated because both obvious assertions are satisfied by the
+    UNFIXED tree: exit code 1 is what an uncaught exception already produces,
+    and the message text already appears inside its traceback. Neither
+    discriminates on its own, and both are kept only to pin the contract
+    jointly. The real discriminators are `"Traceback" not in stderr` and the
+    `codebugs: ` prefix, which only the wrapper can produce.
+
+    THE CARD'S SECOND CLAIM IS FALSE AND IS NOT TESTED AS A FIX. It said the
+    handlers also "leak the connection"; measured, they do not — all three were
+    already `conn = db.connect()` / `try: ... finally: conn.close()`, and
+    `finally` runs on the exception path too. The closure test below therefore
+    PINS EXISTING BEHAVIOUR and is green on both sides of this change; it is
+    named and documented as such so a later reader cannot mistake it for a
+    regression guard.
+    """
+
+    # The subprocess must read THIS checkout, not whichever tree happens to be
+    # the process cwd — a worktree's suite validating main's source is a green
+    # run over code nobody touched. Anchoring on __file__ makes the tree the
+    # test lives in the tree the subprocess imports, by construction.
+    _SRC = str(pathlib.Path(__file__).resolve().parents[1] / "src")
+
+    @classmethod
+    def _cli(cls, project, *args):
+        return subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", *args],
+            capture_output=True,
+            text=True,
+            cwd=str(project),
+            env={**os.environ, "PYTHONPATH": cls._SRC},
+        )
+
+    def test_relate_reports_a_missing_endpoint_as_one_line_not_a_traceback(self, tmp_project):
+        """The card's own reproduction: relate against a tracker with no CB-1."""
+        r = self._cli(tmp_project, "relations-relate", "CB-1", "distinct_from", "CB-2",
+                      "--source", "probe")
+        assert "Traceback" not in r.stderr, r.stderr
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert r.stderr.strip() == "codebugs: No such finding: CB-1", r.stderr
+
+    def test_unrelate_reports_a_missing_edge_as_one_line_not_a_traceback(self, tmp_project):
+        """Retracting an edge that does not exist is `unrelate`'s own ValueError."""
+        r = self._cli(tmp_project, "relations-unrelate", "CB-1", "distinct_from", "CB-2",
+                      "--retracted-by", "probe")
+        assert "Traceback" not in r.stderr, r.stderr
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert r.stderr.strip() == (
+            "codebugs: No live distinct_from edge from CB-1 to CB-2 to retract."
+        ), r.stderr
+
+    def test_query_reports_a_bad_relation_as_one_line_not_a_traceback(
+        self, tmp_project, monkeypatch, capsys
+    ):
+        """The third handler, and it is exercised DIFFERENTLY on purpose.
+
+        `relations-query` declares `--rel` with `choices=list(RELATIONS)`, so
+        argparse refuses an unknown value with its own exit code 2 before the
+        handler runs: measured, `query_relations`' only `ValueError` path —
+        `_validate_rel` — is UNREACHABLE from a command line today. Driving the
+        handler directly is therefore not a shortcut around the subprocess
+        convention, it is the only way to reach the arm at all. The wrapper
+        still belongs here: it is what makes the third verb's behaviour equal
+        to its siblings' the day this verb gains an argument argparse cannot
+        pre-validate.
+
+        The discriminator is the exception TYPE: unwrapped, `ValueError`
+        escapes; wrapped, `domain_errors` prints one line and raises
+        `SystemExit(1)`.
+        """
+        monkeypatch.chdir(tmp_project)
+        args = argparse.Namespace(entity_id=None, rel="no_such_relation",
+                                  include_retracted=False)
+
+        with pytest.raises(SystemExit) as excinfo:
+            relations._cmd_relations_query(args)
+
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert err.startswith("codebugs: Unknown relation 'no_such_relation'"), err
+
+    def test_the_connection_is_closed_on_both_outcomes(self, tmp_project, monkeypatch):
+        """PINS EXISTING BEHAVIOUR — green before and after CB-193's fix.
+
+        The card claimed the unwrapped handlers leaked their connection. They
+        did not: `finally: conn.close()` was already there and runs on the
+        exception path. This exists so that the claim is answered by a test
+        rather than by prose, and so that a future edit which hoists the domain
+        call out of the `try` is caught. It is NOT a regression guard for the
+        wrapper, and must not be read as one.
+
+        Both outcomes are covered because only one of them is interesting:
+        `SystemExit` raised INSIDE the `with` still has to travel through the
+        same `finally`.
+
+        THE REFUSAL PATH ACCEPTS EITHER EXCEPTION, and that is what makes the
+        claim above true rather than merely asserted. Wrapped, the handler
+        raises `SystemExit`; unwrapped, the domain `ValueError` escapes. Pinning
+        `SystemExit` alone would silently make this a second regression guard
+        for the wrapper — measured: it went red under the mutant that removes
+        `_cmd_relations_relate`'s wrapper, which is exactly the "green on both
+        sides" property this test claims to have.
+        """
+        opened: list[sqlite3.Connection] = []
+        real_connect = db.connect
+
+        def spy(*a, **kw):
+            c = real_connect(*a, **kw)
+            opened.append(c)
+            return c
+
+        monkeypatch.chdir(tmp_project)
+        monkeypatch.setattr(db, "connect", spy)
+
+        # Refusal path: wrapped this is SystemExit, unwrapped it is ValueError.
+        # Either way the `finally` below is what this test is about.
+        with pytest.raises((SystemExit, ValueError)):
+            relations._cmd_relations_relate(
+                argparse.Namespace(src_id="CB-1", rel="distinct_from", dst_id="CB-2",
+                                   source="probe", note=None)
+            )
+        # Success path: an empty query is a perfectly good answer.
+        relations._cmd_relations_query(
+            argparse.Namespace(entity_id=None, rel=None, include_retracted=False)
+        )
+
+        assert len(opened) == 2, "both handlers must have gone through db.connect"
+        for c in opened:
+            with pytest.raises(sqlite3.ProgrammingError):
+                c.execute("SELECT 1")
+
+    @pytest.mark.parametrize("handler_name", [
+        "_cmd_relations_relate",
+        "_cmd_relations_unrelate",
+        "_cmd_relations_query",
+    ])
+    def test_the_print_stays_outside_the_wrapper(self, handler_name):
+        """Placement is pinned STRUCTURALLY, because behaviour cannot see it.
+
+        `print` into a closed stream raises `ValueError` (measured). Inside
+        `domain_errors` that would be caught and reported as bad input at exit
+        1 — over a write that already committed, which is the CB-15/CB-16 lie
+        arriving through the mechanism built to prevent it. It is unreachable
+        TODAY only because CB-134's gate refuses a closed stdout at the process
+        entry, so no test can discriminate the placement by running the code:
+        moving the `print` under the `with` passes all three verb tests, the
+        connection pin, and the whole suite. This repository's answer to that
+        shape is a structural pin (CB-41's SQL-side deadline, CB-174's
+        "Placement is pinned STRUCTURALLY"), not a comment asking the next
+        editor to be careful.
+
+        NON-VACUITY: the second assertion is what keeps this honest — deleting
+        the `print` outright would satisfy "no print inside the wrapper" while
+        removing the handler's entire output.
+        """
+        handler = getattr(relations, handler_name)
+        tree = ast.parse(textwrap.dedent(inspect.getsource(handler)))
+
+        def _calls(node):
+            return {
+                n.func.id
+                for n in ast.walk(node)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            }
+
+        wrappers = [
+            w for w in ast.walk(tree)
+            if isinstance(w, ast.With)
+            and any(
+                isinstance(i.context_expr, ast.Call)
+                and isinstance(i.context_expr.func, ast.Name)
+                and i.context_expr.func.id == "domain_errors"
+                for i in w.items
+            )
+        ]
+        assert len(wrappers) == 1, f"{handler_name} must wrap exactly one region"
+
+        inside = set().union(*(_calls(stmt) for stmt in wrappers[0].body))
+        assert "print" not in inside, (
+            f"{handler_name} prints INSIDE domain_errors: a post-commit reporting "
+            "failure would be reported as bad input"
+        )
+        assert "print" in _calls(tree), f"{handler_name} must still print its result"
