@@ -459,30 +459,46 @@ def register_cli(sub, commands):
 
 
 def _cmd_relations_relate(args):
+    from codebugs.cli import domain_errors
+
     conn = db.connect()
     try:
-        result = relate(conn, src_id=args.src_id, rel=args.rel, dst_id=args.dst_id,
-                        source=args.source, note=args.note)
+        # `domain_errors` (cli.py) is the ONE place the CLI-boundary rule lives, and
+        # these three handlers used to route around it by catching nothing at all: a
+        # domain `ValueError` — "No such finding: CB-1" — reached the user as a raw
+        # traceback instead of the one stderr line every other verb prints (CB-193).
+        # The wrapper is used, never re-implemented: its `json.JSONDecodeError`-first
+        # ordering is a ratified rule, and a second copy of it here would be the drift
+        # this repository forecloses by keeping the rule in exactly one function.
+        with domain_errors(prefix="codebugs: "):
+            result = relate(conn, src_id=args.src_id, rel=args.rel, dst_id=args.dst_id,
+                            source=args.source, note=args.note)
         print(json.dumps(result, indent=2))
     finally:
         conn.close()
 
 
 def _cmd_relations_unrelate(args):
+    from codebugs.cli import domain_errors
+
     conn = db.connect()
     try:
-        result = unrelate(conn, src_id=args.src_id, rel=args.rel, dst_id=args.dst_id,
-                          retracted_by=args.retracted_by, reason=args.reason)
+        with domain_errors(prefix="codebugs: "):
+            result = unrelate(conn, src_id=args.src_id, rel=args.rel, dst_id=args.dst_id,
+                              retracted_by=args.retracted_by, reason=args.reason)
         print(json.dumps(result, indent=2))
     finally:
         conn.close()
 
 
 def _cmd_relations_query(args):
+    from codebugs.cli import domain_errors
+
     conn = db.connect()
     try:
-        result = query_relations(conn, entity_id=args.entity_id, rel=args.rel,
-                                 include_retracted=args.include_retracted)
+        with domain_errors(prefix="codebugs: "):
+            result = query_relations(conn, entity_id=args.entity_id, rel=args.rel,
+                                     include_retracted=args.include_retracted)
         print(json.dumps(result, indent=2))
     finally:
         conn.close()
