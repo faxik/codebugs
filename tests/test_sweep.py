@@ -1317,3 +1317,80 @@ class TestArchiveItemsRefusesAnIgnoredFilter:
 
         assert any("BEGIN IMMEDIATE" in s for s in c.sql_log), c.sql_log
         c.close()
+
+
+# --- CB-196 ---------------------------------------------------------------
+
+
+class TestNextBatchRowLimit:
+    """CB-196 — `next_batch` validates its limit instead of binding it raw.
+
+    The third of the card's three sites, and the one whose `None` is LOAD-BEARING:
+    unlike the two query verbs, omitting the limit here legitimately means "use
+    the sweep's own `default_batch_size`". `require_row_limit` accepts `None` for
+    exactly this reason, so routing this site through it neither invents a bound
+    nor removes one.
+
+    Its sibling `list_items` went through the same function under CB-161; the two
+    now share one meaning of a limit across the module.
+    """
+
+    @staticmethod
+    def _sweep_with_three(conn):
+        sw = sweep.create_sweep(conn, default_batch_size=2)
+        sweep.add_items(conn, sw["sweep_id"], ["a.py", "b.py", "c.py"])
+        return sw["sweep_id"]
+
+    def test_a_negative_limit_is_refused(self, conn):
+        sweep_id = self._sweep_with_three(conn)
+        with pytest.raises(ValueError, match="must not be negative"):
+            sweep.next_batch(conn, sweep_id, limit=-1)
+
+    def test_the_refusal_precedes_resolving_the_sweep(self, conn):
+        """The validator sits above `_resolve_sweep`, so a bad limit refuses
+        without first spending a lookup — argument validation before anything is
+        resolved. The observable consequence is which error wins when BOTH the
+        ref and the limit are bad: `ValueError`, not the ref's `KeyError`."""
+        with pytest.raises(ValueError, match="must not be negative"):
+            sweep.next_batch(conn, "SW-does-not-exist", limit=-1)
+
+    def test_omitting_the_limit_still_uses_the_sweep_default(self, conn):
+        """PIN of preserved behaviour, and the reason this site needed a
+        validator that accepts `None` rather than a bare non-negative check."""
+        sweep_id = self._sweep_with_three(conn)
+        assert len(sweep.next_batch(conn, sweep_id)["items"]) == 2
+
+    def test_zero_still_means_no_items(self, conn):
+        """PIN of preserved behaviour — zero is legal and means zero."""
+        sweep_id = self._sweep_with_three(conn)
+        assert sweep.next_batch(conn, sweep_id, limit=0)["items"] == []
+
+    def test_cli_sweep_next_refuses_a_negative_limit(self, tmp_path, monkeypatch, capsys):
+        """The CLI verb is `sweep-next`; the MCP tool is `codesweep_next`. The
+        two surfaces of this module are NOT spelled alike, so a surface swept by
+        one spelling misses the other."""
+        import sys
+
+        from codebugs import cli, db
+
+        project = str(tmp_path)
+        db.init_project(project)
+        c = db.connect(project)
+        try:
+            sweep_id = self._sweep_with_three(c)
+        finally:
+            c.close()
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["codebugs", "--tracker-root", project, "sweep-next", sweep_id, "--limit", "-1"],
+        )
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        out = capsys.readouterr()
+        assert out.out == ""
+        assert "Traceback" not in out.err
+        assert len(out.err.strip().splitlines()) == 1
+        assert "must not be negative" in out.err

@@ -3128,7 +3128,7 @@
         "default": null,
         "deprecated": false,
         "dest": "limit",
-        "help": "Max results",
+        "help": "Max results (0 for none; negative is an error)",
         "metavar": null,
         "nargs": null,
         "option_strings": [
@@ -4180,7 +4180,7 @@
         "default": null,
         "deprecated": false,
         "dest": "limit",
-        "help": "Max results",
+        "help": "Max results (0 for none; negative is an error)",
         "metavar": null,
         "nargs": null,
         "option_strings": [
@@ -5654,7 +5654,7 @@
         "default": null,
         "deprecated": false,
         "dest": "limit",
-        "help": "Batch size override",
+        "help": "Batch size override (0 for none; negative is an error)",
         "metavar": null,
         "nargs": null,
         "option_strings": [

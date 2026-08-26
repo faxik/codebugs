@@ -4099,3 +4099,94 @@ class TestGroupingAxesCliContract:
             assert r.returncode == 1, (args, r.stdout, r.stderr)
             assert "CB-167" in r.stderr, (args, r.stderr)
             assert "Traceback" not in r.stderr
+
+
+# --- CB-196 ---------------------------------------------------------------
+
+
+class TestQueryFindingsRowLimit:
+    """CB-196 — `query_findings` validates its limit instead of binding it raw.
+
+    SQLite reads a negative LIMIT as NO limit, so `--limit -1` used to return the
+    whole table at exit 0: the caller asked to be bounded and silently received
+    the opposite. CB-161 had already built `types.require_row_limit` and had
+    already NAMED this site as still outstanding; this routes it through.
+
+    Two of the tests below are PINS OF PRESERVED BEHAVIOUR, not guards against a
+    mutant — said here and in their own names because a reader who mistakes a pin
+    for a live guard draws the wrong conclusion from its passing.
+    """
+
+    @staticmethod
+    def _three(conn):
+        for i, name in enumerate(("a.py", "b.py", "c.py")):
+            findings.add_finding(
+                conn,
+                severity="low",
+                category="bug",
+                file=name,
+                description=f"finding number {i} about {name}",
+                new_category=(i == 0),
+            )
+
+    def test_a_negative_limit_is_refused(self, conn):
+        """The card itself: this returned every row at exit 0 before."""
+        self._three(conn)
+        with pytest.raises(ValueError, match="must not be negative"):
+            findings.query_findings(conn, limit=-1)
+
+    def test_a_negative_limit_is_refused_even_when_ids_are_given(self, conn):
+        """THE COMPOSITION, and the reason the call sits at the top of the body.
+
+        `query_findings` widens the limit to `len(ids)` inside `if ids:`, so a
+        validator placed after that widening would never see a negative value on
+        any call carrying an id list — one argument with two verdicts, decided by
+        an unrelated parameter. Measured before the fix: the MCP call
+        `query(ids=["CB-196"], limit=-1)` came back reporting `limit: 1`, because
+        the widening had already rewritten it. Moving the call below the widening
+        turns this test red while the bare test above stays green.
+        """
+        self._three(conn)
+        got = findings.query_findings(conn, limit=100)["findings"]
+        with pytest.raises(ValueError, match="must not be negative"):
+            findings.query_findings(conn, ids=[got[0]["id"]], limit=-1)
+
+    def test_zero_still_means_zero_rows(self, conn):
+        """PIN of preserved behaviour — green before this change and after it.
+
+        Zero was already honest here (CB-124 removed an `or 100` that had turned
+        it into 100), and `require_row_limit` keeps zero legal precisely so that
+        the sites which behaved correctly are not broken by the fix.
+        """
+        self._three(conn)
+        assert findings.query_findings(conn, limit=0)["findings"] == []
+
+    def test_a_positive_limit_still_truncates(self, conn):
+        """PIN of preserved behaviour — the ordinary path must be untouched."""
+        self._three(conn)
+        assert len(findings.query_findings(conn, limit=2)["findings"]) == 2
+
+    def test_cli_query_refuses_a_negative_limit(self, tmp_project, monkeypatch, capsys):
+        """Reached through the real verb, because the domain test above cannot
+        see the parser-to-handler seam. One line on stderr, nothing on stdout,
+        exit 1 — deliberately 1 and not 3/4/5/74/141, each of which already means
+        something else in this package."""
+        from codebugs import cli
+
+        conn = db.connect(tmp_project)
+        try:
+            self._three(conn)
+        finally:
+            conn.close()
+
+        monkeypatch.setattr(
+            sys, "argv", ["codebugs", "--tracker-root", tmp_project, "query", "--limit", "-1"]
+        )
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        out = capsys.readouterr()
+        assert out.out == ""
+        assert "Traceback" not in out.err
+        assert len(out.err.strip().splitlines()) == 1
+        assert "must not be negative" in out.err

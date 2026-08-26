@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **A negative `--limit` is now an error instead of silently meaning "no limit" (CB-196).**
+  On `query`, `reqs-query` and `sweep-next` — and on their tool equivalents `query`,
+  `reqs_query` and `codesweep_next` — asking for `--limit -1` used to print the ENTIRE
+  table and exit 0. SQLite reads a negative limit as no limit at all, so the one argument
+  you use to bound a result was quietly doing the opposite of what you asked, with nothing
+  anywhere to tell you. It now refuses with a one-line message and exit 1.
+  **What it costs you:** if you were using a negative number as a way to say "give me
+  everything", drop the flag instead — omitting it is what "no limit" means on `sweep-next`,
+  and on `query`/`reqs-query` it gives you the default page of 100. **`--limit 0` is
+  unchanged and still legal**: it means zero rows, exactly as before.
+  This does NOT close the class. `recent --limit -1` still returns everything at exit 0,
+  along with several internal paths, and nothing mechanical catches a new one — that is
+  tracked as CB-208.
+
 ## [0.2.1] — 2026-08-26
 
 This release is about two things: working alongside other sessions without getting in each

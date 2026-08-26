@@ -93,7 +93,9 @@ insertion order.
 
 Args:
     sweep_ref: Sweep ID (SW-N) or name
-    limit: Batch size (overrides sweep default)
+    limit: Batch size (overrides sweep default). 0 means NO items; omit it to
+        use the sweep's own default batch size. A negative value is an error
+        (it used to mean "no limit").
     tags: Filter to items matching any of these tags
 """
 
@@ -234,7 +236,11 @@ SURFACE = [
             help="Get next batch of unprocessed items",
             args=[
                 dict(flags=["sweep"], help="Sweep ID (SW-N) or name"),
-                dict(flags=["--limit"], type=int, help="Batch size override"),
+                dict(
+                    flags=["--limit"],
+                    type=int,
+                    help="Batch size override (0 for none; negative is an error)",
+                ),
                 dict(flags=["--tags"], help="Filter by tags (comma-separated)"),
             ],
             manual_handler=_cmd_sweep_next,

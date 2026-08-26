@@ -25,6 +25,7 @@ from codebugs.types import (
     is_vocabulary_filter_active,
     normalize_category,
     rank_case_sql,
+    require_row_limit,
     resolve_finding_status,
     resolve_severity,
     severity_rank,
@@ -3164,6 +3165,16 @@ def query_findings(
     With the flag on, the page is resolved in ONE pass — the per-tree context is
     built once for the whole population, never per row.
     """
+    # CB-196. Validated HERE, at the top, and specifically ABOVE the `ids`
+    # widening below: that widening runs only inside `if ids:` and rewrites a
+    # caller's `-1` to `len(ids)`, so a check placed after it would be a gate
+    # that cannot fire for exactly the calls that carry an id list, while still
+    # firing for the bare call. One argument, two verdicts, decided by an
+    # unrelated parameter. Validating the ARGUMENT rather than the derived value
+    # is also this package's standing rule (CB-82): a refusal must cost no
+    # partial work.
+    limit = require_row_limit("limit", limit)
+
     conditions: list[str] = []
     params: list[Any] = []
 
@@ -4289,7 +4300,8 @@ def register_tools(mcp, conn_factory) -> None:
                       that tool is a tag census with pair co-occurrence over
                       `status`/`category` only; this is a distribution that
                       composes with every filter on this tool.
-            limit: Max results (default 100)
+            limit: Max results (default 100). 0 means NO results. A negative
+                      value is an error (it used to mean "no limit").
             offset: Pagination offset
             resolve_anchors: Resolve each result's location anchor against the
                       repository HEAD, so a card whose code moved reports its
@@ -5286,7 +5298,9 @@ def register_cli(sub, commands) -> None:
             "both groups and one with none is in no group; the footer reports both"
         ),
     )
-    p.add_argument("--limit", type=int, help="Max results")
+    p.add_argument(
+        "--limit", type=int, help="Max results (0 for none; negative is an error)"
+    )
     p.add_argument(
         "--resolve-anchors",
         dest="resolve_anchors",

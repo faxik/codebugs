@@ -369,16 +369,33 @@ def require_row_limit(label: str, value: object) -> int | None:
     only copy of its pattern), and because ``types`` is the module every domain
     module may already import.
 
-    **SCOPE, STATED SO NOBODY READS THIS AS THE CLASS BEING CLOSED.** These are
-    the three sites CB-161 measured, not every place in the package that takes a
-    row limit. Others BIND their value already — ``findings.query_findings``,
-    ``reqs.query_requirements`` and ``sweep.next_batch`` among them — so they were
-    never part of CB-161's interpolation class, but they do NOT validate it, and a
-    negative limit there still means "no limit" to SQLite (measured on this tree:
-    ``codebugs query --limit -1`` prints every row and exits 0). Routing those
-    through this function is a separate, larger change with its own behaviour
-    consequences; adding a call here does not make it happen, and this docstring
-    is not a claim that it has.
+    **SCOPE, STATED SO NOBODY READS THIS AS THE CLASS BEING CLOSED.** CB-196
+    added the three sites this paragraph used to list as outstanding —
+    ``findings.query_findings``, ``reqs.query_requirements`` and
+    ``sweep.next_batch``. They were never part of CB-161's INTERPOLATION class,
+    because all three always bound their value; what they lacked was validation,
+    so a negative limit meant "no limit" to SQLite and the caller silently
+    received the whole table. Six sites now route through here.
+
+    **The class is still NOT closed, and these are the sites measured on this
+    tree as still carrying it.** ``findings.recent_findings`` binds an
+    unvalidated ``limit`` and is reachable from both surfaces (MCP ``recent``,
+    CLI ``recent --limit``), so ``recent --limit -1`` still returns every
+    matching row at exit 0. The three internal accessors
+    ``findings.similarity_candidates``, ``grouping_candidates`` and
+    ``anchor_candidates`` take ``limit: int | None`` and bind it unvalidated
+    too; no surface reaches them with a caller-controlled value today, which
+    bounds the exposure without removing the shape. Those are CB-208, which
+    also records two neighbours found by the same comb and NOT of this class:
+    ``embeddings.search_similar`` applies its limit as a Python SLICE, where a
+    negative value trims the tail instead of removing the bound, and
+    ``grouping``'s three report functions carry their own hand-written copy of
+    the negative check rather than sharing this one.
+
+    **And nothing MECHANICAL catches a seventh site**: ruff's ``S608`` is not
+    enabled in this repository (CB-172), and it would not see these anyway,
+    since binding is exactly what they all do correctly. A new query function
+    that forgets this call is caught by review or not at all.
 
     **Zero is legal and means zero rows.** That is not a free choice: on
     ``sweep.list_items`` a zero ALREADY produced ``LIMIT 0``, i.e. no rows, so a

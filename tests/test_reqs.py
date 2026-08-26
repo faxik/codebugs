@@ -1285,3 +1285,69 @@ class TestVerifyAmbientCwdCompatibility:
     def test_all_three_checks_still_run_together(self, conn, tmp_path):
         result = reqs.verify_requirements(conn, project_dir=str(tmp_path))
         assert "issues" in result
+
+
+# --- CB-196 ---------------------------------------------------------------
+
+
+class TestQueryRequirementsRowLimit:
+    """CB-196 — `query_requirements` validates its limit instead of binding it raw.
+
+    The findings twin carries the full reasoning; this is the second of the
+    card's three sites, and it gets its own tests rather than sharing them
+    because a check of elements is not a check of their composition — one
+    unwrapped verb would otherwise pass unnoticed.
+    """
+
+    @staticmethod
+    def _three(conn):
+        for i in range(3):
+            reqs.add_requirement(conn, req_id=f"FR-{i}", description=f"requirement {i}")
+
+    def test_a_negative_limit_is_refused(self, conn):
+        self._three(conn)
+        with pytest.raises(ValueError, match="must not be negative"):
+            reqs.query_requirements(conn, limit=-1)
+
+    def test_a_negative_limit_is_refused_even_when_ids_are_given(self, conn):
+        """Same composition trap as on findings: the `ids` branch widens the
+        limit to `len(ids)`, so a validator below it would be a gate that cannot
+        fire for exactly the calls carrying an id list."""
+        self._three(conn)
+        with pytest.raises(ValueError, match="must not be negative"):
+            reqs.query_requirements(conn, ids=["FR-0"], limit=-1)
+
+    def test_zero_still_means_zero_rows(self, conn):
+        """PIN of preserved behaviour — green on both sides of this change."""
+        self._three(conn)
+        assert reqs.query_requirements(conn, limit=0)["requirements"] == []
+
+    def test_a_positive_limit_still_truncates(self, conn):
+        """PIN of preserved behaviour."""
+        self._three(conn)
+        assert len(reqs.query_requirements(conn, limit=2)["requirements"]) == 2
+
+    def test_cli_reqs_query_refuses_a_negative_limit(self, tmp_path, monkeypatch, capsys):
+        from codebugs import cli
+
+        project = str(tmp_path)
+        db.init_project(project)
+        c = db.connect(project)
+        try:
+            self._three(c)
+        finally:
+            c.close()
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["codebugs", "--tracker-root", project, "reqs-query", "--limit", "-1"],
+        )
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+        assert exc.value.code == 1
+        out = capsys.readouterr()
+        assert out.out == ""
+        assert "Traceback" not in out.err
+        assert len(out.err.strip().splitlines()) == 1
+        assert "must not be negative" in out.err
