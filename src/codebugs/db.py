@@ -1346,39 +1346,29 @@ def _declared_db_path(root: str, source: str) -> str:
     return path
 
 
-# How many unexamined candidates a HUMAN sentence names before it stops listing
-# and starts counting. The KEY is never capped — a programmatic consumer gets
-# every entry — and this governs prose only.
-#
-# The number is a measurement, not a preference. One withheld execute bit high
-# up makes every question BELOW it undeterminable too, because the walk asks
-# with absolute paths and each of them traverses the wall: measured, a tracker
-# three directories down from the wall yields SIX entries (three directories,
-# two probes each) for what is one condition with one fix. Six identical lines
-# is a diagnostic nobody reads, which is the failure mode this whole change
-# exists to avoid, arriving through the fix rather than the defect. The list is
-# in walk order, so the entries kept are the DEEPEST — and the deepest skipped
-# candidate is precisely the one that would have outranked the root that won.
-_UNEXAMINED_SHOWN = 3
-
-
 def unexamined_phrases(unexamined: Unexamined) -> tuple[str, ...]:
-    """`(path, reason)` pairs as human phrases, capped — one definition, three consumers.
+    """`(path, reason)` pairs as human phrases — one definition, three consumers.
 
     The refusal message, `codebugs where` and the MCP preflight all say this,
-    each in its own frame, so the CAP and the counting live here rather than
-    three times over. Returns `()` on an empty list, which is what makes every
-    caller's "say something only when there is something to say" a single `for`
-    or a single `if` rather than a rule to re-establish.
+    each in its own frame, so the wording lives here rather than three times
+    over. Returns `()` on an empty list, which is what makes every caller's "say
+    something only when there is something to say" a single `for` or a single
+    `if` rather than a rule to re-establish.
+
+    NOTHING IS TRUNCATED, and a truncating version was written first and then
+    REFUTED BY MEASUREMENT rather than by argument. One withheld execute bit
+    makes every question BELOW it unanswerable too, since the walk asks with
+    absolute paths and each of them traverses the wall: a tracker three
+    directories down yields six entries for one condition with one fix, and
+    those six read as noise. The cap kept the first three, in walk order — and
+    walk order runs DEEPEST FIRST, so what it kept were the wall's SHADOWS
+    (`…/b/c/.codebugs`, which never existed) while the one entry naming the
+    wall itself, and the directory actually holding the user's tracker, fell off
+    the end. A short diagnostic missing its own cause is worse than a long one.
+    Length is bounded by how deep the caller stood below the wall, and this
+    state is rare and serious enough to be worth every line of it.
     """
-    if not unexamined:
-        return ()
-    shown = [f"{path} ({why})" for path, why in unexamined[:_UNEXAMINED_SHOWN]]
-    hidden = len(unexamined) - len(shown)
-    if hidden > 0:
-        noun = "place" if hidden == 1 else "places"
-        shown.append(f"and {hidden} further {noun} below or above them, for the same kind of reason")
-    return tuple(shown)
+    return tuple(f"{path} ({why})" for path, why in unexamined)
 
 
 def _unexamined_caveat(unexamined: Unexamined) -> str:

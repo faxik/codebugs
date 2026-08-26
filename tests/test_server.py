@@ -597,6 +597,65 @@ class TestPreflightWritability:
         assert "may not be writable" not in err
 
 
+class TestPreflightSpeaksAboutTheRouteItTook:
+    """CB-218/CB-219 at the SECOND consumer, where both cost more than in the CLI.
+
+    Nobody watches a server start. A wrong binding here is read out of a log
+    hours later — if anything was written at all — while every tool call in
+    between has been quietly reading and WRITING a stranger's tracker. One
+    resolver, two consumers, so the same truth has to reach both through each
+    one's own channel; asserting it in the CLI alone would leave exactly the
+    half CB-11 was filed about.
+    """
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
+    def test_a_binding_reached_past_a_wall_is_announced(self, tmp_path, monkeypatch, capsys):
+        stranger = tmp_path / "P"
+        project = stranger / "A"
+        deep = project / "b" / "c"
+        deep.mkdir(parents=True)
+        db.init_project(str(project))
+        db.init_project(str(stranger))
+        monkeypatch.chdir(deep)
+        project.chmod(0o666)
+        try:
+            server._preflight()  # must not raise — warn-only, like every line here
+        finally:
+            project.chmod(0o755)
+        err = capsys.readouterr().err
+        assert "could not be examined" in err
+        assert str(project / ".codebugs") in err
+        assert "is the wrong one" in err, "the reader must learn what the doubt is ABOUT"
+
+    def test_silent_on_an_ordinary_discovered_binding(self, tmp_path, monkeypatch, capsys):
+        """The other half — "one line per project per startup is noise" still holds."""
+        db.init_project(str(tmp_path))
+        conn = db.connect(str(tmp_path))
+        conn.close()
+        monkeypatch.chdir(tmp_path)
+        server._preflight()
+        assert capsys.readouterr().err == ""
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
+    def test_the_first_write_is_not_promised_over_a_directory_that_refuses(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """CB-219 here: this line promises a healthy FUTURE to a reader who cannot
+        go and look, so it must not outlive the check that backs it.
+        """
+        (tmp_path / ".codebugs").mkdir()
+        (tmp_path / ".codebugs").chmod(0o555)
+        monkeypatch.chdir(tmp_path)
+        try:
+            server._preflight()
+        finally:
+            (tmp_path / ".codebugs").chmod(0o755)
+        err = capsys.readouterr().err
+        assert err.count("does not exist yet") == 1, "the fact survives, exactly once"
+        assert "the first write will create" not in err
+        assert "may not be writable" in err
+
+
 class TestInterpreterIndependentDescriptions:
     """CB-73 — what a client sees must not depend on which Python built the server.
 
