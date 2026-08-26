@@ -752,10 +752,17 @@ class TestCliContract:
         """Deploy gate G2. If the CLI never emits 5, worktree-setup.sh's retry is
         dead code and a contended database silently proceeds unclaimed.
 
-        Note WHERE the contention surfaces: db.connect() itself writes during
-        schema init (merge.ensure_schema's INSERT OR IGNORE), so a held write lock
-        raises before any claim code runs. Exit 5 must hold for that path too,
-        which is why the CLI classifies contention around connect as well.
+        Note WHERE the contention surfaces, and note that this changed under
+        CB-195 while this docstring did not (CB-202). It used to say
+        `db.connect()` itself writes during schema init, so the refusal arrived
+        before any claim code ran. Those seed inserts are conditional now, and
+        the fixture below opens the tracker first, so on THIS path connect() is a
+        pure read and does not contend at all — what raises is `claim`'s and
+        `release`'s OWN write against the held lock. The assertion is unchanged
+        and still correct; only the stated mechanism was stale. Exit 5 must hold
+        for the connect path too, which is why the CLI classifies contention
+        around connect as well — that arm is exercised on a tracker whose seed
+        row is still missing, i.e. its very first open.
         """
         cb = _finding(conn)["id"]
         blocker = db.connect(tmp_project)
