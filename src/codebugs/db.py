@@ -818,13 +818,30 @@ def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 # --- Connection + module loading ---
 
 
+# Places the upward walk could not interrogate, each as `(path, reason)` — the
+# same `(what, why)` shape `_path_state` itself returns, so the two cannot drift
+# into different spellings of one answer. Built by `_walk_db_root`; see there for
+# why the walk records instead of stopping.
+Unexamined = tuple[tuple[str, str], ...]
+
+
 class DatabaseNotFoundError(RuntimeError):
     """No `.codebugs/` tracker was found, and one must not be created implicitly.
 
     Auto-creating is what makes a wrong-directory bind silent: the caller gets an
     empty DB instead of an error, and every finding written into it is invisible
     to everyone else. `init_project()` is the only function that may create one.
+
+    Carries `unexamined` (CB-218) so the walk's skipped candidates survive the
+    raise. Without it `describe_root`'s error branch would have to report an
+    EMPTY list for a walk that really did skip something — and an empty list
+    there means *the walk ran and skipped nothing*, so the key would lie in the
+    one state it exists to describe. Empty on every route that did not walk.
     """
+
+    def __init__(self, message: str, *, unexamined: Unexamined = ()) -> None:
+        super().__init__(message)
+        self.unexamined = unexamined
 
 
 class TrackerUnwritableError(RuntimeError):
@@ -944,52 +961,137 @@ def _worktree_main_root(git_file: Path) -> str | None:
 def _enclosing_worktree_root(start: str) -> str | None:
     """Return the root of the linked worktree containing `start`, if any.
 
-    Walks up on the same rules as `_find_db_root` so the two agree on where a
+    Walks up on the same rules as `_walk_db_root` so the two agree on where a
     repository begins: a `.git` DIRECTORY is a normal checkout and ends the
     search, a `.git` FILE is a worktree only if it carries a `commondir`.
+
+    The probe is `_path_state` for CB-218's reason, and BEHAVIOUR HERE IS
+    UNCHANGED — said plainly rather than implied, because a claim of coverage
+    that no test can discriminate is the shape this direction exists to close.
+    `is_dir()` and `is_file()` both answer False on a path that could not be
+    looked at, and both also answer False when the answer is a genuine
+    *something else*; either way this loop walks on. `_path_state` folds the two
+    stats into one and makes the undetermined case NAMED rather than inferred,
+    so the next reader cannot restore a two-valued read by accident. It records
+    nothing: this function only chooses which of two refusal sentences
+    `_resolve_db` prints, and it is reached only when `_walk_db_root` already
+    returned None — having walked the same prefix under the same rules, and
+    having already recorded every undetermined `.git` on it.
     """
     cur = Path(start).resolve()
     while True:
         git = cur / DOT_GIT
-        if git.is_dir():
+        kind, _detail = _path_state(str(git))
+        if kind == PATH_DIR:
             return None
-        if git.is_file():
+        if kind == PATH_FILE:
             return str(cur) if _linked_worktree_gitdir(git) is not None else None
         if cur.parent == cur:
             return None
         cur = cur.parent
 
 
-def _find_db_root(start: str | None = None) -> str | None:
-    """Walk up from `start` (default cwd) looking for an existing `.codebugs/`.
+def _walk_db_root(start: str | None = None) -> tuple[str | None, Unexamined]:
+    """Walk up from `start` (default cwd) for a `.codebugs/`, and say what it could not see.
 
-    Mirrors git's discovery rules: returns the directory containing `.codebugs/`,
-    or None if walking hits a repo boundary or the filesystem root.
+    Returns `(root, unexamined)`: the directory containing `.codebugs/` (or None
+    if walking hits a repo boundary or the filesystem root), and every place on
+    the route whose question could not be answered.
 
-    A `.git/` DIRECTORY is a repo root and stops the walk (picking the enclosing
+    THE ALGORITHM IS UNCHANGED — deliberately, to the letter (CB-218). A
+    `.git/` DIRECTORY is a repo root and stops the walk (picking the enclosing
     repo's DB when invoked inside a submodule would be worse than refusing). A
     `.git` FILE is ambiguous: in a linked worktree it points at the main repo, so
-    discovery continues from there; in a submodule it stays a boundary.
+    discovery continues from there; in a submodule it stays a boundary. And
+    `.codebugs/` still outranks the boundary within one directory. What changed
+    is the PRIMITIVE the three questions are asked with, and what happens to an
+    answer that never arrived.
+
+    WHY THIS FUNCTION EXISTS AT ALL, since CB-203 already made five sites
+    three-valued. Those five look at an ALREADY-FOUND root. This one decides
+    WHICH root will be found, and it runs BEFORE all of them, so a two-valued
+    read here is not a worse message — it is a different tracker. Measured on the
+    unfixed tree: with the execute bit off an intermediate directory that HOLDS
+    the project's tracker, and an unrelated `.codebugs/` one level above it,
+    `codebugs where` reported a completely clean binding to the stranger at exit
+    0, no warning anywhere, and `stats` then answered with the stranger's empty
+    population. Not a lost warning and not a false promise — a silent bind to the
+    wrong tracker, which is what CB-8 was filed to prevent and what CB-11 built
+    visibility for. `Path.is_dir()` swallows the underlying `OSError` exactly as
+    `os.path.isdir` does, so *could not look* arrived here spelled *not there*.
+
+    ALL THREE PROBES, not just the one the card named. The `.git` questions are
+    the same predicate about a different fact: an undetermined answer about
+    `cur/.git` reads as *no boundary here*, and the walk then continues PAST the
+    repository boundary and binds to whatever sits beyond it — the same harm
+    through a second door. Measured, and by two independent routes: with the
+    execute bit off the repository directory, and — with that directory fully
+    readable, so the `.git` probe is the only undetermined one — with `.git` a
+    symbolic-link loop. Both walked past the boundary onto a stranger's tracker
+    at exit 0. Fixing one probe of three would be this repository's own
+    recurring defect: validating elements instead of their composition.
+
+    AN UNDETERMINED ANSWER RECORDS AND WALKS ON; IT DOES NOT STOP. The cost of
+    each direction decides it. `_path_state` answers *undetermined* for every
+    filesystem failure, not only for a withheld execute bit — an I/O error, a
+    symlink loop, a name past the length limit, a network mount answering with an
+    errno nobody here enumerated. One of those on an UNRELATED ancestor between
+    the caller and their real tracker is harmless today; stopping would turn it
+    into a refusal to work at all. This tree treats a false refusal as the worse
+    outcome, and rightly. Continuing is safe; STAYING SILENT about the skipped
+    candidate is not, because silence is the entire mechanism by which the
+    measured state above became a wrong bind rather than a visible one.
+
+    The list is ordered as the walk met them and is not deduplicated: one
+    directory can contribute two entries (its `.codebugs/` and its `.git`), and
+    that is two questions genuinely left unanswered, not one repeated.
     """
     cur = Path(start or os.getcwd()).resolve()
     seen: set[Path] = set()
+    unexamined: list[tuple[str, str]] = []
     while cur not in seen:
         seen.add(cur)
-        if (cur / DB_DIR).is_dir():
-            return str(cur)
+        tracker = cur / DB_DIR
+        kind, detail = _path_state(str(tracker))
+        if kind == PATH_DIR:
+            return str(cur), tuple(unexamined)
+        if kind is None:
+            unexamined.append((str(tracker), detail or "could not look at it"))
         git = cur / DOT_GIT
-        if git.is_dir():
-            return None
-        if git.is_file():
+        kind, detail = _path_state(str(git))
+        if kind == PATH_DIR:
+            return None, tuple(unexamined)
+        if kind == PATH_FILE:
             main_root = _worktree_main_root(git)
             if main_root is None:
-                return None
+                return None, tuple(unexamined)
             cur = Path(main_root)
             continue
+        if kind is None:
+            unexamined.append((str(git), detail or "could not look at it"))
         if cur.parent == cur:
-            return None
+            return None, tuple(unexamined)
         cur = cur.parent
-    return None
+    return None, tuple(unexamined)
+
+
+def _find_db_root(start: str | None = None) -> str | None:
+    """The walked root, without the unexamined list. See `_walk_db_root`.
+
+    The same thin-wrapper shape `_db_path` has over `_resolve_db`, and for the
+    same reason: several callers want only the root, and two of them —
+    `init_project`'s shadow guard and `cli`'s `--force` variant of it — ask a
+    question the list cannot help with. Keeping this signature is also what lets
+    the walk's existing tests stay untouched, which is worth something on a
+    change whose whole claim is that the algorithm did not move.
+
+    KNOWN AND DELIBERATELY OUT OF SCOPE: those two shadow guards still read a
+    None root as *no enclosing tracker*, so an unexaminable ancestor lets `init`
+    create a tracker that a real one above would shadow. That is the same
+    two-valued read one level out, in a different decision, and it needs its own
+    answer (refuse? warn?) rather than a silent inheritance of this one's.
+    """
+    return _walk_db_root(start)[0]
 
 
 # --- Explicit tracker root (CB-11, CB-13) ---
@@ -1244,7 +1346,62 @@ def _declared_db_path(root: str, source: str) -> str:
     return path
 
 
-def _resolve_db(project_dir: str | None = None) -> tuple[str, bool]:
+# How many unexamined candidates a HUMAN sentence names before it stops listing
+# and starts counting. The KEY is never capped — a programmatic consumer gets
+# every entry — and this governs prose only.
+#
+# The number is a measurement, not a preference. One withheld execute bit high
+# up makes every question BELOW it undeterminable too, because the walk asks
+# with absolute paths and each of them traverses the wall: measured, a tracker
+# three directories down from the wall yields SIX entries (three directories,
+# two probes each) for what is one condition with one fix. Six identical lines
+# is a diagnostic nobody reads, which is the failure mode this whole change
+# exists to avoid, arriving through the fix rather than the defect. The list is
+# in walk order, so the entries kept are the DEEPEST — and the deepest skipped
+# candidate is precisely the one that would have outranked the root that won.
+_UNEXAMINED_SHOWN = 3
+
+
+def unexamined_phrases(unexamined: Unexamined) -> tuple[str, ...]:
+    """`(path, reason)` pairs as human phrases, capped — one definition, three consumers.
+
+    The refusal message, `codebugs where` and the MCP preflight all say this,
+    each in its own frame, so the CAP and the counting live here rather than
+    three times over. Returns `()` on an empty list, which is what makes every
+    caller's "say something only when there is something to say" a single `for`
+    or a single `if` rather than a rule to re-establish.
+    """
+    if not unexamined:
+        return ()
+    shown = [f"{path} ({why})" for path, why in unexamined[:_UNEXAMINED_SHOWN]]
+    hidden = len(unexamined) - len(shown)
+    if hidden > 0:
+        noun = "place" if hidden == 1 else "places"
+        shown.append(f"and {hidden} further {noun} below or above them, for the same kind of reason")
+    return tuple(shown)
+
+
+def _unexamined_caveat(unexamined: Unexamined) -> str:
+    """The 'and here is what I could not look at' half of a refusal, or nothing.
+
+    Empty string on an empty list, so a refusal about a route that examined
+    everything stays BYTE-IDENTICAL to what it has always said. That is the same
+    discipline the two consumers follow when they print: say something only when
+    there is something to say. The key that carries this to a caller is
+    unconditional; the SENTENCE is not, because a sentence saying "nothing was
+    skipped" is noise on every healthy tracker in existence.
+    """
+    phrases = unexamined_phrases(unexamined)
+    if not phrases:
+        return ""
+    noun = "place" if len(unexamined) == 1 else "places"
+    return (
+        f" — {len(unexamined)} {noun} on the way up could not be examined "
+        f"({'; '.join(phrases)}), so this is not proof that no tracker is there"
+    )
+
+
+def _resolve_db(project_dir: str | None = None) -> tuple[str, bool, Unexamined]:
     """Locate a tracker's DB file, and say whether this route may CREATE it.
 
     The boolean is the whole point of returning a tuple: only the upward walk may
@@ -1273,6 +1430,15 @@ def _resolve_db(project_dir: str | None = None) -> tuple[str, bool]:
     common benign cause — `init_project` creates the directory before the
     database, so a Ctrl-C'd init leaves one behind, and self-healing on the next
     command is the right answer there. `TestRefusesToAutoCreate` pins both sides.
+
+    THE THIRD ELEMENT is the walk's unexamined candidates (CB-218), passed
+    through unchanged for `describe_root` to report. It is `()` on the named and
+    declared branches BECAUSE NO WALK HAPPENED THERE, and that is a fact rather
+    than a default: those two routes ask about one path they were given. An empty
+    value therefore always means *the route ran and skipped nothing*, never *no
+    such channel* — the discipline `attention`, `stripped_meta_keys` and
+    `exists_reason` already follow here. `_db_path` still returns only the path,
+    so none of its callers move.
     """
     if project_dir is not None:
         root = project_dir
@@ -1309,11 +1475,11 @@ def _resolve_db(project_dir: str | None = None) -> tuple[str, bool]:
                 f"{DB_DIR}/ in {root} holds no {DB_FILE}; "
                 f"check the path, or run `codebugs init {root}` to finish creating it"
             )
-        return path, False
+        return path, False, ()
 
     declared, source = declared_tracker_root()
     if declared is not None:
-        return _declared_db_path(declared, source), False
+        return _declared_db_path(declared, source), False, ()
 
     # Read cwd ONCE, and treat losing it as "no tracker" rather than letting an
     # OSError escape. A deleted working directory is not hypothetical here: a
@@ -1329,25 +1495,46 @@ def _resolve_db(project_dir: str | None = None) -> tuple[str, bool]:
             f"cd somewhere that exists, or name a tracker with --tracker-root"
         ) from e
 
-    root = _find_db_root(cwd)
+    root, unexamined = _walk_db_root(cwd)
     if root is None:
+        # Both refusals below come in two spellings, and the empty-list one is
+        # BYTE-IDENTICAL to what this function has always said. The other stops
+        # asserting an absence it could not establish (CB-218): with a candidate
+        # left unexamined, "no tracker in any parent" is a claim about something
+        # nobody looked at — CB-203's defect, one function earlier.
+        caveat = _unexamined_caveat(unexamined)
+        # `is not None`, not truthiness: this module's own rule, and the reason
+        # `exists` and `writable` are compared the same way two functions down.
         worktree = _enclosing_worktree_root(cwd)
         if worktree is not None:
             # Never advise `init` here: it would create a tracker that dies
             # with the worktree. Name the main checkout when we can find it.
             main = _worktree_main_root(Path(worktree) / DOT_GIT)
             where = f"in the main checkout ({main})" if main else "in the main checkout"
+            found = (
+                "and its main checkout has no tracker either"
+                if not caveat
+                else f"and none was found in its main checkout either{caveat}"
+            )
             raise DatabaseNotFoundError(
                 f"no {DB_DIR}/ found from {cwd}; this is a git worktree ({worktree}) "
-                f"and its main checkout has no tracker either. Run `codebugs init` "
-                f"{where} — a tracker created inside a worktree is deleted with it"
+                f"{found}. Run `codebugs init` "
+                f"{where} — a tracker created inside a worktree is deleted with it",
+                unexamined=unexamined,
+            )
+        if not caveat:
+            raise DatabaseNotFoundError(
+                f"no {DB_DIR}/ found in {cwd} or any parent; "
+                f"run `codebugs init` here, or cd into a project that has one"
             )
         raise DatabaseNotFoundError(
-            f"no {DB_DIR}/ found in {cwd} or any parent; "
-            f"run `codebugs init` here, or cd into a project that has one"
+            f"no {DB_DIR}/ found in {cwd} or any parent that could be examined"
+            f"{caveat}; fix the path or its permissions, or cd into a project "
+            f"that has one, or run `codebugs init` here",
+            unexamined=unexamined,
         )
     # The one route allowed to create: see the asymmetry note above.
-    return os.path.join(root, DB_DIR, DB_FILE), True
+    return os.path.join(root, DB_DIR, DB_FILE), True, unexamined
 
 
 def _db_path(project_dir: str | None = None) -> str:
@@ -1453,11 +1640,36 @@ def _writable_probe(path: str) -> bool | None:
     raises there — where it IS caught and reported. The arm stays for the next
     caller and for the never-raises contract above it.
     """
+    file_ok = _access_probe(path)
+    dir_ok = _access_probe(os.path.dirname(path))
+    if file_ok is None or dir_ok is None:
+        return None
+    return file_ok and dir_ok
+
+
+def _access_probe(path: str) -> bool | None:
+    """One `os.access(W_OK)` on an EXISTING path, tri-state. See `_writable_probe`.
+
+    Split out of `_writable_probe` because CB-219 needs the DIRECTORY half on its
+    own: when the database file is proven absent, what decides whether the next
+    command can create one is the `.codebugs/` directory, and asking
+    `_writable_probe` about that directory would additionally consult the
+    PROJECT ROOT above it — a directory nothing is about to be created in. A
+    false negative there would print a warning about a tracker that works, which
+    is the CB-100 disagreement inverted and is exactly what this diagnostic must
+    not do.
+
+    Splitting rather than copying is the point: one definition of the tri-state,
+    so the two questions cannot drift into two different treatments of *could not
+    look*. The composition is unchanged and exactly equivalent to the single
+    `try` it replaces — under the old spelling a raise from either call left the
+    function at None, and here either None does.
+
+    The `except` arm's honest status is `_writable_probe`'s: measured dead for
+    every reason but a NUL byte in the path, kept for the contract above it.
+    """
     try:
-        directory = os.path.dirname(path)
-        file_ok = os.access(path, os.W_OK, **_ACCESS_KW)
-        dir_ok = os.access(directory, os.W_OK, **_ACCESS_KW)
-        return file_ok and dir_ok
+        return os.access(path, os.W_OK, **_ACCESS_KW)
     except (OSError, ValueError):
         return None
 
@@ -1513,10 +1725,30 @@ def describe_root() -> dict[str, Any]:
     close, merely inverted; and never when `None`, because silence is what
     "could not determine" must look like here, for the same reason `exists`
     silence must never mean "healthy".
+
+    `dir_writable` (CB-219) is `writable`'s mirror: `None` unless `exists` is
+    `False`, and then the `.codebugs/` DIRECTORY's advisory tri-state. It exists
+    because `exists is False` is not merely a report — it is the one branch that
+    makes a PROMISE, "the next command creates one", and a promise needs the
+    check its own subject requires. Measured on the unfixed tree: an empty
+    `.codebugs/` at `chmod 555` produced that promise at exit 0, and the very
+    next verb refused with "cannot open findings.db … for writing". The
+    classification was RIGHT (nothing is at that name) and the INFERENCE was
+    wrong. Printed on the negative answer only, exactly like `writable`.
+
+    `unexamined` (CB-218) is the upward walk's list of places whose question
+    could not be answered — `(path, reason)` pairs, in walk order. It is
+    UNCONDITIONAL and empty means *the route ran and skipped nothing*, never *no
+    such channel*; the named and declared routes return empty because they do
+    not walk at all. Consumers print a line only when it is non-empty, since a
+    healthy walk has nothing to report and a diagnostic that speaks on every
+    invocation is one nobody reads. Without it, a wrong bind caused by an
+    unexaminable ancestor is INVISIBLE — the binding lines look perfect, which
+    is the measured harm in `_walk_db_root`'s docstring.
     """
     declared, source = declared_tracker_root()
     try:
-        path = _db_path()
+        path, _may_create, unexamined = _resolve_db()
     except (DatabaseNotFoundError, OSError) as e:
         # OSError as well, so "never raises" is true rather than aspirational:
         # the filesystem can fail underneath any of this, and a preflight that
@@ -1535,6 +1767,15 @@ def describe_root() -> dict[str, Any]:
             "exists_reason": "the tracker root could not be resolved",
             "error": str(e),
             "writable": None,
+            "dir_writable": None,
+            # Read off the exception rather than defaulted to `()`, because on
+            # THIS branch the walk is exactly what failed, and reporting an empty
+            # list for a walk that skipped something would make the key lie in
+            # the one state it exists for. `isinstance`, not `getattr` with a
+            # default — an `OSError` genuinely carries no such answer, and the
+            # difference between *no walk happened* and *the attribute is
+            # missing* is the difference this key is built on.
+            "unexamined": e.unexamined if isinstance(e, DatabaseNotFoundError) else (),
         }
     # `path` is always `<root>/<DB_DIR>/<DB_FILE>`, so the root is recoverable
     # without walking again — and cannot disagree with the path we just resolved.
@@ -1575,6 +1816,15 @@ def describe_root() -> dict[str, Any]:
         # can hold. Truthiness happens to agree today; spelling it out is what
         # stops the next edit from disagreeing.
         "writable": _writable_probe(path) if exists is True else None,
+        # CB-219's key, and the mirror image of `writable`: asked ONLY when the
+        # database file is PROVEN absent, which is the one state whose whole
+        # meaning is a promise about the future ("the next command creates
+        # one"). The subject is the `.codebugs/` DIRECTORY, which the walk has
+        # just proven is there, so `_access_probe`'s never-call-me-on-a-missing-
+        # path rule is satisfied by construction. `is False`, again — and the
+        # consumers print only the negative answer, for `writable`'s reason.
+        "dir_writable": _access_probe(os.path.dirname(path)) if exists is False else None,
+        "unexamined": unexamined,
     }
 
 
@@ -1837,5 +2087,7 @@ def connect(project_dir: str | None = None) -> sqlite3.Connection:
     Raises `DatabaseNotFoundError`, `TrackerUnwritableError` (CB-86), or a
     contention `sqlite3.OperationalError`; see `_open` for which is which.
     """
-    path, may_create = _resolve_db(project_dir)
+    # The third element is the walk's unexamined candidates, which only the
+    # diagnostic consumers report; connecting neither needs nor may act on it.
+    path, may_create, _unexamined = _resolve_db(project_dir)
     return _open(path, create=may_create)
