@@ -483,6 +483,34 @@ class TestPreflight:
         assert str(tmp_path) in err
         assert db.ENV_ROOT in err
 
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
+    def test_an_unreachable_tracker_is_not_announced_as_a_future_one(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """CB-203, the second consumer — and the one where it costs more.
+
+        This line is read out of a log hours later, by someone who cannot go and
+        look. Under truthiness the tri-state `exists` fell into the `is False`
+        branch, so a tracker sitting right there behind a permission wall was
+        announced as one the first write would happily create. The wall is the
+        `.codebugs/` execute bit here: the directory is still readable and
+        writable, so nothing else about the binding looks wrong.
+
+        Both halves are asserted. The promise must be absent — a stale one is
+        worse than silence — and the honest line must be present, because
+        silence would leave a reader with a binding that looks perfectly fine.
+        """
+        db.init_project(str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".codebugs").chmod(0o666)
+        try:
+            server._preflight()  # warn-only, must not raise
+        finally:
+            (tmp_path / ".codebugs").chmod(0o755)
+        err = capsys.readouterr().err
+        assert "the first write will create" not in err
+        assert "could not confirm a tracker" in err
+
     def test_a_declared_root_that_fails_names_the_channel(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setenv(db.ENV_ROOT, str(tmp_path / "nope"))
         server._preflight()
