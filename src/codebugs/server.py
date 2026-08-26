@@ -470,19 +470,38 @@ def _preflight() -> None:
             file=sys.stderr,
         )
         return
-    # The two checks below are mutually exclusive, which is not visible from here:
-    # a resolved-but-absent database can only come from the walk, since the named
-    # and declared routes refuse it — so `source` is always "discovery" when
-    # `exists` is False. Written as two `if`s rather than an `elif` chain because
-    # they answer different questions, not because both can fire.
-    if not info["exists"]:
+    # The two `exists` checks below are mutually exclusive with each other by
+    # construction (a tri-state cannot be two values at once), and both are
+    # mutually exclusive with the declared-root line for a reason that is not
+    # visible from here: a resolved-but-absent — or unconfirmable — database can
+    # only come from the walk, since the named and declared routes refuse it
+    # outright, so `source` is always "discovery" when `exists` is not True.
+    # Written as separate `if`s rather than an `elif` chain because they answer
+    # different questions, not because several can fire.
+    if info["exists"] is False:
         # Resolving is not the same as being there (CB-23). This binding does not
         # fail — the first tool call CREATES the tracker — so it is invisible in
         # exactly the way CB-11 exists to prevent, and is worth a line even though
         # nothing is broken yet.
+        #
+        # `is False` for CB-203's reason, and it matters MORE here than in the
+        # CLI: this line promises a healthy future to a log a human reads hours
+        # later, and under truthiness an unreachable tracker printed exactly that
+        # promise. One resolver, two consumers — so the same truth reaches both,
+        # through each one's own channel.
         print(
             f"codebugs-mcp: {info['path']} does not exist yet — the first write will "
             f"create a new, empty tracker there",
+            file=sys.stderr,
+        )
+    if info["exists"] is None:
+        # CB-203: could not tell whether a tracker is there. Warn-only like every
+        # other line here — the server must still start, because the condition
+        # can be repaired underneath a running server and lazy connect will pick
+        # it up.
+        print(
+            f"codebugs-mcp: could not confirm a tracker at {info['path']} — "
+            f"{info['exists_reason']}; tool calls may fail until it is fixed",
             file=sys.stderr,
         )
     if info["source"] != "discovery":

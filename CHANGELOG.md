@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`codebugs where` no longer tells you a tracker is missing when it simply could not
+  look at one.** If the permissions on a `.codebugs/` directory stopped the tool from
+  entering it — for instance because the directory lost its execute bit — `where` printed
+  "no database there yet — the next command creates one" and exited successfully, while
+  every other command refused to open the tracker that was sitting right there. That
+  sentence is a promise about the future, and it was the opposite of the truth: nothing
+  was going to be created, because the database already existed and was simply out of
+  reach. The same false line appeared when something other than a database file occupied
+  that name — a directory, a named pipe, a socket, a symbolic link that leads nowhere —
+  and it appeared in the startup message the MCP server writes to its log as well.
+
+  `where` now distinguishes three answers instead of two: a database is there, it is
+  proven that nothing is there, or it could not be established either way. Only the
+  second still promises that the next command will create a tracker. The third prints
+  what stopped the tool from looking, so you can act on it — for example `(could not
+  confirm a database there — could not look at it (Permission denied))`. Naming a tracker
+  explicitly with `--tracker-root` or `--repo` is covered too: those refuse as before,
+  but they no longer say a tracker is absent when the real reason is a permission wall, a
+  path longer than the system limit, or something else standing in the database's place.
+
+  One boundary is worth knowing, because it is unchanged: this reports on the *path*, not
+  on the *contents*. A `findings.db` that has been corrupted still looks perfectly healthy
+  to `where`, and the failure only appears when a command opens it.
+
 ## [0.2.1] — 2026-08-26
 
 This release is about two things: working alongside other sessions without getting in each

@@ -17,6 +17,7 @@ import json
 import os
 import secrets
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
@@ -1059,6 +1060,108 @@ def _absolutized(root: str) -> str:
         return root
 
 
+# Nouns for the things that can sit at a path and are not a regular file or a
+# directory. Used only to build a diagnostic sentence, so an unrecognised mode
+# degrades to a generic word rather than to a wrong one.
+_NODE_NOUNS: dict[int, str] = {
+    stat.S_IFCHR: "a character device",
+    stat.S_IFBLK: "a block device",
+    stat.S_IFIFO: "a named pipe",
+    stat.S_IFSOCK: "a socket",
+}
+
+# The four answers `_path_state` can give. `absent` is the only one that
+# licenses a claim of absence; see the function's docstring.
+PATH_FILE = "file"
+PATH_DIR = "dir"
+PATH_OTHER = "other"
+PATH_ABSENT = "absent"
+
+
+def _path_state(path: str) -> tuple[str | None, str | None]:
+    """What is at `path` — four answers, or `None` meaning *could not tell* (CB-203).
+
+    `os.path.isfile`/`os.path.isdir` answer a three-valued question with two
+    values: they return False for *nothing is there* and for *the question could
+    not be answered*, because they swallow every `OSError` the underlying stat
+    raises. A caller then reads False as proof of absence and says so out loud.
+    Measured, and this is the whole of CB-203: with the execute bit removed from
+    a `.codebugs/` directory (`chmod 666`), `codebugs where` printed "no database
+    there yet — the next command creates one" at exit 0, over a tracker that was
+    sitting right there and that every other verb refused to open.
+
+    THIS TREE ALREADY RATIFIED THE SAME FIX ONE FILE OVER. `provenance.py`
+    swapped `os.path.isfile` for a stat-with-arms guard for CB-85, on the
+    identical reasoning — "a positive claim about the file derived from a
+    question that was never answered". `db.py` kept the two-valued spelling at
+    five call sites, which is this repository's most-repeated shape: a rule fixed
+    at the sites someone enumerated, while the population is larger than the
+    list.
+
+    Returns `(kind, detail)`:
+
+    - `("file", None)`   — a regular file is there. Affirmative proof.
+    - `("dir", None)`    — a directory is there. Affirmative proof.
+    - `("other", noun)`  — something else is there (a named pipe, a socket, a
+      device). Affirmative proof that it is not a file and not a directory,
+      and `noun` names it for the message.
+    - `("absent", None)` — affirmative proof that NOTHING is at that name, and
+      that the failure to find it was `ENOENT` rather than an inability to look.
+    - `(None, why)`      — undetermined. `why` is a short human sentence.
+
+    THE ORDER OF THE TWO STATS IS LOAD-BEARING, not tidiness. `lstat` comes
+    first because a DANGLING SYMLINK is exactly the state that must not read as
+    `absent`: `os.stat` on one raises `FileNotFoundError`, indistinguishable
+    from an empty name, and the two states differ in what happens next — the
+    next command creates a database in the empty case and, in the symlink case,
+    creates one somewhere else entirely or fails. CB-203's card records this as
+    its "related variety", found by the same run.
+
+    `NotADirectoryError` deliberately does NOT read as `absent`, and that is a
+    narrowing against `provenance.py`'s version of this guard, which folds it in
+    with `FileNotFoundError`. There the caller asks *is this file still there*,
+    and a non-directory in the path proves it is not. Here the caller asks *is
+    this the empty slot inside a real tracker where the next command will create
+    a database* — and a non-directory in the path proves it is NOT that state
+    either. One guard, two callers, two different questions: the fail-closed
+    answer is the only one both can use.
+
+    `ValueError` is caught because it is the one exception `os.lstat` raises
+    that is not an `OSError` — a NUL byte in the path — and because
+    `describe_root` may never raise (CB-11). `os.path.isfile` swallowed it for
+    free; a stat-based guard has to say so.
+    """
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        # ENOENT on the name itself: nothing is there, and we could look.
+        return PATH_ABSENT, None
+    except (OSError, ValueError) as e:
+        return None, f"could not look at it ({_why(e)})"
+    if stat.S_ISLNK(st.st_mode):
+        try:
+            st = os.stat(path)
+        except (OSError, ValueError) as e:
+            return None, f"a symbolic link is there and does not resolve ({_why(e)})"
+    if stat.S_ISREG(st.st_mode):
+        return PATH_FILE, None
+    if stat.S_ISDIR(st.st_mode):
+        return PATH_DIR, None
+    return PATH_OTHER, _NODE_NOUNS.get(stat.S_IFMT(st.st_mode), "something that is not a file")
+
+
+def _why(exc: BaseException) -> str:
+    """The shortest honest description of a failed stat, for a diagnostic line.
+
+    `strerror` when the OS supplied one — "Permission denied" is what the reader
+    needs and `str(exc)` would bury it behind an errno and the path already
+    printed on the line above. A `ValueError` has no `strerror`, so it falls
+    back to its own text.
+    """
+    strerror = getattr(exc, "strerror", None)
+    return strerror or str(exc) or type(exc).__name__
+
+
 def _declared_db_path(root: str, source: str) -> str:
     """Resolve a DECLARED root to its DB file, refusing rather than creating.
 
@@ -1071,12 +1174,33 @@ def _declared_db_path(root: str, source: str) -> str:
     wrong bind is a mystery with no visible cause.
     """
     label = SOURCE_LABELS[source]
-    if not os.path.isdir(root):
+    # Each of the three checks below refuses on the same rule: it may assert
+    # what is (or is not) at a path only when it could actually look. An
+    # undetermined answer still REFUSES — the whole branch is fail-closed by
+    # design — but it says *could not determine* rather than inventing an
+    # absence, which is CB-203's rule applied where the same predicate lives.
+    # Fixing it only in `describe_root` and leaving these two behind is the
+    # enumeration failure this repository pays for most often.
+    kind, detail = _path_state(root)
+    if kind is None:
+        raise DatabaseNotFoundError(
+            f"{label} names {root}, and whether a tracker is there could not be "
+            f"determined — {detail}; fix the path or its permissions, or clear "
+            f"{label} to fall back to directory discovery"
+        )
+    if kind != PATH_DIR:
         raise DatabaseNotFoundError(
             f"{label} names {root}, which is not a directory; "
             f"fix it, or clear it to fall back to directory discovery"
         )
-    if not os.path.isdir(os.path.join(root, DB_DIR)):
+    kind, detail = _path_state(os.path.join(root, DB_DIR))
+    if kind is None:
+        raise DatabaseNotFoundError(
+            f"{label} names {root}, and whether it has a {DB_DIR}/ could not be "
+            f"determined — {detail}; fix the path or its permissions, or clear "
+            f"{label} to fall back to directory discovery"
+        )
+    if kind != PATH_DIR:
         raise DatabaseNotFoundError(
             f"{label} names {root}, which has no {DB_DIR}/; "
             f"run `codebugs init {root}`, or clear {label} to fall back to "
@@ -1089,7 +1213,24 @@ def _declared_db_path(root: str, source: str) -> str:
     # place by naming the channel; `mode=rw` at the open is what makes the
     # refusal race-free.
     path = os.path.join(root, DB_DIR, DB_FILE)
-    if not os.path.isfile(path):
+    kind, detail = _path_state(path)
+    if kind is None:
+        raise DatabaseNotFoundError(
+            f"{label} names {root}, and whether its {DB_DIR}/ holds a {DB_FILE} "
+            f"could not be determined — {detail}; fix the path or its "
+            f"permissions, or clear {label} to fall back to directory discovery"
+        )
+    if kind == PATH_DIR or kind == PATH_OTHER:
+        # Something IS at that name and it is not a database. Saying "holds no
+        # findings.db" here would be the same untruth in a quieter place: the
+        # operator would go and create what is already in the way.
+        what = "a directory" if kind == PATH_DIR else detail
+        raise DatabaseNotFoundError(
+            f"{label} names {root}, whose {DB_DIR}/ has {what} where {DB_FILE} "
+            f"should be; move it aside, or clear {label} to fall back to "
+            f"directory discovery"
+        )
+    if kind != PATH_FILE:
         raise DatabaseNotFoundError(
             f"{label} names {root}, whose {DB_DIR}/ holds no {DB_FILE}; "
             f"run `codebugs init {root}` to finish creating it, or clear {label} "
@@ -1130,7 +1271,13 @@ def _resolve_db(project_dir: str | None = None) -> tuple[str, bool]:
     """
     if project_dir is not None:
         root = project_dir
-        if not os.path.isdir(os.path.join(root, DB_DIR)):
+        kind, detail = _path_state(os.path.join(root, DB_DIR))
+        if kind is None:
+            raise DatabaseNotFoundError(
+                f"whether {root} has a {DB_DIR}/ could not be determined — {detail}; "
+                f"check the path and its permissions"
+            )
+        if kind != PATH_DIR:
             raise DatabaseNotFoundError(
                 f"no {DB_DIR}/ in {root}; "
                 f"check the path, or run `codebugs init {root}` to create a tracker there"
@@ -1140,7 +1287,19 @@ def _resolve_db(project_dir: str | None = None) -> tuple[str, bool]:
         # This check exists for its MESSAGE — `mode=rw` at the open is what makes
         # the refusal race-free; a check here alone is a check-then-act.
         path = os.path.join(root, DB_DIR, DB_FILE)
-        if not os.path.isfile(path):
+        kind, detail = _path_state(path)
+        if kind is None:
+            raise DatabaseNotFoundError(
+                f"whether {DB_DIR}/ in {root} holds a {DB_FILE} could not be "
+                f"determined — {detail}; check the path and its permissions"
+            )
+        if kind == PATH_DIR or kind == PATH_OTHER:
+            what = "a directory" if kind == PATH_DIR else detail
+            raise DatabaseNotFoundError(
+                f"{DB_DIR}/ in {root} has {what} where {DB_FILE} should be; "
+                f"move it aside, or check the path"
+            )
+        if kind != PATH_FILE:
             raise DatabaseNotFoundError(
                 f"{DB_DIR}/ in {root} holds no {DB_FILE}; "
                 f"check the path, or run `codebugs init {root}` to finish creating it"
@@ -1258,13 +1417,43 @@ def _writable_probe(path: str) -> bool | None:
     either True or False, or "could not look" reads as either a clean bill
     of health or a false alarm, the "guard reporting clean because it could
     not look" shape this direction exists to close.
+
+    WHAT IT COVERS AND WHAT IT DOES NOT — named here because the omission was
+    itself a finding (CB-201, item 3). `_is_environmental`'s docstring lists the
+    family this diagnostic sits in front of: read-only mount, read-only file,
+    unwritable directory, full disk, I/O error on network storage. This probe
+    answers about the first three, because `os.access(W_OK)` consults the
+    permission bits and the mount's read-only flag and nothing else. It is BLIND
+    to the last two, and blind to every non-permission reason a tracker will not
+    work: a full disk (the space is consumed after the answer, not before), an
+    I/O error, and — measured, and the reason CB-201 was filed — a `findings.db`
+    whose CONTENT is not a database at all. In that last state this returns
+    True, `codebugs where` prints a clean binding, and the first verb to open
+    the file dies. That is not a false answer to this function's question; it is
+    the question being narrower than "is this tracker usable", and no `os.access`
+    call can widen it. Whether the resulting raw traceback is acceptable is
+    `_is_environmental`'s business, where `SQLITE_NOTADB` is already recorded as
+    unclassifiable.
+
+    THE `except` ARM IS INSURANCE AND IS MEASURED DEAD; a mutant deleting it
+    survives, and this says so rather than implying coverage (CB-201, item 4).
+    `os.access` does not raise on a path that is missing, is behind a symlink
+    loop, is reached through a non-directory, or is 5000 bytes long — it returns
+    False, measured on every one. The single exception it does raise is
+    `ValueError` for a NUL byte in the path, which the arm did NOT catch while
+    it claimed to be the tri-state's "could not look" branch. It is caught now,
+    so the declared contract and the code agree. Reachability from
+    `describe_root` is nil BY CONSTRUCTION rather than by luck: `_path_state`
+    runs first, refuses any path it could not `lstat`, and a NUL-bearing path
+    raises there — where it IS caught and reported. The arm stays for the next
+    caller and for the never-raises contract above it.
     """
     try:
         directory = os.path.dirname(path)
         file_ok = os.access(path, os.W_OK, **_ACCESS_KW)
         dir_ok = os.access(directory, os.W_OK, **_ACCESS_KW)
         return file_ok and dir_ok
-    except OSError:
+    except (OSError, ValueError):
         return None
 
 
@@ -1278,6 +1467,31 @@ def describe_root() -> dict[str, Any]:
 
     One resolver, two consumers, so the diagnostic and the server can never
     disagree about where the process is pointed.
+
+    `exists` IS THREE-VALUED, and the third value is the point (CB-203). `True`
+    means a regular file was seen there; `False` means it was PROVEN that
+    nothing is at that name — the CB-23 half-made tracker, the one state where
+    the next command really does create the database; `None` means the question
+    could not be answered, and `exists_reason` then carries a short sentence
+    saying why. A caller may claim presence or absence only on the matching
+    affirmative value, exactly as `reconcile.live_source_clause` hides a row
+    only on affirmative proof. Truthiness reads `None` as `False`, so every
+    consumer must compare with `is`.
+
+    THE THIRD VALUE IS THE DEFAULT, NOT AN EXTRA CASE, and that is what makes
+    this fix outlive the list of states anyone thought of. `_path_state` returns
+    `absent` on exactly one measured condition (`ENOENT` on the name itself) and
+    `None` on every other way of failing to see a file. So a mechanism nobody
+    here has enumerated — a filesystem that answers with an errno this tree has
+    never seen, some future mount type — lands in *could not tell* by
+    construction rather than in *there is nothing there*. CB-203 reached
+    production precisely because the enumeration was three permission states
+    long and the population was not.
+
+    `exists_reason` is UNCONDITIONAL, following the `attention` /
+    `stripped_meta_keys` discipline: it is `None` when there is nothing to say,
+    never absent, so a consumer can never read a missing key as "no such
+    channel".
 
     `writable` (CB-100) is a SEPARATE key, deliberately never folded into
     `exists` — this module's own convention is that resolving is not the
@@ -1307,7 +1521,13 @@ def describe_root() -> dict[str, Any]:
             "source": source,
             "source_label": SOURCE_LABELS[source],
             "path": None,
-            "exists": False,
+            # There is no path, so "is a database file there" is not a question
+            # that was asked, let alone answered. `False` here would be the same
+            # two-valued lie this function's `exists` key exists to stop, sitting
+            # in the same dict. Both consumers return on `error` before reading
+            # it; the value is set for the third one that will not.
+            "exists": None,
+            "exists_reason": "the tracker root could not be resolved",
             "error": str(e),
             "writable": None,
         }
@@ -1320,15 +1540,36 @@ def describe_root() -> dict[str, Any]:
     # diagnostic prints a path that is not there and calls it healthy — which is
     # exactly the CB-13 misbinding's shape, where the wrong root is a stray
     # directory. A binding you cannot see is a binding you cannot debug (CB-11).
-    exists = os.path.isfile(path)
+    kind, detail = _path_state(path)
+    if kind == PATH_FILE:
+        exists: bool | None = True
+        exists_reason = None
+    elif kind == PATH_ABSENT:
+        exists = False
+        exists_reason = None
+    elif kind is None:
+        exists = None
+        exists_reason = detail
+    else:
+        exists = None
+        exists_reason = (
+            "a directory is there, not a database file"
+            if kind == PATH_DIR
+            else f"{detail} is there, not a database file"
+        )
     return {
         "root": os.path.dirname(os.path.dirname(path)),
         "source": source,
         "source_label": SOURCE_LABELS[source],
         "path": path,
         "exists": exists,
+        "exists_reason": exists_reason,
         "error": None,
-        "writable": _writable_probe(path) if exists else None,
+        # `is True`, not truthiness — the probe's own docstring forbids running
+        # it on a path not CONFIRMED to exist, and `None` is now a value `exists`
+        # can hold. Truthiness happens to agree today; spelling it out is what
+        # stops the next edit from disagreeing.
+        "writable": _writable_probe(path) if exists is True else None,
     }
 
 

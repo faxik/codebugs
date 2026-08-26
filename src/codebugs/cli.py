@@ -118,11 +118,27 @@ def _cmd_where(args: argparse.Namespace) -> None:
         sys.exit(1)
     print(f"root:     {info['root']}")
     print(f"database: {info['path']}")
-    if not info["exists"]:
+    if info["exists"] is False:
         # Only reachable on the walk route — a `.codebugs/` with no database in
         # it. Saying so is the whole job here: otherwise `where` reports a path
         # that is not there as if it were the project's tracker (CB-23).
+        #
+        # `is False`, never `not info["exists"]`, and that one word IS CB-203.
+        # `exists` became three-valued, and under truthiness the new third value
+        # falls into THIS branch — the one that promises the next command will
+        # create a database. Measured on the unfixed tree: with the execute bit
+        # off `.codebugs/`, that promise printed at exit 0 over a tracker that
+        # was there and that every other verb refused. A diagnostic asserting
+        # the opposite of the truth is worse than one that says nothing, which
+        # is why the branch below exists instead.
         print("          (no database there yet — the next command creates one)")
+    elif info["exists"] is None:
+        # CB-203: could not tell. Not a promise, not a denial, and not silence
+        # either — silence would leave the reader with a `database:` line that
+        # looks perfectly healthy. Same stream as its two siblings (CB-182): all
+        # three are parenthetical continuations of one table, and none of them
+        # is an error, so `codebugs where 2>/dev/null` must not lose any of them.
+        print(f"          (could not confirm a database there — {info['exists_reason']})")
     elif info["writable"] is False:
         # CB-100: an unwritable tracker used to look identical to a healthy one
         # here, while every verb refused it. `writable` is advisory (os.access

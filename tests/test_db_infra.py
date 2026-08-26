@@ -1,7 +1,9 @@
 """Tests for db.py infrastructure: connect, _find_db_root, _db_path, init_project."""
 
 import ast
+import errno
 import os
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -1048,6 +1050,312 @@ class TestWritabilityProbe:
         info = db.describe_root()
         assert info["error"] is not None
         assert info["writable"] is None
+
+
+def _skip_if_root():
+    if os.geteuid() == 0:
+        pytest.skip("root ignores the permission bits")
+
+
+def _state_dir_traverse_bit(cb_dir):
+    _skip_if_root()
+    cb_dir.chmod(0o666)  # rw, no execute: the directory cannot be entered
+    return lambda: cb_dir.chmod(0o755)
+
+
+def _state_dir_no_permissions(cb_dir):
+    _skip_if_root()
+    cb_dir.chmod(0o000)
+    return lambda: cb_dir.chmod(0o755)
+
+
+def _state_file_no_permissions(cb_dir):
+    _skip_if_root()
+    (cb_dir / "findings.db").chmod(0o000)
+    return lambda: (cb_dir / "findings.db").chmod(0o644)
+
+
+def _state_node_is_directory(cb_dir):
+    (cb_dir / "findings.db").unlink()
+    (cb_dir / "findings.db").mkdir()
+    return None
+
+
+def _state_node_is_fifo(cb_dir):
+    (cb_dir / "findings.db").unlink()
+    os.mkfifo(cb_dir / "findings.db")
+    return None
+
+
+def _state_node_is_socket(cb_dir):
+    (cb_dir / "findings.db").unlink()
+    sock = socket.socket(socket.AF_UNIX)
+    try:
+        sock.bind(str(cb_dir / "findings.db"))
+    finally:
+        sock.close()
+    return None
+
+
+def _state_symlink_loop(cb_dir):
+    (cb_dir / "findings.db").unlink()
+    (cb_dir / "tmp.db").symlink_to(cb_dir / "findings.db")
+    (cb_dir / "tmp.db").rename(cb_dir / "findings.db")
+    return None
+
+
+def _state_dangling_symlink(cb_dir):
+    (cb_dir / "findings.db").unlink()
+    (cb_dir / "findings.db").symlink_to(cb_dir / "gone.db")
+    return None
+
+
+def _state_genuinely_absent(cb_dir):
+    (cb_dir / "findings.db").unlink()
+    return None
+
+
+def _state_healthy(cb_dir):
+    return None
+
+
+# The §4 state table, and the third column is the ORACLE. `occupied` says what
+# the FIXTURE put at the database's path — a fact the code under test never
+# sees — so the assertion below compares the verb's claim against ground truth
+# rather than against another reading of the same code.
+#
+# The rows are chosen as distinct MECHANISMS, not as a list of `chmod` calls:
+# a permission bit removed at three different objects, a wrong node type in
+# three flavours, a link that does not resolve in two, plus both controls. A
+# test that enumerated the three known permission states would be green on the
+# other five, which is exactly how CB-203 survived to be found by hand.
+_TRACKER_STATES = {
+    "dir_traverse_bit_removed": (_state_dir_traverse_bit, True),
+    "dir_has_no_permissions": (_state_dir_no_permissions, True),
+    "file_has_no_permissions": (_state_file_no_permissions, True),
+    "a_directory_is_in_its_place": (_state_node_is_directory, True),
+    "a_named_pipe_is_in_its_place": (_state_node_is_fifo, True),
+    "a_socket_is_in_its_place": (_state_node_is_socket, True),
+    "a_symlink_loop_is_in_its_place": (_state_symlink_loop, True),
+    "a_dangling_symlink_is_in_its_place": (_state_dangling_symlink, True),
+    "nothing_is_there_at_all": (_state_genuinely_absent, False),
+    "a_healthy_database_is_there": (_state_healthy, True),
+}
+
+_PROMISE = "no database there yet — the next command creates one"
+
+
+class TestUnreachableTrackerIsNeverReportedAsAbsent:
+    """CB-203 — ONE property, checked on every state, stated in one sentence:
+
+        `where` claims a database will be created at that path only when it was
+        PROVEN that nothing is at that name.
+
+    The defect it pins was measured by hand before this class existed: with the
+    execute bit taken off a `.codebugs/` directory (`chmod 666`), `codebugs
+    where` printed exactly that promise at exit 0, over a populated tracker that
+    every other verb refused to open. Strictly worse than CB-100 and CB-182,
+    where a warning merely went missing — here a false statement stands in its
+    place.
+
+    WHY THE TABLE IS BUILT FROM MECHANISMS AND NOT FROM COMMANDS. Three ways to
+    make a tracker unreachable were known when this unit started (the file's
+    bits, the directory's write bit, the directory's execute bit). Measurement
+    found five more, each with its own errno and its own `sqlite3` message, and
+    there is no reason to believe eight is the whole population either. So the
+    fix is not "handle these eight": `_path_state` proves absence on exactly one
+    condition and answers *could not tell* on every other, which is what makes a
+    ninth mechanism safe by construction. `test_an_unenumerated_failure_reads_as
+    _undetermined` is where that claim is checked directly.
+    """
+
+    def _where(self, cwd):
+        return subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", "where"],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            env={**os.environ},
+        )
+
+    @pytest.mark.parametrize("state", sorted(_TRACKER_STATES))
+    def test_the_creation_promise_needs_proof_that_nothing_is_there(self, state, tmp_path):
+        build, occupied = _TRACKER_STATES[state]
+        db.init_project(str(tmp_path))
+        restore = build(tmp_path / ".codebugs")
+        try:
+            proc = self._where(tmp_path)
+        finally:
+            if restore:
+                restore()
+        assert proc.returncode == 0, proc.stderr
+        promised = _PROMISE in proc.stdout
+        assert promised is not occupied, (
+            f"{state}: `where` said {'nothing is' if promised else 'something may be'} "
+            f"there, and the fixture put {'something' if occupied else 'nothing'} there"
+        )
+
+    @pytest.mark.parametrize("state", sorted(_TRACKER_STATES))
+    def test_exists_is_false_only_on_proof_of_absence(self, state, tmp_path, monkeypatch):
+        """The same property one layer down, where both consumers read it.
+
+        `describe_root` is the shared resolver, so a consumer that got this
+        right and one that got it wrong would be a divergence this repository
+        deliberately made impossible (CB-11). Checking the dict as well as the
+        printed line is what keeps the MCP preflight covered without a second
+        table.
+        """
+        build, occupied = _TRACKER_STATES[state]
+        db.init_project(str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        restore = build(tmp_path / ".codebugs")
+        try:
+            info = db.describe_root()  # must never raise (CB-11)
+        finally:
+            if restore:
+                restore()
+        assert (info["exists"] is False) is not occupied, f"{state}: {info}"
+        # And the third value always carries its reason, so a caller never has
+        # to print "could not tell" with nothing after it.
+        if info["exists"] is None:
+            assert isinstance(info["exists_reason"], str) and info["exists_reason"]
+        else:
+            assert info["exists_reason"] is None
+
+    def test_an_unenumerated_failure_reads_as_undetermined(self, tmp_path, monkeypatch):
+        """THE TEST THAT IS NOT A LIST. Every row above names a mechanism someone
+        thought of; this one names none.
+
+        An errno this tree has never handled — `EOVERFLOW` here, but the point is
+        that it could be any of them, from a filesystem nobody here has mounted —
+        must land in *could not tell* rather than in *there is nothing there*.
+        That is a property of the classifier's DEFAULT arm, not of its list of
+        cases, and it is the only reason the fix is expected to outlive the eight
+        states that were measured.
+        """
+        path = str(tmp_path / ".codebugs" / "findings.db")
+
+        def exploding_lstat(_p, *a, **kw):
+            raise OSError(errno.EOVERFLOW, os.strerror(errno.EOVERFLOW), _p)
+
+        monkeypatch.setattr(os, "lstat", exploding_lstat)
+        kind, detail = db._path_state(path)
+        assert kind is None
+        assert "Value too large" in detail or detail
+
+    def test_proof_of_absence_still_works(self, tmp_path):
+        """The other half of the oracle, and the half a lazy fix would break.
+
+        Answering *could not tell* to everything would satisfy every assertion
+        above about untruth while destroying the CB-23 line the promise exists
+        for. This is the pin that a fix which merely stopped talking would fail.
+        """
+        kind, detail = db._path_state(str(tmp_path / "nothing-here"))
+        assert kind == db.PATH_ABSENT
+        assert detail is None
+
+    def test_a_dangling_symlink_is_not_proof_of_absence(self, tmp_path):
+        """`lstat` before `stat`, and this is the state that decides the order.
+
+        `os.stat` on a dangling symlink raises `FileNotFoundError` — byte for
+        byte the answer an empty name gives — so a stat-first guard would call
+        this proven absence. It is not: something IS at that name, and what
+        happens next differs (a database gets created at the LINK'S TARGET, in
+        another directory, or the open fails outright). Measured both ways.
+        """
+        link = tmp_path / "link.db"
+        link.symlink_to(tmp_path / "does-not-exist.db")
+        kind, detail = db._path_state(str(link))
+        assert kind is None
+        assert "symbolic link" in detail
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
+    def test_the_declared_route_refuses_without_inventing_an_absence(self, tmp_path):
+        """The same predicate, the other resolution route (CB-203 + CB-201).
+
+        `_declared_db_path` and the `--repo` branch each answered the same
+        two-valued question with `os.path.isdir`/`isfile`, so they too reported
+        a tracker they could not look at as one that is not there — a refusal
+        that sends the operator to run `init` over a tracker that already
+        exists. Fixing only `describe_root` would have left two sites carrying
+        the defect, which is this repository's most-repeated shape.
+
+        It still REFUSES, and that half must not change: a declared root is
+        ambient state, and fail-closed is what stops a stale export from
+        quietly becoming a second, empty tracker (CB-8).
+        """
+        db.init_project(str(tmp_path))
+        (tmp_path / ".codebugs").chmod(0o666)
+        try:
+            with pytest.raises(db.DatabaseNotFoundError) as excinfo:
+                db._declared_db_path(str(tmp_path), "flag")
+        finally:
+            (tmp_path / ".codebugs").chmod(0o755)
+        message = str(excinfo.value)
+        assert "could not be determined" in message
+        assert "holds no findings.db" not in message
+
+    def test_a_name_too_long_is_not_reported_as_a_missing_tracker(self, tmp_path):
+        """A mechanism that is not a permission at all, and was invisible.
+
+        `os.path.isdir` folds `ENAMETOOLONG` into a plain False, so a declared
+        root longer than the kernel's limit was refused with "which has no
+        .codebugs/" — a statement about a tracker, for a cause that has nothing
+        to do with one. Measured: the message now names the real reason.
+        """
+        with pytest.raises(db.DatabaseNotFoundError) as excinfo:
+            db._declared_db_path("/" + "x" * 4900, "flag")
+        assert "could not be determined" in str(excinfo.value)
+
+    def test_a_nul_byte_in_the_path_is_reported_not_raised(self, tmp_path):
+        """`os.path.isfile` swallowed `ValueError` for free; a stat does not.
+
+        `describe_root` may NEVER raise (CB-11), so the guard that replaced
+        `isfile` has to catch the one exception `os.lstat` raises that is not an
+        `OSError`. Without this the never-raises contract would have been broken
+        by the change that was supposed to make the function more honest.
+        """
+        kind, detail = db._path_state("/tmp/no\0pe")
+        assert kind is None
+        assert detail
+
+
+class TestWritabilityProbeBoundaries:
+    """CB-201 — the probe's undeclared edges, each measured before being named.
+
+    The probe answers ONE question ("do the permission bits and the mount allow
+    a write here"), and its docstring used to name only the check-then-act
+    caveat while `_is_environmental`'s docstring, in the same file, listed the
+    whole family it sits in front of. A boundary nobody wrote down is one the
+    next reader assumes is covered.
+    """
+
+    def test_a_corrupt_database_still_reads_as_writable(self, tmp_path, monkeypatch):
+        """The measured boundary, pinned so the docstring cannot quietly rot.
+
+        `findings.db` full of non-database bytes: the permission bits are
+        perfect, so the probe says True and `where` prints a clean binding,
+        while the first verb to open the file dies. That is not a wrong answer
+        to the probe's question — it is the question being narrower than "is
+        this tracker usable", and no `os.access` call can widen it. Filed
+        separately rather than papered over here.
+        """
+        db.init_project(str(tmp_path))
+        (tmp_path / ".codebugs" / "findings.db").write_bytes(b"not a database at all\n" * 10)
+        monkeypatch.chdir(tmp_path)
+        info = db.describe_root()
+        assert info["exists"] is True
+        assert info["writable"] is True
+
+    def test_the_probe_reports_rather_than_raising_on_a_nul_byte(self):
+        """CB-201 item 4: the tri-state's "could not look" arm caught `OSError`
+        and nothing else, while the ONE exception `os.access` actually raises is
+        a `ValueError` for a NUL byte in the path. The arm claimed a coverage it
+        did not have. It is unreachable from `describe_root` by construction —
+        `_path_state` refuses such a path first — so this exercises the function
+        directly, and says so rather than implying the caller reaches it.
+        """
+        assert db._writable_probe("/tmp/no\0pe") is None
 
 
 class TestOpenCallSitesRatchet:
