@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **The test suite now tells you when the source tree changed while the run was in progress
+  (CB-215).** Several tests here read source files straight off the disk, and the suite is often
+  re-run in the main checkout — the same place other branches are merged. When a merge, an editor
+  save or a formatter lands halfway through a run, the tests that ran before it and the tests that
+  ran after it were reading two different trees, and the failures that come out of that look exactly
+  like a real regression. People then go and debug code that is perfectly fine. The run now takes a
+  fingerprint of every file in the tree before the first test and again at the end, and if anything
+  differs it prints a short block in the final summary naming the paths that moved, next to the
+  failures it explains. **It never changes the exit status of the run** — a tree that moved is
+  ordinary, and turning that into a failure would just be a new kind of false alarm — and it says so
+  in the message itself, so the block is a report and never a verdict. **On a tree that did not move
+  it prints nothing at all**, not even a heading. The list is not filtered by any judgement about
+  which paths matter: a note landing in `.claude/plans/` is reported exactly like a change under
+  `src/`, because only you know which test went red and therefore whether the path is relevant. Only
+  directories that are not a source of anything are left out — git's own directory, the virtual
+  environment, the worktree directories, the tracker's own database, and build caches. The commit
+  name is shown beside the paths when git can supply it, and is simply left out when it cannot; a
+  tree unpacked without a git directory works exactly the same way, because the decision is made
+  from the files and never from the commit.
+
 ### Changed
 - **Marking sweep items now refuses `--state` together with `--undo`, instead of silently
   doing the opposite of what you asked (CB-197).** `codesweep_mark` takes two ways of saying
