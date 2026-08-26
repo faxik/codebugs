@@ -75,10 +75,16 @@ from codebugs import db
 # the other direction and must not be touched here -- "территория DIR-2, юнит
 # передаётся куратором". DIR-2 has since taken the two `anchor_recapture` rows
 # (T-50, BT-7 Т-c): both bools are strict now, and a third one landed strict
-# beside them rather than growing this table, which may only shrink. `categories_normalize.apply` is named in the
-# same brief as an exact twin of THIS card's own defect (a mass re-key with a
-# dry-run default), so it is the highest-priority row in this table when
-# DIR-2 picks it up.
+# beside them rather than growing this table, which may only shrink.
+#
+# `categories_normalize.apply` HAS NOW BEEN TAKEN TOO (T-100, CB-222/CB-223), and
+# the paragraph above used to end by naming it "the highest-priority row in this
+# table when DIR-2 picks it up" -- which it was, for the reason the row itself
+# gave: a mass re-key whose only brake is a dry-run default, so an MCP client
+# sending `apply: 1.0` turned a report into a corpus-wide rewrite. It is strict
+# now and the row is GONE rather than reworded, which is what a table that may
+# only shrink means. `categories_normalize.new_category`, added by the same unit,
+# was born strict and never had a row here.
 DECLARED_EXCEPTIONS: dict[tuple[str, str], str] = {
     ("add", "new_category"): (
         "CB-151: DIR-2 territory (findings.py). Gates minting a new category "
@@ -88,11 +94,6 @@ DECLARED_EXCEPTIONS: dict[tuple[str, str], str] = {
     ("batch_add", "new_category"): (
         "CB-151: DIR-2 territory (findings.py), same gate as add.new_category "
         "applied batch-wide."
-    ),
-    ("categories_normalize", "apply"): (
-        "CB-151: DIR-2 territory (findings.py). EXACT TWIN of this card's own "
-        "defect -- a mass re-key with a dry-run default -- so this is the "
-        "highest-priority row in this table for DIR-2 to pick up."
     ),
     # The four codesweep_* rows that used to live here (codesweep_mark.processed,
     # codesweep_list_items.include_archived/archived_only, codesweep_list.

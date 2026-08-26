@@ -7,6 +7,56 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **You can merge category NAMES into one another with one command, and the help finally
+  says so (CB-222).** `categories-normalize` has always been able to do two different jobs,
+  and its help, its tool description and its docstring described only the first: folding
+  variant SPELLINGS of one word (`Process Improvement` → `process_improvement`) to a single
+  canonical form. The second job is the one you reach for when a tracker has accumulated too
+  many category names — renaming a rare name into a common one, where the two are not
+  spellings of each other at all:
+
+      codebugs categories-normalize --fold-map '{"data_loss": "correctness"}'
+      codebugs categories-normalize --fold-map '{"data_loss": "correctness"}' --apply
+
+  That worked before this release; nothing in the three places you would look said it did, so
+  anyone who needed it concluded the tool could not do it. Nothing about the operation itself
+  changed — the first command above is still a **dry run**, which is the default, and it
+  writes nothing at all. What you get back is the list of rows that would move, and a
+  `from → to` table. Renamed rows have their derived `auto:v1` fingerprint re-computed with
+  the new category, so a later report of the same defect still lands on the same card; a
+  fingerprint you supplied yourself is left byte-identical. If the rename would put two LIVE
+  findings on one fingerprint the run writes **nothing at all** and names the pair — merging
+  two cards is your decision, not a migration step.
+  **Read the `from → to` table against your own map before you type `--apply`.** A key that
+  matches no stored category is accepted in silence and appears nowhere in the report, so the
+  only sign of a typo on the left-hand side is a pair missing from that table.
+  **And take a backup first:** `codebugs export-csv backup.csv` writes the findings, and
+  `codebugs restore-csv backup.csv` puts them back verbatim — ids, statuses, occurrence
+  counts and fingerprints — into an **empty** tracker. Its limit is real and worth knowing
+  before you rely on it: milestone items and the audit history are not part of a CSV export
+  and are not restored.
+- **A fold target that does not exist now needs `--new-category` (CB-223).** This is the one
+  behaviour change here, and it is worth stating plainly. Previously,
+  `--fold-map '{"correctness": "corectness"}' --apply` — one letter wrong on the right-hand
+  side — moved every matching row into a brand-new category called `corectness`, returned
+  success, and printed that name in the `from → to` table looking exactly like an existing
+  one. An operation whose entire purpose is to make a tracker hold FEWER category names could
+  quietly make it hold one more. Now such a target is refused with one line naming the
+  nearest existing categories (or the canonical spelling, when your target is a near miss of
+  one), and nothing is written. **If you genuinely are renaming a category to a new name,
+  add `--new-category`** — the same flag, with the same meaning, that `add` already uses. The
+  refusal stops at the first bad target rather than listing them all, so a map with two typos
+  takes two runs to clear. The refusal happens on the dry run too, not only under `--apply`:
+  a dry run's job is to tell you what would happen, and "it would refuse" is part of that.
+  Folding every stored spelling to its canonical form — the command with no `--fold-map` at
+  all — is untouched and never asks for the flag.
+- **`categories_normalize`'s `apply` and `new_category` are now strictly boolean over MCP.**
+  A client that sent `apply: 1`, `apply: 1.0` or `apply: "true"` used to have it quietly
+  accepted as `true`, which turned the dry run — the only thing standing between a report and
+  a rewrite of every category in the tracker — into that rewrite, for exactly the values that
+  most look like a mistake. Those calls are now refused at the validation boundary, before
+  anything runs. Send a real JSON `true` or `false`. The command line is unaffected: `--apply`
+  and `--new-category` are flags and were never coercible.
 - **Marking sweep items now refuses `--state` together with `--undo`, instead of silently
   doing the opposite of what you asked (CB-197).** `codesweep_mark` takes two ways of saying
   where an item should go: `state="done"` names one state outright, and `processed=True/False`

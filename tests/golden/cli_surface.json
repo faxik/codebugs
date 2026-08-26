@@ -1394,11 +1394,27 @@
         "default": null,
         "deprecated": false,
         "dest": "fold_map",
-        "help": "JSON {\"stored spelling\": \"canonical_target\"}; omit to fold every spelling to its own normalized form",
+        "help": "JSON {\"stored category name\": \"canonical_target_name\"} \u2014 the key may be ANY name the table holds, not just a spelling of the target, so this is how category names are merged; omit it to fold every stored spelling to its own normalized form. Check the printed from->to table against your map before --apply: a key matching no stored category is silently absent from it. Back up with export-csv first (restore-csv reloads findings verbatim into an empty tracker; milestone items and audit history are not in a CSV export)",
         "metavar": null,
         "nargs": null,
         "option_strings": [
           "--fold-map"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "action_class": "_StoreTrueAction",
+        "choices": null,
+        "const": true,
+        "default": false,
+        "deprecated": false,
+        "dest": "new_category",
+        "help": "Permit folding INTO a category this tracker does not hold yet; without it such a target is refused, naming the nearest existing ones (CB-223)",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "--new-category"
         ],
         "required": false,
         "type": null
@@ -1428,7 +1444,7 @@
       "default": null,
       "deprecated": false,
       "dest": "categories-normalize",
-      "help": "Fold stored category spellings to canon and re-key auto:v1 fingerprints (CB-61)",
+      "help": "Rename stored categories and re-key auto:v1 fingerprints: fold spellings to canon, or MERGE category names into one another with --fold-map (CB-61)",
       "metavar": "categories-normalize",
       "nargs": null,
       "option_strings": [],
