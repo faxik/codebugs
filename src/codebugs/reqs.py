@@ -12,6 +12,7 @@ from codebugs import db, entities
 from codebugs.types import (
     ENTITY_REQUIREMENT,
     is_vocabulary_filter_active,
+    require_row_limit,
     resolve_priority,
     resolve_requirement_status,
     utc_now,
@@ -334,6 +335,11 @@ def query_requirements(
 
     `id` / `ids` are AND-combined with other filters; missing IDs are silently absent.
     """
+    # CB-196, and ABOVE the `ids` widening below for the reason spelled out on
+    # `findings.query_findings`: that widening rewrites a negative limit to
+    # `len(ids)` and would hide the refusal from every call carrying an id list.
+    limit = require_row_limit("limit", limit)
+
     conditions: list[str] = []
     params: list[Any] = []
 
@@ -847,12 +853,20 @@ def register_tools(mcp, conn_factory):
             source: Filter by source (substring match)
             tag: Filter by tag
             group_by: Group by: section, status, priority, source
-            limit: Max results (default 100)
+            limit: Max results (default 100). 0 means NO results, EXCEPT when
+                    `id`/`ids` is given, where the id list sets a floor and a
+                    smaller limit is raised to fit it. A negative value is an
+                    error (it used to mean "no limit").
             offset: Pagination offset
         """
         from codebugs import blockers
 
         with conn_factory() as conn:
+            # CB-196, the twin of the findings wrapper: the `deferred` branch
+            # returns without reaching `query_requirements`, so a negative limit
+            # used to be accepted at exit 0 whenever no deferred row existed.
+            limit = require_row_limit("limit", limit)
+
             deferred_ids: list[str] | None = None
             if status == "deferred":
                 # Pseudo-status resolved to an id restriction so the ordinary query
@@ -1225,7 +1239,11 @@ def register_cli(sub, commands) -> None:
     p.add_argument("--section", help="Filter by section (substring)")
     p.add_argument("--search", help="Search in description/ID")
     p.add_argument("--group-by", help="Group by: section|status|priority|source")
-    p.add_argument("--limit", type=int, help="Max results")
+    p.add_argument(
+        "--limit",
+        type=int,
+        help="Max results (0 for none unless --id/--ids is given; negative is an error)",
+    )
 
     p = sub.add_parser("reqs-get", help="Fetch a single requirement by ID")
     p.add_argument("id", help="Requirement ID (e.g. FR-001)")

@@ -7,6 +7,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **A negative `--limit` is now an error instead of silently meaning "no limit" (CB-196).**
+  On `query`, `reqs-query` and `sweep-next` — and on their tool equivalents `query`,
+  `reqs_query` and `codesweep_next` — asking for `--limit -1` used to print the ENTIRE
+  table and exit 0. SQLite reads a negative limit as no limit at all, so the one argument
+  you use to bound a result was quietly doing the opposite of what you asked, with nothing
+  anywhere to tell you. It now refuses with a one-line message and exit 1.
+  **What it costs you:** if you were using a negative number as a way to say "give me
+  everything", drop the flag instead — omitting it is what "no limit" means on `sweep-next`,
+  and on `query`/`reqs-query` it gives you the default page of 100. **`--limit 0` is
+  unchanged and still legal**: it means zero rows — except when you also pass
+  `--id`/`--ids`, where the id list you named sets a floor and a smaller limit is
+  raised to fit it. That was always true; it is now written on the flag.
+  The refusal also covers `--status deferred`, which answers from a different code
+  path and used to accept a negative limit at exit 0 whenever no deferred rows
+  existed — so the same flag no longer gets two different verdicts depending on
+  what the tracker happens to contain.
+  This does NOT close the class. `recent --limit -1` still returns everything at exit 0,
+  along with several internal paths, and nothing mechanical catches a new one — that is
+  tracked as CB-208.
 - **The "a read never waits on a write" improvement now states its one exception, because it
   has one (CB-202).** Since 0.2.1, a call that only reads the tracker no longer stalls behind
   another session's write. That holds from the *second* time a tracker is opened onward. The

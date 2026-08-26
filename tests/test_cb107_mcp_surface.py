@@ -29,7 +29,7 @@ import pytest
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from codebugs import db, findings, merge, milestones
+from codebugs import db, findings, merge, milestones, reqs, sweep
 
 
 def _call(mcp, name, **arguments):
@@ -301,3 +301,66 @@ class TestMilestoneReconcileTool:
         mcp = self._mcp(root)
         with pytest.raises(ToolError, match="Input should be a valid boolean"):
             _call(mcp, "milestone_reconcile", apply=None)
+
+
+# ---------------------------------------------------------------------------
+# CB-196 — the MCP boundary passes a negative limit through to the domain
+# ---------------------------------------------------------------------------
+
+
+class TestNegativeRowLimitAtTheMcpBoundary:
+    """CB-196 — a negative limit REACHES the domain, so the domain must refuse it.
+
+    The premise this rests on is measured rather than assumed, and it is pinned
+    separately in `tests/test_types.py` against a real `pydantic.TypeAdapter`:
+    these parameters are declared `surfacegen.OPT_INT`, pydantic's lax mode
+    coerces `"5"` to `5` and `false` to `0`, refuses `2.7` — and passes `-1`
+    through untouched. Re-measured live against the running server while this
+    unit was built: `query(ids=[...], limit=-1)` was NOT rejected at the
+    boundary, it ran.
+
+    That is the whole reason the guard belongs in the domain function and not on
+    the surface. This class is the composition test for that claim: it exercises
+    all three of the card's tools through the real `call_tool` pipeline, because
+    a check of one tool is not a check of the three.
+    """
+
+    @staticmethod
+    def _server(conn, name, register):
+        @contextmanager
+        def factory():
+            yield conn
+
+        mcp = MCPServer(name)
+        register(mcp, factory)
+        return mcp
+
+    @pytest.fixture
+    def conn(self):
+        c = sqlite3.connect(":memory:", check_same_thread=False)
+        c.row_factory = sqlite3.Row
+        findings.ensure_schema(c)
+        reqs.ensure_schema(c)
+        sweep.ensure_schema(c)
+        yield c
+        c.close()
+
+    def test_query_refuses(self, conn):
+        mcp = self._server(conn, "cb196-findings", findings.register_tools)
+        with pytest.raises(ToolError, match="must not be negative"):
+            _call(mcp, "query", limit=-1)
+
+    def test_reqs_query_refuses(self, conn):
+        mcp = self._server(conn, "cb196-reqs", reqs.register_tools)
+        with pytest.raises(ToolError, match="must not be negative"):
+            _call(mcp, "reqs_query", limit=-1)
+
+    def test_codesweep_next_refuses(self, conn):
+        """Note the tool is `codesweep_next` while the CLI verb is `sweep-next`:
+        the two surfaces of this module are not spelled alike, so a sweep by one
+        spelling does not find the other."""
+        sw = sweep.create_sweep(conn)
+        sweep.add_items(conn, sw["sweep_id"], ["a.py"])
+        mcp = self._server(conn, "cb196-sweep", sweep.register_tools)
+        with pytest.raises(ToolError, match="must not be negative"):
+            _call(mcp, "codesweep_next", sweep_ref=sw["sweep_id"], limit=-1)

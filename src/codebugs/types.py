@@ -369,16 +369,39 @@ def require_row_limit(label: str, value: object) -> int | None:
     only copy of its pattern), and because ``types`` is the module every domain
     module may already import.
 
-    **SCOPE, STATED SO NOBODY READS THIS AS THE CLASS BEING CLOSED.** These are
-    the three sites CB-161 measured, not every place in the package that takes a
-    row limit. Others BIND their value already — ``findings.query_findings``,
-    ``reqs.query_requirements`` and ``sweep.next_batch`` among them — so they were
-    never part of CB-161's interpolation class, but they do NOT validate it, and a
-    negative limit there still means "no limit" to SQLite (measured on this tree:
-    ``codebugs query --limit -1`` prints every row and exits 0). Routing those
-    through this function is a separate, larger change with its own behaviour
-    consequences; adding a call here does not make it happen, and this docstring
-    is not a claim that it has.
+    **SCOPE, STATED SO NOBODY READS THIS AS THE CLASS BEING CLOSED.** CB-196
+    added the three sites this paragraph used to list as outstanding —
+    ``findings.query_findings``, ``reqs.query_requirements`` and
+    ``sweep.next_batch``. They were never part of CB-161's INTERPOLATION class,
+    because all three always bound their value; what they lacked was validation,
+    so a negative limit meant "no limit" to SQLite and the caller silently
+    received the whole table. Six sites now route through here.
+
+    **The class is still NOT closed. The SHAPE is stated here; the inventory
+    lives on CB-208, and this paragraph deliberately does not enumerate it.**
+    The shape is: a function that takes a row limit, binds it into SQL, and
+    does not call this function — SQLite then reads a negative value as NO
+    limit and the caller silently receives everything. ``recent_findings`` is
+    the worked example worth naming, because it is reachable from both surfaces
+    (MCP ``recent``, CLI ``recent --limit``) and sits beside ``query_findings``
+    over the same table, so the two neighbouring verbs answer a negative limit
+    DIFFERENTLY. A second shape rides along and is NOT this one: a limit applied
+    as a Python SLICE (``rows[:limit]``), where a negative value silently trims
+    the TAIL instead of removing the bound.
+
+    An earlier draft of this paragraph listed "the sites measured on this tree"
+    and adversarial review then found six it had missed, two of them reachable
+    from a live surface. That is this repository's signature failure — *a rule
+    expressed as an enumeration gets fixed at the sites someone enumerated, and
+    the population is always larger than the list* — committed inside the very
+    paragraph written to stop someone reading the class as closed. A docstring
+    cannot hold a completeness claim about a population it does not gate, so it
+    no longer makes one.
+
+    **And nothing MECHANICAL catches a seventh site**: ruff's ``S608`` is not
+    enabled in this repository (CB-172), and it would not see these anyway,
+    since binding is exactly what they all do correctly. A new query function
+    that forgets this call is caught by review or not at all.
 
     **Zero is legal and means zero rows.** That is not a free choice: on
     ``sweep.list_items`` a zero ALREADY produced ``LIMIT 0``, i.e. no rows, so a
@@ -433,6 +456,12 @@ def require_row_limit(label: str, value: object) -> int | None:
         raise ValueError(
             f"{label} must not be negative (SQLite reads a negative LIMIT as NO limit, "
             f"so it would silently return everything); got {canonical}. "
-            f"Use 0 for no rows, or omit it for no limit."
+            # NOT "omit it for no limit": true for CB-161's three sites, and
+            # FALSE for two of CB-196's, where omitting gives the default page
+            # of 100 rather than everything (and on `next_batch`, the sweep's
+            # own batch size). One shared predicate emits this line at six
+            # sites, so it must be true at all six or it is a message that
+            # misdescribes the very verb the reader just ran.
+            f"Use 0 for no rows, or omit it to take this call's own default."
         )
     return canonical
