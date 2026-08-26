@@ -53,6 +53,7 @@ from codebugs.sweep import (
     next_batch,
 )
 from codebugs.surfacegen import (
+    OPT_BOOL,
     OPT_INT,
     OPT_TEXT,
     OPT_TEXT_LIST,
@@ -105,9 +106,13 @@ Args:
     sweep_ref: Sweep ID (SW-N) or name
     items: Item identifiers to mark
     processed: Legacy mode — True maps to first terminal state, False
-        to first non-terminal state. Ignored if `state` is set.
+        to first non-terminal state. Omit it entirely (the default) to get
+        the same effect as True. MUTUALLY EXCLUSIVE with `state`: sending
+        both is an error, including when the two happen to agree, because
+        `state` names one state and `processed` names a class of them.
     state: Explicit target state. Validated against the sweep's
-        `lifecycle` and `transitions` DAG (if declared).
+        `lifecycle` and `transitions` DAG (if declared). Mutually exclusive
+        with `processed` — send one or the other, never both.
 """
 
 CODESWEEP_STATUS_DOC = """Sweep overview — total/processed/remaining/archived counts, per-tag and
@@ -253,7 +258,7 @@ SURFACE = [
             params=[
                 dict(name="sweep_ref", type=str),
                 dict(name="items", type=TEXT_LIST),
-                dict(name="processed", type=bool, default=True),
+                dict(name="processed", type=OPT_BOOL, default=None),
                 dict(name="state", type=OPT_TEXT, default=None),
             ],
             calls=mark_items,
@@ -267,11 +272,11 @@ SURFACE = [
                 dict(
                     flags=["--undo"],
                     action="store_true",
-                    help="Map to first non-terminal state",
+                    help="Map to first non-terminal state (not with --state)",
                 ),
                 dict(
                     flags=["--state"],
-                    help="Explicit target state (validated against lifecycle)",
+                    help="Explicit target state (validated against lifecycle; not with --undo)",
                 ),
             ],
             manual_handler=_cmd_sweep_mark,

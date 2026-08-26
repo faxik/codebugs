@@ -37,6 +37,7 @@ from pathlib import Path
 
 import pytest
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.shared.exceptions import MCPError
 
 from codebugs import db, server, surfacegen, sweep
@@ -190,6 +191,66 @@ class TestGeneratedMcpSurface:
         for decl in SURFACE:
             facet = decl["mcp"]
             assert by_name[facet["name"]].description == normalize_description(facet["doc"])
+
+    def test_codesweep_mark_exclusivity_survives_apply_defaults(self, tracker):
+        """CB-197 through a real `tools/call`, and the composition is the point.
+
+        The generated tool binds and then `apply_defaults()`, so the DECLARED
+        default is forwarded on every call whether or not the client sent it.
+        With `default=True` still on `processed` — the pre-CB-197 declaration —
+        the domain would receive `processed=True` beside every `state`, and
+        `codesweep_mark(state=...)` would refuse for EVERY MCP client: the fix
+        would have made the tool unusable while its own domain tests stayed
+        green. So the row that matters most here is the one that must SUCCEED.
+
+        Both rows are asserted against one server, because the failure mode is a
+        declaration/domain disagreement and a test that only checks the refusal
+        cannot see it.
+        """
+        srv = build_server(tracker)
+        called(srv, "codesweep_create", {"name": "mx", "lifecycle": ["todo", "done"],
+                                         "terminal_states": ["done"]})
+        called(srv, "codesweep_add", {"sweep_ref": "mx", "items": ["a"]})
+
+        # The declared default reaches the domain as "not supplied".
+        assert called(srv, "codesweep_mark",
+                      {"sweep_ref": "mx", "items": ["a"], "state": "done"})["state"] == "done"
+
+        # An explicitly supplied `processed` beside `state` is refused, and the
+        # refusal reaches the client instead of a success payload.
+        with pytest.raises(ToolError, match="mutually exclusive"):
+            asyncio.run(srv.call_tool(
+                "codesweep_mark",
+                {"sweep_ref": "mx", "items": ["a"], "state": "done", "processed": True},
+            ))
+
+    def test_codesweep_mark_processed_is_still_a_strict_bool(self, tracker):
+        """`OPT_BOOL` carries `STRICT_BOOL` inside the Union, and here is why.
+
+        `_signature` widens a declared `bool` to `STRICT_BOOL` by an IDENTITY
+        test (`is bool`), which cannot reach inside a Union — so an `OPT_BOOL`
+        spelled as the obvious `bool | None` would have been the one coercible
+        bool on the whole surface, accepting `1`, `0` and `"true"` where every
+        other bool parameter refuses them. Nothing else in the suite would have
+        noticed: the JSON Schema of the strict and lax spellings is identical
+        (measured), so the wire golden is blind to it.
+        """
+        srv = build_server(tracker)
+        called(srv, "codesweep_create", {"name": "sb", "lifecycle": ["todo", "done"],
+                                         "terminal_states": ["done"]})
+        called(srv, "codesweep_add", {"sweep_ref": "sb", "items": ["a"]})
+        for coercible in (1, 0, "true", 1.0):
+            with pytest.raises(ToolError, match="Input should be a valid boolean"):
+                asyncio.run(srv.call_tool(
+                    "codesweep_mark",
+                    {"sweep_ref": "sb", "items": ["a"], "processed": coercible},
+                ))
+        # ...while a real bool and an omitted argument both still pass validation,
+        # so the refusal above is strictness and not a broken parameter.
+        assert called(srv, "codesweep_mark",
+                      {"sweep_ref": "sb", "items": ["a"], "processed": True})["state"] == "done"
+        assert called(srv, "codesweep_mark",
+                      {"sweep_ref": "sb", "items": ["a"], "processed": None})["state"] == "done"
 
     def test_input_schema_matches_the_declared_parameters(self, tracker):
         by_name = {t.name: t for t in listed(build_server(tracker))}
@@ -414,7 +475,7 @@ CLI_CONTRACT = {
                 0,
                 "_StoreTrueAction",
                 False,
-                "Map to first non-terminal state",
+                "Map to first non-terminal state (not with --state)",
             ),
             (
                 "state",
@@ -422,7 +483,7 @@ CLI_CONTRACT = {
                 None,
                 "_StoreAction",
                 None,
-                "Explicit target state (validated against lifecycle)",
+                "Explicit target state (validated against lifecycle; not with --undo)",
             ),
         ],
     ),
@@ -682,6 +743,63 @@ class TestHandlerBodiesRunWithTheirNamesResolved:
         assert "Lifecycle: DETECTED -> CONFIRMED -> RESOLVED" in out
         run(["sweep-add", "retro", "i1"])
         assert "state=CONFIRMED" in run(["sweep-mark", "retro", "i1", "--state", "CONFIRMED"])
+
+    def test_sweep_mark_supplies_processed_only_when_undo_was_typed(
+        self, monkeypatch, capsys, tmp_path
+    ):
+        """CB-197 at the CLI, and this is where the fix nearly broke the verb.
+
+        `_cmd_sweep_mark` used to pass `processed=not args.undo` on EVERY call,
+        so once the domain began refusing both arguments together, the ordinary
+        `sweep-mark X --state done` would have refused too — the fix breaking the
+        verb it was fixing. The mapping is now "send `False` only when `--undo`
+        was typed, otherwise send nothing", which is exactly what `store_true`
+        can express: its absence and "not asked for" are the same state.
+
+        The three rows are asserted together, in one test, because each is only
+        meaningful against the others: any one of them passes under some wrong
+        mapping (always-`None` passes rows 1 and 2 and silently makes `--undo` a
+        no-op; always-`False` passes row 3 alone), and only the three together
+        pin the mapping itself.
+        """
+        db.init_project(str(tmp_path))
+        run = lambda argv: self._run(monkeypatch, capsys, tmp_path, argv)  # noqa: E731
+        run(["sweep-create", "--name", "m", "--lifecycle", "todo,done",
+             "--terminal-states", "done"])
+        run(["sweep-add", "m", "a", "b"])
+
+        # 1. `--state` alone: must reach the transition, not the refusal.
+        assert "state=done" in run(["sweep-mark", "m", "a", "--state", "done"])
+        # 2. Neither flag: the legacy "mark processed" default.
+        assert "state=done" in run(["sweep-mark", "m", "b"])
+        # 3. `--undo` alone: still the first non-terminal state.
+        assert "state=todo" in run(["sweep-mark", "m", "b", "--undo"])
+
+    def test_sweep_mark_with_state_and_undo_refuses_at_exit_one(
+        self, monkeypatch, capsys, tmp_path
+    ):
+        """The one genuinely ambiguous combination, routed to the DOMAIN refusal.
+
+        Deliberately NOT an argparse mutually-exclusive group: that would refuse
+        at exit 2 in the parser and leave the library and MCP callers governed by
+        a second, separate rule. One rule, in `mark_items`, decides for all three
+        surfaces; the handler's job is only to stop mistranslating "flag absent"
+        as "False supplied". Exit 1 is `domain_errors()`' ordinary arm, so the
+        caller gets one line on stderr and no traceback.
+        """
+        db.init_project(str(tmp_path))
+        run = lambda argv: self._run(monkeypatch, capsys, tmp_path, argv)  # noqa: E731
+        run(["sweep-create", "--name", "m", "--lifecycle", "todo,done",
+             "--terminal-states", "done"])
+        run(["sweep-add", "m", "a"])
+
+        with pytest.raises(SystemExit) as excinfo:
+            self._run(monkeypatch, capsys, tmp_path,
+                      ["sweep-mark", "m", "a", "--state", "done", "--undo"])
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "mutually exclusive" in err
+        assert "Traceback" not in err
 
     def test_a_domain_refusal_still_exits_one_through_the_handler(
         self, monkeypatch, capsys, tmp_path
