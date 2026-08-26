@@ -83,6 +83,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   tracker sits above a `.git` directory and is therefore genuinely out of reach.
 
 ### Fixed
+- **When the test suite refuses to run, the way out it hands you no longer deletes a directory
+  without warning you (CB-214).** The suite stops before any test executes when a `.codebugs/`
+  tracker sits above pytest's temporary root, because in that state a thousand tests would fail
+  for a reason that has nothing to do with the code. That refusal offered two ways out, and one
+  of them read `pytest tests/ --basetemp=/some/other/place`. **pytest empties the directory you
+  name there, recursively, before the run starts, and says nothing about it** — so "some other
+  place" pointed at a directory you already had is a directory you no longer have. The message
+  said nothing about that, and the harmless neighbouring suggestion (`TMPDIR`, which only adds
+  its own subtree beside whatever is already there) sat below it as if the two were equals.
+  Three things changed, all in that message. The exits now run from safe to destructive, so the
+  first line that fits is the one that destroys nothing. `--basetemp` is still offered — it is a
+  legitimate flag and there are cases `TMPDIR` does not cover — but the deletion is now stated
+  where it is offered, together with a whole command you can copy as it stands
+  (`pytest tests/ --basetemp="$(mktemp -d)"`), because advice you have to adapt is advice that
+  gets pointed at an existing directory. And the check the message suggests for deciding whether
+  a stray tracker is safe to delete now tells you what its own answer means: it exits 1 saying
+  `holds no findings.db`, which is the confirmation that the directory is litter and not a sign
+  you typed the command wrong, while an answer that prints statistics means the tracker is real
+  and must be left alone. Nothing about when the suite refuses has changed — only what it tells
+  you to do next.
 - **`codebugs` could bind to somebody else's tracker without a word, and now it tells you when
   it might have (CB-218).** Before running anything, `codebugs` walks up from the directory
   you are standing in, looking for the nearest `.codebugs/`. If a directory on the way up could
