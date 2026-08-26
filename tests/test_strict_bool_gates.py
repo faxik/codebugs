@@ -150,6 +150,27 @@ def _is_bool_carrying(annotation: object) -> bool:
     checks either a bare `bool` or a `bool` member of a Union (covering the
     pre-fix `bool | int | str | None` shape, so a NEW union-shaped hole would
     still be found by this ratchet even though it is not this card's fix).
+
+    **Union MEMBERS are unwrapped too, and until CB-197 they were not — which
+    made this ratchet stop seeing the very parameter that card changed.** The
+    member test used to be `bool in typing.get_args(base)`, an identity test
+    against the bare builtin, so a Union whose member is `Annotated[bool, ...]`
+    answered False and the parameter left the population SILENTLY: not a
+    failure, not an "undeclared" verdict, simply one fewer row. `OPT_BOOL`
+    (`surfacegen.OPT_BOOL = STRICT_BOOL | None`) is the first annotation of that
+    shape in the package, so before CB-197 the case was unreachable and the
+    identity test was sufficient.
+
+    Measured, because the direction is the whole point and the first report of
+    this said only that coverage was "lost": the NAIVE dangerous spelling
+    `bool | None` was still caught either way (carrying=True, strict=False, so
+    the ratchet goes red), so a future author simplifying `OPT_BOOL` was never
+    unguarded. What the old test could not see is a Union carrying an
+    ANNOTATED-but-NOT-STRICT bool — `Annotated[bool, Field()] | None` — which is
+    both invisible to it and coercible, and which only became writable once
+    CB-197 established the Union-of-Annotated pattern for others to copy. That
+    is the hole this closes, and `TestBoolCarryingSeesThroughAnnotatedUnionMembers`
+    pins all three spellings so the distinction cannot be re-flattened.
     """
     base = annotation
     if typing.get_origin(annotation) is typing.Annotated:
@@ -158,7 +179,12 @@ def _is_bool_carrying(annotation: object) -> bool:
         return True
     origin = typing.get_origin(base)
     if origin is typing.Union:
-        return bool in typing.get_args(base)
+        for member in typing.get_args(base):
+            if member is bool:
+                return True
+            if typing.get_origin(member) is typing.Annotated:
+                if typing.get_args(member)[0] is bool:
+                    return True
     return False
 
 
@@ -256,6 +282,55 @@ class TestStrictBoolGateRatchet:
             "them Annotated[bool, Field(strict=True)] or add a reasoned row "
             "to DECLARED_EXCEPTIONS in this file."
         )
+
+    def test_bool_carrying_sees_through_annotated_union_members(self):
+        """CB-197: the ratchet must not lose a parameter to its own spelling.
+
+        Three spellings of "an optional bool", and the middle column is what the
+        pre-CB-197 identity test got wrong. The row that MATTERS is the third:
+        it is coercible AND was invisible, so a parameter declared that way
+        would have left the population without failing anything — a gate quietly
+        not looking at the thing it exists to look at.
+
+        The first row is here to keep the fix honest in the other direction: it
+        was ALREADY caught before this change, so a report of "CB-197 blinded the
+        ratchet" that does not distinguish these two rows is overstated. Both are
+        asserted, so neither can be dropped as redundant.
+        """
+        strict_opt = typing.Annotated[bool, pydantic.Field(strict=True)] | None
+        lax_opt = typing.Annotated[bool, pydantic.Field()] | None
+
+        # 1. Bare bool in a Union: seen before and after, and correctly not strict.
+        assert _is_bool_carrying(bool | None)
+        assert not _is_strict_bool(bool | None)
+
+        # 2. The shipped `OPT_BOOL` shape: now SEEN, and it passes on its merits.
+        #    Reconstructed here rather than imported from `surfacegen`: this file
+        #    is held to importing `db` and nothing else from the package (see
+        #    `test_ratchet_walks_the_registry_not_a_module_list`), and widening
+        #    that allowlist would buy nothing — the REAL constant is reached
+        #    through the registry by the population test below, and any lax
+        #    respelling of it fails this class's main assertion regardless.
+        assert _is_bool_carrying(strict_opt)
+        assert _is_strict_bool(strict_opt)
+
+        # 3. The hole CB-197 made reachable and this closes: annotated, in a
+        #    Union, and NOT strict. Seen now, and the ratchet's own assertion
+        #    above would refuse it.
+        assert _is_bool_carrying(lax_opt)
+        assert not _is_strict_bool(lax_opt)
+
+    def test_the_opt_bool_parameter_is_actually_in_the_population(self):
+        """The composition, which the predicate test above cannot establish.
+
+        `_is_bool_carrying` being right about the annotation in isolation does
+        not put `codesweep_mark.processed` back into `_collect_bool_params()`:
+        that walks the registry and reads `get_type_hints`, and a parameter can
+        drop out anywhere along the way. Named explicitly rather than left to
+        the `>= 14` floor, which a single missing row cannot cross.
+        """
+        found = _collect_bool_params()
+        assert ("codesweep_mark", "processed") in [(t, p) for t, p, _ in found]
 
     def test_every_declared_exception_carries_a_non_empty_reason(self):
         empty = [key for key, reason in DECLARED_EXCEPTIONS.items() if not reason.strip()]
