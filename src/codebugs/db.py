@@ -665,8 +665,13 @@ def is_contention(exc: BaseException) -> bool:
     and 'cannot rollback - no transaction is active' are both SQLITE_ERROR (1) and
     are programming errors that must stay loud.
 
-    Contention is not confined to a domain module's own statements — connect()
-    itself writes during schema initialization, so any command can meet it.
+    Contention is not confined to a domain module's own statements, but the
+    reason is narrower than it was: this paragraph used to say `connect()` itself
+    writes during schema initialization, full stop, and CB-195 ended that. The
+    seed inserts now run only when their row is missing, so on any tracker that
+    has been opened before, `connect()` takes no write lock and cannot contend.
+    The FIRST open of a tracker still does write, and there any command — a pure
+    read included — can meet contention before reaching its own statements.
     """
     return _sqlite_code_in(exc, _CONTENTION_CODES)
 
@@ -1515,11 +1520,34 @@ def _open(path: str, *, create: bool) -> sqlite3.Connection:
     # verified by running each shape rather than assumed:
     #   - `sqlite3.connect(path)` on the create route  -> SQLITE_CANTOPEN
     #   - the WAL pragma                               -> SQLITE_READONLY (ext. 1544)
-    #   - a module's `ensure_schema`, e.g. merge.py:80 -> SQLITE_READONLY
+    #   - a module's `ensure_schema`, e.g. merge.py:99 -> SQLITE_READONLY
     # The third is the one that could have broken the design: it raises from
     # another module, several frames down, yet still inside `_open`. Because it
-    # is, one classification point covers every shape, and the exception type can
-    # honestly say "this happened while opening a connection".
+    # is, the exception type can honestly say "this happened while opening a
+    # connection".
+    #
+    # THAT THIRD SITE IS CONDITIONAL SINCE CB-195, AND THE CLAIM ABOVE IT WAS
+    # NARROWED TO MATCH (CB-199, open by design; the same narrowing is recorded
+    # in CLAUDE.md immediately after the CB-86 rule). This comment used to end
+    # "one classification point covers every SHAPE", and that was true only
+    # because `merge.ensure_schema` wrote UNCONDITIONALLY on every open — an
+    # accident, never a designed probe. CB-195 gated those seed inserts behind a
+    # read, so on an established tracker `_open` attempts no write of its own and
+    # a read-only DATABASE FILE reached through the walk is no longer detected
+    # here at all. The honest claim is therefore: one classification point covers
+    # OPENING A CONNECTION. A write that fails on an ALREADY-OPEN connection to a
+    # read-only file is outside this try, and surfaces at the domain's own INSERT
+    # as a raw traceback — exit code unchanged, nothing landed, only the message
+    # narrowed.
+    #
+    # DO NOT "RESTORE" AN UNCONDITIONAL WRITE HERE TO WIDEN IT BACK. Any probe
+    # that could detect a read-only file early must attempt a write on EVERY
+    # `db.connect()`, which is verbatim the write-lock-on-read defect CB-195
+    # exists to remove; a `busy_timeout=0` variant only turns "someone else is
+    # writing" into an instant refusal, which is the same defect, faster. The
+    # unresolved design question — early diagnosis without a write per open —
+    # is what CB-199 is kept open to carry, and it is not answered by this
+    # comment.
     #
     # Contention is re-raised untouched so `cli.main`'s exit-5 arm still sees it,
     # and anything not on the environmental allowlist keeps its traceback — a

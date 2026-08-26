@@ -640,10 +640,14 @@ def _connect_or_undetermined(entity_id: str, as_json: bool) -> sqlite3.Connectio
     """Open the tracker, reporting contention as `undetermined` rather than a
     traceback.
 
-    db.connect() WRITES during schema initialization — merge.ensure_schema does an
-    `INSERT OR IGNORE` — so a database held by another writer for longer than
-    busy_timeout raises before any claim code runs. The shell contract promises
-    exit 5 for contention wherever it arises, so it is classified here too.
+    Since CB-195 `db.connect()` writes during schema initialization only when a
+    seed row is actually MISSING — the first open of a tracker, or one whose seed
+    rows were removed. This paragraph used to assert the write as unconditional,
+    which stopped being true with that fix. On the remaining path the insert does
+    run, so a database held by another writer for longer than busy_timeout still
+    raises before any claim code reaches its own statements. The shell contract
+    promises exit 5 for contention wherever it arises, so it is classified here
+    too; on an established tracker this arm is simply never reached from connect.
     """
     try:
         return db.connect()
