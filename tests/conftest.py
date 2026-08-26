@@ -59,6 +59,13 @@ def _hermeticity_refusal(basetemp: str, foreign_root: str) -> str:
     recursively, before deleting a directory by hand. Measured 2026-08-26 on
     this tree's pytest: a file placed in the directory named by `--basetemp` is
     gone after one run, and the same file under `TMPDIR` survives untouched.
+    The deletion is UNCONDITIONAL, which is worse than it first reads and was
+    measured rather than assumed: it happens when `getbasetemp()` is first
+    called, and the guard below calls it to ask its own question — so a run that
+    this very refusal STOPS has already emptied the directory by the time the
+    refusal is printed. The message does not spend a line on that, deliberately:
+    it is read in irritation and length is itself a cost, and a reader who has
+    been handed a whole safe form to copy never reaches the case.
 
     THE EXPECTED ANSWER OF THE EMPTINESS CHECK IS SPELLED OUT, because the
     check answers correctly and LOOKS like a mistake. Measured the same day:
