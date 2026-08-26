@@ -59,6 +59,17 @@ def _hermeticity_refusal(basetemp: str, foreign_root: str) -> str:
     recursively, before deleting a directory by hand. Measured 2026-08-26 on
     this tree's pytest: a file placed in the directory named by `--basetemp` is
     gone after one run, and the same file under `TMPDIR` survives untouched.
+
+    THE EXPECTED ANSWER OF THE EMPTINESS CHECK IS SPELLED OUT, because the
+    check answers correctly and LOOKS like a mistake. Measured the same day:
+    `codebugs --tracker-root <dir> stats` over a `.codebugs/` holding no
+    database exits 1 with `holds no findings.db` — the right answer to the
+    question asked, and the same rc and text that `where`, `summary` and
+    `categories` give, because a DECLARED root treats the FILE as the tracker
+    and fails closed before any verb body runs (CB-23). So there is no verb to
+    swap in that would exit 0 here, and the only honest repair is to say what
+    the answer means: on litter it CONFIRMS, and real statistics mean the
+    tracker must be kept.
     """
     return (
         "\n"
@@ -76,16 +87,24 @@ def _hermeticity_refusal(basetemp: str, foreign_root: str) -> str:
         "none for a reason that has anything to do with the code under test.\n"
         "\n"
         "This is refused once, here, instead of being discovered a thousand\n"
-        "times in the middle of the run. Two ways out:\n"
+        "times in the middle of the run. Two ways out, safest first:\n"
+        "\n"
+        "  * Move the temporary root out from under that tracker. This is safe\n"
+        "    on a directory that already holds things — pytest only ADDS its own\n"
+        "    `pytest-of-<user>/` subtree under the path you name:\n"
+        "        TMPDIR=/some/other/place pytest tests/\n"
+        "    `--basetemp` does the same job and is NOT safe that way: pytest\n"
+        "    DELETES the directory you name, recursively and without asking,\n"
+        "    before the run starts. Point it only at a fresh throwaway path:\n"
+        '        pytest tests/ --basetemp="$(mktemp -d)"\n'
         "\n"
         f"  * If {foreign_root}/.codebugs is litter — an empty directory some\n"
-        "    tool left behind — delete it. Check first that it holds nothing:\n"
+        "    tool left behind — delete it. Ask what it holds first:\n"
         f"        codebugs --tracker-root {foreign_root} stats\n"
-        "\n"
-        "  * If it is a real tracker you want to keep, move the temporary root\n"
-        "    out from under it instead:\n"
-        "        pytest tests/ --basetemp=/some/other/place\n"
-        "    or export TMPDIR=/some/other/place before running pytest.\n"
+        "    On litter that command exits 1 saying `holds no findings.db`, and\n"
+        "    that answer IS the confirmation — it is not a typo in the command.\n"
+        "    If it prints statistics instead, the tracker is real: leave it\n"
+        "    alone and take the first way out above.\n"
         "\n"
         "Note the same refusal fires for `--basetemp` pointing INSIDE this\n"
         "repository, and that case is not a false alarm: the suite would bind\n"
