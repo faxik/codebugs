@@ -489,11 +489,24 @@ def _preflight() -> None:
         # later, and under truthiness an unreachable tracker printed exactly that
         # promise. One resolver, two consumers — so the same truth reaches both,
         # through each one's own channel.
-        print(
-            f"codebugs-mcp: {info['path']} does not exist yet — the first write will "
-            f"create a new, empty tracker there",
-            file=sys.stderr,
-        )
+        if info["dir_writable"] is False:
+            # CB-219. The promise below is read out of a log hours later by
+            # someone who cannot go and look, so it must not outlive the check
+            # that backs it. `is False` only: an advisory probe's `True` and its
+            # `could not tell` both keep the ordinary line, exactly as
+            # `writable` does at the bottom of this function.
+            print(
+                f"codebugs-mcp: {info['path']} does not exist yet, and its "
+                f".codebugs/ directory may not be writable — the first write "
+                f"will probably fail rather than create a tracker there",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"codebugs-mcp: {info['path']} does not exist yet — the first write will "
+                f"create a new, empty tracker there",
+                file=sys.stderr,
+            )
     if info["exists"] is None:
         # CB-203: could not tell whether a tracker is there. Warn-only like every
         # other line here — the server must still start, because the condition
@@ -502,6 +515,23 @@ def _preflight() -> None:
         print(
             f"codebugs-mcp: could not confirm a tracker at {info['path']} — "
             f"{info['exists_reason']}; tool calls may fail until it is fixed",
+            file=sys.stderr,
+        )
+    # CB-218. The binding above can be reported perfectly and still be the wrong
+    # tracker: if a directory on the way up could not be examined, a nearer
+    # `.codebugs/` may be sitting behind it and this server bound past it. That
+    # is worse here than in the CLI — nobody watches a server start, and every
+    # tool call afterwards quietly reads and WRITES the stranger's tracker. Warn
+    # only, and silent on a healthy walk, so the "one line per project per
+    # startup is noise" rule above still holds.
+    phrases = db.unexamined_phrases(info["unexamined"])
+    if phrases:
+        noun = "place" if len(info["unexamined"]) == 1 else "places"
+        print(
+            f"codebugs-mcp: {len(info['unexamined'])} {noun} on the way up could not be "
+            f"examined ({'; '.join(phrases)}) — a tracker may be hidden behind one of "
+            f"them, in which case {info['path']} is the wrong one; "
+            f"`codebugs where` shows the current binding",
             file=sys.stderr,
         )
     if info["source"] != "discovery":

@@ -131,7 +131,22 @@ def _cmd_where(args: argparse.Namespace) -> None:
         # was there and that every other verb refused. A diagnostic asserting
         # the opposite of the truth is worse than one that says nothing, which
         # is why the branch below exists instead.
-        print("          (no database there yet — the next command creates one)")
+        if info["dir_writable"] is False:
+            # CB-219: the classification above is right — nothing IS at that
+            # name — and the promise drawn from it was not. Measured on the
+            # unfixed tree: an empty `.codebugs/` at `chmod 555` printed the
+            # promise at exit 0, and the next verb refused to open the database
+            # it had just promised. The FACT survives here and only the promise
+            # changes, so the CB-23 line this replaces is neither lost nor
+            # doubled. Negative answer only, like every other `os.access`
+            # verdict in this table: `True` and `None` keep the line below.
+            print(
+                "          (no database there yet, and .codebugs/ may not be "
+                "writable — the next command will probably fail rather than "
+                "create one)"
+            )
+        else:
+            print("          (no database there yet — the next command creates one)")
     elif info["exists"] is None:
         # CB-203: could not tell. Not a promise, not a denial, and not silence
         # either — silence would leave the reader with a `database:` line that
@@ -159,6 +174,23 @@ def _cmd_where(args: argparse.Namespace) -> None:
             "          (may not be writable — check permissions on the file "
             "and its .codebugs/ directory)"
         )
+    # CB-218, and deliberately OUTSIDE the chain above: those three branches all
+    # answer "what is at the database path", while this one answers "could the
+    # route that chose that path be trusted". They are independent questions and
+    # both may need saying at once. Silent on an empty list — a healthy walk has
+    # nothing to report — and on stdout with the rest of the table, for CB-182's
+    # reason: this is not an error (the exit code stays 0), so `codebugs where
+    # 2>/dev/null` must not lose it.
+    phrases = db.unexamined_phrases(info["unexamined"])
+    if phrases:
+        noun = "place" if len(info["unexamined"]) == 1 else "places"
+        print(
+            f"          ({len(info['unexamined'])} {noun} on the way up could not be "
+            f"examined — a tracker may be hidden behind one of them, in which case "
+            f"the binding above is the wrong one)"
+        )
+        for phrase in phrases:
+            print(f"              {phrase}")
 
 
 def _register_builtins(sub, commands: dict) -> None:

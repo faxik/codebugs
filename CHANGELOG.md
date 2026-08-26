@@ -83,6 +83,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   tracker sits above a `.git` directory and is therefore genuinely out of reach.
 
 ### Fixed
+- **`codebugs` could bind to somebody else's tracker without a word, and now it tells you when
+  it might have (CB-218).** Before running anything, `codebugs` walks up from the directory
+  you are standing in, looking for the nearest `.codebugs/`. If a directory on the way up could
+  not be looked into — its permissions were changed after you entered it, it sits on a mount
+  that answered with an error, a `.git` in it turned out to be a broken symbolic link — the walk
+  read "I could not look" as "there is nothing here" and simply carried on upwards. Measured:
+  with your project's own tracker sitting inside such a directory and an unrelated `.codebugs/`
+  one level above it, `codebugs where` printed a completely clean binding to the stranger's
+  tracker and exited 0, with no warning of any kind, and `stats` then answered — truthfully and
+  uselessly — about the stranger's empty database while your findings sat one level below,
+  unread. The walk still behaves exactly as it always has, including where it stops at a
+  repository boundary; what it no longer does is stay silent. `codebugs where` now lists every
+  place on the way up it could not examine, with the reason for each, right under the binding it
+  reports, and says in words that a tracker may be hidden behind one of them. The MCP server
+  says the same thing on start-up, on its error stream, where it matters more — nobody watches a
+  server start, and every tool call afterwards would have been reading and writing the wrong
+  tracker. And when the walk finds nothing at all, the refusal no longer claims that no tracker
+  exists in any parent directory; it says which questions it could not answer, and that this is
+  not proof. Nothing here refuses a command that used to work: if a directory cannot be examined
+  the walk carries on past it exactly as before, because one unreadable directory belonging to
+  somebody else, somewhere between you and your project, must not stop `codebugs` from working.
+- **`codebugs where` promised that the next command would create a database, without checking
+  whether it could (CB-219).** When a `.codebugs/` directory exists but holds no database yet,
+  `where` says "no database there yet — the next command creates one". That is usually right —
+  it is how a half-finished `codebugs init` heals itself. But it was printed without ever asking
+  whether the directory could be written to, so with a read-only `.codebugs/` you were told the
+  next command would create a database, at exit 0, and the very next command refused with
+  "cannot open findings.db … for writing". The fact is still reported; only the promise is now
+  conditional. Where the directory looks unwritable you are told so instead, and the MCP server's
+  start-up line changes the same way. As with the other writability warnings here, only the
+  negative answer is printed — a permission can be withdrawn between the check and the write, so
+  saying "this will work" would be the same kind of false confidence, merely inverted.
 - **The safety net protecting that improvement was checking less than it promised (CB-202).**
   A test in this repository exists to catch the one-line mistake that would silently bring the
   old stalling behaviour back — the symptom is invisible unless two sessions happen to collide,

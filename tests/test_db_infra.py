@@ -1358,6 +1358,410 @@ class TestWritabilityProbeBoundaries:
         assert db._writable_probe("/tmp/no\0pe") is None
 
 
+def _wall_traverse_bit(directory):
+    """The measured CB-218 mechanism: a directory that cannot be ENTERED."""
+    _skip_if_root()
+    directory.chmod(0o666)
+    return lambda: directory.chmod(0o755)
+
+
+def _wall_symlink_loop(directory, name):
+    """`name` is a symbolic link that points at itself through a second link."""
+    (directory / name).symlink_to(directory / "loop")
+    (directory / "loop").symlink_to(directory / name)
+    return None
+
+
+def _wall_dangling_symlink(directory, name):
+    """`name` is a symbolic link to something that is not there.
+
+    Worth having beside the permission mechanisms because it needs NO
+    permission trick at all, so it is the one row of this table that also runs
+    as root — and it is the state CB-203's docstring calls out as the reason
+    `lstat` runs before `stat`.
+    """
+    (directory / name).symlink_to(directory / "no-such-target")
+    return None
+
+
+class TestTheWalkIsThreeValued:
+    """CB-218: the walk decides WHICH tracker is found, and it did so two-valued.
+
+    CB-203 made five sites three-valued, and every one of them looks at a root
+    the walk has ALREADY chosen. This class is about the step before that. The
+    harm is different in kind, not in degree: those five could print a wrong
+    sentence about the right tracker, while this one silently binds to the wrong
+    tracker and then answers, honestly and uselessly, about someone else's data.
+
+    The states are built with the process ALREADY INSIDE the directory before the
+    wall goes up, which is not a flourish — a directory whose ancestor lost its
+    execute bit cannot be entered from outside, so a subprocess with `cwd=` set
+    to it fails to start. That is also why these run in-process.
+    """
+
+    def _bind(self, deep, wall_up):
+        """`describe_root()` as seen from `deep`, with the wall raised around it."""
+        restore = wall_up()
+        try:
+            return db.describe_root()
+        finally:
+            if restore:
+                restore()
+
+    def _project(self, tmp_path, name):
+        deep = tmp_path / name / "b" / "c"
+        deep.mkdir(parents=True)
+        db.init_project(str(tmp_path / name))
+        return tmp_path / name, deep
+
+    def test_nothing_above_it_the_refusal_stops_asserting_absence(self, tmp_path, monkeypatch):
+        """State (1): a wall, and genuinely no tracker above it.
+
+        Before: "no .codebugs/ found in <cwd> or any parent" at exit 1 — a claim
+        about parents nobody could look at, which is CB-203's defect one function
+        earlier. The tracker was sitting inside the wall the whole time.
+        """
+        project, deep = self._project(tmp_path, "A")
+        monkeypatch.chdir(deep)
+        info = self._bind(deep, lambda: _wall_traverse_bit(project))
+        assert info["error"], "the walk must still find nothing — that half is unchanged"
+        # THE HEAD CLAUSE, asserted as a literal, and it had to be. The first
+        # version of this line read `"or any parent;" not in ...` — a NEGATIVE
+        # about the old spelling — and a mutant that deleted the qualifier while
+        # leaving the caveat appended SURVIVED it, because the caveat starts with
+        # an em dash and the semicolon never returned. The test was weaker than
+        # its own name: it pinned "a caveat is present", which mutant 5 already
+        # covers, and not "the absence claim is qualified", which is this test's
+        # whole subject. The sibling test on a healthy route asserts the
+        # UNqualified spelling, so the pair pins both directions.
+        assert "or any parent that could be examined" in info["error"]
+        assert "could not be examined" in info["error"]
+        assert str(project / ".codebugs") in info["error"]
+        assert info["unexamined"], "the key must carry what the message names"
+
+    def test_a_stranger_above_the_wall_is_bound_and_the_wall_is_named(self, tmp_path, monkeypatch):
+        """State (2), the card's `high` half and this unit's central case.
+
+        The project's own tracker is inside the wall; an unrelated one sits above
+        it. Nothing errors, nothing is refused, and every line of the binding is
+        correct about a tracker the user never meant. Only naming the place the
+        walk could not look makes that visible — so BOTH halves are asserted: the
+        binding still resolves (this is a diagnostic, not a refusal) and the
+        skipped candidate is reported.
+        """
+        stranger = tmp_path / "P"
+        project, deep = self._project(stranger, "A")
+        db.init_project(str(stranger))
+        monkeypatch.chdir(deep)
+        info = self._bind(deep, lambda: _wall_traverse_bit(project))
+        assert info["error"] is None
+        assert info["root"] == str(stranger), "the walk's own answer must not change"
+        skipped = [path for path, _why in info["unexamined"]]
+        assert str(project / ".codebugs") in skipped, (
+            "the directory holding the real tracker was skipped and never mentioned"
+        )
+        assert all(why for _path, why in info["unexamined"]), "every entry carries a reason"
+
+    def test_the_git_probe_is_the_same_defect_through_a_second_door(self, tmp_path, monkeypatch):
+        """CB-218 §2's extension: a `.git` answer nobody got reads as "no boundary".
+
+        This is the ISOLATED form, and that is what makes it evidence. The
+        repository directory is perfectly readable, its `.codebugs/` is provably
+        absent, and the ONLY question that cannot be answered is whether `.git`
+        is there — so the walk crossing the boundary cannot be blamed on
+        anything else. Fixing the `.codebugs` probe alone would leave this
+        untouched: validating elements instead of their composition.
+        """
+        stranger = tmp_path / "OUT"
+        repo = stranger / "G"
+        deep = repo / "w" / "x"
+        deep.mkdir(parents=True)
+        db.init_project(str(stranger))
+        _wall_symlink_loop(repo, ".git")
+        monkeypatch.chdir(deep)
+        info = db.describe_root()
+        assert info["root"] == str(stranger), "walking past the boundary is unchanged behaviour"
+        assert [path for path, _ in info["unexamined"]] == [str(repo / ".git")], (
+            "exactly one question went unanswered, and it must be the one reported"
+        )
+
+    def test_a_real_repository_boundary_still_stops_the_walk_silently(self, tmp_path, monkeypatch):
+        """The other half of the oracle, and the one a careless fix would break.
+
+        A `.git` DIRECTORY answers the question, so the walk stops exactly as it
+        always has and the key stays empty — empty meaning *the route ran and
+        skipped nothing*, never *no such channel*.
+        """
+        stranger = tmp_path / "OUT"
+        repo = stranger / "G"
+        deep = repo / "w" / "x"
+        deep.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        db.init_project(str(stranger))
+        monkeypatch.chdir(deep)
+        info = db.describe_root()
+        assert info["error"], "a repo boundary with no tracker inside it still refuses"
+        assert "or any parent;" in info["error"], "the healthy refusal must be byte-identical"
+        assert info["unexamined"] == ()
+
+    def test_an_ordinary_tracker_reports_an_empty_list_rather_than_no_key(
+        self, tmp_path, monkeypatch
+    ):
+        """Silence on a healthy walk is half the oracle — and the key is still there.
+
+        A consumer must never have to tell a missing key from an empty one, so
+        this asserts the key's PRESENCE and its emptiness separately.
+        """
+        db.init_project(str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        info = db.describe_root()
+        assert "unexamined" in info, "the key is unconditional"
+        assert info["unexamined"] == ()
+
+    def test_a_route_that_never_walked_reports_empty_because_it_asked_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        """The declared route resolves ONE named path and does no walking at all.
+
+        Its empty list is therefore a fact rather than a default, which is what
+        lets every consumer read empty as "the route skipped nothing".
+        """
+        declared = tmp_path / "declared"
+        declared.mkdir()
+        db.init_project(str(declared))
+        monkeypatch.setattr(db, "_tracker_root_override", str(declared))
+        monkeypatch.chdir(tmp_path)
+        info = db.describe_root()
+        assert info["source"] == "flag"
+        assert info["unexamined"] == ()
+
+    @pytest.mark.parametrize(
+        "mechanism",
+        ["traverse_bit", "symlink_loop", "dangling_symlink"],
+        ids=["traverse_bit", "symlink_loop", "dangling_symlink"],
+    )
+    def test_every_way_of_failing_to_look_is_recorded_not_swallowed(
+        self, mechanism, tmp_path, monkeypatch
+    ):
+        """A TABLE, because the harm is a property of the primitive, not of one errno.
+
+        Three mechanisms, only one of which is the permission wall the card
+        measured. The dangling-symlink row needs no permission trick, so it also
+        runs as root; the loop row is what proves the `.git` case above is not a
+        peculiarity of permissions.
+        """
+        stranger = tmp_path / "P"
+        holder = stranger / "A"
+        deep = holder / "b" / "c"
+        deep.mkdir(parents=True)
+        # Inner tracker FIRST: `init_project` refuses to create one an existing
+        # enclosing tracker would shadow, so the natural history is the only
+        # order that builds this state without `force`.
+        if mechanism == "traverse_bit":
+            db.init_project(str(holder))
+        db.init_project(str(stranger))
+        monkeypatch.chdir(deep)
+        if mechanism == "traverse_bit":
+            restore = _wall_traverse_bit(holder)
+        elif mechanism == "symlink_loop":
+            restore = _wall_symlink_loop(holder, ".codebugs")
+        else:
+            restore = _wall_dangling_symlink(holder, ".codebugs")
+        try:
+            info = db.describe_root()
+        finally:
+            if restore:
+                restore()
+        assert info["root"] == str(stranger)
+        assert str(holder / ".codebugs") in [path for path, _ in info["unexamined"]], (
+            f"{mechanism}: the walk read *could not look* as *nothing is there*"
+        )
+
+    def test_an_unenumerated_failure_on_the_walk_is_recorded_too(self, tmp_path, monkeypatch):
+        """THE ROW THAT IS NOT A MECHANISM — the same shape CB-203 needed.
+
+        Every row above names something someone thought of. This one names an
+        errno from a filesystem nobody here has mounted, and it must land in
+        *recorded* by construction rather than because it was listed. Only the
+        candidate path is made to fail, so the rest of the walk is real.
+        """
+        stranger = tmp_path / "P"
+        holder = stranger / "A"
+        deep = holder / "b"
+        deep.mkdir(parents=True)
+        db.init_project(str(stranger))
+        monkeypatch.chdir(deep)
+        real_lstat = os.lstat
+
+        def selective_lstat(path, *a, **kw):
+            if str(path) == str(holder / ".codebugs"):
+                raise OSError(errno.EOVERFLOW, os.strerror(errno.EOVERFLOW), str(path))
+            return real_lstat(path, *a, **kw)
+
+        monkeypatch.setattr(os, "lstat", selective_lstat)
+        info = db.describe_root()
+        assert info["root"] == str(stranger)
+        assert str(holder / ".codebugs") in [path for path, _ in info["unexamined"]]
+
+    def test_the_directory_holding_the_tracker_reaches_the_human_text(
+        self, tmp_path, monkeypatch
+    ):
+        """The entry that names the WALL must survive into prose, not just the key.
+
+        One wall makes every question below it unanswerable too, so the list runs
+        deepest-first and the causal entry — the directory that actually holds
+        the user's tracker — sits at the END of it. A truncating formatter was
+        written first and kept the deepest three, which are the wall's shadows:
+        paths that never existed, while the one a reader must go and fix fell
+        off. Measured, which is why nothing truncates now. This test is the pin
+        on that: it asserts the SHALLOWEST entry reaches the text, which is
+        exactly what any future cap would break.
+        """
+        stranger = tmp_path / "P"
+        project, deep = self._project(stranger, "A")
+        db.init_project(str(stranger))
+        monkeypatch.chdir(deep)
+        info = self._bind(deep, lambda: _wall_traverse_bit(project))
+        assert len(info["unexamined"]) > 3, (
+            "fixture no longer produces a long list — it proves nothing now"
+        )
+        phrases = db.unexamined_phrases(info["unexamined"])
+        assert len(phrases) == len(info["unexamined"]), "every entry reaches the text"
+        assert any(str(project / ".codebugs") in phrase for phrase in phrases)
+
+
+class TestTheCreationPromiseIsChecked:
+    """CB-219: `exists is False` is the one branch that PROMISES, so it needs proof.
+
+    The classification is right — nothing IS at that name — and the inference
+    drawn from it was not. Measured on the unfixed tree: an empty `.codebugs/`
+    at `chmod 555` printed "the next command creates one" at exit 0, and the very
+    next verb refused with "cannot open findings.db … for writing".
+    """
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
+    def test_an_unwritable_tracker_directory_is_reported(self, tmp_path, monkeypatch):
+        (tmp_path / ".codebugs").mkdir()
+        (tmp_path / ".codebugs").chmod(0o555)
+        monkeypatch.chdir(tmp_path)
+        try:
+            info = db.describe_root()
+        finally:
+            (tmp_path / ".codebugs").chmod(0o755)
+        assert info["exists"] is False, "the file really is absent — that half must not change"
+        assert info["dir_writable"] is False
+
+    def test_a_writable_half_made_tracker_keeps_its_ordinary_answer(self, tmp_path, monkeypatch):
+        """The CB-23 self-healing state, which must stay exactly as it was."""
+        (tmp_path / ".codebugs").mkdir()
+        monkeypatch.chdir(tmp_path)
+        info = db.describe_root()
+        assert info["exists"] is False
+        assert info["dir_writable"] is True
+
+    def test_the_question_is_not_asked_when_the_database_is_there(self, tmp_path, monkeypatch):
+        """`None` unless `exists` is False — the mirror of `writable`'s own rule.
+
+        Writability of a directory whose database already exists is `writable`'s
+        question, and two keys answering one question is how they come to
+        disagree.
+        """
+        db.init_project(str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        info = db.describe_root()
+        assert info["exists"] is True
+        assert info["dir_writable"] is None
+
+    def test_the_key_survives_a_route_that_resolved_nothing(self, tmp_path, monkeypatch):
+        """Unconditional, like every other key here — `describe_root` never raises."""
+        monkeypatch.chdir(tmp_path)
+        info = db.describe_root()
+        assert info["error"]
+        assert "dir_writable" in info
+        assert info["dir_writable"] is None
+
+
+class TestWhereSpeaksAboutWhatItCouldNotSee:
+    """CB-218/CB-219 at the CONSUMER, because the resolver is not what a user reads.
+
+    In-process rather than through a subprocess, and that is forced by the state
+    itself: a directory whose ancestor has lost its execute bit cannot be
+    ENTERED, so `subprocess.run(..., cwd=deep)` fails to start. The process has
+    to be standing there before the wall goes up. `where` never writes, so
+    running it in-process costs nothing.
+    """
+
+    def _where(self, monkeypatch, capsys):
+        from codebugs import cli
+
+        monkeypatch.setattr(sys, "argv", ["codebugs", "where"])
+        cli.main()
+        return capsys.readouterr()
+
+    def test_a_clean_binding_over_a_wall_is_no_longer_silent(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """THE CENTRAL CASE. Before this, every printed line was correct and the
+        whole answer was a lie: a stranger's tracker, at exit 0, with no warning.
+        """
+        stranger = tmp_path / "P"
+        project = stranger / "A"
+        deep = project / "b" / "c"
+        deep.mkdir(parents=True)
+        db.init_project(str(project))
+        db.init_project(str(stranger))
+        monkeypatch.chdir(deep)
+        restore = _wall_traverse_bit(project)
+        try:
+            out = self._where(monkeypatch, capsys)
+        finally:
+            restore()
+        assert f"root:     {stranger}" in out.out, "the binding itself must not change"
+        assert "could not be examined" in out.out
+        assert str(project / ".codebugs") in out.out
+        # CB-182: parenthetical continuations of this table live on stdout, so
+        # `codebugs where 2>/dev/null` does not lose them.
+        assert "could not be examined" not in out.err
+
+    def test_a_healthy_tracker_gains_no_new_line(self, tmp_path, monkeypatch, capsys):
+        """Silence on a healthy walk is half the oracle, and it is asserted on a
+        NON-EMPTY set of ordinary states rather than on one, or it would be green
+        by construction.
+        """
+        for name in ("plain", "nested/deeper"):
+            root = tmp_path / name
+            root.mkdir(parents=True)
+            db.init_project(str(root))
+            monkeypatch.chdir(root)
+            out = self._where(monkeypatch, capsys)
+            assert "could not be examined" not in out.out + out.err, name
+            assert f"root:     {root}" in out.out, name
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
+    def test_the_creation_promise_is_withdrawn_when_the_directory_refuses(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """CB-219 at the consumer: the fact survives, the promise does not."""
+        (tmp_path / ".codebugs").mkdir()
+        (tmp_path / ".codebugs").chmod(0o555)
+        monkeypatch.chdir(tmp_path)
+        try:
+            out = self._where(monkeypatch, capsys)
+        finally:
+            (tmp_path / ".codebugs").chmod(0o755)
+        assert "no database there yet" in out.out, "the CB-23 fact must not vanish"
+        assert out.out.count("no database there yet") == 1, "and must not be doubled"
+        assert "the next command creates one" not in out.out
+        assert "may not be writable" in out.out
+
+    def test_a_writable_half_made_tracker_keeps_the_promise(self, tmp_path, monkeypatch, capsys):
+        """The other half: CB-23's self-healing line is untouched where it is true."""
+        (tmp_path / ".codebugs").mkdir()
+        monkeypatch.chdir(tmp_path)
+        out = self._where(monkeypatch, capsys)
+        assert "(no database there yet — the next command creates one)" in out.out
+
+
 class TestOpenCallSitesRatchet:
     """`_open` is the only door to a live connection. Guard how many hold a key.
 
