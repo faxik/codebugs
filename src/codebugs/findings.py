@@ -4538,7 +4538,19 @@ def register_tools(mcp, conn_factory) -> None:
             else _ambient_head(project_dir)
         )
         enriched = []
-        for i, f in enumerate(findings):
+        for f in findings:
+            # NOT `enumerate(findings)`, and this is not a style preference.
+            # `tests/test_declared_params_reach_the_body.py` ratchets that every
+            # declared tool parameter reaches a call, with a self-deleting table
+            # of the few that instead reach the domain as the CONTENT of another
+            # argument — `findings` is one of those rows (CB-157), and its reason
+            # is still exactly true: what reaches `batch_add_findings` is
+            # `enriched`. `enumerate(findings)` would satisfy the ratchet
+            # MECHANICALLY, by handing the list to a builtin that forwards it
+            # nowhere, and the table's own rule is then to delete the row. That
+            # would shrink the ratchet's population for a reason that is not the
+            # row's reason. The index is taken from the list being built instead.
+            i = len(enriched)
             f = {**f}
             if "reported_at_commit" not in f:
                 f["reported_at_commit"] = default_commit

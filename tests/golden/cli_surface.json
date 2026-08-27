@@ -93,7 +93,7 @@
         "default": null,
         "deprecated": false,
         "dest": "lines",
-        "help": "Line range (stored in meta)",
+        "help": "Where in the file this finding is \u2014 1850, 1850-1870, or path/file.py:1850. Anchors the card to that code so it survives later edits; without it the card has no anchor.",
         "metavar": null,
         "nargs": null,
         "option_strings": [
