@@ -413,16 +413,22 @@ AI code review sessions produce findings that get lost. Multiple agents working 
 
 codebugs stores everything in one local SQLite database. AI assistants write findings, requirements, and milestone items as they discover them, then query the database in future sessions for instant context recovery. Concurrent agents coordinate via the same database — no race conditions, atomic claims.
 
-**Token savings**: A `summary` call returns a structured JSON overview in ~200 tokens. Without codebugs, re-establishing the same context costs 2K–10K+ tokens of file reading and conversation history.
+**Token savings**: a `summary` call returns one small structured overview — counts by severity, the top categories, the hottest files — instead of the file reading and conversation replay it would otherwise take to re-establish the same picture.
 
 ### Typical Workflows
 
-**Code review loop**:
+**Code review loop.** This is the same loop the MCP server tells every client that connects, so the two cannot drift apart:
 
-1. AI reviews code, calls `categories` for naming consistency, then `add` for each finding.
-2. Each `add` auto-routes the finding to `stream/triage`.
-3. Next session: AI calls `summary` → 50 open findings → `query --severity critical` → fixes the worst → `update CB-N --status fixed`.
-4. Over time, `categories` reveals systemic issues — "12 `tz_naive_datetime` fixed across 9 files → time for a lint rule."
+1. File the observation with `add` (or `batch_add` for several at once). Call `categories` first when you are unsure of the naming.
+2. **Read what came back before doing anything else.** `dedup_action` says whether this created a new card, bumped or reopened an existing one, or refiled one already dismissed. `attention` is the server's own flag when your observation raised the card's severity or diverged from its stored category — a card you thought you were filing fresh but which the tracker already knew about, differently.
+3. The code location is anchored at file time when the observation names one; `anchor_resolve` reports whether that anchor still points at live code.
+4. Close the card with `update CB-N --status fixed` once it is actually fixed.
+
+Working alongside other agents on the same tracker? Claim the card with `claims_claim` before starting and release it with `claims_release` when done, or two agents can end up fixing the same thing. Closing the card releases the claim on its own.
+
+Each `add` also auto-routes the finding to `stream/triage`, and over time `categories` reveals systemic issues — "12 `tz_naive_datetime` fixed across 9 files → time for a lint rule."
+
+Requirements (`reqs_add`, `reqs_query`, ...) are a separate, authored entity next to findings, and they have **no** deduplication. Do not file a requirement through `add`, or a defect through `reqs_add`.
 
 **Release loop**:
 
