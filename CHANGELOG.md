@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **"Last changed" means last changed again: routine housekeeping no longer looks like an edit to
+  your card.** The tracker keeps each card's code location pinned to the surrounding text, so the
+  card still points at the right lines after the file is edited around it. Refreshing that pin is
+  bookkeeping the tracker does for itself — but it was going in through the same door as a human
+  edit, so every refreshed card came back reading as though somebody had just changed it. A
+  housekeeping pass across the whole tracker therefore reset the "last changed" date of most cards
+  in it, all to the same moment.
+
+  Housekeeping now says it is housekeeping, and leaves that date alone. Closing, re-triaging,
+  re-tagging or annotating a card still moves it, exactly as before — and a status change can no
+  longer be filed as housekeeping at all, so nothing can quietly close a card without leaving a
+  date behind.
+
+  **What this does not fix, said plainly: this change repairs the cause and touches no existing
+  row.** A date already overwritten by such a pass is not recomputed and not guessed — inventing a
+  plausible date inside a tool whose job is to record history would be worse than admitting the
+  gap. The only way back is a backup taken before the pass, restored by hand; if you have no such
+  copy, treat the affected cards' "last changed" as no older than the day the pass ran, rather than
+  as the truth about the card's earlier life. (This project's own trackers were repaired that way
+  from a copy dated 23 August 2026, which is why their dates read correctly again — that was a
+  separate act on the data, not something this release does for you.) Cards filed since are
+  unaffected, and from now on the date means what it says.
+
 ### Changed
 - **Four places where a surface still promised more than the code delivers, and the reader was
   acting on the promise.** Starting the MCP server with `--mode usage` was described as a server
