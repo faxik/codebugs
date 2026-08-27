@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **The README now says what this tracker does differently, and no longer promises things the code
+  does not do.** It opened on "durable memory for AI assistants" — true, but true of any tracker —
+  and never mentioned the one thing that actually separates this one: a finding here has an
+  identity. Filing the same thing twice bumps one card instead of creating two; a card that was
+  fixed and comes back is recorded as a regression on the same row; something you already dismissed
+  is not quietly reopened; a finding that named a line range can still be found after the file is
+  edited around it; and a claim stops two agents fixing the same card. The opening section is now
+  about that, and every example in it is real output from a real run rather than an illustration.
+  The tool now also admits, in the same place, where it declines to answer — an anchor whose card
+  never named a code span comes back as *undetermined with a reason*, not as a confident guess.
+- **Several things the README stated were simply false, and one of them broke the very first
+  command a new user types.** `codebugs add` with a category the tracker has never seen is refused
+  unless you pass `--new-category`, which is a deliberate guard against a typo splitting your
+  category set in two — and the README neither used the flag in its first example nor mentioned it
+  existed, so the opening command failed with an error the surrounding text did not explain. It is
+  explained now. The dependency line promised `mcp>=1.0.0`; the package has required `mcp>=2.0.0,<3`
+  since the server moved to the 2.0 SDK class, so the version the README named would not have
+  started at all. The `codebugs categories` sample output did not match what the command prints.
+- **The module and tool listings were missing about a third of the product.** Five modules — the
+  code-location anchors, near-duplicate similarity, typed relations between findings, the grouping
+  reports and the usage counters — appeared nowhere at all, and two of those are exactly the
+  features the opening section is about. Half of the merge module's tools were unlisted, as were
+  three findings tools and one requirements tool. There were two separate module tables that had to
+  agree and did not; there is one now, it lists every module, and it marks `usage` as the CLI-only
+  mode it is. Fixed counts ("nine modules", "66 MCP tools", and a per-module tool count that was
+  wrong for four of the ten rows) have been removed rather than corrected, because a number written
+  into prose is a number that goes stale — the running server reports its own catalogue.
+- **The README also now says which tools you cannot reach from a terminal.** Eleven milestone tools,
+  including `pull_next` and `milestone_close`, exist only over MCP. The README previously showed
+  them in a "typical loop" without mentioning that typing them into a shell will not work.
+- **The workflow the README teaches is now the workflow the server teaches.** The MCP server sends
+  every client that connects a short recommended loop; the README described a different one. They
+  are one loop now, with the README following the server, so a reader and an agent are not given
+  two different sets of instructions for the same tool.
+
 ### Added
 - **The test suite now tells you when the source tree changed while the run was in progress
   (CB-215).** Several tests here read source files straight off the disk, and the suite is often
