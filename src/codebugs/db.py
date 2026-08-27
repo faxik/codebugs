@@ -916,19 +916,35 @@ def _linked_worktree_gitdir(git_file: Path) -> tuple[Path | None, tuple[str, str
     - `(gitdir, None)` — confirmed: `commondir` is a real file there, so this
       really is a linked worktree's gitdir.
     - `(None, None)` — confirmed NOT a linked worktree: the `.git` file's own
-      text could not be read, its pointer does not parse, or `commondir` is
+      text was READ and carries no `gitdir:` pointer, or `commondir` is
       affirmatively absent or is something other than a regular file (the
       submodule shape, among others).
-    - `(None, (path, detail))` — undetermined: whether `commondir` is there
-      could not be determined. `(path, detail)` is already shaped as an
-      `unexamined` entry (see `_walk_db_root`), ready for a caller that tracks
-      one to append verbatim, so the two cannot drift into two spellings of the
-      same fact.
+    - `(None, (path, detail))` — undetermined: the `.git` file's own text could
+      not be read, or whether `commondir` is there could not be determined.
+      `(path, detail)` is already shaped as an `unexamined` entry (see
+      `_walk_db_root`), ready for a caller that tracks one to append verbatim,
+      so the two cannot drift into two spellings of the same fact.
+
+    THE SECOND DOOR, AND THE FIRST ONE WAS CLOSED WITHOUT IT (CB-227). CB-224
+    gave this function its third value and wired it to exactly ONE of the two
+    reads it makes — the `commondir` probe — while the read that happens FIRST,
+    the `.git` file's own text, kept answering "confirmed NOT a linked worktree"
+    when it had failed to look. Measured on the tree that fix landed on: with
+    `chmod 000` on the `.git` FILE of a linked worktree (its stat still
+    succeeds, so `_path_state` correctly says *a regular file is there* and
+    hands the question here), `codebugs where` printed "no `.codebugs/` found in
+    <worktree> or any parent" at exit 1 — with the unexamined list EMPTY — while
+    the project's real tracker sat in the main checkout one step away. The
+    reason the first door's fix could not reach this one is worth keeping: the
+    two reads fail in different LAYERS. `commondir`'s question is *what is at
+    this path*, which `_path_state` answers three-valued; the `.git` file's
+    question is *what does this file SAY*, which no stat can answer at all, so a
+    swap of primitives was never going to find it.
     """
     try:
         text = git_file.read_text(errors="replace")
-    except OSError:
-        return None, None
+    except OSError as e:
+        return None, (str(git_file), f"could not read it ({_why(e)})")
 
     pointer = next(
         (ln[len("gitdir:") :].strip() for ln in text.splitlines() if ln.startswith("gitdir:")),
@@ -962,14 +978,28 @@ def _worktree_main_root(git_file: Path) -> tuple[str | None, tuple[str, str] | N
     unrecoverable (git's own `worktree list` reports the git dir in these
     layouts), so we refuse rather than guess. Callers that only need to know
     they are IN a worktree must use `_linked_worktree_gitdir`.
+
+    THE THIRD DOOR, AND IT IS THE SAME DEFECT ONE READ FURTHER ON (CB-227).
+    `commondir` is probed twice on this route: `_linked_worktree_gitdir` asks
+    *is a regular file there* (three-valued since CB-224) and this function then
+    asks *what does it SAY*. The second read swallowed its failure into "no main
+    root, and nothing was left unexamined" — so a `commondir` that stats
+    perfectly and cannot be read produced, measured on a tree whose main
+    checkout HELD the project's tracker: "this is a git worktree (<path>) and
+    its main checkout has no tracker either", flat, at exit 1, with no caveat.
+    An assertion about a directory the process never located, let alone looked
+    in. The `if not common` arm below stays two-valued ON PURPOSE and is a
+    different statement: there the file WAS read and genuinely records no
+    pointer, which is a confirmed answer, not a failure to look.
     """
     gitdir, unexamined_entry = _linked_worktree_gitdir(git_file)
     if gitdir is None:
         return None, unexamined_entry
+    marker = gitdir / "commondir"
     try:
-        common = (gitdir / "commondir").read_text().strip()
-    except OSError:
-        return None, None
+        common = marker.read_text().strip()
+    except OSError as e:
+        return None, (str(marker), f"could not read it ({_why(e)})")
     if not common:
         return None, None
 
@@ -1539,13 +1569,30 @@ def _resolve_db(project_dir: str | None = None) -> tuple[str, bool, Unexamined]:
         if worktree is not None:
             # Never advise `init` here: it would create a tracker that dies
             # with the worktree. Name the main checkout when we can find it.
+            # The second element is DISCARDED deliberately: the walk above met
+            # this same `.git` file first and has already recorded the same
+            # entry, so `caveat` carries it. Appending it again would put one
+            # fact on the line twice.
             main, _unexamined = _worktree_main_root(Path(worktree) / DOT_GIT)
-            where = f"in the main checkout ({main})" if main else "in the main checkout"
-            found = (
-                "and its main checkout has no tracker either"
-                if not caveat
-                else f"and none was found in its main checkout either{caveat}"
-            )
+            # `main` resolving is EXACTLY the condition under which the walk
+            # jumped into the main checkout and examined it — `_walk_db_root`
+            # continues from `main_root`, so reaching this refusal with a
+            # resolvable `main` means it looked there and found nothing. A
+            # `None` main is the opposite: the walk stopped at this boundary and
+            # the main checkout was never located, let alone read. Both branches
+            # below used to say it held no tracker (CB-227), which was measured
+            # false with an unreadable `commondir` and the project's real
+            # tracker sitting in that very checkout.
+            if main:
+                where = f"in the main checkout ({main})"
+                found = (
+                    "and its main checkout has no tracker either"
+                    if not caveat
+                    else f"and none was found in its main checkout either{caveat}"
+                )
+            else:
+                where = "in the main checkout"
+                found = f"and its main checkout could not be located from here{caveat}"
             raise DatabaseNotFoundError(
                 f"no {DB_DIR}/ found from {cwd}; this is a git worktree ({worktree}) "
                 f"{found}. Run `codebugs init` "
