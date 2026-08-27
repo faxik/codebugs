@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **"Last changed" means last changed again: routine housekeeping no longer looks like an edit to
+  your card.** The tracker keeps each card's code location pinned to the surrounding text, so the
+  card still points at the right lines after the file is edited around it. Refreshing that pin is
+  bookkeeping the tracker does for itself — but it was going in through the same door as a human
+  edit, so every refreshed card came back reading as though somebody had just changed it. A
+  housekeeping pass across the whole tracker therefore reset the "last changed" date of most cards
+  in it, all to the same moment.
+
+  Housekeeping now says it is housekeeping, and leaves that date alone. Closing, re-triaging,
+  re-tagging or annotating a card still moves it, exactly as before — and a status change can no
+  longer be filed as housekeeping at all, so nothing can quietly close a card without leaving a
+  date behind.
+
+  **What this does not fix, said plainly: the dates already lost are not coming back.** There is
+  nowhere to recover them from, and inventing a plausible date inside a tool whose job is to record
+  history would be worse than admitting the gap. Cards touched by the pass of 24 August 2026 still
+  show that day as their last change, whatever happened to them before it — so on those cards,
+  treat "last changed" as no older than that date rather than as the truth about the card's earlier
+  life. Cards filed since are unaffected, and from now on the date means what it says.
+
 ### Changed
 - **The README now says what this tracker does differently, and no longer promises things the code
   does not do.** It opened on "durable memory for AI assistants" — true, but true of any tracker —
