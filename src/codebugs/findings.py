@@ -908,8 +908,48 @@ def _match_fingerprint(
 
     The closed lookup is one query over all terminal statuses ordered
     `updated_at DESC, rowid DESC` — the newest row's own status class decides
-    reopen-vs-recurrence, and rowid breaks the whole-second updated_at tie
-    deterministically.
+    reopen-vs-recurrence.
+
+    **`rowid` is NOT merely a tie-breaker on this corpus, and calling it one was
+    the sentence CB-230 came to correct.** The wording used to be "rowid breaks
+    the whole-second updated_at tie deterministically", which describes a rare
+    coincidence. On 2026-08-24 a mass anchor capture wrote `meta.loc` to every
+    card it touched through `update_finding`, which stamped `updated_at`
+    unconditionally, and the collapse it produced was measured the same week:
+    136 of this tracker's 233 rows and 3285 of autosorter's 3449 (95.4 %) carried
+    one of a handful of stamps inside a six-second window. Wherever that holds the
+    first sort key is CONSTANT, so `rowid` — which is INSERT order, not edit order
+    — decides alone.
+
+    **That collapse was afterwards REPAIRED FROM A BACKUP, and this paragraph is
+    written in the past tense for that reason.** An archive copy dated 2026-08-23
+    turned out to exist, and the stamps were restored from it — 127 of 131 in this
+    tracker, 3252 of 3285 in autosorter's — so the majority state described above
+    no longer holds on either live tracker (re-measured 2026-08-27 from a fresh
+    `export-csv`: four codebugs rows still stamped inside that window, nine on that
+    day at all). Two consequences, and they point in opposite directions, so keep
+    both: the repair was a separate act on the DATA and this flag is the fix for
+    the CAUSE — neither substitutes for the other; and the repair was possible only
+    because somebody happened to have a backup, which is luck rather than a
+    property of the system, so the next capture without the flag would collapse the
+    column again with no reason to expect a second archive.
+
+    **A second sort key is deliberately NOT built, and the measurement is the
+    argument.** The order only decides anything when ONE fingerprint carries TWO
+    OR MORE terminal rows. Measured over both live trackers on 2026-08-27, terminal
+    vocabulary read from `_REOPEN_STATUSES + RECURRENCE_STATUSES`: codebugs,
+    233 rows — **zero** such fingerprints; autosorter, 3449 rows — **one**,
+    `CB-3268` and `CB-3265`, both `wont_fix`, both stamped `2026-08-24T19:17:36`.
+    Both members of that pair are in the SAME status class, so `recurrence_of` is
+    chosen whichever wins and the outcome is indistinguishable. There is no live
+    tracker on which the degraded order can produce a wrong answer, and building a
+    key for it would be fixing a defect nothing exhibits — the refusal CB-44 made
+    and CB-45 reversed only when a consumer appeared. The revisit trigger is a
+    fingerprint acquiring two terminal rows of DIFFERENT classes (one `fixed`, one
+    `wont_fix`/`not_a_bug`); that is the state in which the winner changes the
+    branch taken. **The mechanism that can CREATE that state is tracked as CB-209**
+    — a reader who finds this trigger has somewhere to go rather than a condition to
+    watch for by hand.
     """
     live = _live_row_by_fingerprint(conn, fingerprint)
     terminal = _REOPEN_STATUSES + RECURRENCE_STATUSES
@@ -2305,6 +2345,7 @@ def update_finding(
     tags: list[str] | None = None,
     meta_update: dict[str, Any] | None = None,
     reported_at_ref: str | None = None,
+    authored: bool = True,
 ) -> dict[str, Any]:
     """Update a finding. Returns updated finding.
 
@@ -2336,6 +2377,51 @@ def update_finding(
     Do not restore a ``conn.commit()`` here: ``db.txn`` yields ``False`` under an
     ambient transaction, and committing then would commit the *caller's* work
     (``milestones.triage_dismiss`` is such a caller).
+
+    **``authored=False`` is a SERVICE write, and it governs EXACTLY ONE COLUMN
+    (CB-230).** The name is wider than the effect, so read the effect first:
+    with ``authored=False`` the ``updated_at = ?`` assignment is not appended,
+    and NOTHING ELSE changes. The ``meta`` merge, the one-assignment-per-column
+    rule, the built ``SET`` clause, ``rowcount``, the status-change hooks, the
+    surrounding ``db.txn`` and the returned row are all byte-for-byte what they
+    are on the authored path. It does not make the write silent, partial,
+    unlogged or unhooked; it declines to claim that a human edited the card.
+
+    The name comes from doctrine this package had already written down twice and
+    then walked past. ``normalize_categories`` carries the comment "``updated_at``
+    is deliberately not bumped: it records an AUTHORED change, and a spelling
+    migration authors nothing", and the paragraph below says the same about the
+    fingerprint refusal. Both are the same rule: ``updated_at`` answers *when did
+    somebody last change this card*, not *when did a program last touch this
+    row*. What forced a parameter is that a caller had no way to say which of the
+    two it was — the mass anchor capture of 2026-08-24 wrote its machine-derived
+    ``meta.loc`` through this function and, in doing so, overwrote the last-change
+    date of 136 of this tracker's 233 cards (95.4 % of the 3449 in autosorter's)
+    with one six-second window. Those stamps were later restored from a 2026-08-23
+    archive that turned out to exist (127 of 131 here, 3252 of 3285 in
+    autosorter's), which is a separate act on the DATA and not something this flag
+    did: **nothing in this function restores anything.** Read the repair as luck
+    rather than as a property of the system — the next capture without the flag
+    would collapse the column again, and there is no reason to expect a second
+    archive to be lying around.
+
+    **``status`` under ``authored=False`` is REFUSED, not silently obeyed.** A
+    status write is authorship by definition: a person or a commit closed the
+    card. The refusal is a ``ValueError`` raised from the argument-validation
+    block above the transaction, so it takes no write lock and lands nothing —
+    and it exists because the alternative is point-of-use discipline, which this
+    package has watched fail (CB-41). One ``if`` makes the single way this flag
+    could erase a real date unrepresentable, rather than trusting each future
+    caller to pass it correctly.
+
+    Every other parameter is still reachable under the flag, and that is a
+    boundary rather than an oversight: a service write that legitimately needs
+    ``tags`` or ``notes`` is imaginable, and only ``status`` carries a
+    definitional claim of authorship. Today the package has exactly one service
+    caller (``loc.recapture_findings``, pinned by
+    ``tests/test_cb230_service_write.py::TestServiceWriteCallSiteRatchet``), and
+    the flag is deliberately absent from the MCP tool and the CLI verb, so no
+    external caller can decline to author.
 
     **What this function deliberately CANNOT reach, and why (CB-21).**
     ``description``, ``category`` and ``file`` are the three INPUTS to the
@@ -2389,6 +2475,17 @@ def update_finding(
     # contention, instead of the ValueError the contract promises immediately.
     if status is not None:
         status = resolve_finding_status(status)
+        # CB-230. A status write is authorship by definition — a person or a commit
+        # closed the card — so the one combination that could let this flag erase a
+        # real edit date is refused rather than obeyed. Argument-only, so it lands
+        # here with the resolvers: a refusal must not take the write lock.
+        if not authored:
+            raise ValueError(
+                "update_finding: status=... cannot be combined with authored=False — "
+                "a status change is an authored act (a person or a commit closed the "
+                "card), never a service write. Drop authored=False, or write the "
+                "service payload (meta_update/tags/notes) in a separate call."
+            )
     if severity is not None:
         severity = resolve_severity(severity)
     # Same reservation as on the add path: a meta_update planting "occurrences"
@@ -2486,8 +2583,14 @@ def update_finding(
             if not updates:
                 final_row = row
             else:
-                updates.append("updated_at = ?")
-                params.append(utc_now())
+                # CB-230. The ONE column the service-write flag governs. Everything
+                # below this `if` — the parameter for the id, the UPDATE, the hook
+                # firing, the re-read — is outside it deliberately: `authored` must
+                # not be able to change what lands, only whether this row claims a
+                # human last changed it.
+                if authored:
+                    updates.append("updated_at = ?")
+                    params.append(utc_now())
                 params.append(finding_id)
 
                 old_status = row["status"]
@@ -3403,15 +3506,30 @@ def recent_findings(
 
     WHAT THIS MEASURES. ``updated_at`` is the time of the last WRITE to the row,
     not the moment the finding was closed — there is no close timestamp anywhere
-    in the schema. A status change moves it, and so do a re-tag, a meta patch, a
-    severity re-triage, an ``append_note``, and a DEDUPLICATED OBSERVATION (a
-    repeat report bumps the occurrence count and stamps ``updated_at`` while the
-    status stays exactly where it was).
+    in the schema. A status change moves it, and so do a re-tag, an AUTHORED meta
+    patch, a severity re-triage, an ``append_note``, and a DEDUPLICATED
+    OBSERVATION (a repeat report bumps the occurrence count and stamps
+    ``updated_at`` while the status stays exactly where it was).
+
+    ``AUTHORED`` is doing work in that sentence since CB-230. A SERVICE write —
+    ``update_finding(..., authored=False)``, whose one caller is the anchor
+    refresh in ``loc.py`` — writes ``meta`` and deliberately does NOT stamp, so a
+    housekeeping pass over the whole tracker no longer floods this reader with
+    every card it touched. Before that flag existed, one such pass on 2026-08-24
+    made 136 of this tracker's 233 cards answer ``recent`` for that day.
 
     So ``recent_findings(since=…, status="fixed")`` means *cards that are fixed
     NOW and were touched since that date*, not *cards closed since that date*.
     The error is ONE-SIDED: false positives are possible, misses are not, because
-    closing a card always writes ``updated_at``.
+    closing a card always writes ``updated_at`` — and that half is now GUARANTEED
+    rather than merely true, because ``authored=False`` is refused outright when
+    combined with ``status=``, so no writer can close a card without stamping it.
+    **The guarantee rests on TWO pillars, not one, and naming only the first would
+    be a claim wider than its argument.** The refusal covers this function; the
+    other sanctioned cross-table status writer, ``entities.EntityRef.set_status``,
+    is outside it entirely and stamps the column on its own — so the guarantee
+    holds across the package because BOTH writers stamp, and it would lapse the day
+    a third status writer appeared that did neither.
 
     ``since`` is inclusive (``>=``). With a date-granular bound the exclusive
     form would silently drop the whole first day, and a net-delta count built on
@@ -4649,14 +4767,20 @@ def register_tools(mcp, conn_factory) -> None:
         WHAT THIS MEASURES: `updated_at`, the time of the LAST WRITE to the row,
         and not the moment the finding was closed. There is no close timestamp
         anywhere in the schema. A status change moves `updated_at`, and so do a
-        re-tag, a meta patch, a severity re-triage, an `append_note`, and a
-        DEDUPLICATED OBSERVATION — a repeat report bumps the occurrence count and
-        stamps `updated_at` while the status stays exactly where it was.
+        re-tag, an AUTHORED meta patch, a severity re-triage, an `append_note`,
+        and a DEDUPLICATED OBSERVATION — a repeat report bumps the occurrence
+        count and stamps `updated_at` while the status stays exactly where it was.
+
+        AUTHORED is doing work in that sentence since CB-230: the tracker's own
+        housekeeping (refreshing a card's code anchor) writes `meta` WITHOUT
+        stamping, so a maintenance pass no longer floods this reader with every
+        card it touched.
 
         So `recent(since=..., status="fixed")` means "cards that are fixed NOW and
         were touched since that date", NOT "cards closed since that date". The
         error is ONE-SIDED: false positives are possible, misses are not, because
-        closing a card always writes `updated_at`.
+        closing a card always writes `updated_at` — guaranteed rather than merely
+        true, since housekeeping is refused outright when it carries a status.
 
         Rows come back newest touch first, with `rowid` breaking the whole-second
         ties `updated_at` produces, so a paged walk is stable.
@@ -5689,15 +5813,19 @@ def register_cli(sub, commands) -> None:
             "\n"
             "WHAT THIS MEASURES: updated_at, the time of the LAST WRITE to the row, and\n"
             "not the moment the finding was closed. There is no close timestamp anywhere\n"
-            "in the schema. A status change moves updated_at, and so do a re-tag, a meta\n"
-            "patch, a severity re-triage, an append_note, and a DEDUPLICATED OBSERVATION\n"
-            "— a repeat report bumps the occurrence count and stamps updated_at while the\n"
-            "status stays exactly where it was.\n"
+            "in the schema. A status change moves updated_at, and so do a re-tag, an\n"
+            "AUTHORED meta patch, a severity re-triage, an append_note, and a DEDUPLICATED\n"
+            "OBSERVATION — a repeat report bumps the occurrence count and stamps\n"
+            "updated_at while the status stays exactly where it was. AUTHORED is doing\n"
+            "work there since CB-230: the tracker's own housekeeping (refreshing a card's\n"
+            "code anchor) writes meta WITHOUT stamping, so a maintenance pass no longer\n"
+            "floods this reader with every card it touched.\n"
             "\n"
             "So `recent --since DATE --status fixed` means \"cards that are fixed NOW and\n"
             "were touched since that date\", NOT \"cards closed since that date\". The error\n"
             "is ONE-SIDED: false positives are possible, misses are not, because closing a\n"
-            "card always writes updated_at.\n"
+            "card always writes updated_at — guaranteed rather than merely true, since\n"
+            "housekeeping is refused outright when it carries a status.\n"
             "\n"
             "Rows print newest touch first; whole-second ties break by rowid, so a paged\n"
             "walk is stable."

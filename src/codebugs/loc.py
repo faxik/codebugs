@@ -1847,7 +1847,16 @@ def _apply_recapture(
         # point 4 read for a population that did not exist when it was written.
         if state_now != was_state or now != stored:
             return "stale"
-        findings.update_finding(conn, finding_id, meta_update={"loc": fresh})
+        # `authored=False` (CB-230): the anchor is this module's own output, not a
+        # human's edit of the card, so it must not move `updated_at`. Without it the
+        # mass capture of 2026-08-24 rewrote the last-change date of 136 of this
+        # tracker's 233 cards inside one six-second window. Those stamps were
+        # afterwards restored from a 2026-08-23 archive that happened to exist —
+        # which is luck, not a property of the system, so do not read the repair as
+        # a reason this flag is optional.
+        findings.update_finding(
+            conn, finding_id, meta_update={"loc": fresh}, authored=False
+        )
     return written
 
 
