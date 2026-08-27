@@ -915,28 +915,41 @@ def _match_fingerprint(
     the whole-second updated_at tie deterministically", which describes a rare
     coincidence. On 2026-08-24 a mass anchor capture wrote `meta.loc` to every
     card it touched through `update_finding`, which stamped `updated_at`
-    unconditionally: 136 of this tracker's 233 rows and 3285 of autosorter's 3449
-    (95.4 %) now carry one of a handful of stamps inside a six-second window. For
-    that majority the first sort key is CONSTANT, so `rowid` — which is INSERT
-    order, not edit order — decides alone. Those dates are unrecoverable; the
-    service-write flag on `update_finding` stops the NEXT capture from widening
-    the damage, and restores nothing.
+    unconditionally, and the collapse it produced was measured the same week:
+    136 of this tracker's 233 rows and 3285 of autosorter's 3449 (95.4 %) carried
+    one of a handful of stamps inside a six-second window. Wherever that holds the
+    first sort key is CONSTANT, so `rowid` — which is INSERT order, not edit order
+    — decides alone.
+
+    **That collapse was afterwards REPAIRED FROM A BACKUP, and this paragraph is
+    written in the past tense for that reason.** An archive copy dated 2026-08-23
+    turned out to exist, and the stamps were restored from it — 127 of 131 in this
+    tracker, 3252 of 3285 in autosorter's — so the majority state described above
+    no longer holds on either live tracker (re-measured 2026-08-27 from a fresh
+    `export-csv`: four codebugs rows still stamped inside that window, nine on that
+    day at all). Two consequences, and they point in opposite directions, so keep
+    both: the repair was a separate act on the DATA and this flag is the fix for
+    the CAUSE — neither substitutes for the other; and the repair was possible only
+    because somebody happened to have a backup, which is luck rather than a
+    property of the system, so the next capture without the flag would collapse the
+    column again with no reason to expect a second archive.
 
     **A second sort key is deliberately NOT built, and the measurement is the
     argument.** The order only decides anything when ONE fingerprint carries TWO
-    OR MORE terminal rows. Measured over both live trackers on 2026-08-27:
-    codebugs, 233 rows — **zero** such fingerprints (re-measured on 2026-08-27
-    from a fresh `export-csv`, terminal vocabulary read from
-    `_REOPEN_STATUSES + RECURRENCE_STATUSES`, 136 terminal rows carrying a
-    fingerprint at all); autosorter, 3449 rows — **one**, `CB-3268` and `CB-3265`,
-    both `wont_fix`, both stamped `2026-08-24T19:17:36`. Both members of that pair
-    are in the SAME status class, so `recurrence_of` is chosen whichever wins and
-    the outcome is indistinguishable. There is no live tracker on which the
-    degraded order can produce a wrong answer, and building a key for it would be
-    fixing a defect nothing exhibits — the refusal CB-44 made and CB-45 reversed
-    only when a consumer appeared. The revisit trigger is a fingerprint acquiring
-    two terminal rows of DIFFERENT classes (one `fixed`, one `wont_fix`/
-    `not_a_bug`); that is the state in which the winner changes the branch taken.
+    OR MORE terminal rows. Measured over both live trackers on 2026-08-27, terminal
+    vocabulary read from `_REOPEN_STATUSES + RECURRENCE_STATUSES`: codebugs,
+    233 rows — **zero** such fingerprints; autosorter, 3449 rows — **one**,
+    `CB-3268` and `CB-3265`, both `wont_fix`, both stamped `2026-08-24T19:17:36`.
+    Both members of that pair are in the SAME status class, so `recurrence_of` is
+    chosen whichever wins and the outcome is indistinguishable. There is no live
+    tracker on which the degraded order can produce a wrong answer, and building a
+    key for it would be fixing a defect nothing exhibits — the refusal CB-44 made
+    and CB-45 reversed only when a consumer appeared. The revisit trigger is a
+    fingerprint acquiring two terminal rows of DIFFERENT classes (one `fixed`, one
+    `wont_fix`/`not_a_bug`); that is the state in which the winner changes the
+    branch taken. **The mechanism that can CREATE that state is tracked as CB-209**
+    — a reader who finds this trigger has somewhere to go rather than a condition to
+    watch for by hand.
     """
     live = _live_row_by_fingerprint(conn, fingerprint)
     terminal = _REOPEN_STATUSES + RECURRENCE_STATUSES
@@ -2384,7 +2397,13 @@ def update_finding(
     two it was — the mass anchor capture of 2026-08-24 wrote its machine-derived
     ``meta.loc`` through this function and, in doing so, overwrote the last-change
     date of 136 of this tracker's 233 cards (95.4 % of the 3449 in autosorter's)
-    with one six-second window. Those dates are gone; nothing here restores them.
+    with one six-second window. Those stamps were later restored from a 2026-08-23
+    archive that turned out to exist (127 of 131 here, 3252 of 3285 in
+    autosorter's), which is a separate act on the DATA and not something this flag
+    did: **nothing in this function restores anything.** Read the repair as luck
+    rather than as a property of the system — the next capture without the flag
+    would collapse the column again, and there is no reason to expect a second
+    archive to be lying around.
 
     **``status`` under ``authored=False`` is REFUSED, not silently obeyed.** A
     status write is authorship by definition: a person or a commit closed the
@@ -3505,6 +3524,12 @@ def recent_findings(
     closing a card always writes ``updated_at`` — and that half is now GUARANTEED
     rather than merely true, because ``authored=False`` is refused outright when
     combined with ``status=``, so no writer can close a card without stamping it.
+    **The guarantee rests on TWO pillars, not one, and naming only the first would
+    be a claim wider than its argument.** The refusal covers this function; the
+    other sanctioned cross-table status writer, ``entities.EntityRef.set_status``,
+    is outside it entirely and stamps the column on its own — so the guarantee
+    holds across the package because BOTH writers stamp, and it would lapse the day
+    a third status writer appeared that did neither.
 
     ``since`` is inclusive (``>=``). With a date-granular bound the exclusive
     form would silently drop the whole first day, and a net-delta count built on

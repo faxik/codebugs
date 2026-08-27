@@ -4,10 +4,12 @@
 capture of 2026-08-24 wrote its machine-derived `meta.loc` through the shared
 `findings.update_finding`, which stamped the column unconditionally, and so
 overwrote the last-change date of 136 of this tracker's 233 cards (3285 of
-autosorter's 3449) inside one six-second window. The dates are gone; nothing
-here restores them. What this file pins is that the NEXT capture cannot repeat
-it, and that the flag which makes that possible cannot be used for anything
-else.
+autosorter's 3449) inside one six-second window. Those stamps were afterwards
+restored from a 2026-08-23 archive that happened to exist — a separate act on
+the data, and luck rather than a property of the system, so nothing in the code
+under test restores anything. What this file pins is that the NEXT capture
+cannot repeat it, and that the flag which makes that possible cannot be used for
+anything else.
 
 Six of the seven properties below are held by a mutant that turns a named test
 red. The seventh is stated as such in its own docstring: it pins behaviour the

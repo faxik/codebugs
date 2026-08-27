@@ -20,12 +20,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   longer be filed as housekeeping at all, so nothing can quietly close a card without leaving a
   date behind.
 
-  **What this does not fix, said plainly: the dates already lost are not coming back.** There is
-  nowhere to recover them from, and inventing a plausible date inside a tool whose job is to record
-  history would be worse than admitting the gap. Cards touched by the pass of 24 August 2026 still
-  show that day as their last change, whatever happened to them before it — so on those cards,
-  treat "last changed" as no older than that date rather than as the truth about the card's earlier
-  life. Cards filed since are unaffected, and from now on the date means what it says.
+  **What this does not fix, said plainly: this change repairs the cause and touches no existing
+  row.** A date already overwritten by such a pass is not recomputed and not guessed — inventing a
+  plausible date inside a tool whose job is to record history would be worse than admitting the
+  gap. The only way back is a backup taken before the pass, restored by hand; if you have no such
+  copy, treat the affected cards' "last changed" as no older than the day the pass ran, rather than
+  as the truth about the card's earlier life. (This project's own trackers were repaired that way
+  from a copy dated 23 August 2026, which is why their dates read correctly again — that was a
+  separate act on the data, not something this release does for you.) Cards filed since are
+  unaffected, and from now on the date means what it says.
 
 ### Changed
 - **The README now says what this tracker does differently, and no longer promises things the code
