@@ -43,6 +43,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   two different sets of instructions for the same tool.
 
 ### Added
+- **Every run of `tools/worktree-finish.sh` now records how it ended, so "landing has become
+  painful" can stop being a feeling and become a number (CB-176).** Landing a branch runs the whole
+  test suite, takes the integration lock, and then refuses if `main` moved while the suite was
+  running. That refusal is correct — the tree it tested is no longer the tree it would land on — but
+  nobody could say how OFTEN it happens, and the suspicion is that it happens a lot, because
+  parallel sessions commit plan notes to `main` continuously and a run takes longer than the typical
+  gap between those commits. Each finish now appends one line to
+  **`.worktrees/landing-attempts.log`** — a UTC timestamp, the slug you passed, and the raw exit
+  code — and nothing else changes: no new output, no new command, no delay, and **not one exit code
+  is altered on any path**. To turn the file into the two numbers that matter, mean attempts per
+  landing and which refusals are costing them:
+
+      awk '{n++; c[$3]++} END {printf "%s attempts per landing (%d attempts, %d landings)\n", (c["0"]?sprintf("%.2f",n/c["0"]):"n/a"), n, c["0"]+0; for (i=1;i<256;i++) if (i in c) printf "  exit %d: %d\n", i, c[i]}' .worktrees/landing-attempts.log
+
+  It prints, for example, `2.00 attempts per landing (4 attempts, 2 landings)` followed by a count
+  per refusal code, and `n/a` rather than a made-up `0.00` when nothing has landed yet. The log
+  lives beside the integration lock in `.worktrees/`, which is already ignored by git: it is local
+  to your clone, no other session or checkout reads it, and you can delete it at any time. The
+  recording is deliberately unable to interfere with your work — if the file cannot be written, for
+  any reason at all, the finish carries on and ends with exactly the code it would have had
+  otherwise. Note that a line with code `15` is a landing whose merge DID happen (the post-merge
+  alarm fired), which is why it is counted separately from a clean `0`.
 - **The test suite now tells you when the source tree changed while the run was in progress
   (CB-215).** Several tests here read source files straight off the disk, and the suite is often
   re-run in the main checkout — the same place other branches are merged. When a merge, an editor
@@ -214,6 +236,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   tracker sits above a `.git` directory and is therefore genuinely out of reach.
 
 ### Fixed
+- **Mistyping a worktree name at `tools/worktree-finish.sh` now reports the code it is documented
+  to report (CB-231).** The harness publishes an exit code per kind of refusal so a script calling
+  it can tell them apart, and `2` means "there is no worktree by that name". It printed the right
+  message and then exited **`1`** — the code that means bad input in general — so the refusal was
+  real but you could not tell it apart from any other. The cause was the listing of available
+  worktrees printed just below the message: it filters out your main checkout, so in a clone with no
+  OTHER worktree it selects nothing, which counts as a failure and killed the script two lines
+  before it could report `2`. In other words, the documented code was unreachable in exactly the
+  situation it describes — a mistyped name with nothing else checked out. Found while adding the
+  landing-attempt journal above, which recorded a `1` where the table promised a `2`.
 - **The test-suite alarm that warns you when the source tree moved mid-run could stay completely
   silent over the exact case it exists to catch (CB-226).** A directory that lost its listing
   permission — or that failed to list for any other reason — simply vanished from both the
