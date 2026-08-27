@@ -1,25 +1,42 @@
 """Every two-valued "what is at this path" read in `src/codebugs/db.py` is
 either routed through `_path_state`, or declared in a table with a reason
-(CB-224).
+(CB-224), and the gate keys on the CAPABILITY rather than on the spelling of
+the call (CB-227).
 
 WHY THIS FILE EXISTS. T-97 (CB-218) converted the walk's three probes to
 `_path_state` and closed the paragraph in CLAUDE.md with a UNIVERSAL claim:
 "every question this module asks about what is at a path is three-valued".
 That sentence was false the day it was written -- `_linked_worktree_gitdir`'s
-own `(gitdir / "commondir").is_file()` (CB-224's line 924) and two reads
-inside `init_project` (`os.path.isdir`/`os.path.exists`) still answered a
-three-valued question with two values, exactly the CB-203/CB-218 shape. This
-is this repository's own recurring lesson (CLAUDE.md: "a rule expressed as an
-enumeration gets fixed at the sites someone enumerated, and the population is
-always larger than the list") landing a THIRD time on the identical property:
-"three copies" was four (CB-24), "five sites in db.py" was six (CB-218's own
-correction), and now "every question" left three readings standing. A
-universal property stated in prose and never re-checked is a promise that
-rots the moment the file is next edited -- so this time the property is held
-by a GATE, on the model of `tests/test_no_network_capability.py` (self-deleting
-DECLARED_EXCEPTIONS, a reason per row, a premise test that the gate reads
-files at all) and `tests/test_strict_bool_gates.py` (the same three
-properties, applied to a different closed vocabulary).
+own `(gitdir / "commondir").is_file()` and two reads inside `init_project`
+(`os.path.isdir`/`os.path.exists`) still answered a three-valued question with
+two values, exactly the CB-203/CB-218 shape. This is this repository's own
+recurring lesson (CLAUDE.md: "a rule expressed as an enumeration gets fixed at
+the sites someone enumerated, and the population is always larger than the
+list") landing a THIRD time on the identical property: "three copies" was four
+(CB-24), "five sites in db.py" was six (CB-218's own correction), and now
+"every question" left three readings standing. A universal property stated in
+prose and never re-checked is a promise that rots the moment the file is next
+edited -- so the property is held by a GATE, on the model of
+`tests/test_no_network_capability.py` (self-deleting DECLARED_EXCEPTIONS, a
+reason per row, a premise test that the gate reads files at all) and
+`tests/test_strict_bool_gates.py` (the same three properties, applied to a
+different closed vocabulary).
+
+AND THE FIRST VERSION OF THAT GATE WAS ITSELF AN ENUMERATION -- OF SPELLINGS
+(CB-227). It compared the TEXT of a call (`os.path.isdir`) against a list of
+texts, matched an `except` clause only against the literal name `OSError`, and
+let one `DECLARED_EXCEPTIONS` row license every call of that primitive
+anywhere in the licensed function. Measured over thirteen mutants (eleven real
+bypasses plus two controls) it caught THREE, and two of the three were the
+controls: `from os.path import isdir`, `import os.path as osp`, `from os
+import path`, an `IOError` alias, a bare `except:`, and a restored decisive
+read inside `init_project` -- the very defect CB-224 had just removed -- all
+walked past it. So the form of the gate was kept and its KEY was replaced:
+what follows resolves a call through the file's OWN import bindings and then
+asks the LIVE Python object whether it IS one of the primitives, and asks the
+LIVE class hierarchy whether an `except` clause could swallow what a stat
+raises. Re-measured over the same thirteen: nine caught, zero false refusals
+on the unmutated file.
 
 WHAT IS CHECKED, STATED AT THE WIDTH IT IS TRUE -- and the width is
 deliberately narrower than "every two-valued read in the package": this reads
@@ -27,72 +44,108 @@ deliberately narrower than "every two-valued read in the package": this reads
 already scoped their own fix to, and the file this card's brief names
 throughout. `provenance.py` made the identical swap for CB-85, on its own
 schedule; extending this gate there is a separate, negotiated widening, not a
-silent scope creep here.
+silent scope creep here. The direct consequence is worth saying rather than
+leaving to be discovered: MOVING a swallow into a sibling module that `db.py`
+imports escapes this gate completely, however good the in-file predicate is.
 
-KEY ON THE CAPABILITY, NOT ON FIVE SPELLINGS -- and this is the trap the
-card's own brief names by name: "a gate over the list `is_dir, is_file, isdir,
-isfile, exists` is an enumeration, which is exactly the defect being fixed."
-Two layers, neither a literal name list of what THIS file happens to use
-today:
+THREE LAYERS.
 
-1. NAMED PRIMITIVES: the CLOSED, stdlib-documented set of `os.path` functions
-   and `pathlib.Path` methods whose behaviour is exactly the CB-203 shape --
-   answer a bool, swallow every `OSError` the underlying stat raises. This is
-   wider than the three spellings CB-224 found (`is_file`, `isdir`, `exists`):
-   it also names `islink`, `lexists`, `ismount` and six more `pathlib.Path`
-   predicates that do not appear in `db.py` today but share the identical
-   documented behaviour, so a mutant introducing any of them -- not merely a
-   repeat of a name already seen -- is caught (see `TestTheGateItself` below).
-   `pathlib.Path` methods are matched by NAME on a zero-argument call
-   regardless of receiver, deliberately over-broad: a name collision with an
-   unrelated object's `.exists()` method costs a `DECLARED_EXCEPTIONS` row,
-   never a missed capability. None occurs in this file today (measured).
+1. NAMED PRIMITIVES, RESOLVED THROUGH THIS FILE'S OWN IMPORTS AND COMPARED AS
+   OBJECTS. The capability is "answer a bool about the filesystem, swallow
+   every `OSError` the underlying stat raises". For `os.path` that capability
+   is a set of FUNCTION OBJECTS (`_OS_PATH_PRIMITIVE_OBJECTS`), so any spelling
+   that resolves to one of them is caught -- `os.path.isdir`, a `from os.path
+   import isdir`, `import os.path as osp`, `from os import path`, and also
+   `posixpath.isdir` and `genericpath.exists`, which are not aliases at all but
+   literally the same objects (`os.path.isdir is posixpath.isdir` on this
+   platform, pinned as a premise test below). Nothing here is a list of
+   spellings: the list is of CAPABILITIES, and the resolver does the rest.
 
-2. STRUCTURAL: a function that reimplements the same anti-pattern BY HAND --
-   catching `OSError` and returning a bare `True`/`False` literal instead of
-   `None` (the three-valued convention every fixed site in this file already
-   uses, from `_path_state` itself to `_access_probe`) -- is caught even
-   though it calls no named primitive at all. Measured on this file's own 12
-   `except OSError` blocks (including the two `except (OSError, ValueError)`
-   pairs `_path_state` itself carries): zero return a bare boolean literal
-   today, so this layer is purely forward-looking, exactly the half of the
-   oracle "a mutant adds a NEW two-valued read" needs (CLAUDE.md CB-218: "the
-   gate is obliged to catch the future"). It does NOT see: a swallow that
-   returns through an intermediate variable (`ok = False; return ok`) rather
-   than a literal at the `return` site, a bare `except:` with no named type,
-   or a handler on a *tuple* whose OSError member is spelled through an
-   alias. Named here rather than silently claimed as covered.
+2. `pathlib.Path` PREDICATES, matched by NAME on a zero-positional-argument
+   call regardless of receiver -- because the receiver's type is not knowable
+   from one file, so an object comparison is impossible here and a name match
+   is the honest substitute. Deliberately over-broad: a collision with an
+   unrelated object's `.exists()` costs a `DECLARED_EXCEPTIONS` row, never a
+   missed capability. The set is not left to rot: `test_a_new_pathlib_predicate
+   _in_a_future_python_is_not_a_free_pass` walks `dir(pathlib.Path)` in the
+   RUNNING interpreter and fails on any `is_*`/`exists` name that is in neither
+   the flagged set nor the small pure set beside it -- which is how the missing
+   `is_junction` (new in 3.12) was found rather than argued about. The pure set
+   needs no self-deletion clause, and that asymmetry is deliberate: a stale
+   entry in a DETECTION list over-detects and can hide nothing, while a stale
+   row in a PERMISSION list is exactly the hole `DECLARED_EXCEPTIONS`'s
+   self-deletion closes.
 
-WHAT NEITHER LAYER SEES, NAMED RATHER THAN IMPLIED -- because "how close to
-the capability did the AST get" is a measurement, not a principle, and this
-unit's brief says so explicitly: state what the gate sees and what it does
-not, rather than widen the promise past what was actually built.
+3. STRUCTURAL: a function that reimplements the anti-pattern BY HAND --
+   catching something that could swallow what a stat raises, and handing back a
+   bare `True`/`False` literal instead of `None` (the three-valued convention
+   every fixed site in this file already uses, from `_path_state` itself to
+   `_access_probe`) -- is caught though it calls no named primitive at all.
+   "Could swallow what a stat raises" is COMPUTED, not listed: a caught class
+   qualifies when `issubclass(caught, OSError) or issubclass(OSError, caught)`,
+   which admits `OSError` itself, its stdlib aliases `IOError` /
+   `EnvironmentError` / `os.error` (the same class object, so no alias list is
+   needed), its supertypes `Exception` and `BaseException`, and its subclasses
+   `PermissionError` / `FileNotFoundError` -- and refuses `ValueError` and
+   every domain exception this module defines. A bare `except:` qualifies, and
+   so does an `except*` group. A clause this resolver cannot resolve at all
+   qualifies too: fail closed, because a swallow nobody can classify is the one
+   that must not be waved through. Measured: this file returns a bare boolean
+   from no handler today, so layer 3 is purely forward-looking and its
+   fail-closed arm costs nothing here.
 
-* An indirection that hides the call -- `getattr(os.path, "isdir")(x)`, a
-  primitive stored in a variable and called through it, a wrapper function
-  elsewhere in the package that itself calls one of these and is called FROM
-  `db.py` -- is invisible. Closing this means tracking values, not names, the
-  same boundary `test_no_network_capability.py` draws around
-  `__import__`/`exec` indirection.
-* `os.access` is a DIFFERENT primitive (a permission check, not an existence
+WHAT NO LAYER SEES, NAMED RATHER THAN IMPLIED -- because "how close to the
+capability did the AST get" is a measurement, not a principle, and this unit's
+brief says so explicitly: state what the gate sees and what it does not, rather
+than widen the promise past what was actually built. Each of these was
+reproduced against this predicate, not reasoned about.
+
+* THE SEMANTIC SENTRY, and it is the one standing in `db.py` today. A function
+  can answer three-valued perfectly -- `except OSError: return None` -- while
+  its CALLER reads the `None` as "definitely not there". That was CB-227's
+  live harm: `_linked_worktree_gitdir` returned a bare `None` for "could not
+  read the `.git` file" and `_walk_db_root` treated it as "confirmed not a
+  worktree". The meaning lives in the CALLER, so no predicate over the reading
+  function can ever see it, and no predicate over ONE FILE can see it when the
+  caller is elsewhere. This is why CB-227 needed a behavioural oracle as well
+  as this gate, and why this gate must never be described as covering it.
+* AN INDIRECTION THAT HIDES THE NAME: `getattr(os.path, "isdir")(p)`, a
+  primitive fetched from a dict or a tuple, `functools.partial`,
+  `operator.methodcaller("is_dir")`, a callback parameter, `eval`/`exec`, or
+  `sys.modules["os"].path.isdir`. Closing these means tracking VALUES rather
+  than names -- the same boundary `test_no_network_capability.py` draws around
+  `__import__`/`exec` indirection, and out of scope by the same decision.
+  A SIMPLE name binding (`f = os.path.isdir` at any scope, then `f(p)`) IS
+  caught, because that is name resolution and not value tracking; a binding
+  that is conditional, rebound, or built inside a container is not.
+* A SWALLOW THAT RETURNS THROUGH ANYTHING BUT A LITERAL: `ok = False; return
+  ok`, `return bool(x)`, `return not err`, a flag set in a `finally`, or a
+  `with contextlib.suppress(OSError):` block around an assignment. Each needs
+  data-flow analysis inside the function, which layer 3 deliberately does not
+  do.
+* `os.access` is a DIFFERENT capability (a permission check, not an existence
   query) and is correctly out of scope: `_access_probe` already returns
   `bool | None` via its own `except (OSError, ValueError): return None`, which
-  is the three-valued shape already, not a violation of it.
-* A pathlib method call with ARGUMENTS (e.g. a hypothetical `Path.exists(
-  follow_symlinks=False)`) is still matched -- the zero-argument restriction
-  above is about avoiding a false positive on an unrelated same-named method,
-  and `Path.is_file`/`is_dir`/`exists` never legitimately take positional
-  arguments, so restricting to zero POSITIONAL args (keywords still allowed)
-  is the actual rule; see `_is_pathlib_predicate_call`.
+  is the three-valued shape already, not a violation of it. Pinned below, so
+  the exclusion is a decision rather than an oversight.
 
-DECLARED EXCEPTIONS are keyed by `(enclosing_function, primitive)`, not by
-line number: a line number would make the table go stale on ordinary
-reformatting, teaching people to stop trusting it (the "self-deleting" clause
-below needs a key that only turns stale on a REAL fix, not a `black` pass). It
-is validated that this key stays unique per row-worthy call at construction
-time (see `TestDeclaredExceptionsCannotRot`). Two rows exist today, both
-already documented at length in `CLAUDE.md`'s CB-86/CB-23 sections rather than
-invented for this file:
+DECLARED EXCEPTIONS are keyed by `(enclosing_function, canonical_primitive,
+call_text)`, and each of the three parts earns its place. Not a LINE NUMBER,
+which would go stale on ordinary reformatting and teach people to stop
+trusting the table. Not `(function, primitive)` alone, which was the CB-227
+escape: with one informational `os.path.exists` licensed inside
+`init_project`, a restored DECISIVE `os.path.exists` in the same function
+inherited the licence and the gate stayed green over a defect CB-224 had just
+removed. The call text comes from `ast.unparse`, so it survives comment and
+whitespace edits and does not survive a rewrite of the call itself -- which is
+correct, since a rewritten call is a new call and has to be re-declared. And
+because two textually identical calls of one primitive could still sit in one
+function, `test_no_row_licenses_more_than_one_call` REFUSES that state rather
+than letting one row quietly cover both: a row is a licence for one call, and
+where the key cannot distinguish two, the answer is to refuse, not to hope.
+
+Two rows exist today, both already documented at length in `CLAUDE.md`'s
+CB-86/CB-23 sections rather than invented for this file:
 
 * `init_project`'s `created = not os.path.exists(path)` reports a purely
   INFORMATIONAL flag in the returned dict; the actual creation decision is
@@ -107,63 +160,79 @@ invented for this file:
   branch runs -- `TrackerUnwritableError`/`DatabaseNotFoundError` are still
   raised correctly either way.
 
-Two more reads in `db.py` are declared for a DIFFERENT, structural reason:
 `_writable_probe`'s and `_access_probe`'s own `os.access(...)` calls are not
-in either detected primitive set at all (a different capability), so they
-never reach `DECLARED_EXCEPTIONS` -- they are omitted from the table
-entirely rather than declared, and `TestTheGateItself` pins that omission is
-correct (`os.access` is not flagged).
+in any detected capability set (see above), so they never reach
+`DECLARED_EXCEPTIONS` -- they are omitted from the table entirely rather than
+declared, and `TestTheGateItself` pins that the omission is correct.
 """
 
 from __future__ import annotations
 
 import ast
+import builtins
+import os.path
 import pathlib
+import sys
 
 import codebugs.db
 
 # ---------------------------------------------------------------------------
-# The closed, stdlib-documented capability: "answer a bool, swallow OSError".
+# The capability: "answer a bool about the filesystem, swallow OSError".
 # ---------------------------------------------------------------------------
 
-# Fully-qualified `os.path` functions. All of these are documented to return
-# False on any stat failure rather than raise -- not a guess about this
-# repository's habits, a property of the stdlib itself.
-_OS_PATH_PRIMITIVES: frozenset[str] = frozenset(
-    {
-        "os.path.isfile",
-        "os.path.isdir",
-        "os.path.exists",
-        "os.path.islink",
-        "os.path.lexists",
-        "os.path.ismount",
-    }
+# `os.path` functions documented to return False on any stat failure rather
+# than raise. Held as OBJECTS, not as text: every spelling that resolves to one
+# of these is the same capability, including `posixpath`/`genericpath`, which
+# are not aliases but the very same functions.
+_OS_PATH_PRIMITIVE_NAMES: tuple[str, ...] = (
+    "isfile",
+    "isdir",
+    "exists",
+    "islink",
+    "lexists",
+    "ismount",
 )
+_OS_PATH_PRIMITIVE_OBJECTS: dict[object, str] = {
+    getattr(os.path, name): f"os.path.{name}" for name in _OS_PATH_PRIMITIVE_NAMES
+}
+_OS_PATH_PRIMITIVE_TEXTS: frozenset[str] = frozenset(_OS_PATH_PRIMITIVE_OBJECTS.values())
 
-# `pathlib.Path` zero-argument predicate methods with the identical
-# documented behaviour. Matched by NAME on any receiver (see module
-# docstring for why that is deliberately over-broad rather than under-broad).
+# `pathlib.Path` predicates that touch the filesystem and swallow the failure.
+# Matched by NAME (the receiver's type is not knowable from one file), and
+# ratcheted against `dir(pathlib.Path)` so a future interpreter cannot add one
+# silently -- see `_PATHLIB_PURE_PREDICATES` for the other half of that ratchet.
 _PATHLIB_PREDICATE_METHODS: frozenset[str] = frozenset(
     {
+        "exists",
         "is_file",
         "is_dir",
-        "exists",
         "is_symlink",
         "is_mount",
         "is_socket",
         "is_fifo",
         "is_block_device",
         "is_char_device",
+        "is_junction",
     }
 )
 
-# (enclosing_function, primitive) -> reason. Self-deleting: a row naming a
-# call that is no longer there, or that has no reason, fails this file's own
-# tests (TestDeclaredExceptionsCannotRot below) -- otherwise this table
-# becomes the place a real two-valued read gets quietly parked, which is the
-# hole the whole gate exists to close, one level up.
-DECLARED_EXCEPTIONS: dict[tuple[str, str], str] = {
-    ("init_project", "os.path.exists"): (
+# `is_*` names on `pathlib.Path` that are PURE -- they inspect the path string
+# and never touch the filesystem, so they cannot swallow a stat failure and
+# flagging them would be a false refusal. Kept beside the set above so the
+# ratchet can partition every predicate-shaped name in the running interpreter.
+_PATHLIB_PURE_PREDICATES: dict[str, str] = {
+    "is_absolute": "pure string inspection of the path itself; opens nothing",
+    "is_relative_to": "compares two paths lexically; opens nothing",
+    "is_reserved": "inspects the name against reserved Windows names; opens nothing",
+}
+
+# (enclosing_function, canonical_primitive, call_text) -> reason. Self-deleting:
+# a row naming a call that is no longer there, or that has no reason, fails this
+# file's own tests (TestDeclaredExceptionsCannotRot below) -- otherwise this
+# table becomes the place a real two-valued read gets quietly parked, which is
+# the hole the whole gate exists to close, one level up.
+DECLARED_EXCEPTIONS: dict[tuple[str, str, str], str] = {
+    ("init_project", "os.path.exists", "os.path.exists(path)"): (
         "CB-224: `created = not os.path.exists(path)` feeds only the "
         "informational `created` key in the returned dict. The actual "
         "creation decision is `_open(path, create=True)`, two lines below, "
@@ -172,7 +241,7 @@ DECLARED_EXCEPTIONS: dict[tuple[str, str], str] = {
         "card was not asked to add, ahead of a call that might succeed "
         "regardless."
     ),
-    ("_open", "os.path.exists"): (
+    ("_open", "os.path.exists", "os.path.exists(path)"): (
         "CB-86 (documented at length in CLAUDE.md): SQLITE_CANTOPEN (14) is "
         "returned identically for 'file missing' and 'file present but "
         "unopenable', so os.path.exists here picks which of two TRUE "
@@ -180,6 +249,11 @@ DECLARED_EXCEPTIONS: dict[tuple[str, str], str] = {
         "wording, never which exception type is raised."
     ),
 }
+
+
+# ---------------------------------------------------------------------------
+# Name resolution: this file's own bindings, then the live objects behind them.
+# ---------------------------------------------------------------------------
 
 
 def _dotted_name(node: ast.expr) -> str | None:
@@ -196,14 +270,116 @@ def _dotted_name(node: ast.expr) -> str | None:
     return ".".join(reversed(parts))
 
 
-def _is_pathlib_predicate_call(node: ast.Call) -> bool:
-    """A `.is_file()`-shaped call: zero positional args, the right method name.
+def _binding_map(tree: ast.Module) -> dict[str, str]:
+    """Local name -> the dotted path it is bound to, from this file's own source.
 
-    Keywords are still allowed (see module docstring) -- what is excluded is a
-    POSITIONAL argument, which none of `Path.is_file`/`is_dir`/`exists`/... can
-    legitimately take, so restricting to that shape costs nothing on the real
-    methods and only narrows the accidental collisions this deliberately
-    over-broad name match would otherwise catch.
+    Three sources, and each closes a measured bypass of the text-matching gate
+    this replaces:
+
+    * `import os.path` binds `os`; `import os.path as osp` binds `osp` to
+      `os.path`.
+    * `from os import path` binds `path` to `os.path`; `from os.path import
+      isdir [as d]` binds the local name to `os.path.isdir`.
+    * a simple `name = <dotted>` assignment at ANY scope binds that name --
+      which is what makes `f = os.path.isdir; f(p)` visible. That is name
+      resolution, not value tracking: a conditional or repeated binding, or one
+      through a container, is out of reach and is named in the module docstring.
+
+    Every `import` in the file is read regardless of where it sits, so an
+    import inside a function body or inside a `try:`/`except ImportError:`
+    fallback is covered. Later bindings of one name overwrite earlier ones
+    arbitrarily -- deliberate, because the failure direction of a wrong
+    over-broad binding is a declared row, never a missed capability.
+    """
+    bindings: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    bindings[alias.asname] = alias.name
+                else:
+                    top = alias.name.split(".")[0]
+                    bindings[top] = top
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                continue  # a relative import cannot reach the stdlib
+            module = node.module or ""
+            for alias in node.names:
+                local = alias.asname or alias.name
+                bindings[local] = f"{module}.{alias.name}" if module else alias.name
+        elif isinstance(node, ast.Assign):
+            if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+                continue
+            if not isinstance(node.value, (ast.Name, ast.Attribute)):
+                continue
+            value = _dotted_name(node.value)
+            if value is not None:
+                bindings[node.targets[0].id] = value
+    return bindings
+
+
+def _canonicalize(dotted: str, bindings: dict[str, str]) -> str:
+    """Rewrite the head of a dotted name through this file's own bindings."""
+    head, _, rest = dotted.partition(".")
+    base = bindings.get(head)
+    if base is None or base == head:
+        return dotted
+    return f"{base}.{rest}" if rest else base
+
+
+def _resolve_object(dotted: str) -> object | None:
+    """The live object a canonical dotted name refers to, or None.
+
+    Reads `sys.modules` and never imports: everything `db.py` imports is
+    already there, because this test module imports `codebugs.db`. A name that
+    cannot be resolved falls back to the caller's own textual comparison rather
+    than to a guess.
+    """
+    parts = dotted.split(".")
+    for cut in range(len(parts), 0, -1):
+        module = sys.modules.get(".".join(parts[:cut]))
+        if module is None:
+            continue
+        obj: object | None = module
+        for attr in parts[cut:]:
+            obj = getattr(obj, attr, None)
+            if obj is None:
+                break
+        if obj is not None:
+            return obj
+    if len(parts) == 1:
+        return getattr(builtins, parts[0], None)
+    return None
+
+
+def _canonical_primitive(node: ast.Call, bindings: dict[str, str]) -> str | None:
+    """The canonical `os.path.X` name this call reaches, or None.
+
+    Object identity first (so `posixpath.isdir` and a from-imported `isdir`
+    both land on `os.path.isdir`), then a textual fallback for the case where
+    the module is genuinely not importable in this process -- fail closed on
+    the text rather than answer "not a primitive" because a lookup failed.
+    """
+    dotted = _dotted_name(node.func)
+    if dotted is None:
+        return None
+    canonical = _canonicalize(dotted, bindings)
+    resolved = _resolve_object(canonical)
+    if resolved is not None and resolved in _OS_PATH_PRIMITIVE_OBJECTS:
+        return _OS_PATH_PRIMITIVE_OBJECTS[resolved]
+    if canonical in _OS_PATH_PRIMITIVE_TEXTS:
+        return canonical
+    return None
+
+
+def _is_pathlib_predicate_call(node: ast.Call) -> bool:
+    """A `.is_file()`-shaped call: zero positional args, a flagged method name.
+
+    Keywords are still allowed -- what is excluded is a POSITIONAL argument,
+    which none of `Path.is_file`/`is_dir`/`exists`/... can legitimately take,
+    so restricting to that shape costs nothing on the real methods and only
+    narrows the accidental collisions this deliberately over-broad name match
+    would otherwise catch.
     """
     if not isinstance(node.func, ast.Attribute):
         return False
@@ -212,11 +388,75 @@ def _is_pathlib_predicate_call(node: ast.Call) -> bool:
     return not node.args
 
 
+# ---------------------------------------------------------------------------
+# "Could this `except` clause swallow what a stat raises?" -- computed.
+# ---------------------------------------------------------------------------
+
+
+def _class_overlaps_oserror(cls: type) -> bool:
+    """True when `except cls:` could catch something a failed stat raises.
+
+    Both directions, and both are needed. `issubclass(OSError, cls)` admits
+    `OSError` itself, its stdlib aliases (`IOError`, `EnvironmentError`,
+    `os.error` -- all the same class object, which is why no alias list
+    appears anywhere in this file) and its supertypes `Exception` /
+    `BaseException`. `issubclass(cls, OSError)` admits the concrete errnos a
+    stat actually raises -- `PermissionError`, `FileNotFoundError`,
+    `NotADirectoryError` -- each of which swallows the CB-203 case just as
+    completely while being invisible to a name-keyed check.
+    """
+    return issubclass(cls, OSError) or issubclass(OSError, cls)
+
+
+def _local_class_names(tree: ast.Module) -> frozenset[str]:
+    return frozenset(n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef))
+
+
+def _catches_os_error(
+    exc_type: ast.expr | None,
+    bindings: dict[str, str],
+    local_classes: frozenset[str],
+) -> bool:
+    """Whether this `except` clause could swallow a failed stat. Fail closed.
+
+    A bare `except:` catches everything, so it qualifies. A tuple qualifies if
+    any member does. A class DEFINED IN THIS FILE gets a determined `False`:
+    a stat raises stdlib exceptions, and no locally declared class is a
+    superclass of one, so `except SomeLocalError:` provably cannot swallow it
+    (an `X = OSError` rebinding is an assignment, not a class, and is handled
+    by `_binding_map` instead). Anything else that will not resolve to a class
+    -- a type built at runtime, a name bound to a tuple -- qualifies, because a
+    swallow nobody can classify is exactly the one that must not be waved
+    through.
+    """
+    if exc_type is None:
+        return True
+    if isinstance(exc_type, ast.Tuple):
+        return any(_catches_os_error(e, bindings, local_classes) for e in exc_type.elts)
+    dotted = _dotted_name(exc_type)
+    if dotted is None:
+        return True
+    if dotted in local_classes:
+        return False
+    resolved = _resolve_object(_canonicalize(dotted, bindings))
+    if isinstance(resolved, type) and issubclass(resolved, BaseException):
+        return _class_overlaps_oserror(resolved)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# The two collectors.
+# ---------------------------------------------------------------------------
+
+Key = tuple[str, str, str]
+
+
 class _CallCollector(ast.NodeVisitor):
     """Every two-valued path-state call in one file, keyed by enclosing function."""
 
-    def __init__(self) -> None:
-        self.hits: list[tuple[str, str]] = []
+    def __init__(self, bindings: dict[str, str]) -> None:
+        self.hits: list[Key] = []
+        self._bindings = bindings
         self._stack: list[str] = ["<module>"]
 
     def _enclosing(self) -> str:
@@ -230,33 +470,36 @@ class _CallCollector(ast.NodeVisitor):
     visit_AsyncFunctionDef = visit_FunctionDef  # noqa: N815
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
-        dotted = _dotted_name(node.func)
-        if dotted is not None and dotted in _OS_PATH_PRIMITIVES:
-            self.hits.append((self._enclosing(), dotted))
+        primitive = _canonical_primitive(node, self._bindings)
+        if primitive is not None:
+            self.hits.append((self._enclosing(), primitive, ast.unparse(node)))
         elif _is_pathlib_predicate_call(node):
             attr = node.func.attr  # type: ignore[union-attr]
-            self.hits.append((self._enclosing(), attr))
+            self.hits.append((self._enclosing(), attr, ast.unparse(node)))
         self.generic_visit(node)
 
 
-def _named_primitive_hits(source: str) -> list[tuple[str, str]]:
-    """(enclosing_function, primitive) for every named-primitive call in `source`."""
-    collector = _CallCollector()
-    collector.visit(ast.parse(source))
+def _named_primitive_hits(source: str) -> list[Key]:
+    """(function, primitive, call text) for every named-primitive call in `source`."""
+    tree = ast.parse(source)
+    collector = _CallCollector(_binding_map(tree))
+    collector.visit(tree)
     return collector.hits
 
 
 class _SwallowCollector(ast.NodeVisitor):
-    """Functions that catch OSError and hand back a bare True/False literal.
+    """Functions that swallow a failed stat and hand back a bare True/False.
 
-    The STRUCTURAL half of the gate (see module docstring): this needs no
-    named primitive at all, so it is what would catch a hand-rolled
-    reimplementation of the CB-203 anti-pattern -- exactly the shape line 924
-    used to be, before `_linked_worktree_gitdir` called `.is_file()` at all.
+    The STRUCTURAL layer (see module docstring): this needs no named primitive
+    at all, so it is what would catch a hand-rolled reimplementation of the
+    CB-203 anti-pattern -- exactly the shape CB-224's line 924 used to be,
+    before `_linked_worktree_gitdir` called `.is_file()` at all.
     """
 
-    def __init__(self) -> None:
-        self.hits: list[tuple[str, str]] = []
+    def __init__(self, bindings: dict[str, str], local_classes: frozenset[str]) -> None:
+        self.hits: list[Key] = []
+        self._bindings = bindings
+        self._local_classes = local_classes
         self._stack: list[str] = ["<module>"]
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
@@ -266,9 +509,9 @@ class _SwallowCollector(ast.NodeVisitor):
 
     visit_AsyncFunctionDef = visit_FunctionDef  # noqa: N815
 
-    def visit_Try(self, node: ast.Try) -> None:  # noqa: N802
+    def _visit_try(self, node: ast.Try | ast.TryStar) -> None:
         for handler in node.handlers:
-            if not _catches_os_error(handler.type):
+            if not _catches_os_error(handler.type, self._bindings, self._local_classes):
                 continue
             for stmt in ast.walk(ast.Module(body=handler.body, type_ignores=[])):
                 if (
@@ -276,26 +519,24 @@ class _SwallowCollector(ast.NodeVisitor):
                     and isinstance(stmt.value, ast.Constant)
                     and stmt.value.value in (True, False)
                 ):
-                    self.hits.append((self._enclosing(), "except-OSError-return-bool"))
+                    self.hits.append(
+                        (self._enclosing(), "except-OSError-return-bool", ast.unparse(stmt))
+                    )
         self.generic_visit(node)
+
+    # `except*` is a different AST node, and a gate that reads only `ast.Try`
+    # is one `*` away from seeing nothing (found in this unit's bypass sweep).
+    visit_Try = _visit_try  # noqa: N815
+    visit_TryStar = _visit_try  # noqa: N815
 
     def _enclosing(self) -> str:
         return self._stack[-1]
 
 
-def _catches_os_error(exc_type: ast.expr | None) -> bool:
-    if exc_type is None:
-        return False  # a bare `except:` is a separate, undetected shape (see docstring)
-    if isinstance(exc_type, ast.Name):
-        return exc_type.id == "OSError"
-    if isinstance(exc_type, ast.Tuple):
-        return any(isinstance(e, ast.Name) and e.id == "OSError" for e in exc_type.elts)
-    return False
-
-
-def _swallow_hits(source: str) -> list[tuple[str, str]]:
-    collector = _SwallowCollector()
-    collector.visit(ast.parse(source))
+def _swallow_hits(source: str) -> list[Key]:
+    tree = ast.parse(source)
+    collector = _SwallowCollector(_binding_map(tree), _local_class_names(tree))
+    collector.visit(tree)
     return collector.hits
 
 
@@ -309,7 +550,7 @@ def _db_source_files() -> list[tuple[str, pathlib.Path]]:
     return [("db.py", path)]
 
 
-def _all_hits(source: str) -> list[tuple[str, str]]:
+def _all_hits(source: str) -> list[Key]:
     return _named_primitive_hits(source) + _swallow_hits(source)
 
 
@@ -326,35 +567,37 @@ class TestTwoValuedPathGate:
             f"routed through _path_state nor declared: {undeclared}. Either "
             "convert the call to _path_state, or -- if an undetermined answer "
             "genuinely cannot change what the caller does -- add it to "
-            "DECLARED_EXCEPTIONS in this file with a reason."
+            "DECLARED_EXCEPTIONS in this file with a reason. Note the key "
+            "carries the CALL TEXT: a row licenses one call, so a rewritten "
+            "call has to be declared again rather than inheriting a licence."
         )
 
 
 class TestTheGateItself:
     """A gate is only worth its line count if it can fail, and only fail
-    rightly (CB-224 oracle items 1 and 2)."""
+    rightly (CB-224 oracle items 1 and 2; CB-227 oracle item 3)."""
 
     def test_the_original_line_924_shape_is_caught(self):
-        """Oracle item 1: reverting `_linked_worktree_gitdir` to its pre-fix
-        form must turn the gate red. This is that exact shape, isolated."""
+        """CB-224 oracle item 1: reverting `_linked_worktree_gitdir` to its
+        pre-fix form must turn the gate red. This is that exact shape."""
         mutant = (
             "def _linked_worktree_gitdir(git_file):\n"
             "    gitdir = _abs_from(git_file.parent, pointer)\n"
             "    return gitdir if (gitdir / 'commondir').is_file() else None\n"
         )
         hits = _named_primitive_hits(mutant)
-        assert ("_linked_worktree_gitdir", "is_file") in hits
+        assert any(fn == "_linked_worktree_gitdir" and prim == "is_file" for fn, prim, _ in hits)
 
     def test_a_new_two_valued_read_anywhere_in_the_file_is_caught(self):
-        """Oracle item 2: the half the gate exists for -- catching a read
-        nobody enumerated, added to a brand new function."""
-        mutant = "def _some_future_probe(p):\n    return os.path.isdir(p)\n"
+        """The half the gate exists for -- catching a read nobody enumerated,
+        added to a brand new function."""
+        mutant = "import os\ndef _some_future_probe(p):\n    return os.path.isdir(p)\n"
         hits = _named_primitive_hits(mutant)
-        assert ("_some_future_probe", "os.path.isdir") in hits
-        assert ("_some_future_probe", "os.path.isdir") not in DECLARED_EXCEPTIONS
+        assert ("_some_future_probe", "os.path.isdir", "os.path.isdir(p)") in hits
+        assert ("_some_future_probe", "os.path.isdir", "os.path.isdir(p)") not in DECLARED_EXCEPTIONS
 
     def test_a_hand_rolled_swallow_with_no_named_primitive_is_also_caught(self):
-        """The structural half: no `is_dir`/`is_file`/`isdir`/`isfile`/`exists`
+        """The structural layer: no `is_dir`/`is_file`/`isdir`/`isfile`/`exists`
         anywhere in this mutant, and it is still the CB-203 anti-pattern."""
         mutant = (
             "def _homegrown_check(p):\n"
@@ -365,7 +608,7 @@ class TestTheGateItself:
             "        return False\n"
         )
         hits = _swallow_hits(mutant)
-        assert ("_homegrown_check", "except-OSError-return-bool") in hits
+        assert any(fn == "_homegrown_check" for fn, _prim, _text in hits)
 
     def test_the_three_valued_convention_is_not_flagged(self):
         """`except OSError: return None` -- the convention every fixed site in
@@ -378,14 +621,14 @@ class TestTheGateItself:
         """`_access_probe`'s `os.access(...)` is a permission check, not an
         existence query, and already returns tri-state on its own -- it must
         never need a DECLARED_EXCEPTIONS row."""
-        source = "def _access_probe(path):\n    return os.access(path, os.W_OK)\n"
+        source = "import os\ndef _access_probe(path):\n    return os.access(path, os.W_OK)\n"
         assert _named_primitive_hits(source) == []
 
     def test_pathlib_predicates_beyond_the_three_seen_today_are_still_caught(self):
         """Wider than the three spellings CB-224 measured in this file
         (is_file, isdir, exists) -- islink/lexists/ismount and the pathlib
-        siblings are part of the same closed capability, so a mutant using
-        one of THOSE instead is not a free pass."""
+        siblings are part of the same capability, so a mutant using one of
+        THOSE instead is not a free pass."""
         for snippet, expected in [
             ("os.path.islink(p)", "os.path.islink"),
             ("os.path.lexists(p)", "os.path.lexists"),
@@ -393,29 +636,225 @@ class TestTheGateItself:
             ("p.is_symlink()", "is_symlink"),
             ("p.is_socket()", "is_socket"),
             ("p.is_mount()", "is_mount"),
+            ("p.is_junction()", "is_junction"),
         ]:
-            source = f"def _f(p):\n    return {snippet}\n"
+            source = f"import os\ndef _f(p):\n    return {snippet}\n"
             hits = _named_primitive_hits(source)
-            assert any(prim == expected for _fn, prim in hits), (snippet, hits)
+            assert any(prim == expected for _fn, prim, _text in hits), (snippet, hits)
 
     def test_a_zero_arg_pathlib_call_on_an_unrelated_receiver_is_still_flagged(self):
         """Deliberately over-broad, per the module docstring: this repo has no
         occurrence today, but a genuine collision costs a declared row, not a
         blind spot."""
         source = "def _f(thing):\n    return thing.exists()\n"
-        assert _named_primitive_hits(source) == [("_f", "exists")]
+        assert _named_primitive_hits(source) == [("_f", "exists", "thing.exists()")]
 
     def test_the_gate_actually_reads_files(self):
-        """Oracle item 5: a gate reading an empty file list passes vacuously."""
+        """A gate reading an empty file list passes vacuously."""
         files = _db_source_files()
         assert files, "the file sweep found nothing -- this gate cannot look"
         rel, path = files[0]
         assert rel == "db.py"
         assert path.read_text(encoding="utf-8"), f"{path} read as empty"
 
+    def test_the_gate_reads_the_db_py_it_claims_to(self):
+        """The trap this direction has already stood on: the file is resolved
+        through `codebugs.db.__file__`, so a probe run against a COPY of the
+        tree without entering it measures the ORIGINAL checkout and every
+        number it reports is about the wrong file. Assert the identity rather
+        than assume it, so a mis-rooted run is loud instead of quietly
+        reassuring."""
+        _rel, path = _db_source_files()[0]
+        assert path.resolve() == pathlib.Path(codebugs.db.__file__).resolve()
+        assert path.name == "db.py" and path.parent.name == "codebugs"
+
+
+class TestKeyedOnTheCapabilityNotTheSpelling:
+    """CB-227 oracle item 3: six mutants that the text-matching gate passed.
+
+    Each is a measured escape of the predecessor, not a hypothetical. The
+    seventh case here is the one that made the whole rewrite necessary -- a
+    DECLARED_EXCEPTIONS row licensing a second, decisive call in the same
+    function -- and it is checked against the live table rather than a mutant.
+    """
+
+    def test_a_declared_row_does_not_license_a_second_call_in_the_same_function(self):
+        """THE escape that made the key change. `init_project` is licensed for
+        one INFORMATIONAL `os.path.exists(path)`; restoring the DECISIVE read
+        CB-224 removed from the same function must not inherit that licence."""
+        mutant = (
+            "import os\n"
+            "def init_project(root):\n"
+            "    if not os.path.isdir(root):\n"
+            "        raise ValueError('no such directory')\n"
+            "    created = not os.path.exists(path)\n"
+        )
+        hits = _named_primitive_hits(mutant)
+        licensed = [k for k in hits if k in DECLARED_EXCEPTIONS]
+        undeclared = [k for k in hits if k not in DECLARED_EXCEPTIONS]
+        assert ("init_project", "os.path.exists", "os.path.exists(path)") in licensed
+        assert ("init_project", "os.path.isdir", "os.path.isdir(root)") in undeclared
+
+    def test_a_from_import_of_the_primitive_is_resolved(self):
+        mutant = "from os.path import isdir\ndef _f(p):\n    return isdir(p)\n"
+        assert any(prim == "os.path.isdir" for _fn, prim, _t in _named_primitive_hits(mutant))
+
+    def test_a_renamed_module_import_is_resolved(self):
+        mutant = "import os.path as osp\ndef _f(p):\n    return osp.isdir(p)\n"
+        assert any(prim == "os.path.isdir" for _fn, prim, _t in _named_primitive_hits(mutant))
+
+    def test_importing_the_submodule_by_name_is_resolved(self):
+        mutant = "from os import path\ndef _f(p):\n    return path.isdir(p)\n"
+        assert any(prim == "os.path.isdir" for _fn, prim, _t in _named_primitive_hits(mutant))
+
+    def test_the_ioerror_alias_still_reads_as_swallowing_a_stat(self):
+        mutant = (
+            "def _f(p):\n"
+            "    try:\n"
+            "        os.stat(p)\n"
+            "        return True\n"
+            "    except IOError:\n"
+            "        return False\n"
+        )
+        assert any(fn == "_f" for fn, _p, _t in _swallow_hits(mutant))
+
+    def test_a_bare_except_still_reads_as_swallowing_a_stat(self):
+        mutant = (
+            "def _f(p):\n"
+            "    try:\n"
+            "        os.stat(p)\n"
+            "        return True\n"
+            "    except:\n"
+            "        return False\n"
+        )
+        assert any(fn == "_f" for fn, _p, _t in _swallow_hits(mutant))
+
+    def test_the_other_stdlib_spellings_of_oserror_are_covered_without_a_list(self):
+        """`EnvironmentError`, `os.error` and the concrete errno subclasses --
+        none of which appears as a literal anywhere in this file, because the
+        answer is computed from the class hierarchy."""
+        for clause in ("EnvironmentError", "os.error", "PermissionError", "Exception"):
+            mutant = (
+                "import os\n"
+                "def _f(p):\n"
+                "    try:\n"
+                "        os.stat(p)\n"
+                "        return True\n"
+                f"    except {clause}:\n"
+                "        return False\n"
+            )
+            assert any(fn == "_f" for fn, _p, _t in _swallow_hits(mutant)), clause
+
+    def test_an_unrelated_exception_class_is_not_read_as_swallowing_a_stat(self):
+        """The other direction, and the reason the check is computed rather
+        than a widened list: `ValueError` and this module's own exception
+        classes cannot catch what a stat raises, so flagging them would be a
+        false refusal."""
+        for clause in ("ValueError", "KeyError"):
+            mutant = (
+                "def _f(p):\n"
+                "    try:\n"
+                "        os.stat(p)\n"
+                "        return True\n"
+                f"    except {clause}:\n"
+                "        return False\n"
+            )
+            assert _swallow_hits(mutant) == [], clause
+        local = (
+            "class DatabaseNotFoundError(Exception):\n"
+            "    pass\n"
+            "def _f(p):\n"
+            "    try:\n"
+            "        os.stat(p)\n"
+            "        return True\n"
+            "    except DatabaseNotFoundError:\n"
+            "        return False\n"
+        )
+        assert _swallow_hits(local) == []
+
+    def test_an_except_star_group_is_not_a_free_pass(self):
+        """`except*` is a different AST node; a gate reading only `ast.Try`
+        would see nothing at all here."""
+        mutant = (
+            "def _f(p):\n"
+            "    try:\n"
+            "        os.stat(p)\n"
+            "        return True\n"
+            "    except* OSError:\n"
+            "        return False\n"
+        )
+        assert any(fn == "_f" for fn, _p, _t in _swallow_hits(mutant))
+
+    def test_an_exception_name_rebound_to_oserror_is_resolved(self):
+        mutant = (
+            "E = OSError\n"
+            "def _f(p):\n"
+            "    try:\n"
+            "        os.stat(p)\n"
+            "        return True\n"
+            "    except E:\n"
+            "        return False\n"
+        )
+        assert any(fn == "_f" for fn, _p, _t in _swallow_hits(mutant))
+
+    def test_a_primitive_bound_to_a_plain_name_is_resolved(self):
+        """Name resolution reaches this; VALUE tracking would be needed for a
+        conditional or container-held binding, which is named in the docstring
+        as out of reach rather than claimed."""
+        mutant = "import os\n_probe = os.path.isdir\ndef _f(p):\n    return _probe(p)\n"
+        assert any(prim == "os.path.isdir" for _fn, prim, _t in _named_primitive_hits(mutant))
+
+    def test_the_same_function_under_another_module_name_is_resolved(self):
+        """`os.path.isdir is posixpath.isdir` -- not an alias to be listed, the
+        same object. Object identity is what makes this free."""
+        for mutant in (
+            "import posixpath\ndef _f(p):\n    return posixpath.isdir(p)\n",
+            "import genericpath\ndef _f(p):\n    return genericpath.exists(p)\n",
+        ):
+            hits = _named_primitive_hits(mutant)
+            assert hits, mutant
+            assert all(prim.startswith("os.path.") for _fn, prim, _t in hits), mutant
+
+
+class TestPremises:
+    """The two facts the resolver rests on, pinned so an interpreter change
+    turns the suite red instead of quietly disarming a layer."""
+
+    def test_premise_os_path_is_the_same_object_as_the_platform_module(self):
+        assert os.path.isdir is sys.modules[os.path.__name__].isdir
+        assert os.path.exists is sys.modules["genericpath"].exists
+
+    def test_premise_the_stdlib_oserror_aliases_are_one_class(self):
+        assert OSError is builtins.IOError is builtins.EnvironmentError
+        assert _class_overlaps_oserror(builtins.IOError)
+        assert _class_overlaps_oserror(PermissionError)
+        assert _class_overlaps_oserror(Exception)
+        assert not _class_overlaps_oserror(ValueError)
+
+    def test_a_new_pathlib_predicate_in_a_future_python_is_not_a_free_pass(self):
+        """The ratchet that keeps layer 2 from being a list somebody forgets.
+
+        Every predicate-shaped name on `pathlib.Path` in the RUNNING
+        interpreter is either flagged or declared pure with a reason. This is
+        how `is_junction` (new in 3.12) was found missing from the set CB-224
+        wrote, rather than argued about. The pure set is deliberately NOT
+        checked for staleness: it is an exclusion list, and an exclusion for a
+        method that no longer exists can hide nothing -- unlike a stale row in
+        DECLARED_EXCEPTIONS, which is a standing permission.
+        """
+        shaped = {n for n in dir(pathlib.Path) if n.startswith("is_") or n == "exists"}
+        unclassified = shaped - _PATHLIB_PREDICATE_METHODS - set(_PATHLIB_PURE_PREDICATES)
+        assert not unclassified, (
+            f"pathlib.Path predicate(s) this gate has never classified: "
+            f"{sorted(unclassified)} (running Python {sys.version.split()[0]}). "
+            "Add each to _PATHLIB_PREDICATE_METHODS if it stats the filesystem "
+            "and swallows the failure, or to _PATHLIB_PURE_PREDICATES with the "
+            "reason it cannot."
+        )
+
 
 class TestDeclaredExceptionsCannotRot:
-    """Oracle items 3 and 4: the table may only shrink."""
+    """The table may only shrink, and one row may only cover one call."""
 
     def test_every_row_carries_a_reason(self):
         empty = [key for key, reason in DECLARED_EXCEPTIONS.items() if not reason.strip()]
@@ -425,12 +864,32 @@ class TestDeclaredExceptionsCannotRot:
         )
 
     def test_no_row_is_stale(self):
-        live: set[tuple[str, str]] = set()
+        live: set[Key] = set()
         for _rel, path in _db_source_files():
             live.update(_all_hits(path.read_text(encoding="utf-8")))
         stale = [key for key in DECLARED_EXCEPTIONS if key not in live]
         assert not stale, (
             f"stale DECLARED_EXCEPTIONS row(s): {stale} -- the call is gone "
-            "(fixed, or removed), so delete the row rather than leaving a "
-            "standing permission behind"
+            "(fixed, removed, or rewritten), so delete the row rather than "
+            "leaving a standing permission behind"
+        )
+
+    def test_no_row_licenses_more_than_one_call(self):
+        """A row is a licence for ONE call. The key distinguishes calls by
+        function, primitive and call text -- but two textually identical calls
+        of one primitive could still sit in one function, and there the key
+        cannot tell them apart. That state is REFUSED rather than quietly
+        double-licensed: the whole point of CB-227's re-key is that a licence
+        granted for a harmless read must never cover a decisive one.
+        """
+        counts: dict[Key, int] = {}
+        for _rel, path in _db_source_files():
+            for key in _all_hits(path.read_text(encoding="utf-8")):
+                counts[key] = counts.get(key, 0) + 1
+        doubled = [key for key in DECLARED_EXCEPTIONS if counts.get(key, 0) > 1]
+        assert not doubled, (
+            f"DECLARED_EXCEPTIONS row(s) matching more than one call: {doubled}. "
+            "One row licenses one call. Distinguish the two calls (rename a "
+            "variable, or move one into its own function), or fix them both -- "
+            "do not let one reason stand for two decisions."
         )

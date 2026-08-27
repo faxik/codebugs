@@ -1017,37 +1017,49 @@ def _worktree_main_root(git_file: Path) -> tuple[str | None, tuple[str, str] | N
     return str(common_git.parent), None
 
 
-def _enclosing_worktree_root(start: str) -> str | None:
-    """Return the root of the linked worktree containing `start`, if any.
+def _enclosing_worktree_root(start: str) -> tuple[str | None, tuple[str, str] | None]:
+    """The root of the linked worktree containing `start`, and what it could not see.
 
     Walks up on the same rules as `_walk_db_root` so the two agree on where a
     repository begins: a `.git` DIRECTORY is a normal checkout and ends the
     search, a `.git` FILE is a worktree only if it carries a `commondir`.
 
-    The probe is `_path_state` for CB-218's reason, and BEHAVIOUR HERE IS
-    UNCHANGED — said plainly rather than implied, because a claim of coverage
-    that no test can discriminate is the shape this direction exists to close.
-    `is_dir()` and `is_file()` both answer False on a path that could not be
-    looked at, and both also answer False when the answer is a genuine
-    *something else*; either way this loop walks on. `_path_state` folds the two
-    stats into one and makes the undetermined case NAMED rather than inferred,
-    so the next reader cannot restore a two-valued read by accident. It records
-    nothing: this function only chooses which of two refusal sentences
-    `_resolve_db` prints, and it is reached only when `_walk_db_root` already
-    returned None — having walked the same prefix under the same rules, and
-    having already recorded every undetermined `.git` on it.
+    Returns `(root, unexamined)` in the same shape as `_linked_worktree_gitdir`
+    and `_worktree_main_root`, and it did NOT used to — it answered `str | None`
+    and dropped the third value on the floor. THAT DROP IS WHAT MADE THE
+    RATIFIED `init` REFUSAL A GATE THAT COULD NOT FIRE (CB-227). This function
+    has two callers, not one, and its docstring used to claim otherwise
+    ("it records nothing: this function only chooses which of two refusal
+    sentences `_resolve_db` prints"). The second caller is `init_project`, where
+    it does not choose a sentence — it decides whether a REFUSAL HAPPENS AT ALL.
+    The two states are one unread byte apart and were measured side by side:
+    with an unreadable `commondir` the worktree is still recognised and `init`
+    correctly refuses to create a tracker that git would delete with the
+    worktree; with an unreadable `.git` FILE the identical `init` created one
+    inside the worktree, silently, at exit 0. Same policy, same guard, one
+    swallowed read. Handing the caller the third value lets the refusal it
+    already has fire — it decides no policy, and `--force` remains the escape it
+    always was.
+
+    STILL RECORD-AND-CONTINUE, DELIBERATELY, on a `.git` whose PATH could not be
+    examined at all (`kind is None`): that is CB-218's own door, and CB-218
+    ratified walking on rather than stopping there, because one unexaminable
+    ancestor between a caller and their real repository must not become a
+    refusal to work. Named here so it is not mistaken for covered.
     """
     cur = Path(start).resolve()
     while True:
         git = cur / DOT_GIT
         kind, _detail = _path_state(str(git))
         if kind == PATH_DIR:
-            return None
+            return None, None
         if kind == PATH_FILE:
-            gitdir, _unexamined = _linked_worktree_gitdir(git)
-            return str(cur) if gitdir is not None else None
+            gitdir, unexamined_entry = _linked_worktree_gitdir(git)
+            if gitdir is not None:
+                return str(cur), None
+            return None, unexamined_entry
         if cur.parent == cur:
-            return None
+            return None, None
         cur = cur.parent
 
 
@@ -1565,7 +1577,10 @@ def _resolve_db(project_dir: str | None = None) -> tuple[str, bool, Unexamined]:
         caveat = _unexamined_caveat(unexamined)
         # `is not None`, not truthiness: this module's own rule, and the reason
         # `exists` and `writable` are compared the same way two functions down.
-        worktree = _enclosing_worktree_root(cwd)
+        # The second element is discarded here and NOT in `init_project`: this
+        # caller only picks a sentence, and the walk above met the same `.git`
+        # first and has already recorded the same entry into `caveat`.
+        worktree, _worktree_unexamined = _enclosing_worktree_root(cwd)
         if worktree is not None:
             # Never advise `init` here: it would create a tracker that dies
             # with the worktree. Name the main checkout when we can find it.
@@ -1959,7 +1974,22 @@ def init_project(project_dir: str | None = None, *, force: bool = False) -> dict
         # The check above cannot catch a worktree whose main checkout has no
         # tracker yet: discovery returns None, so nothing looks shadowed. The
         # tracker would still be created inside the worktree and die with it.
-        worktree = _enclosing_worktree_root(root)
+        worktree, worktree_unexamined = _enclosing_worktree_root(root)
+        if worktree is None and worktree_unexamined is not None:
+            # CB-227: this refusal is not a new policy — it is the one three
+            # lines below, reached in the state where the question could not be
+            # answered. Before this, an unreadable `.git` FILE made the probe
+            # say "confirmed: not a worktree", so `init` created a tracker
+            # inside a linked worktree, at exit 0, with no word said; git then
+            # deletes it with the worktree and every finding in it. Fail closed
+            # and keep the escape hatch the determined refusal already offers.
+            unexaminable, why = worktree_unexamined
+            raise WorktreeTrackerError(
+                f"cannot tell whether {root} is inside a git worktree: {unexaminable} — "
+                f"{why}. A tracker created inside a worktree is deleted along with it, "
+                f"taking its findings with it. Fix the path or its permissions, or pass "
+                f"--force to create one here anyway"
+            )
         if worktree is not None:
             main, _unexamined = _worktree_main_root(Path(worktree) / DOT_GIT)
             where = f" Run it in the main checkout ({main}) instead." if main else ""
