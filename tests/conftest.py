@@ -79,6 +79,24 @@ def _hermeticity_refusal(basetemp: str, foreign_root: str) -> str:
     it is read in irritation and length is itself a cost, and a reader who has
     been handed a whole safe form to copy never reaches the case.
 
+    THE `--basetemp` LINE CLAIMED TO "DO THE SAME JOB" AS `TMPDIR=`, AND THAT
+    WAS FALSE ON THE STATE THIS MESSAGE IS SHOWN FOR (CB-225). Copying it
+    verbatim runs plain `mktemp -d`, which resolves against `$TMPDIR` (or
+    `/tmp` when that is unset) — exactly the root a contaminated ancestor
+    sits ABOVE when this refusal fires from an ordinary, no-flags invocation.
+    So the "fresh throwaway path" it names is still a descendant of the same
+    tracker this message is refusing over, and the walk finds it again.
+    Built by hand and measured, not assumed (brief §4, П3): with a
+    `.codebugs/` planted above `$TMPDIR`, the plain run refuses at
+    `pytest.ExitCode.USAGE_ERROR` (4); copying
+    `pytest tests/ --basetemp="$(mktemp -d)"` verbatim, `$TMPDIR` left as it
+    was, refuses AGAIN at the SAME code — not a different message, the
+    identical one — while pointing `TMPDIR` itself at a genuinely different
+    place (the first way out below) exits 0. The message says this rather
+    than repeating the false claim, because the reader is in exactly the
+    worst position to notice the difference themselves: they followed the
+    instructions and got the identical refusal back.
+
     THE EXPECTED ANSWER OF THE EMPTINESS CHECK IS SPELLED OUT, because the
     check answers correctly and LOOKS like a mistake. Measured the same day:
     `codebugs --tracker-root <dir> stats` over a `.codebugs/` holding no
@@ -112,10 +130,16 @@ def _hermeticity_refusal(basetemp: str, foreign_root: str) -> str:
         "    on a directory that already holds things — pytest only ADDS its own\n"
         "    `pytest-of-<user>/` subtree under the path you name:\n"
         "        TMPDIR=/some/other/place pytest tests/\n"
-        "    `--basetemp` does the same job and is NOT safe that way: pytest\n"
-        "    DELETES the directory you name, recursively and without asking,\n"
-        "    before the run starts. Point it only at a fresh throwaway path:\n"
+        "    `--basetemp` DELETES the directory you name, recursively and\n"
+        "    without asking, before the run starts — point it only at a fresh\n"
+        "    throwaway path, never at one that already holds anything:\n"
         '        pytest tests/ --basetemp="$(mktemp -d)"\n'
+        "    This escapes the tracker above ONLY WHEN `$TMPDIR` (or `/tmp`\n"
+        "    when it is unset) is not itself under it — plain `mktemp -d`\n"
+        "    resolves against that same variable, so copying this line\n"
+        "    verbatim can refuse AGAIN, at the SAME exit code, when the\n"
+        "    tracker sits at or above the default temp root. If that\n"
+        "    happens, the `TMPDIR=` form above is the one that works.\n"
         "\n"
         f"  * If {foreign_root}/.codebugs is litter — an empty directory some\n"
         "    tool left behind — delete it. Ask what it holds first:\n"
@@ -236,7 +260,7 @@ def _is_pruned(rel_dir: str, name: str) -> bool:
     return os.path.normpath(os.path.join(rel_dir, name)) in _PRUNED_PATHS
 
 
-def _tree_fingerprint(root=None) -> dict:
+def _tree_fingerprint(root=None, *, unexamined: list | None = None) -> dict:
     """Map every file in the tree to (size, mtime_ns), or to why it could not be read.
 
     THE DISCRIMINATOR IS THE FILES, NOT THE NAME OF A COMMIT, and each half of
@@ -250,13 +274,65 @@ def _tree_fingerprint(root=None) -> dict:
 
     Errors are per-file and never raise: a file that became unreadable between
     the two samples is a CHANGE and is reported as one, rather than taking the
-    run's summary down with it. Two boundaries, named rather than left to be
-    discovered: a symlink is stat'd without following it, and a symlinked
-    DIRECTORY is not descended into, so nothing inside one is fingerprinted.
+    run's summary down with it.
+
+    `unexamined` (optional; CB-226) collects every DIRECTORY this walk could
+    not LIST at all — permission denied, or anything else `os.walk`'s own
+    default behaviour silently swallows. Before this, such a directory was
+    invisible at BOTH ends of a run: it is absent from the fingerprint taken
+    before and the one taken after, so the diff between two identical
+    absences is empty and the alarm stayed silent over a subtree it never
+    looked at — built and measured by hand (brief §4, П1): a directory
+    `chmod 0300` before the first sample, a file inside it rewritten to a
+    different length while the run was "in progress", `chmod` left unchanged
+    for the second sample, and the diff between the two samples came back
+    empty. This repository already has a name for that shape — "a guard
+    reporting clean because it could not look" (CB-203/CB-218) — landing here
+    in a new place. AN UNLISTABLE DIRECTORY RECORDS AND THE WALK CONTINUES,
+    THE FORM TAKEN FROM `db._walk_db_root` RATHER THAN REINVENTED (CB-218,
+    CB-224; brief §4, П4): record `(path, reason)` and keep walking, because
+    one unreadable directory must not cancel the whole alarm, and continuing
+    is the only way the rest of the tree still gets checked. `db`'s own walk
+    helper is private and answers a different question (which `.codebugs/` to
+    bind to, not which file changed), so this is a three-line duplicate of
+    the SHAPE rather than a call into it — the alternative, reaching into
+    `db._walk_db_root`'s internals for an unrelated string-formatting detail,
+    is the worse coupling.
+
+    Four boundaries are named now, not three: a symlink is stat'd without
+    being followed; a symlinked DIRECTORY is not descended into, so nothing
+    inside one is fingerprinted; an unreadable FILE is recorded as a changed
+    entry (`"unreadable (...)"`); and an unreadable DIRECTORY — the boundary
+    this docstring used to leave unnamed — is recorded in `unexamined`
+    instead of vanishing from both snapshots at once.
+
+    STILL NOT COVERED, NAMED RATHER THAN LEFT TO BE REDISCOVERED (brief §5):
+    a dangling symlink and a directory symlink were both tried by hand against
+    this function and neither blinds it — `os.lstat` reports the link itself
+    without raising, and a symlinked directory is already excluded from
+    descent by the boundary above, not silently missed. An undecodable name
+    was also tried (a byte sequence that is not valid UTF-8) and does not
+    blind it either: POSIX `os.walk` round-trips such names through
+    `surrogateescape`, so `os.lstat` still succeeds on them. What is NOT
+    tried, and is left as a named gap rather than a silent one: a path at or
+    past the operating system's length limit for a component that is a
+    DIRECTORY (as opposed to a file, which the per-file `except OSError`
+    above already turns into a "changed" entry) — reaching it would need a
+    filesystem that permits creating such a path in the first place, which
+    was not available to build this state against.
     """
     root = str(root or REPO_ROOT)
     seen: dict = {}
-    for dirpath, dirnames, filenames in os.walk(root):
+
+    def _on_walk_error(exc: OSError) -> None:
+        if unexamined is None:
+            return
+        where = exc.filename or root
+        rel = os.path.normpath(os.path.relpath(where, root))
+        reason = getattr(exc, "strerror", None) or str(exc) or type(exc).__name__
+        unexamined.append((rel, f"could not be listed ({reason})"))
+
+    for dirpath, dirnames, filenames in os.walk(root, onerror=_on_walk_error):
         rel_dir = os.path.relpath(dirpath, root)
         dirnames[:] = [name for name in dirnames if not _is_pruned(rel_dir, name)]
         for name in filenames:
@@ -307,10 +383,23 @@ def _tree_difference(before: dict, after: dict) -> list[tuple[str, str]]:
     return changes
 
 
+def _top_level_directory(path: str) -> str | None:
+    """The first path segment, or `None` for a file sitting directly at the root.
+
+    A root-level file is not a DIRECTORY that could disappear whole from the
+    truncation tail (CB-226 is about a nested path losing its entire first
+    segment), so it is left out of the per-directory breakdown below rather
+    than counted as a directory of one.
+    """
+    head, sep, _tail = path.partition(os.sep)
+    return head if sep else None
+
+
 def _tree_moved_report(
     changes: list[tuple[str, str]],
     head_before: str | None,
     head_after: str | None,
+    unexamined: tuple[tuple[str, str], ...] = (),
     limit: int = _TREE_MOVED_LIMIT,
 ) -> str:
     """The whole alarm, as one string, so a test can read it back.
@@ -321,13 +410,31 @@ def _tree_moved_report(
     `src/` goes and re-runs. Only that reader knows which test went red, so only
     that reader can weigh the list — a rule guessing on their behalf would be
     wrong in the one case that mattered.
+
+    THE TRUNCATION TAIL NAMES EVERY TOP-LEVEL DIRECTORY WITH A CHANGE, WITH A
+    COUNT — NOT JUST "... and N more" (CB-226). The old tail let the alphabet
+    decide what survives it: built by hand (brief §4, П2), 26 changes — 25
+    under `.claude/plans`, one under `src/` — sorted alphabetically put every
+    `.claude/plans` entry ahead of the `src/` one (the dot sorts below the
+    letters), so the top-20 cut and the "... and 6 more" line between them
+    dropped the `src/` path with no trace anywhere in the report. That is the
+    same "guard reporting clean" shape CB-226's other half fixes, reached
+    through a limit and an alphabet instead of a permission bit, and it is the
+    more harmful of the two: brief §1 for why. The limit and the alphabetical
+    order are UNCHANGED — only the tail is — and the breakdown covers every
+    top-level directory with a change regardless of whether some of its paths
+    already appear above the cut, so a directory's disappearance from the
+    report is unrepresentable BY CONSTRUCTION rather than merely less likely.
+    It still does not say which directory MATTERS — that would smuggle
+    judgement back in through a new door, against `_PRUNED_NAMES`'s own rule.
     """
     lines = [
         "",
         f"codebugs test suite: {_TREE_MOVED_ANCHOR}.",
         "",
-        f"  {len(changes)} path(s) differ between the start of this run and now.",
     ]
+    if changes:
+        lines.append(f"  {len(changes)} path(s) differ between the start of this run and now.")
     if head_before is not None or head_after is not None:
         lines.append(
             f"  HEAD at the start: {head_before or 'unknown'}     HEAD now: {head_after or 'unknown'}"
@@ -337,6 +444,27 @@ def _tree_moved_report(
         lines.append(f"    {verb:<9}{path}")
     if len(changes) > limit:
         lines.append(f"    ... and {len(changes) - limit} more")
+        counts: dict[str, int] = {}
+        for _verb, path in changes:
+            top = _top_level_directory(path)
+            if top is not None:
+                counts[top] = counts.get(top, 0) + 1
+        if counts:
+            lines.append("")
+            lines.append(
+                "  Every top-level directory with a change, so a truncated list can"
+            )
+            lines.append("  never make one disappear from this report entirely:")
+            for top in sorted(counts):
+                lines.append(f"    {top} ({counts[top]})")
+    if unexamined:
+        lines.append("")
+        noun = "directory" if len(unexamined) == 1 else "directories"
+        lines.append(f"  {len(unexamined)} {noun} could not be LISTED at all during this run,")
+        lines.append("  and a change inside one would not show up as a path above — this")
+        lines.append("  run cannot rule that out:")
+        for path, why in unexamined:
+            lines.append(f"    {path} — {why}")
     lines.extend(
         [
             "",
@@ -365,8 +493,15 @@ def _fingerprint_the_tree_at_the_start_of_the_run(request):
     defined here — a gate that cannot fire under a perfectly ordinary command.
     A session fixture runs whatever the invocation looks like, and the window it
     covers is exactly the window that matters: from the first test to the last.
+
+    The `unexamined` list (CB-226) is sampled here too, on the same fingerprint
+    call, for the same reason the fingerprint itself is: whatever this run could
+    not list at the START must be compared against whatever it could not list
+    at the END, exactly like every other entry in the tree.
     """
-    request.config.stash[_TREE_AT_START] = (_tree_fingerprint(), _head_signature())
+    unexamined: list = []
+    seen = _tree_fingerprint(unexamined=unexamined)
+    request.config.stash[_TREE_AT_START] = (seen, _head_signature(), tuple(unexamined))
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
@@ -379,13 +514,34 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     The channel is the terminal summary rather than a line at startup for the
     same reason: the reader needs it standing next to the red it explains, not
     scrolled off the top of a ninety-second run.
+
+    STILL SILENT ONLY WHEN NOTHING CHANGED AND NOTHING WAS BLIND (CB-226). A
+    directory that could not be listed at either end of the run is not, on its
+    own, "the tree moved" — it might not have — but it is also not "the tree
+    is still", because this run never looked. Built and measured by hand
+    (brief §4, П1): before this, that exact state fell through the `if not
+    changes: return` below and the run reported nothing, indistinguishable
+    from a genuinely still tree.
     """
     taken = config.stash.get(_TREE_AT_START, None)
     if taken is None:
         return
-    before, head_before = taken
-    changes = _tree_difference(before, _tree_fingerprint())
-    if not changes:
+    before, head_before, unexamined_before = taken
+    unexamined_after: list = []
+    after = _tree_fingerprint(unexamined=unexamined_after)
+    changes = _tree_difference(before, after)
+    # A directory blind for the WHOLE run appears in both samples; report it
+    # once, by the first path it was seen at, rather than doubling every
+    # persistent blind spot into a count that overstates how much is unseen.
+    seen_unexamined_paths: set = set()
+    unexamined: list = []
+    for entry in (*unexamined_before, *unexamined_after):
+        if entry[0] not in seen_unexamined_paths:
+            seen_unexamined_paths.add(entry[0])
+            unexamined.append(entry)
+    unexamined = tuple(unexamined)
+    if not changes and not unexamined:
         return
-    for line in _tree_moved_report(changes, head_before, _head_signature()).splitlines():
+    report = _tree_moved_report(changes, head_before, _head_signature(), unexamined)
+    for line in report.splitlines():
         terminalreporter.write_line(line)
