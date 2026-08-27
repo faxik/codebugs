@@ -3487,15 +3487,24 @@ def recent_findings(
 
     WHAT THIS MEASURES. ``updated_at`` is the time of the last WRITE to the row,
     not the moment the finding was closed — there is no close timestamp anywhere
-    in the schema. A status change moves it, and so do a re-tag, a meta patch, a
-    severity re-triage, an ``append_note``, and a DEDUPLICATED OBSERVATION (a
-    repeat report bumps the occurrence count and stamps ``updated_at`` while the
-    status stays exactly where it was).
+    in the schema. A status change moves it, and so do a re-tag, an AUTHORED meta
+    patch, a severity re-triage, an ``append_note``, and a DEDUPLICATED
+    OBSERVATION (a repeat report bumps the occurrence count and stamps
+    ``updated_at`` while the status stays exactly where it was).
+
+    ``AUTHORED`` is doing work in that sentence since CB-230. A SERVICE write —
+    ``update_finding(..., authored=False)``, whose one caller is the anchor
+    refresh in ``loc.py`` — writes ``meta`` and deliberately does NOT stamp, so a
+    housekeeping pass over the whole tracker no longer floods this reader with
+    every card it touched. Before that flag existed, one such pass on 2026-08-24
+    made 136 of this tracker's 233 cards answer ``recent`` for that day.
 
     So ``recent_findings(since=…, status="fixed")`` means *cards that are fixed
     NOW and were touched since that date*, not *cards closed since that date*.
     The error is ONE-SIDED: false positives are possible, misses are not, because
-    closing a card always writes ``updated_at``.
+    closing a card always writes ``updated_at`` — and that half is now GUARANTEED
+    rather than merely true, because ``authored=False`` is refused outright when
+    combined with ``status=``, so no writer can close a card without stamping it.
 
     ``since`` is inclusive (``>=``). With a date-granular bound the exclusive
     form would silently drop the whole first day, and a net-delta count built on
@@ -4733,14 +4742,20 @@ def register_tools(mcp, conn_factory) -> None:
         WHAT THIS MEASURES: `updated_at`, the time of the LAST WRITE to the row,
         and not the moment the finding was closed. There is no close timestamp
         anywhere in the schema. A status change moves `updated_at`, and so do a
-        re-tag, a meta patch, a severity re-triage, an `append_note`, and a
-        DEDUPLICATED OBSERVATION — a repeat report bumps the occurrence count and
-        stamps `updated_at` while the status stays exactly where it was.
+        re-tag, an AUTHORED meta patch, a severity re-triage, an `append_note`,
+        and a DEDUPLICATED OBSERVATION — a repeat report bumps the occurrence
+        count and stamps `updated_at` while the status stays exactly where it was.
+
+        AUTHORED is doing work in that sentence since CB-230: the tracker's own
+        housekeeping (refreshing a card's code anchor) writes `meta` WITHOUT
+        stamping, so a maintenance pass no longer floods this reader with every
+        card it touched.
 
         So `recent(since=..., status="fixed")` means "cards that are fixed NOW and
         were touched since that date", NOT "cards closed since that date". The
         error is ONE-SIDED: false positives are possible, misses are not, because
-        closing a card always writes `updated_at`.
+        closing a card always writes `updated_at` — guaranteed rather than merely
+        true, since housekeeping is refused outright when it carries a status.
 
         Rows come back newest touch first, with `rowid` breaking the whole-second
         ties `updated_at` produces, so a paged walk is stable.
@@ -5773,15 +5788,19 @@ def register_cli(sub, commands) -> None:
             "\n"
             "WHAT THIS MEASURES: updated_at, the time of the LAST WRITE to the row, and\n"
             "not the moment the finding was closed. There is no close timestamp anywhere\n"
-            "in the schema. A status change moves updated_at, and so do a re-tag, a meta\n"
-            "patch, a severity re-triage, an append_note, and a DEDUPLICATED OBSERVATION\n"
-            "— a repeat report bumps the occurrence count and stamps updated_at while the\n"
-            "status stays exactly where it was.\n"
+            "in the schema. A status change moves updated_at, and so do a re-tag, an\n"
+            "AUTHORED meta patch, a severity re-triage, an append_note, and a DEDUPLICATED\n"
+            "OBSERVATION — a repeat report bumps the occurrence count and stamps\n"
+            "updated_at while the status stays exactly where it was. AUTHORED is doing\n"
+            "work there since CB-230: the tracker's own housekeeping (refreshing a card's\n"
+            "code anchor) writes meta WITHOUT stamping, so a maintenance pass no longer\n"
+            "floods this reader with every card it touched.\n"
             "\n"
             "So `recent --since DATE --status fixed` means \"cards that are fixed NOW and\n"
             "were touched since that date\", NOT \"cards closed since that date\". The error\n"
             "is ONE-SIDED: false positives are possible, misses are not, because closing a\n"
-            "card always writes updated_at.\n"
+            "card always writes updated_at — guaranteed rather than merely true, since\n"
+            "housekeeping is refused outright when it carries a status.\n"
             "\n"
             "Rows print newest touch first; whole-second ties break by rowid, so a paged\n"
             "walk is stable."
