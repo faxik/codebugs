@@ -33,12 +33,26 @@ name sets. It is blind to:
   gate will not notice — said plainly, because a promise wider than the check
   behind it is what CB-232 is about;
 - **flags and their behaviour** — `--append-note`, `--older-than 30d`,
-  `--new-category`, defaults, whether a declared flag exists at all, and
-  whether a flag that exists does what the surrounding sentence says. The one
-  exception is narrow and is about READING, not behaviour: an example whose
-  leading token is a flag this gate does not know is REFUSED rather than
-  skipped, because it cannot tell whether that flag swallows the next token
-  and therefore cannot tell which token is the verb;
+  `--new-category`, `--tracker-root`, defaults, whether a declared flag exists
+  at all, and whether a flag that exists does what the surrounding sentence
+  says. The one exception is narrow and is about READING, not behaviour: an
+  example whose leading token is a flag this gate does not know is REFUSED
+  rather than skipped, because it cannot tell whether that flag swallows the
+  next token and therefore cannot tell which token is the verb.
+
+  **`--tracker-root init` is the worked example of this limit, and it is worth
+  naming because it is one of the sentences CB-232 corrected.** README said
+  `init` ignores a declared root and creates where you stand; that is true of
+  `CODEBUGS_ROOT` and false of `--tracker-root DIR`, which creates in `DIR`
+  (CB-48). The BEHAVIOUR is gated, by a run, in
+  `tests/test_db_infra.py::TestInitUnderTheTrackerRootFlag` — which asserts on
+  every case which directory must NOT get a tracker. What is not gated is the
+  CORRESPONDENCE between that behaviour and the English sentence describing
+  it, and this gate is the wrong place to close that: it would have to parse a
+  paragraph into a claim about two channels before it could compare anything,
+  which is prose comprehension rather than a set comparison. Stated rather than
+  left as an omission, because a wrong sentence over a correct, well-tested
+  function is exactly the shape this file exists to be honest about;
 - **the accuracy of any example's OUTPUT** — the `categories` block, the
   `reqs-verify` block, the `milestone-status` block, the `anchor-resolve` block
   and the close-gate refusal are all reproduced from real runs, and nothing
