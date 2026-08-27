@@ -516,14 +516,16 @@ This is the view the category gate above protects. Had half those findings been 
 
 ```
 $ codebugs reqs-verify
-Verified 683 requirements.
+Verified 3 requirements.
 
-12 issue(s) found:
-check   sev       id      message
-tests   high      FR-350  Test file not found: test_entity_graph.py
-status  high      FR-090  Description mentions 'superseded' but status is 'Planned'
-status  medium    FR-006  Must-priority requirement implemented without test coverage
-ids     medium    --      Numbering gaps (5+): FR-025..FR-029, FR-316..FR-329
+4 issue(s) found:
+
+check   sev     id      message
+------  ------  ------  -----------------------------------------------------------
+ids     medium  --      Numbering gaps (5+): FR-007..FR-089, FR-091..FR-349
+status  medium  FR-006  Must-priority requirement implemented without test coverage
+status  high    FR-090  Description mentions 'superseded' but status is 'planned'
+status  medium  FR-350  Must-priority requirement implemented without test coverage
 ```
 
 ### Semantic requirements search
@@ -539,27 +541,32 @@ Float32 BLOB storage in SQLite; brute-force cosine similarity — fast for thous
 
 ### Close-gate enforcement
 
-`milestone_close("release/1.1")` won't let you ship a release with work stranded on a branch:
+`milestone_close` won't let you ship a release with work stranded on a branch. First, what the release looks like:
 
 ```
 $ codebugs milestone-status release/1.1
 release/1.1  (release, state=open)
-  target: 2026-06-15 (35 days)
+  target: 2026-09-15 (19 days)
+  First post-1.0 feature release. Target date set later.
 
-Items: 12 total (3 open/in_progress, 9 done)
-  Branch-only: CB-1234
-  Blocked: CB-1240
+Items: 3 total (3 open/in_progress, 0 done)
+
+  By status:
+    open              3
+  By size:
+    small             3
+
+  Branch-only: CB-1
+  Blocked: CB-2
 ```
 
-When you try to close it:
+Then closing it. **`milestone_close` is one of the milestone tools with no CLI verb** — this is the error the MCP tool returns, raised as a `ValueError` from the domain function, on a single line:
+
 ```
-ValueError: cannot close release/1.1: unfinished items (3): CB-1234, CB-1240, CB-1242;
-            branch-only items (1): CB-1234@feat/CB-1234;
-            items with active blockers (1): CB-1240
-            (use force=True with reason to override)
+cannot close release/1.1: unfinished items (3): CB-1, CB-2, CB-3; branch-only items (1): CB-1@feat/CB-1; items with active blockers (1): CB-2  (use force=True with reason to override)
 ```
 
-Streams (`stream/*`) refuse to close at all — they're permanent buckets.
+`force=True` with a logged reason overrides that. Streams do not have an override — `milestone_close(id="stream/triage", force=True, reason="x")` still refuses with `streams cannot be closed (milestone=stream/triage)`, because they are permanent buckets rather than things that ship.
 
 ## Requirements
 
@@ -571,14 +578,15 @@ Streams (`stream/*`) refuse to close at all — they're permanent buckets.
 
 ```bash
 # Run tests
-uv run python -m pytest tests/ -v
+uv run --extra dev python -m pytest tests/ -q
 
-# Lint
-uv run ruff check src/ tests/
-
-# Format
-uv run ruff format src/ tests/
+# Lint — this is the gate
+uv run --extra dev ruff check src/ tests/
 ```
+
+`pytest` and `ruff` live in the `dev` extra, which `uv run` does not install by default, so `--extra dev` is not optional in a fresh clone.
+
+**`ruff format` is deliberately not run over this tree.** Much of the existing code does not conform to it, so `ruff format src/ tests/` would rewrite most of the repository in one commit. `ruff check` is the gate; formatting is left alone on purpose.
 
 See [CLAUDE.md](CLAUDE.md) for architectural rules and conventions.
 
