@@ -5577,7 +5577,50 @@ class TestPostMergeAlarmIsNotAGate:
         """
         src = code_only(self.FINISH.read_text())
         assert "trap _alarm_speak EXIT" in src, "the alarm is not armed as an exit trap"
-        assert src.count("trap ") == 1, "a second trap could replace this one silently"
+
+        # THIS REPLACED A COUNT, AND IT IS STRICTLY STRONGER — said plainly
+        # because of what this edit IS: a change to a guard, made by the very
+        # change that guard obstructed (CB-176). That is the shape which gets
+        # waved through, so the case has to be on the page rather than in a
+        # commit message.
+        #
+        # The line was `src.count("trap ") == 1`, whose stated intent was "a
+        # second trap could replace this one silently". The landing-attempt
+        # journal needs a trap of its own, armed before the first guard,
+        # because every refusal that fires BEFORE the merge is otherwise
+        # unrecordable — and bash has exactly one EXIT trap, so the alarm's
+        # arming really does erase the journal's. What makes that legitimate is
+        # that it is not SILENT: `_alarm_speak` calls the journal itself on
+        # both of its paths, which test_the_alarm_hands_the_journal_its_own_
+        # outcome pins. Measured, with that call removed: the journal loses
+        # exactly the 0 and 15 rows and nothing else complains.
+        #
+        # A count was also weaker than it looked, in a way that has nothing to
+        # do with this change. It cannot say WHICH traps, so it could not tell
+        # a deliberate second one from a hostile one — and, measured, it passed
+        # on `: "trap _alarm_speak EXIT"`, a no-op command carrying the string,
+        # where the substring assertion above is satisfied and NO TRAP IS ARMED
+        # AT ALL. That is precisely the state the count existed to refuse, and
+        # it was green. An arming is a line that STARTS with `trap `, so that
+        # is what is collected here.
+        armings = [ln.strip() for ln in src.splitlines() if ln.strip().startswith("trap ")]
+        assert armings == ["trap _journal_record EXIT", "trap _alarm_speak EXIT"], (
+            f"the EXIT traps must be exactly the journal's, then the alarm's: {armings}"
+        )
+        # The journal's half of the ordering: armed before the FIRST guard, or
+        # every pre-merge refusal goes unrecorded — silently, and in the
+        # flattering direction. Anchored on the guard-invocation idiom rather
+        # than on a guard's NAME: the structural tests in this file search the
+        # raw source for a name plus a space, and naming one here would put a
+        # match above the real call site (measured — that is how two of them
+        # went red while this change was being written).
+        # The alarm's half — after the merge, before the unlock — belongs to
+        # test_the_alarm_reads_the_tip_then_its_parents_before_the_unlock and is
+        # deliberately NOT duplicated here.
+        assert src.index("trap _journal_record EXIT") < src.index("|| exit $?"), (
+            "the journal's trap is armed after a guard could already have refused"
+        )
+
         body = self._speak_body()
         assert "exit 15" in body, "the alarm no longer exits with its own code"
         # An EXIT trap runs on EVERY exit, so the silent branch must not carry
@@ -5599,6 +5642,33 @@ class TestPostMergeAlarmIsNotAGate:
         assert len(silent) >= 2, silent
         assert not [ln for ln in silent if "exit" in ln], (
             f"the silent branch exits, so every ordinary finish takes its code: {silent}"
+        )
+
+    def test_the_alarm_hands_the_journal_its_own_outcome(self) -> None:
+        """CB-176 — arming this trap REPLACES the journal's, so the alarm owes it a row.
+
+        bash has exactly one EXIT trap and a second erases the first (measured
+        on 5.3.9). The journal's trap is therefore gone from the moment the
+        merge returns, and every outcome from there on reaches the journal only
+        because this function calls it: the ordinary landing, whose status
+        arrives on the silent branch, and the alarm's own `exit 15`.
+
+        This is the half a COUNT of traps could never see, and it is why the
+        count was replaced rather than merely relaxed — the count would have
+        been equally green with the journal silently dropped on both paths.
+        Measured with these two calls removed: the journal loses exactly the 0
+        and the 15 rows, while every pre-merge refusal is still recorded, so
+        nothing else in the suite notices.
+
+        `15` and not the incoming status, deliberately: that is what the
+        process actually exits with, and a 15 is a LANDING whose premise was
+        unconfirmed — a different row from a clean 0, which is the whole reason
+        this journal exists.
+        """
+        body = self._speak_body()
+        calls = [ln.strip() for ln in body.splitlines() if ln.strip().startswith("_journal_record")]
+        assert calls == ['_journal_record "${rc}"', "_journal_record 15"], (
+            f"the alarm must record the silent path's status and its own 15: {calls}"
         )
 
     def test_the_alarm_never_offers_a_re_run(self) -> None:
@@ -5665,3 +5735,243 @@ class TestPostMergeAlarmIsNotAGate:
         window = md[at - 2000 : at + 4000]
         assert "alarm" in window.lower(), "CB-121 is mentioned but the alarm is not named"
         assert "check-then-act" in window.lower()
+
+
+# The journal's own injection: main moves BEFORE the in-lock re-check, so the
+# finish refuses with 13 having landed nothing. Firing on the worktree's
+# `rev-parse HEAD` puts the commit immediately after TESTED_MAIN is sampled,
+# which is the earliest point at which the skew is real.
+_SHIM_MOVE_MAIN_EARLY = r"""
+_is_rp=0
+for _a in "$@"; do
+    [[ "$_a" == "rev-parse" ]] && _is_rp=1
+done
+if (( _is_rp )) && [[ "$*" == *"$WT"* && ! -e "$MARKER" ]]; then
+    : > "$MARKER"
+    printf 'landed before the re-check\n' > "$REPO/.claude/plans/EARLY.md"
+    "$REAL" -C "$REPO" add -- .claude/plans/EARLY.md
+    "$REAL" -C "$REPO" commit -q -m 'docs: EARLY.md landing before the re-check'
+fi
+"""
+
+
+class TestLandingAttemptJournal:
+    """CB-176 — every finish records its own outcome, so "how often does landing
+    lose the race to a plan note" stops being an impression and becomes a number.
+
+    The instrument is deliberately the weakest thing that can answer the
+    question: one appended line per run, no output, no new verb, and NO exit
+    code touched anywhere. It is FAIL-OPEN, against this repository's usual
+    discipline, because an instrument able to refuse a landing would turn the
+    measurement of CB-176 into a fresh instance of CB-176.
+    """
+
+    SLUG = "fix-cb-176-probe"
+    BRANCH = "fix/cb-176-probe"
+    MERGE_MSG = "Merge fix/cb-176-probe: probe (CB-176)"
+
+    def _branch(self, armed: dict) -> Path:
+        repo = armed["repo"]
+        wt = repo / ".worktrees" / self.SLUG
+        git(repo, "worktree", "add", "-q", "-b", self.BRANCH, str(wt), "main")
+        (wt / "feature.txt").write_text("work\n")
+        git(wt, "add", "feature.txt")
+        git(wt, "commit", "--no-verify", "-m", "fix(cb-176): the branch's own work")
+        return wt
+
+    def _shim(self, armed: dict, body: str) -> Path:
+        real = shutil.which("git")
+        assert real, "no git on PATH to wrap"
+        marker = armed["repo"] / ".shim-fired"
+        shim = armed["bin"] / "git"
+        shim.write_text(
+            "#!/usr/bin/env bash\n"
+            f'REAL="{real}"\n'
+            f'REPO="{armed["repo"]}"\n'
+            f'WT="{armed["repo"] / ".worktrees" / self.SLUG}"\n'
+            f'MARKER="{marker}"\n'
+            f"{body}\n"
+            'exec "$REAL" "$@"\n'
+        )
+        shim.chmod(0o755)
+        assert shim.is_file() and os.access(shim, os.X_OK), shim
+        return marker
+
+    def _finish(self, armed: dict, slug: str | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                str(armed["repo"] / "tools" / "worktree-finish.sh"),
+                slug or self.SLUG,
+                "--skip-checks",
+                "--merge-msg",
+                self.MERGE_MSG,
+            ],
+            cwd=str(armed["repo"]),
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": f"{armed['bin']}{os.pathsep}{os.environ['PATH']}"},
+        )
+
+    def _rows(self, armed: dict) -> list[list[str]]:
+        """The journal, split into fields. Asserts the SHAPE, not just presence.
+
+        A line that lost a field would still 'contain' the exit code while the
+        documented one-line reader mis-parses it, so every row is checked for
+        exactly three fields here rather than at one call site.
+        """
+        log = armed["repo"] / ".worktrees" / "landing-attempts.log"
+        if not log.exists():
+            return []
+        rows = [ln.split() for ln in log.read_text().splitlines() if ln.strip()]
+        for row in rows:
+            assert len(row) == 3, f"a journal row is not timestamp/slug/code: {row}"
+            assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", row[0]), row
+        return rows
+
+    # ---- the four oracle rows -------------------------------------------
+
+    def test_a_clean_landing_records_a_zero(self, armed: dict) -> None:
+        """Without the 0 row there is no boundary between one landing and the next.
+
+        "Attempts per landing" is computed at read time as lines-per-zero, so a
+        journal that recorded only failures could not be divided into landings
+        at all — it would report a pile of refusals with no denominator.
+        """
+        self._branch(armed)
+        r = self._finish(armed)
+        assert r.returncode == 0, (r.returncode, r.stdout[-3000:], r.stderr[-3000:])
+        assert self._rows(armed) == [[self._rows(armed)[0][0], self.SLUG, "0"]]
+
+    def test_a_pre_merge_refusal_records_its_own_code(self, armed: dict) -> None:
+        """exit 13 — the refusal CB-176 is actually about, in the real window."""
+        self._branch(armed)
+        marker = self._shim(armed, _SHIM_MOVE_MAIN_EARLY)
+        r = self._finish(armed)
+        assert marker.exists(), "the shim never fired — this test proved nothing"
+        assert r.returncode == 13, (r.returncode, r.stdout[-3000:], r.stderr[-3000:])
+        rows = self._rows(armed)
+        assert [row[1:] for row in rows] == [[self.SLUG, "13"]], rows
+
+    def test_an_early_refusal_before_the_alarm_trap_is_recorded(self, armed: dict) -> None:
+        """THE test that tells the right form from the naive one.
+
+        exit 11 fires in [7/7], before the merge and therefore before the point
+        where `trap _alarm_speak EXIT` is armed. A journal trap installed beside
+        the alarm — the obvious place, since that is where the existing trap
+        lives — would lose this row and every other pre-merge refusal, which is
+        precisely the half of the measurement CB-176 needs. The loss would be
+        silent AND in the flattering direction: fewer failed attempts recorded
+        than happened.
+        """
+        self._branch(armed)
+        # A TRACKED modification in main: _guard_main_clean reads
+        # --untracked-files=no, so an untracked file would not refuse.
+        (armed["repo"] / "pyproject.toml").write_text(
+            (armed["repo"] / "pyproject.toml").read_text() + "\n# dirty\n"
+        )
+        r = self._finish(armed)
+        assert r.returncode == 11, (r.returncode, r.stdout[-3000:], r.stderr[-3000:])
+        rows = self._rows(armed)
+        assert [row[1:] for row in rows] == [[self.SLUG, "11"]], rows
+
+    def test_the_alarm_path_records_fifteen_and_still_speaks(self, armed: dict) -> None:
+        """BOTH, not one of the two — and 15 rather than the incoming status.
+
+        Arming the alarm's trap REPLACES the journal's, so this is the path on
+        which the journal exists only because `_alarm_speak` calls it. The code
+        recorded is the one the process actually leaves with: a 15 is a LANDING
+        whose premise was unconfirmed, and folding it into the clean 0 would
+        make the journal disagree with the shell that ran it.
+        """
+        self._branch(armed)
+        marker = self._shim(armed, _SHIM_MOVE_MAIN)
+        r = self._finish(armed)
+        assert marker.exists(), "the shim never fired — this test proved nothing"
+        assert r.returncode == 15, (r.returncode, r.stdout[-3000:], r.stderr[-3000:])
+        assert "POST-MERGE ALARM" in r.stdout, r.stdout[-3000:]
+        rows = self._rows(armed)
+        assert [row[1:] for row in rows] == [[self.SLUG, "15"]], rows
+
+    # ---- fail-open, which is the whole licence for this to exist ---------
+
+    def test_an_unwritable_journal_does_not_change_the_finish(self, armed: dict) -> None:
+        """П5 — the instrument may lose its own data, never the operator's run.
+
+        Measured on bash 5.3.9: an unguarded command failing INSIDE an EXIT trap
+        under `set -euo pipefail` both truncates the trap and REWRITES the exit
+        status to 1. So a careless journal would not merely drop a line, it
+        would turn a clean landing into an unexplained failure — and turn the
+        repeatable `exit 13` into a `1` the operator is told to treat as an
+        error, sabotaging the very measurement it exists to take.
+        """
+        self._branch(armed)
+        log = armed["repo"] / ".worktrees" / "landing-attempts.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("")
+        log.chmod(0o000)
+        try:
+            r = self._finish(armed)
+            assert r.returncode == 0, (r.returncode, r.stdout[-3000:], r.stderr[-3000:])
+            assert "Integration complete" in r.stdout
+            assert log.read_bytes() == b"" if os.access(log, os.W_OK) else True
+        finally:
+            log.chmod(0o644)
+        assert log.read_text() == "", "the write was not actually refused"
+
+
+
+class TestUnknownSlugRefusal:
+    """CB-231 — a documented exit code that could not fire in the case it names.
+
+    `worktree-finish.sh` advertises 2 for "no worktree for that slug", and
+    `tools/_guards.sh` carries it in the exit-code table. Measured on bash
+    5.3.9: the script printed its refusal, then died with **1**. The block ends
+    by listing the worktrees the operator might have meant, and that listing's
+    final `grep -v` drops the primary checkout — so in a clone with no OTHER
+    worktree it selects nothing and exits 1, `set -o pipefail` lifts that to the
+    pipeline, and `set -e` killed the script two lines before `exit 2`.
+
+    The case it could not fire in is the ordinary one: a mistyped slug in a
+    clone with nothing else checked out. The caller got 1, which is this
+    script's code for bad input generally, so the refusal was real but
+    unattributable — the "described better than it behaves" shape the Workflow
+    section of CLAUDE.md exists to record.
+
+    Found while installing the landing-attempt journal (CB-176): the journal
+    recorded a 1 where the table promised a 2.
+    """
+
+    def _finish(self, armed: dict, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(armed["repo"] / "tools" / "worktree-finish.sh"), *args],
+            cwd=str(armed["repo"]),
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": f"{armed['bin']}{os.pathsep}{os.environ['PATH']}"},
+        )
+
+    def test_an_unknown_slug_refuses_with_the_code_the_harness_documents(
+        self, armed: dict
+    ) -> None:
+        # The condition that used to break it, ASSERTED rather than assumed: a
+        # fixture that happened to register a second worktree would make the
+        # listing non-empty and this test could never fail.
+        listed = git(armed["repo"], "worktree", "list").splitlines()
+        assert len(listed) == 1, f"the fixture registers more than the primary checkout: {listed}"
+
+        r = self._finish(armed, "no-such-slug")
+        assert "no worktree for slug" in r.stdout, r.stdout[-2000:]
+        assert r.returncode == 2, (r.returncode, r.stdout[-2000:], r.stderr[-2000:])
+
+    def test_the_usage_block_still_refuses_with_one(self, armed: dict) -> None:
+        """PASSES ON BOTH SIDES, and pins what the fix deliberately preserved.
+
+        The usage block ends with the same listing and had the same latent
+        defect, but its own code is 1 — so the pipeline's stray 1 was
+        indistinguishable from the intended one and nothing was visibly wrong.
+        Sharing the helper fixes the mechanism in both places at once; this
+        asserts the outcome here did not move while that happened.
+        """
+        r = self._finish(armed)
+        assert "Usage:" in r.stdout, r.stdout[-2000:]
+        assert r.returncode == 1, (r.returncode, r.stdout[-2000:], r.stderr[-2000:])

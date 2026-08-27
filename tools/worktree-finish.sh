@@ -41,6 +41,122 @@ while [[ $# -gt 0 ]]; do
 done
 set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"
 
+# ---------------------------------------------------------------------------
+# THE LANDING-ATTEMPT JOURNAL (CB-176). A MEASURING INSTRUMENT — not a gate,
+# and not even an alarm.
+#
+# WHAT IT IS FOR. This script runs the whole suite (~166s), takes the lock, and
+# refuses to land if main moved meanwhile (exit 13). That refusal is correct.
+# What is not known is how OFTEN it fires: the median interval between commits
+# on main is ~107s, shorter than the run, so a finish plausibly loses the race
+# to ordinary plan notes written by parallel sessions. "Landing has become
+# painful" is today an IMPRESSION, and CB-176 cannot be priced from an
+# impression. After this, it is a number: how many attempts one landing costs,
+# and which code each failed attempt carried.
+#
+# WHAT IT DELIBERATELY IS NOT. It never refuses, never delays, never prints,
+# and never touches an exit code on any path. It does not decide what the
+# number means — that is CB-176's own future decision — and it adds no verb.
+#
+# FAIL-OPEN, AGAINST THIS REPOSITORY'S USUAL DISCIPLINE, AND ON PURPOSE. The
+# rest of this harness is fail-closed: could not look, so refuse. Here that
+# would be self-defeating — an instrument able to refuse a landing turns the
+# measurement of a problem into a fresh instance of that same problem. So every
+# failure of the write (no directory, no permission, full disk) is swallowed
+# and the run continues with the status it already had. Measured, and this is
+# not a theoretical hazard: under `set -euo pipefail` a single unguarded
+# command that fails INSIDE an EXIT trap both truncates the trap and REWRITES
+# the exit status to 1 (bash 5.3.9). Hence the `{ … } || true` and the
+# unconditional `return 0` — the function cannot fail, by construction.
+#
+# A TRAP, NOT A LINE BESIDE EVERY `exit`. The tempting form is one write per
+# refusal site. That is enumeration, and its cost here is specific: whoever
+# adds the next guard forgets one, and the journal then reports FEWER failures
+# than happened — quietly, and in the flattering direction. A trap makes that
+# state unrepresentable. `set -e` deaths are the other half of the argument:
+# no per-site line can catch a command that simply failed.
+#
+# ARMED HERE, BEFORE THE FIRST GUARD, because the early refusals are half of
+# what is being measured: a dirty main (11), a clone that was never armed (12)
+# and an interpreter disagreeing with main's (14) all refuse BEFORE the merge,
+# and a trap armed next to the post-merge alarm would lose every one of them.
+#
+# The guards are described here rather than NAMED, and that is not style. The
+# structural tests in tests/test_worktree_harness.py search the RAW source for
+# a guard's name followed by a space, to find where it is CALLED and in which
+# phase. Writing one in this comment put a match above the real call site, so
+# the phase assertions read this sentence as the invocation and the call-site
+# count went from two to three. Measured: two tests red, from prose alone.
+#
+# EXIT PATHS THAT STILL LOSE THE LINE — named rather than left to be
+# rediscovered, because an undeclared gap costs more than a declared one:
+#   * anything failing ABOVE this point: sourcing tools/_guards.sh, resolving
+#     REPO_ROOT, or the argument loop itself. The trap does not exist yet.
+#   * SIGKILL, which no trap can catch. (SIGINT and SIGTERM DO reach this trap
+#     — measured on bash 5.3.9 — so an operator's Ctrl-C is recorded.)
+#   * an `exit` inside a `( … )` subshell: bash resets traps there. No such
+#     exit exists in this script today; the two subshells are `uv run` gates
+#     whose status is read by `if !`, and they return rather than exit.
+#
+# READING IT — the whole point, since a file nobody can read is not a
+# measurement. Mean attempts per landing, and the distribution of failure
+# codes, in one line (verified against a real journal):
+#
+#   awk '{n++; c[$3]++} END {printf "%s attempts per landing (%d attempts, %d landings)\n", (c["0"]?sprintf("%.2f",n/c["0"]):"n/a"), n, c["0"]+0; for (i=1;i<256;i++) if (i in c) printf "  exit %d: %d\n", i, c[i]}' .worktrees/landing-attempts.log
+#
+# Three properties of that line were chosen after running it, not before.
+# It prints "n/a" rather than 0.00 when no landing has happened yet, because a
+# fabricated number where the answer is undefined is the shape this repository
+# refuses everywhere else. It sweeps codes numerically instead of iterating the
+# array, since awk's `for (k in c)` order is unspecified and a documented
+# command should not print its rows in a different order each run. And the
+# attempts-per-landing figure is COMPUTED at read time and never stored: a
+# derived number kept in the file is one that can disagree with its own source.
+# Note exit 15 counts as a failure code there while being a LANDING — the merge
+# ran — so a journal carrying 15s is read with that in mind.
+#
+# WHERE IT LIVES. .worktrees/ is already gitignored and already holds
+# .integrate.lock, i.e. it is already this clone's local-state directory. The
+# journal is local to the clone and shared with nobody: no other session and no
+# other clone reads it. Concurrent finishes in different worktrees are safe
+# because the write is a single short `printf … >>` — O_APPEND, one line, well
+# under PIPE_BUF — and never a read-modify-write.
+_JOURNAL_FILE="${WORKTREE_DIR}/landing-attempts.log"
+_journal_record() {
+    local rc=$? ts
+    if (( $# >= 1 )); then rc="$1"; fi
+    # A placeholder rather than an empty field if `date` is unavailable: the
+    # line must keep three fields, or the reader above silently mis-parses it.
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || ts=""
+    [[ -n "${ts}" ]] || ts="-"
+    {
+        mkdir -p "${WORKTREE_DIR}" \
+            && printf '%s %s %s\n' "${ts}" "${SLUG:-?}" "${rc}" >>"${_JOURNAL_FILE}"
+    } >/dev/null 2>&1 || true
+    return 0
+}
+trap _journal_record EXIT
+
+# The worktrees an operator could have meant, for the two refusals that offer a
+# list. SHARED because it was DUPLICATED, and the duplicate is how CB-231 stayed
+# invisible for so long: the same pipeline sat in both places, and only one of
+# them stood in front of an exit code worth losing.
+#
+# `|| true` IS THE FIX (CB-231), not tidiness. The final `grep -v` drops the
+# primary checkout from the listing, so in a clone with no OTHER worktree it
+# selects nothing and exits 1. Under `set -o pipefail` that becomes the whole
+# pipeline's status, and `set -e` then killed the script BEFORE the `exit 2`
+# two lines below it — so the code this harness documents for "no worktree for
+# that slug" could not fire in exactly the case it names: a mistyped slug in a
+# clone with nothing else checked out. Measured on bash 5.3.9 before and after;
+# the caller saw 1, which is this script's code for "bad input" generally, so
+# the refusal was real but unattributable.
+_list_other_worktrees() {
+    git -C "${REPO_ROOT}" worktree list --porcelain 2>/dev/null \
+        | grep "^worktree " | grep -v "^worktree ${REPO_ROOT}$" \
+        | sed 's|^worktree .*/||; s|^|  |' || true
+}
+
 if [[ $# -lt 1 ]]; then
     echo "Usage: $0 <slug> [commit-message] [flags]"
     echo ""
@@ -54,8 +170,7 @@ if [[ $# -lt 1 ]]; then
     echo "  Env: CODEBUGS_STALE_BASE_MAX (default ${CODEBUGS_STALE_BASE_MAX})"
     echo ""
     echo "Available worktrees:"
-    git -C "${REPO_ROOT}" worktree list --porcelain 2>/dev/null \
-        | grep "^worktree " | grep -v "^worktree ${REPO_ROOT}$" | sed 's|^worktree .*/||; s|^|  |'
+    _list_other_worktrees
     exit 1
 fi
 
@@ -115,8 +230,7 @@ WORKTREE_PATH=$(_resolve_worktree_path "${SLUG}")
 if [[ ! -d "${WORKTREE_PATH}" ]]; then
     echo "ERROR: no worktree for slug '${SLUG}' (last tried: ${WORKTREE_PATH})"
     echo "Available worktrees:"
-    git -C "${REPO_ROOT}" worktree list --porcelain 2>/dev/null \
-        | grep "^worktree " | grep -v "^worktree ${REPO_ROOT}$" | sed 's|^worktree .*/||; s|^|  |'
+    _list_other_worktrees
     exit 2
 fi
 
@@ -453,6 +567,14 @@ _alarm_speak() {
         # rather than credited with work it does not do, because the mutant
         # that this line appears to stop (`return 0`) does not reproduce, and
         # the one that does (`exit 0`) is not this line at all.
+        #
+        # THE JOURNAL IS WRITTEN FROM HERE, ON BOTH OF THIS FUNCTION'S PATHS
+        # (CB-176). Arming that trap replaced the journal's own, because bash
+        # has exactly ONE EXIT trap and a second erases the first — so if this
+        # function did not call the journal, every landing attempt that got as
+        # far as the merge would go unrecorded, which is precisely the half of
+        # the measurement that matters most.
+        _journal_record "${rc}"
         return "${rc}"
     fi
     echo ""
@@ -530,6 +652,11 @@ _alarm_speak() {
         echo "  Check the worktree and the claim by hand."
     fi
     echo "================================================================"
+    # 15, not the incoming rc: this is the status the process actually leaves
+    # with, and the journal records raw outcomes rather than interpretations.
+    # A 15 in the journal is a LANDING whose premise was unconfirmed, which is
+    # a different row from a clean 0 and must not be folded into it.
+    _journal_record 15
     exit 15
 }
 
