@@ -195,6 +195,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   not proof. Nothing here refuses a command that used to work: if a directory cannot be examined
   the walk carries on past it exactly as before, because one unreadable directory belonging to
   somebody else, somewhere between you and your project, must not stop `codebugs` from working.
+- **A fourth spot where "I could not look" still read as "there is nothing here" — the one
+  place CB-218's own fix left standing, in the corner where git worktrees are recognized
+  (CB-224).** When `codebugs` walks up looking for your tracker and crosses into a git worktree,
+  it has to tell a worktree apart from a submodule by checking a small marker file inside the
+  worktree's own git bookkeeping directory. If that directory could not be examined — for
+  instance because something removed its permissions after the worktree was created — the check
+  silently answered "not a worktree" instead of "I could not tell", and two things followed from
+  that single silent guess. `codebugs where`, run from inside such a worktree, reported "no
+  tracker found anywhere" even when your project's real tracker was sitting right there in the
+  main checkout, one hop away, with no warning that anything had gone unchecked. And `codebugs
+  init`, run in the same spot, no longer recognized that it was inside a worktree at all, and
+  went ahead and created a brand-new tracker inside it — a tracker that git deletes the moment
+  the worktree is removed, findings and all. `where` now lists this skipped check alongside the
+  others it already reports, with the actual reason it failed (for example, "Permission
+  denied"), so you know a tracker may be hiding behind it instead of being told none exists.
+  Two related checks inside `codebugs init` — whether the directory you are initializing
+  actually exists, and whether a `.codebugs/` already sitting there is a directory rather than
+  some other kind of file — got the identical honest treatment: an answer that could not be
+  established now refuses with the actual reason instead of silently being read as "no, it
+  isn't". None of this changes anything about your worktree-detection policy question (whether
+  `init` should warn or refuse there is a separate, still-open decision) — it only makes sure
+  that when the check cannot see, it says so instead of guessing, and a test now holds every
+  such check in this file to that standard so a fifth one cannot go unnoticed the same way.
 - **`codebugs where` promised that the next command would create a database, without checking
   whether it could (CB-219).** When a `.codebugs/` directory exists but holds no database yet,
   `where` says "no database there yet — the next command creates one". That is usually right —

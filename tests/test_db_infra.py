@@ -1629,6 +1629,75 @@ class TestTheWalkIsThreeValued:
         assert len(phrases) == len(info["unexamined"]), "every entry reaches the text"
         assert any(str(project / ".codebugs") in phrase for phrase in phrases)
 
+    def test_the_recorded_reason_is_the_real_one_not_a_generic_fallback(
+        self, tmp_path, monkeypatch
+    ):
+        """CB-224 closes one of two blind spots T-97's own acceptance found.
+
+        `_walk_db_root` writes `detail or "could not look at it"` — a fallback
+        that only matters if `_path_state` ever returned an EMPTY detail, which
+        it never does today. A mutant that drops the real `_why(e)` text and
+        substitutes the generic phrase unconditionally passed every existing
+        test in this class, because every one of them only asserts a reason is
+        PRESENT (`all(why for _path, why in info["unexamined"])`), never that it
+        is the SPECIFIC one the operating system actually gave. Asserted for the
+        permission-wall mechanism here; the symlink-loop mechanism is the sibling
+        test right below, so a mutant cannot pass by hardcoding one string.
+        """
+        stranger = tmp_path / "P"
+        project, deep = self._project(stranger, "A")
+        db.init_project(str(stranger))
+        monkeypatch.chdir(deep)
+        info = self._bind(deep, lambda: _wall_traverse_bit(project))
+        reasons = [why for _path, why in info["unexamined"]]
+        assert any("Permission denied" in why for why in reasons), reasons
+
+    def test_a_second_mechanism_also_carries_its_own_specific_reason(
+        self, tmp_path, monkeypatch
+    ):
+        """The sibling of the test above, on the symlink-loop mechanism (ELOOP).
+
+        Together the two pin that the reason text tracks WHICH failure actually
+        happened, not merely THAT one happened.
+        """
+        stranger = tmp_path / "P"
+        holder = stranger / "A"
+        deep = holder / "b" / "c"
+        deep.mkdir(parents=True)
+        db.init_project(str(stranger))
+        monkeypatch.chdir(deep)
+        _wall_symlink_loop(holder, ".codebugs")
+        info = db.describe_root()
+        reasons = [why for _path, why in info["unexamined"]]
+        assert any("Too many levels of symbolic links" in why for why in reasons), reasons
+
+    def test_the_unexamined_order_is_deepest_first_not_its_reverse(
+        self, tmp_path, monkeypatch
+    ):
+        """CB-224 closes the second of T-97's own two blind spots.
+
+        Every existing order-sensitive assertion in this class only checks that
+        the SHALLOWEST entry (the one naming the wall itself) reaches the text —
+        true whether the list is deepest-first or its exact reverse, since a
+        bare `.reverse()` mutant keeps that one entry in the list, merely moved
+        to the front instead of the back. This pins the FULL sequence, which a
+        reversal cannot survive.
+        """
+        stranger = tmp_path / "P"
+        project, deep = self._project(stranger, "A")
+        db.init_project(str(stranger))
+        monkeypatch.chdir(deep)
+        info = self._bind(deep, lambda: _wall_traverse_bit(project))
+        expected = [
+            str(deep / ".codebugs"),
+            str(deep / ".git"),
+            str(deep.parent / ".codebugs"),
+            str(deep.parent / ".git"),
+            str(project / ".codebugs"),
+            str(project / ".git"),
+        ]
+        assert [p for p, _ in info["unexamined"]] == expected
+
 
 class TestTheCreationPromiseIsChecked:
     """CB-219: `exists is False` is the one branch that PROMISES, so it needs proof.
