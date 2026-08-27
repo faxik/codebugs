@@ -177,13 +177,17 @@ Modules are self-registering — adding a new one is local to its own file. See 
 | Tool | Purpose |
 |------|---------|
 | `summary` | Dashboard overview — **start here** for orientation |
-| `add` | Log a finding with severity, category, file, description |
-| `batch_add` | Log multiple findings at once |
+| `add` | File an observation. Creates, bumps, reopens or refiles — read `dedup_action` to see which |
+| `batch_add` | File several observations at once |
 | `update` | Change status, severity, notes, tags or metadata (`append_note` adds, `notes` replaces) |
 | `query` | Search/filter with pagination and group-by |
+| `get` | Fetch one finding by id, with its full body and occurrence history |
+| `recent` | Findings touched at or after a date — the one call for "what closed since" |
 | `stats` | Cross-tabulated counts (severity x category/file/status) |
 | `categories` | List existing categories — **call before `add`** for consistency |
-| `staleness_check` | Compare against git history; mark obsolete findings stale |
+| `categories_normalize` | Fold twin category spellings together. **Dry run by default** |
+
+`staleness_check` lives in the **provenance** module rather than here, and `anchor_resolve` in **loc**; both are listed in [the module table](#the-modules).
 
 **CLI:**
 
@@ -211,6 +215,7 @@ When a new finding is added, the **milestones auto-router** automatically attach
 | `reqs_add` | Add a requirement (FR-001, priority, status, test coverage) |
 | `reqs_update` | Change status, description, priority, test coverage |
 | `reqs_query` | Search/filter by status, priority, section, free text |
+| `reqs_get` | Fetch a single requirement by ID with full body |
 | `reqs_stats` | Cross-tabulated counts (status x priority) |
 | `reqs_verify` | Automated checks: ghost test files, duplicate IDs, status contradictions |
 | `reqs_import` | Import from REQUIREMENTS.md (parses markdown tables) |
@@ -361,6 +366,42 @@ codebugs sweep-archive-items retro-findings --state RESOLVED --older-than 30d
 | `codemerge_check` | Check for overlapping claims against `main` |
 | `codemerge_merge` | Mark merge in progress (acquires the global merge lock with TTL) |
 | `codemerge_finish` | Release the lock |
+| `codemerge_claims` | List all files a session has claimed, in claim order |
+| `codemerge_sessions` | List merge sessions with claim counts |
+| `codemerge_status` | Dashboard: session counts by status, total active claims |
+| `codemerge_abandon` | Close a session for good, so its files stop blocking everyone else |
+
+### Identity, location and grouping
+
+These four modules are what the opening section is about, and none of them had an entry here before.
+
+| Tool | Purpose |
+|------|---------|
+| `anchor_resolve` | Where a finding's code is **now** — `current`, `moved`, `moved_file`, `lost`, `ambiguous`, or `unknown` with a reason |
+| `anchor_recapture` | Rebuild stored anchors from the git object store. **Dry run by default** |
+| `similarity_check` | Preview what the file-time annotator would stamp for an observation |
+| `similarity_report` | Similarity families as auditable evidence — a scrub you read, never a merge it performs |
+| `relations_relate` | Assert a typed relation (`duplicate_of`, `follow_up_of`, `split_from`, ...) between two findings |
+| `relations_query` | List relations touching a finding, in both directions |
+| `relations_unrelate` | Retract a relation. Tombstones it — the row and its history remain |
+| `grouping_citations` | Connected components of the hand-written CB-id reference graph |
+| `grouping_tags` | Tag pivots: counts, co-occurrence, near-duplicate taxonomy strings |
+| `grouping_filing` | Split lineages and shared filing events |
+
+**An anchor needs the filing to name a code span.** The location is captured from `meta.line` / `meta.lines` (and a few equivalent spellings) at the moment the finding is filed. A report that names only a file has nothing to anchor, and `anchor_resolve` says so — `unknown`, reason `no_grammar` — instead of guessing a line. Most findings in practice name no span, so this is the ordinary case, not an error:
+
+```
+$ codebugs anchor-resolve --finding-id CB-2 --repo . --json
+      "anchor": {
+        "status": "moved",
+        "path": "src_api.py",
+        "line": 25,
+        "end": 27,
+        "channel": "git",
+        "survived": "3/3",
+```
+
+That card was filed against lines 5–7. Twenty lines were then inserted above it. The stored line numbers are stale; the anchor is not.
 
 ## How It Works
 
