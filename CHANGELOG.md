@@ -249,11 +249,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   different way — importing the function by name instead of through its module, renaming the
   module on import, catching the error under one of its older aliases — made it invisible. It
   also let a note saying "this one particular harmless check is fine" quietly cover a second,
-  decisive check added to the same function later. Measured against thirteen variations, the old
-  test caught three, two of which were the deliberate controls. It now works out what a call
-  actually DOES rather than how it is written, and a note covers one specific check rather than a
-  whole function. Its own documentation now lists, by name, the kinds of evasion it still cannot
-  see, instead of promising to catch everything.
+  decisive check added to the same function later. Ten ways of writing the same check a little
+  differently were tried against the old test and the new one: the old caught none of them, the
+  new catches all ten, and both still catch the two plain cases that must always be caught. It
+  now works out what a call actually DOES rather than how it is written, and a note covers one
+  specific check rather than a whole function. A wider sweep of forty evasions is caught fifteen
+  times; the twenty-five that get through are now listed by name in the test's own documentation,
+  instead of it promising to catch everything.
 - **`codebugs where` promised that the next command would create a database, without checking
   whether it could (CB-219).** When a `.codebugs/` directory exists but holds no database yet,
   `where` says "no database there yet — the next command creates one". That is usually right —

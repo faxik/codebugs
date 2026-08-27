@@ -26,17 +26,21 @@ AND THE FIRST VERSION OF THAT GATE WAS ITSELF AN ENUMERATION -- OF SPELLINGS
 (CB-227). It compared the TEXT of a call (`os.path.isdir`) against a list of
 texts, matched an `except` clause only against the literal name `OSError`, and
 let one `DECLARED_EXCEPTIONS` row license every call of that primitive
-anywhere in the licensed function. Measured over thirteen mutants (eleven real
-bypasses plus two controls) it caught THREE, and two of the three were the
-controls: `from os.path import isdir`, `import os.path as osp`, `from os
-import path`, an `IOError` alias, a bare `except:`, and a restored decisive
-read inside `init_project` -- the very defect CB-224 had just removed -- all
-walked past it. So the form of the gate was kept and its KEY was replaced:
+anywhere in the licensed function. Measured on the two predicates side by side
+over TEN bypasses -- the six this card's oracle names, plus four found in this
+unit's own sweep -- the old one caught ZERO and this one catches TEN, while
+both still catch the two controls (`os.path.isdir` undeclared, and
+`Path(...).is_dir()`) and neither reports anything at all on the unmutated
+file. The ten: a restored DECISIVE `os.path.exists` inside `init_project`,
+where the informational one is licensed -- the very defect CB-224 had just
+removed; `from os.path import isdir`; `import os.path as osp`; `from os import
+path`; `posixpath.isdir`; an `IOError` alias; a bare `except:`; an `except*`
+group; a generator that yields the bare literal; and `f = os.path.isdir`
+called through `f`. So the FORM of the gate was kept and its KEY was replaced:
 what follows resolves a call through the file's OWN import bindings and then
 asks the LIVE Python object whether it IS one of the primitives, and asks the
 LIVE class hierarchy whether an `except` clause could swallow what a stat
-raises. Re-measured over the same thirteen: nine caught, zero false refusals
-on the unmutated file.
+raises.
 
 WHAT IS CHECKED, STATED AT THE WIDTH IT IS TRUE -- and the width is
 deliberately narrower than "every two-valued read in the package": this reads
@@ -97,8 +101,10 @@ THREE LAYERS.
 WHAT NO LAYER SEES, NAMED RATHER THAN IMPLIED -- because "how close to the
 capability did the AST get" is a measurement, not a principle, and this unit's
 brief says so explicitly: state what the gate sees and what it does not, rather
-than widen the promise past what was actually built. Each of these was
-reproduced against this predicate, not reasoned about.
+than widen the promise past what was actually built. FORTY distinct evasions
+were swept for this unit and RUN against this predicate rather than judged;
+it catches FIFTEEN. What follows is the twenty-five it does not, by name,
+because an unannounced miss costs more than an announced one.
 
 * THE SEMANTIC SENTRY, and it is the one standing in `db.py` today. A function
   can answer three-valued perfectly -- `except OSError: return None` -- while
@@ -108,26 +114,49 @@ reproduced against this predicate, not reasoned about.
   worktree". The meaning lives in the CALLER, so no predicate over the reading
   function can ever see it, and no predicate over ONE FILE can see it when the
   caller is elsewhere. This is why CB-227 needed a behavioural oracle as well
-  as this gate, and why this gate must never be described as covering it.
-* AN INDIRECTION THAT HIDES THE NAME: `getattr(os.path, "isdir")(p)`, a
-  primitive fetched from a dict or a tuple, `functools.partial`,
-  `operator.methodcaller("is_dir")`, a callback parameter, `eval`/`exec`, or
-  `sys.modules["os"].path.isdir`. Closing these means tracking VALUES rather
-  than names -- the same boundary `test_no_network_capability.py` draws around
-  `__import__`/`exec` indirection, and out of scope by the same decision.
-  A SIMPLE name binding (`f = os.path.isdir` at any scope, then `f(p)`) IS
-  caught, because that is name resolution and not value tracking; a binding
-  that is conditional, rebound, or built inside a container is not.
-* A SWALLOW THAT RETURNS THROUGH ANYTHING BUT A LITERAL: `ok = False; return
-  ok`, `return bool(x)`, `return not err`, a flag set in a `finally`, or a
-  `with contextlib.suppress(OSError):` block around an assignment. Each needs
-  data-flow analysis inside the function, which layer 3 deliberately does not
-  do.
+  as this gate, and why this gate must never be described as covering it. Note
+  the sweep DID report a hit on this form's sample -- on a narrow `except
+  FileNotFoundError: return False` handler that happened to sit in the same
+  function, which layer 3 is right to flag on its own account. The sentry
+  itself produced no hit, measured in isolation. A hit for the wrong reason is
+  not coverage.
+* AN INDIRECTION THAT HIDES THE NAME, eleven measured spellings:
+  `getattr(os.path, "isdir")(p)` and its dynamic-string twin,
+  `importlib.import_module("os.path").isdir`, `__import__("os.path").isdir`,
+  `sys.modules["os"].path.isdir`, `globals()["isdir"]`, a dict dispatch table,
+  a tuple indexed by position, `functools.partial(os.path.isdir, ...)`,
+  `operator.methodcaller("is_dir")`, a default-argument capture, a
+  `staticmethod()` capture in a class body, and `eval`/`exec` of a string.
+  Closing any of them means tracking VALUES rather than names -- the same
+  boundary `test_no_network_capability.py` draws around `__import__`/`exec`
+  indirection, and out of scope by the same decision. The boundary was
+  measured rather than assumed: replacing the indirection with a plain
+  `name = os.path.isdir` binding flips EVERY one of them to caught, so what
+  escapes is precisely the one hop, not a wider family.
+* A SWALLOW THAT RETURNS THROUGH ANYTHING BUT A LITERAL, six measured
+  spellings: `ok = False; return ok`, `return bool(x)`, `return not err`,
+  `return a == b`, a flag set in a `finally`, and a `with
+  contextlib.suppress(OSError):` block around an assignment -- the last of
+  which layer 3 also cannot see for a second reason, that it walks `Try` and
+  `TryStar` and not `With`. Each needs data-flow inside the function. A
+  generator that YIELDS the bare literal instead of returning it was in this
+  family until the sweep found it, and is now caught: that was node coverage,
+  not value tracking, so it was fixed rather than declared.
+* THE SAME READ MOVED INTO A SIBLING MODULE that `db.py` imports. Measured
+  both ways: the swallow WOULD be caught if the gate read that file, and the
+  `db.py` side, which merely imports and calls the helper, produces no hit at
+  all. This is scope, not blindness -- see "WHAT IS CHECKED" above.
 * `os.access` is a DIFFERENT capability (a permission check, not an existence
   query) and is correctly out of scope: `_access_probe` already returns
   `bool | None` via its own `except (OSError, ValueError): return None`, which
   is the three-valued shape already, not a violation of it. Pinned below, so
-  the exclusion is a decision rather than an oversight.
+  the exclusion is a decision rather than an oversight. Counted among the
+  twenty-five for honesty, though it is a boundary rather than a miss.
+* THIS GATE'S OWN FILE RESOLUTION, which is not an AST question at all: the
+  file is found through `codebugs.db.__file__`, so a probe run against a COPY
+  of the tree without entering it silently measures the ORIGINAL checkout.
+  Nothing in the predicate can see that, so it is held by
+  `test_the_gate_reads_the_db_py_it_claims_to` instead.
 
 DECLARED EXCEPTIONS are keyed by `(enclosing_function, canonical_primitive,
 call_text)`, and each of the three parts earns its place. Not a LINE NUMBER,
@@ -514,11 +543,18 @@ class _SwallowCollector(ast.NodeVisitor):
             if not _catches_os_error(handler.type, self._bindings, self._local_classes):
                 continue
             for stmt in ast.walk(ast.Module(body=handler.body, type_ignores=[])):
-                if (
-                    isinstance(stmt, ast.Return)
-                    and isinstance(stmt.value, ast.Constant)
-                    and stmt.value.value in (True, False)
-                ):
+                # `return False` and `yield False` are one lie in two
+                # transports, and a gate reading only `ast.Return` misses the
+                # generator spelling entirely -- found by this unit's own
+                # bypass sweep, and closed here because it is node coverage
+                # rather than the value tracking layer 3 declines to do.
+                if isinstance(stmt, (ast.Return, ast.Yield)):
+                    value = stmt.value
+                elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Yield):
+                    value = stmt.value.value
+                else:
+                    continue
+                if isinstance(value, ast.Constant) and value.value in (True, False):
                     self.hits.append(
                         (self._enclosing(), "except-OSError-return-bool", ast.unparse(stmt))
                     )
@@ -552,6 +588,20 @@ def _db_source_files() -> list[tuple[str, pathlib.Path]]:
 
 def _all_hits(source: str) -> list[Key]:
     return _named_primitive_hits(source) + _swallow_hits(source)
+
+
+def _rows_licensing_more_than_one_call(source: str) -> list[Key]:
+    """Declared rows whose key matches two or more calls in `source`.
+
+    ONE function, called both by the live-file test and by the mutant that
+    exercises it, because a rule with two implementations is one edit away from
+    disagreeing with itself -- the shape `_guards.sh` and the two git hooks pay
+    for elsewhere in this repository.
+    """
+    counts: dict[Key, int] = {}
+    for key in _all_hits(source):
+        counts[key] = counts.get(key, 0) + 1
+    return [key for key in DECLARED_EXCEPTIONS if counts.get(key, 0) > 1]
 
 
 class TestTwoValuedPathGate:
@@ -679,13 +729,19 @@ class TestKeyedOnTheCapabilityNotTheSpelling:
     """
 
     def test_a_declared_row_does_not_license_a_second_call_in_the_same_function(self):
-        """THE escape that made the key change. `init_project` is licensed for
-        one INFORMATIONAL `os.path.exists(path)`; restoring the DECISIVE read
-        CB-224 removed from the same function must not inherit that licence."""
+        """THE escape that made the key change, and it has to be spelled with
+        the SAME primitive to discriminate anything.
+
+        `init_project` is licensed for one INFORMATIONAL `os.path.exists(path)`.
+        Under the old `(function, primitive)` key, restoring a DECISIVE
+        `os.path.exists` to that same function inherited the licence and the
+        whole file went on reporting clean. A mutant using a DIFFERENT primitive
+        proves nothing here -- measured, the old key caught that one too.
+        """
         mutant = (
             "import os\n"
             "def init_project(root):\n"
-            "    if not os.path.isdir(root):\n"
+            "    if not os.path.exists(root):\n"
             "        raise ValueError('no such directory')\n"
             "    created = not os.path.exists(path)\n"
         )
@@ -693,7 +749,26 @@ class TestKeyedOnTheCapabilityNotTheSpelling:
         licensed = [k for k in hits if k in DECLARED_EXCEPTIONS]
         undeclared = [k for k in hits if k not in DECLARED_EXCEPTIONS]
         assert ("init_project", "os.path.exists", "os.path.exists(path)") in licensed
-        assert ("init_project", "os.path.isdir", "os.path.isdir(root)") in undeclared
+        assert ("init_project", "os.path.exists", "os.path.exists(root)") in undeclared
+
+    def test_a_decisive_call_textually_identical_to_a_licensed_one_is_refused(self):
+        """The residual of the key, closed by REFUSING rather than by hoping.
+
+        The key cannot tell two textually identical calls of one primitive in
+        one function apart -- so where that happens, the answer is a red test
+        naming the row, not a licence quietly covering both. Same function as
+        the live-file check, so the two cannot drift.
+        """
+        mutant = (
+            "import os\n"
+            "def init_project(root):\n"
+            "    if not os.path.exists(path):\n"
+            "        raise ValueError('no such directory')\n"
+            "    created = not os.path.exists(path)\n"
+        )
+        assert _rows_licensing_more_than_one_call(mutant) == [
+            ("init_project", "os.path.exists", "os.path.exists(path)")
+        ]
 
     def test_a_from_import_of_the_primitive_is_resolved(self):
         mutant = "from os.path import isdir\ndef _f(p):\n    return isdir(p)\n"
@@ -882,11 +957,9 @@ class TestDeclaredExceptionsCannotRot:
         double-licensed: the whole point of CB-227's re-key is that a licence
         granted for a harmless read must never cover a decisive one.
         """
-        counts: dict[Key, int] = {}
+        doubled: list[Key] = []
         for _rel, path in _db_source_files():
-            for key in _all_hits(path.read_text(encoding="utf-8")):
-                counts[key] = counts.get(key, 0) + 1
-        doubled = [key for key in DECLARED_EXCEPTIONS if counts.get(key, 0) > 1]
+            doubled += _rows_licensing_more_than_one_call(path.read_text(encoding="utf-8"))
         assert not doubled, (
             f"DECLARED_EXCEPTIONS row(s) matching more than one call: {doubled}. "
             "One row licenses one call. Distinguish the two calls (rename a "
