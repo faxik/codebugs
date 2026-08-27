@@ -135,26 +135,17 @@ Use `--mode` to load only the tools you need:
 }
 ```
 
-| Mode | Tools | Use it when |
-|------|-------|-------------|
-| `findings` | 8 | Code review / bug tracking only |
-| `provenance` | 1 | Staleness checks against git history |
-| `reqs` | 12 | Specification tracking only |
-| `sweep` | 9 | Batch iteration / state-machine tasks |
-| `bench` | 4 | Performance benchmarks |
-| `merge` | 5 | Multi-agent merge coordination |
-| `blockers` | 4 | Cross-entity dependency tracking |
-| `milestones` | 18 | Release + stream + capacity-aware pull |
-| `claims` | 5 | "Who holds this card" for parallel agents |
-| `all` | **66** | Default — everything |
+Any module name from [the module table below](#the-modules) is a valid mode, and `all` — the default — loads everything. The CLI takes the same flag: `codebugs --mode findings summary`.
 
-The CLI takes the same flag: `codebugs --mode findings summary`.
+One asymmetry is worth knowing before you rely on it: `usage` is a **CLI-only** mode. It registers a command but no MCP tools, so `codebugs --mode usage usage` works while an MCP server started with `--mode usage` would have nothing to offer.
 
 ### Other MCP Clients
 
 Any MCP-compatible client can connect to `codebugs-mcp` via stdio transport.
 
-## The nine modules
+## The modules
+
+Every name in this table is a valid `--mode` value.
 
 | Module | Domain | Headline tools |
 |--------|--------|----------------|
@@ -167,8 +158,15 @@ Any MCP-compatible client can connect to `codebugs-mcp` via stdio transport.
 | **milestones** | Releases, streams, capacity-aware pull | `pull_next`, `milestone_status`, `milestone_close` |
 | **provenance** | Staleness vs git history, commit trailers | `staleness_check` |
 | **claims** | Which agent holds a finding or requirement | `claims_claim`, `claims_release`, `claims_who_holds` |
+| **loc** | Where in the code a finding is, across edits | `anchor_resolve`, `anchor_recapture` |
+| **similarity** | Near-duplicate findings, as a dry run | `similarity_check`, `similarity_report` |
+| **relations** | Typed, retractable links between findings | `relations_relate`, `relations_query` |
+| **grouping** | Reads the axes the tracker stores but never exposed | `grouping_citations`, `grouping_tags`, `grouping_filing` |
+| **usage** | Tool-call counters (**CLI only** — no MCP tools) | — |
 
 Modules are self-registering — adding a new one is local to its own file. See [`docs/superpowers/specs/`](docs/superpowers/specs/) for the architecture history.
+
+**Not every MCP tool has a CLI verb.** The milestones module is where the gap is widest: `milestone_create`, `milestone_update`, `milestone_add_item`, `milestone_move_item`, `milestone_set_status`, `milestone_defer`, `milestone_close`, `triage_dismiss`, `triage_promote`, `pull_next` and `release_item` are reachable through MCP only. From a terminal you can inspect a release, but you cannot create one or pull work from it.
 
 ## Quick tour
 
