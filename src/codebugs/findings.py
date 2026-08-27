@@ -3840,7 +3840,18 @@ def _plan_category_fold(
                 # it never reaches here.
                 "old_fingerprint": row["fingerprint"],
             }
-            by_fingerprint_all.setdefault(effective, []).append(member)
+            # A NON-STRING token is left out of THIS map, and the exclusion is
+            # PROVABLY LOSSLESS rather than defensive. SQLite's dynamic typing
+            # permits one exactly as it permits a non-string category, and such a
+            # row is `supplied_untouched`: the fold never re-keys it, and nothing
+            # can arrive at its value either, because a re-derived fingerprint is
+            # always a `str` beginning with `auto:v1:`. So it can never take part
+            # in a merge this run creates, and keeping it would buy nothing while
+            # WIDENING a pre-existing crash — `sorted()` cannot order bytes
+            # against str, and until this map existed only the live one, which is
+            # left exactly as it was, could meet that. Measured on both sides.
+            if isinstance(effective, str):
+                by_fingerprint_all.setdefault(effective, []).append(member)
             if row["status"] in LIVE_STATUSES:
                 # The stop-rule's row shape is UNCHANGED, and it is PROJECTED from
                 # the record above rather than spelled a second time — two literals

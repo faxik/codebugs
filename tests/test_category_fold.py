@@ -1116,6 +1116,38 @@ class TestMergedIdentities:
         assert report["renames"] == [], "premise: so nothing departs the group"
         assert report["merged_identities"] == []
 
+    def test_a_terminal_row_with_a_non_string_fingerprint_does_not_break_the_run(self, conn):
+        """A REGRESSION THIS UNIT INTRODUCED AND THEN CLOSED, kept as its pin.
+
+        SQLite's dynamic typing permits a BLOB fingerprint exactly as it permits
+        a BLOB category. The new map holds every row with a post-fold identity,
+        where the stop-rule's map held only live ones — so a CLOSED row carrying
+        such a token entered a `sorted()` for the first time, and `sorted()`
+        cannot order bytes against str. Measured against this branch's parent:
+        the terminal case ran fine there and raised `TypeError` here, until such
+        tokens were excluded from that map. The exclusion loses nothing, because
+        a re-derived fingerprint is always a `str`, so no row can ever arrive at
+        a BLOB value and the row itself is never re-keyed.
+
+        The LIVE case is untouched and still raises — it did so before this unit
+        as well, and it is the stop-rule's map, which this change must not move.
+        """
+        _insert_raw(conn, fid="CB-1", category=MERGE_TO, status="fixed")
+        _insert_raw(conn, fid="CB-2", category=MERGE_FROM, description=DESC_B, status="fixed")
+        conn.execute(
+            "UPDATE findings SET fingerprint = CAST(x'DEADBEEF' AS BLOB) WHERE id = 'CB-2'"
+        )
+        conn.commit()
+        stored = conn.execute(
+            "SELECT fingerprint FROM findings WHERE id = 'CB-2'"
+        ).fetchone()["fingerprint"]
+        assert not isinstance(stored, str), "premise: the token really is not a string"
+
+        report = findings.normalize_categories(conn, fold_map={MERGE_FROM: MERGE_TO})
+
+        assert report["counts"]["supplied_untouched"] == 1
+        assert report["merged_identities"] == []
+
     def test_a_row_with_a_null_fingerprint_never_joins_a_group(self, conn):
         """A NULL hash is not an identity — it matches nothing — so such a row is
         outside both the stop-rule's map and this one, exactly as before."""
