@@ -188,12 +188,14 @@ Modules are self-registering — adding a new one is local to its own file. See 
 **CLI:**
 
 ```bash
-codebugs add -s high -c n_plus_one -f src/api.py -d "Query in loop at line 42"
+codebugs add -s high -c n_plus_one -f src/api.py -d "Query in loop at line 42" --new-category
 codebugs summary
 codebugs query --status open --severity critical
 codebugs update CB-1 --status fixed --append-note "Fixed in PR #42"
 codebugs categories
 ```
+
+**`--new-category` is needed the first time a category is used, and only then.** A category the tracker has never seen is refused, naming the closest existing spellings, because the common way a category set fragments is a typo — `n-plus-one` beside `n_plus_one` — and a fragmented category set is what makes `categories` stop revealing patterns. Once `n_plus_one` exists, later findings use it without the flag. Spelling is normalized on the way in, so hyphens, spaces and case do not mint twins.
 
 `--append-note` adds to a finding's notes; `--notes` **replaces** them wholesale. Prefer `--append-note` when recording investigation history — `--notes` will discard whatever was there, which is usually not what you want on a finding others have been working.
 
@@ -450,13 +452,16 @@ Item kinds are `bug` (validated against `findings`), `requirement` (validated ag
 
 ```
 $ codebugs categories
-category                        total  open  fixed
-tz_naive_datetime                  15     3     12
-n_plus_one                          8     2      6
-missing_input_validation            6     4      2
+category                  total  open  fixed
+------------------------  -----  ----  -----
+tz_naive_datetime         15     3     12
+n_plus_one                8      2     6
+missing_input_validation  6      4     2
 ```
 
 If you keep fixing the same category → time for a lint rule. codebugs turns reactive bug-fixing into proactive prevention.
+
+This is the view the category gate above protects. Had half those findings been filed as `tz_naive_dt`, the table would show two rows of 8 and 7 instead of one row of 15, and there would be no pattern to see. Normalization handles the punctuation-and-case twins on its own; the gate is what catches a genuinely different name for the same thing.
 
 ### Requirements verification
 
@@ -512,7 +517,7 @@ Streams (`stream/*`) refuse to close at all — they're permanent buckets.
 ## Requirements
 
 - Python 3.11+
-- No external runtime dependencies beyond `mcp>=1.0.0` (for the server)
+- One runtime dependency: `mcp>=2.0.0,<3`, for the server. The 2.0 floor is not cosmetic — `server.py` uses `MCPServer`, the class that replaced `FastMCP` in the 2.0 SDK, so an older `mcp` will not start.
 - SQLite (bundled with Python)
 
 ## Development
