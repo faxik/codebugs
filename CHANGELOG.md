@@ -154,6 +154,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   tracker sits above a `.git` directory and is therefore genuinely out of reach.
 
 ### Fixed
+- **The test-suite alarm that warns you when the source tree moved mid-run could stay completely
+  silent over the exact case it exists to catch (CB-226).** A directory that lost its listing
+  permission — or that failed to list for any other reason — simply vanished from both the
+  "before" and "after" snapshot the alarm compares, so a file changed inside it, in the middle of
+  a run, produced no report at all: the run looked perfectly still. The same alarm's own
+  truncation line could also make a whole directory disappear on an ordinary tree: with more
+  changed paths than its twenty-line display limit, the alphabetical sort put every note under
+  `.claude/plans/` ahead of a single changed file under `src/` (the dot sorts before letters), so
+  the bare "... and N more" at the end swallowed that one file with no trace anywhere in the
+  report — the one path a reader would actually have gone to check. Both are fixed. A directory
+  the run could not list is now named in the report as a place it never examined, so the alarm no
+  longer calls a run "still" when it simply did not look; and whenever the truncation line fires,
+  it now also names every top-level directory that has a change in it, with a count, so a whole
+  directory can no longer vanish from the report — only individual files inside an already-named
+  directory stay capped, exactly as before.
+- **One of the two ways out this alarm's own setup refusal offers you does not always work as
+  advertised (CB-225).** When your tracker sits above pytest's temporary root, the refusal
+  suggests `pytest tests/ --basetemp="$(mktemp -d)"` as a safe alternative to moving `TMPDIR`. It
+  is safe from the deletion risk it was written to avoid, but it does not always escape the
+  tracker: plain `mktemp -d` resolves against the very `$TMPDIR` (or `/tmp`) that is already
+  contaminated, so copying that line verbatim can print the identical refusal again, at the same
+  exit code. The message now says so, and tells you to use the `TMPDIR=` form instead when that
+  happens.
 - **When the test suite refuses to run, the way out it hands you no longer deletes a directory
   without warning you (CB-214).** The suite stops before any test executes when a `.codebugs/`
   tracker sits above pytest's temporary root, because in that state a thousand tests would fail

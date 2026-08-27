@@ -358,6 +358,99 @@ class TestTheReportNamesPathsWithoutJudgingThem:
             assert word not in report.lower()
 
 
+class TestTheAlarmNamesADirectoryItCannotList:
+    """CB-226 oracle item 1, built exactly as the brief's §4 П1 demands.
+
+    A directory `chmod 0300` BEFORE the run starts is absent from the "before"
+    fingerprint AND from the "after" one — `os.walk`'s default behaviour
+    swallows the listing failure — so the diff between two identical absences
+    is empty. Before this unit, a file rewritten to a different length INSIDE
+    that directory, while it stayed unlistable throughout, produced NOTHING in
+    the terminal summary: this is the row that used to pass silently over a
+    tree that had, in fact, changed under it in a way the run could not see.
+    """
+
+    def test_an_unlistable_directory_is_named_and_the_run_is_not_reported_clean(self, tmp_path):
+        probe_dir = REPO_ROOT / "tests" / "_cb226_probe_blinddir"
+        probe_file = probe_dir / "f.py"
+        probe_dir.mkdir()
+        probe_file.write_text("original\n")
+        os.chmod(probe_dir, 0o300)
+        try:
+            plugin_dir = _mutator(
+                tmp_path,
+                f"open({str(probe_file)!r}, 'w').write("
+                "'a considerably longer replacement body than before\\n')",
+            )
+            proc = _inner_pytest(tmp_path / "bt", plugin_dir=plugin_dir)
+        finally:
+            os.chmod(probe_dir, 0o700)
+            shutil.rmtree(probe_dir)
+        out = _output(proc)
+        assert proc.returncode == 0, out[-3000:]
+        assert _TREE_MOVED_ANCHOR in out, out[-3000:]
+        assert "_cb226_probe_blinddir" in out, out[-3000:]
+        assert "could not be listed" in out, out[-3000:]
+
+
+class TestTheTruncationTailNamesEveryTopLevelDirectory:
+    """CB-226 oracle item 2: heterogeneous paths, built as the brief's §5 demands.
+
+    The old tail let the alphabet decide what survives a truncated list: with
+    changes under `.claude/plans`, `src/` and `tests/` all present and more of
+    them than the limit, the dot in `.claude` sorted every one of its entries
+    ahead of the other two, and the file that actually mattered — the one
+    under `src/` — vanished with no trace anywhere in the report.
+    """
+
+    def test_no_top_level_directory_disappears_under_truncation(self):
+        changes = [("changed", f".claude/plans/note{i:02d}.md") for i in range(25)]
+        changes.append(("changed", "src/codebugs/db.py"))
+        changes.append(("changed", "tests/conftest.py"))
+        changes.sort(key=lambda t: t[1])
+        assert len(changes) > _TREE_MOVED_LIMIT
+
+        report = _tree_moved_report(changes, None, None)
+
+        assert "src/codebugs/db.py" not in report, "the itemised list is still capped"
+        assert "tests/conftest.py" not in report, "same cap, same reason"
+        assert ".claude (25)" in report, "but the DIRECTORY must survive the cap"
+        assert "src (1)" in report, "the one that used to vanish entirely"
+        assert "tests (1)" in report
+
+    def test_a_homogeneous_flat_list_keeps_the_old_bare_tail(self):
+        """The pre-existing oracle row, unaffected: flat names have no directory.
+
+        `_top_level_directory` returns `None` for a path with no `os.sep`, so a
+        list of bare filenames — this repo's own existing fixture shape — gets
+        no per-directory breakdown at all, and the tail is exactly what it was.
+        """
+        changes = [("changed", f"f{i:03d}") for i in range(_TREE_MOVED_LIMIT + 7)]
+        report = _tree_moved_report(changes, None, None)
+        assert "... and 7 more" in report
+        assert f"f{_TREE_MOVED_LIMIT + 6:03d}" not in report
+
+
+class TestTheReportNamesUnexaminedDirectories:
+    """CB-226: the `unexamined` channel, exercised directly on the pure function."""
+
+    def test_unexamined_directories_appear_even_with_no_itemised_changes(self):
+        report = _tree_moved_report(
+            [],
+            None,
+            None,
+            (("src/blinddir", "could not be listed (Permission denied)"),),
+        )
+        assert "src/blinddir" in report
+        assert "could not be listed" in report
+        assert "0 path(s) differ" not in report
+
+    def test_no_unexamined_places_prints_nothing_about_them(self):
+        report = _tree_moved_report([("changed", "x")], None, None)
+        assert "could not be listed" not in report
+        assert "could not be LISTED" not in report
+
+
 class TestNothingIsPrunedByJudgement:
     def test_every_pruned_entry_carries_its_reason(self):
         for table in (_PRUNED_NAMES, _PRUNED_PATHS):
