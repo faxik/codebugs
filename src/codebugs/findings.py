@@ -908,8 +908,35 @@ def _match_fingerprint(
 
     The closed lookup is one query over all terminal statuses ordered
     `updated_at DESC, rowid DESC` — the newest row's own status class decides
-    reopen-vs-recurrence, and rowid breaks the whole-second updated_at tie
-    deterministically.
+    reopen-vs-recurrence.
+
+    **`rowid` is NOT merely a tie-breaker on this corpus, and calling it one was
+    the sentence CB-230 came to correct.** The wording used to be "rowid breaks
+    the whole-second updated_at tie deterministically", which describes a rare
+    coincidence. On 2026-08-24 a mass anchor capture wrote `meta.loc` to every
+    card it touched through `update_finding`, which stamped `updated_at`
+    unconditionally: 136 of this tracker's 233 rows and 3285 of autosorter's 3449
+    (95.4 %) now carry one of a handful of stamps inside a six-second window. For
+    that majority the first sort key is CONSTANT, so `rowid` — which is INSERT
+    order, not edit order — decides alone. Those dates are unrecoverable; the
+    service-write flag on `update_finding` stops the NEXT capture from widening
+    the damage, and restores nothing.
+
+    **A second sort key is deliberately NOT built, and the measurement is the
+    argument.** The order only decides anything when ONE fingerprint carries TWO
+    OR MORE terminal rows. Measured over both live trackers on 2026-08-27:
+    codebugs, 233 rows — **zero** such fingerprints (re-measured on 2026-08-27
+    from a fresh `export-csv`, terminal vocabulary read from
+    `_REOPEN_STATUSES + RECURRENCE_STATUSES`, 136 terminal rows carrying a
+    fingerprint at all); autosorter, 3449 rows — **one**, `CB-3268` and `CB-3265`,
+    both `wont_fix`, both stamped `2026-08-24T19:17:36`. Both members of that pair
+    are in the SAME status class, so `recurrence_of` is chosen whichever wins and
+    the outcome is indistinguishable. There is no live tracker on which the
+    degraded order can produce a wrong answer, and building a key for it would be
+    fixing a defect nothing exhibits — the refusal CB-44 made and CB-45 reversed
+    only when a consumer appeared. The revisit trigger is a fingerprint acquiring
+    two terminal rows of DIFFERENT classes (one `fixed`, one `wont_fix`/
+    `not_a_bug`); that is the state in which the winner changes the branch taken.
     """
     live = _live_row_by_fingerprint(conn, fingerprint)
     terminal = _REOPEN_STATUSES + RECURRENCE_STATUSES
@@ -2305,6 +2332,7 @@ def update_finding(
     tags: list[str] | None = None,
     meta_update: dict[str, Any] | None = None,
     reported_at_ref: str | None = None,
+    authored: bool = True,
 ) -> dict[str, Any]:
     """Update a finding. Returns updated finding.
 
@@ -2336,6 +2364,45 @@ def update_finding(
     Do not restore a ``conn.commit()`` here: ``db.txn`` yields ``False`` under an
     ambient transaction, and committing then would commit the *caller's* work
     (``milestones.triage_dismiss`` is such a caller).
+
+    **``authored=False`` is a SERVICE write, and it governs EXACTLY ONE COLUMN
+    (CB-230).** The name is wider than the effect, so read the effect first:
+    with ``authored=False`` the ``updated_at = ?`` assignment is not appended,
+    and NOTHING ELSE changes. The ``meta`` merge, the one-assignment-per-column
+    rule, the built ``SET`` clause, ``rowcount``, the status-change hooks, the
+    surrounding ``db.txn`` and the returned row are all byte-for-byte what they
+    are on the authored path. It does not make the write silent, partial,
+    unlogged or unhooked; it declines to claim that a human edited the card.
+
+    The name comes from doctrine this package had already written down twice and
+    then walked past. ``normalize_categories`` carries the comment "``updated_at``
+    is deliberately not bumped: it records an AUTHORED change, and a spelling
+    migration authors nothing", and the paragraph below says the same about the
+    fingerprint refusal. Both are the same rule: ``updated_at`` answers *when did
+    somebody last change this card*, not *when did a program last touch this
+    row*. What forced a parameter is that a caller had no way to say which of the
+    two it was — the mass anchor capture of 2026-08-24 wrote its machine-derived
+    ``meta.loc`` through this function and, in doing so, overwrote the last-change
+    date of 136 of this tracker's 233 cards (95.4 % of the 3449 in autosorter's)
+    with one six-second window. Those dates are gone; nothing here restores them.
+
+    **``status`` under ``authored=False`` is REFUSED, not silently obeyed.** A
+    status write is authorship by definition: a person or a commit closed the
+    card. The refusal is a ``ValueError`` raised from the argument-validation
+    block above the transaction, so it takes no write lock and lands nothing —
+    and it exists because the alternative is point-of-use discipline, which this
+    package has watched fail (CB-41). One ``if`` makes the single way this flag
+    could erase a real date unrepresentable, rather than trusting each future
+    caller to pass it correctly.
+
+    Every other parameter is still reachable under the flag, and that is a
+    boundary rather than an oversight: a service write that legitimately needs
+    ``tags`` or ``notes`` is imaginable, and only ``status`` carries a
+    definitional claim of authorship. Today the package has exactly one service
+    caller (``loc.recapture_findings``, pinned by
+    ``tests/test_cb230_service_write.py::TestServiceWriteCallSiteRatchet``), and
+    the flag is deliberately absent from the MCP tool and the CLI verb, so no
+    external caller can decline to author.
 
     **What this function deliberately CANNOT reach, and why (CB-21).**
     ``description``, ``category`` and ``file`` are the three INPUTS to the
@@ -2389,6 +2456,17 @@ def update_finding(
     # contention, instead of the ValueError the contract promises immediately.
     if status is not None:
         status = resolve_finding_status(status)
+        # CB-230. A status write is authorship by definition — a person or a commit
+        # closed the card — so the one combination that could let this flag erase a
+        # real edit date is refused rather than obeyed. Argument-only, so it lands
+        # here with the resolvers: a refusal must not take the write lock.
+        if not authored:
+            raise ValueError(
+                "update_finding: status=... cannot be combined with authored=False — "
+                "a status change is an authored act (a person or a commit closed the "
+                "card), never a service write. Drop authored=False, or write the "
+                "service payload (meta_update/tags/notes) in a separate call."
+            )
     if severity is not None:
         severity = resolve_severity(severity)
     # Same reservation as on the add path: a meta_update planting "occurrences"
@@ -2486,8 +2564,14 @@ def update_finding(
             if not updates:
                 final_row = row
             else:
-                updates.append("updated_at = ?")
-                params.append(utc_now())
+                # CB-230. The ONE column the service-write flag governs. Everything
+                # below this `if` — the parameter for the id, the UPDATE, the hook
+                # firing, the re-read — is outside it deliberately: `authored` must
+                # not be able to change what lands, only whether this row claims a
+                # human last changed it.
+                if authored:
+                    updates.append("updated_at = ?")
+                    params.append(utc_now())
                 params.append(finding_id)
 
                 old_status = row["status"]
