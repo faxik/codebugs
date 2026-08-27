@@ -137,6 +137,26 @@ _journal_record() {
 }
 trap _journal_record EXIT
 
+# The worktrees an operator could have meant, for the two refusals that offer a
+# list. SHARED because it was DUPLICATED, and the duplicate is how CB-231 stayed
+# invisible for so long: the same pipeline sat in both places, and only one of
+# them stood in front of an exit code worth losing.
+#
+# `|| true` IS THE FIX (CB-231), not tidiness. The final `grep -v` drops the
+# primary checkout from the listing, so in a clone with no OTHER worktree it
+# selects nothing and exits 1. Under `set -o pipefail` that becomes the whole
+# pipeline's status, and `set -e` then killed the script BEFORE the `exit 2`
+# two lines below it — so the code this harness documents for "no worktree for
+# that slug" could not fire in exactly the case it names: a mistyped slug in a
+# clone with nothing else checked out. Measured on bash 5.3.9 before and after;
+# the caller saw 1, which is this script's code for "bad input" generally, so
+# the refusal was real but unattributable.
+_list_other_worktrees() {
+    git -C "${REPO_ROOT}" worktree list --porcelain 2>/dev/null \
+        | grep "^worktree " | grep -v "^worktree ${REPO_ROOT}$" \
+        | sed 's|^worktree .*/||; s|^|  |' || true
+}
+
 if [[ $# -lt 1 ]]; then
     echo "Usage: $0 <slug> [commit-message] [flags]"
     echo ""
@@ -150,8 +170,7 @@ if [[ $# -lt 1 ]]; then
     echo "  Env: CODEBUGS_STALE_BASE_MAX (default ${CODEBUGS_STALE_BASE_MAX})"
     echo ""
     echo "Available worktrees:"
-    git -C "${REPO_ROOT}" worktree list --porcelain 2>/dev/null \
-        | grep "^worktree " | grep -v "^worktree ${REPO_ROOT}$" | sed 's|^worktree .*/||; s|^|  |'
+    _list_other_worktrees
     exit 1
 fi
 
@@ -211,8 +230,7 @@ WORKTREE_PATH=$(_resolve_worktree_path "${SLUG}")
 if [[ ! -d "${WORKTREE_PATH}" ]]; then
     echo "ERROR: no worktree for slug '${SLUG}' (last tried: ${WORKTREE_PATH})"
     echo "Available worktrees:"
-    git -C "${REPO_ROOT}" worktree list --porcelain 2>/dev/null \
-        | grep "^worktree " | grep -v "^worktree ${REPO_ROOT}$" | sed 's|^worktree .*/||; s|^|  |'
+    _list_other_worktrees
     exit 2
 fi
 
