@@ -1167,6 +1167,12 @@ class TestInstructionsNamedToolsExist:
             "a response KEY `add`/`batch_add` return (CB-43's dedup branch "
             "name), not a tool the caller invokes."
         ),
+        "meta": (
+            "the head of `meta.line` / `meta.lines` (CB-232), which are INPUT "
+            "keys on the observation `add` accepts -- the two spellings the "
+            "anchor grammar reads to capture a code span. Not a tool, and not "
+            "a response key either: it is an argument the caller supplies."
+        ),
     }
 
     @staticmethod

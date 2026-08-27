@@ -584,9 +584,14 @@ INSTRUCTIONS = """Recommended loop for a finding:
    own flag when your observation raised the card's severity or diverged from
    its stored category; `dedup_action` says whether this created a new card,
    bumped or reopened an existing one, or refiled one already dismissed.
-3. The code location is anchored automatically at file time (git-derived), so
-   the card survives later edits; `anchor_resolve` reports whether an anchor
-   still points at live code.
+3. When your observation NAMES a place in the code — a line or a line range,
+   passed as `meta.line` or `meta.lines` — that place is anchored at file time
+   from git, and the card then survives later edits of the file. A report that
+   names only a file has nothing to anchor, and most reports name no span, so
+   this is a thing you opt into rather than something every card gets.
+   `anchor_resolve` is how to tell the two apart on any card: it reports where
+   the code is now when there is an anchor, and an unknown-with-a-reason
+   answer when the filing never named a span.
 4. Close the card with `update(status="fixed")` once it is actually fixed.
 
 Deduplication is the point, not a side effect: filing the same finding twice
