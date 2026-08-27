@@ -33,6 +33,7 @@ the exact failure mode this whole unit exists to close.
 
 import ast
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -336,6 +337,97 @@ class TestTheWayOutIsSafeToCopyInAHurry:
         msg = self._message()
         assert msg.count(NOTE_ANCHOR) == 1
         assert "not a false alarm" in msg
+
+
+class TestTheBasetempAdviceIsNotEquivalentToTheTmpdirAdvice:
+    """CB-225: copying the `--basetemp` exit verbatim can reproduce the refusal.
+
+    Built by hand first, exactly as the brief's §4 П3 demands, against a REAL
+    pytest session — not the rendered message, which the class above already
+    covers. `mktemp -d` with no `-p`/`--tmpdir` resolves against `$TMPDIR` (or
+    `/tmp` when unset), so when the contaminating tracker sits at or above
+    `$TMPDIR` itself, the "fresh throwaway path" the message recommends is
+    still a descendant of it, and the walk finds the same tracker again. Only
+    moving `TMPDIR` to a genuinely different place escapes.
+
+    Every row here sets `TMPDIR` explicitly to a path inside its own `tmp_path`
+    rather than touching the real one — the machine's actual `$TMPDIR`/`/tmp`
+    must never be poisoned by a test, or the next unrelated session run on this
+    machine inherits the contamination and refuses by accident.
+    """
+
+    def test_the_plain_run_refuses(self, tmp_path):
+        poisoned = tmp_path / "poisoned"
+        (poisoned / ".codebugs").mkdir(parents=True)
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", CANARY, "-q"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            env={**os.environ, "TMPDIR": str(poisoned)},
+        )
+
+        assert proc.returncode == pytest.ExitCode.USAGE_ERROR, _output(proc)
+        assert REFUSAL_ANCHOR in _output(proc)
+
+    def test_copying_the_basetemp_advice_verbatim_refuses_again_at_the_same_code(self, tmp_path):
+        poisoned = tmp_path / "poisoned"
+        (poisoned / ".codebugs").mkdir(parents=True)
+        env = {**os.environ, "TMPDIR": str(poisoned)}
+
+        # The exact line from the refusal message: `--basetemp="$(mktemp -d)"`,
+        # with the same TMPDIR the plain run above already refused under.
+        mk = subprocess.run(["mktemp", "-d"], capture_output=True, text=True, env=env, check=True)
+        fresh = mk.stdout.strip()
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "pytest", CANARY, "-q", "--basetemp", fresh],
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            first = subprocess.run(
+                [sys.executable, "-m", "pytest", CANARY, "-q"],
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            assert proc.returncode == pytest.ExitCode.USAGE_ERROR, _output(proc)
+            assert proc.returncode == first.returncode, (
+                "the copied advice must refuse at the SAME code as the plain run, "
+                "not a different one — it is not a different failure, it is the "
+                "identical refusal"
+            )
+            assert REFUSAL_ANCHOR in _output(proc)
+        finally:
+            shutil.rmtree(fresh, ignore_errors=True)
+
+    def test_moving_tmpdir_itself_actually_escapes(self, tmp_path):
+        poisoned = tmp_path / "poisoned"
+        (poisoned / ".codebugs").mkdir(parents=True)
+        clean = tmp_path / "clean"
+        clean.mkdir()
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", CANARY, "-q"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            env={**os.environ, "TMPDIR": str(clean)},
+        )
+
+        assert proc.returncode == 0, _output(proc)
+        assert REFUSAL_ANCHOR not in _output(proc)
+
+    def test_the_message_no_longer_claims_basetemp_does_the_same_job(self):
+        """The false claim CB-225 fixes, pinned on the rendered text itself."""
+        msg = _hermeticity_refusal("/BASETEMP", "/FOREIGN")
+        assert "does the same job" not in msg
+        assert "ONLY WHEN" in msg
+        assert "$TMPDIR" in msg
 
 
 def _git(*args, cwd):
