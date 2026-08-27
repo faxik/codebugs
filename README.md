@@ -83,7 +83,9 @@ codebugs where     # show the current binding and which channel decided it
 
 `where` is a diagnostic, not a precedence level: it prints the resolved root, the database path, and the channel — the fastest way to check that a command is about to read the tracker you think it is.
 
-Two things worth knowing. A declared root that contains no `.codebugs/` is a **hard error**, never a new tracker: the value may be a stale export inherited from another shell, and silently creating an empty database there is how findings go missing. And `init` ignores the declaration — it always creates where you are standing — but warns if the declaration points somewhere else, since otherwise it would report success for a tracker no other command will read.
+Two things worth knowing. A declared root that contains no `.codebugs/` is a **hard error**, never a new tracker: the value may be a stale export inherited from another shell, and silently creating an empty database there is how findings go missing.
+
+And `init` treats the two channels differently, because they carry different evidence. **`--tracker-root DIR init` creates the tracker in `DIR`** — the flag is typed on the command line being run, so it is an assertion about this invocation, exactly like a path argument. **`CODEBUGS_ROOT` is ignored by `init`, which creates where you are standing**, and warns that later commands will read somewhere else: an environment variable exported days ago and inherited by an unrelated process must never conjure a tracker in a directory you are not in. Whenever the tracker `init` created is not the one the next command would read, it says so on stderr, since otherwise it would report success for a dead end.
 
 `CODEBUGS_ROOT` is inherited by every subprocess, so export it only when you mean "this shell works on that project". For one-off use across projects, prefer `--tracker-root`.
 
@@ -103,7 +105,7 @@ Add to `~/.claude.json` (global) or `.mcp.json` (per-project):
 
 The database lives at `.codebugs/findings.db`, discovered by walking up from the server's working directory — each project gets its own. Run `codebugs init` in the project first (see above), or every tool call will fail with "no `.codebugs/` found".
 
-The server connects lazily, per tool call, so it starts successfully even when no tracker is reachable. At startup it writes one line to **stderr** — which MCP clients log — if discovery failed, or if a root was declared rather than discovered; on the ordinary path it says nothing. It never refuses to start: a project directory that appears later must still work.
+The server connects lazily, per tool call, so it starts successfully even when no tracker is reachable. At startup it writes a diagnostic to **stderr** — which MCP clients log — if discovery failed, or if a root was declared rather than discovered; on the ordinary path it says nothing. It never refuses to start: a project directory that appears later must still work.
 
 To pin one server to one tracker instead of deriving it from the working directory:
 
@@ -137,7 +139,7 @@ Use `--mode` to load only the tools you need:
 
 Any module name from [the module table below](#the-modules) is a valid mode, and `all` — the default — loads everything. The CLI takes the same flag: `codebugs --mode findings summary`.
 
-One asymmetry is worth knowing before you rely on it: `usage` is a **CLI-only** mode. It registers a command but no MCP tools, so `codebugs --mode usage usage` works while an MCP server started with `--mode usage` would have nothing to offer.
+One asymmetry is worth knowing before you rely on it: `usage` is a **CLI-only** mode. It registers a command but no MCP tools, so `codebugs --mode usage usage` works, while `codebugs-mcp --mode usage` **does not start at all** — the server does not accept that value, and refuses it with `argument --mode: invalid choice: 'usage'` and exit code 2. It is not a server that runs with an empty catalogue; there is no server. The two lists of accepted modes are compared against this table by the test suite, so a mode that appears on one surface and not the other turns a test red rather than surprising you here.
 
 ### Other MCP Clients
 
@@ -373,7 +375,7 @@ codebugs sweep-archive-items retro-findings --state RESOLVED --older-than 30d
 
 ### Identity, location and grouping
 
-These four modules are what the opening section is about, and none of them had an entry here before.
+The modules behind the opening section — `loc`, `similarity`, `relations` and `grouping` — are what this section is about, and none of them had an entry here before.
 
 | Tool | Purpose |
 |------|---------|
@@ -392,16 +394,19 @@ These four modules are what the opening section is about, and none of them had a
 
 ```
 $ codebugs anchor-resolve --finding-id CB-2 --repo . --json
+      ...
       "anchor": {
         "status": "moved",
         "path": "src_api.py",
         "line": 25,
         "end": 27,
         "channel": "git",
+        "reason": null,
         "survived": "3/3",
+        ...
 ```
 
-That card was filed against lines 5–7. Twenty lines were then inserted above it. The stored line numbers are stale; the anchor is not.
+That card was filed against lines 5–7. Twenty lines were then inserted above it. The stored line numbers are stale; the anchor is not. The `...` are real: this is an excerpt of one entry from a larger document, and the anchor object itself carries one more key — `resolved_against`, the root, commit and on-disk file the answer was computed against. Every key is always present: `"reason": null` here means *there is nothing to explain*, because there is an answer, and never *this field is missing*.
 
 ## How It Works
 
