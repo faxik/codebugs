@@ -3784,15 +3784,18 @@ def _plan_category_fold(
     for row in conn.execute(_FOLD_SELECT):
         rows_scanned += 1
         kind, target, new_fingerprint = _fold_row_decision(row, fold_map)
-        # CB-207, and the trap is that this CANNOT be derived from `renames`: a key
-        # whose target EQUALS the stored value decides `unchanged`, so it reaches
-        # neither `renames` nor any counter, and a report built from the RESULT
-        # would call a key that named its category perfectly a miss (measured).
-        # `skipped_non_string` IS the "stored category is not a str" test — read
-        # here rather than re-spelled as a second `isinstance`, so the report
-        # judges by the same predicate the fold acts on instead of a copy of it.
+        # CB-207, and the trap is that this set CANNOT be derived from `renames`:
+        # a key whose target EQUALS the stored value decides `unchanged`, so it
+        # reaches neither `renames` nor any counter, and a report built from the
+        # RESULT would call a key that named its category perfectly a miss
+        # (measured). The test is the row's own KIND rather than a second
+        # `isinstance` — `skipped_non_string` IS "the stored category is not a
+        # str" — so the report judges by the same predicate the fold acts on
+        # instead of by a copy of it. It sits beside the counting chain rather
+        # than inside it because `unchanged` rows take no branch there at all.
         if kind != "skipped_non_string":
             stored_categories.add(row["category"])
+
         if kind == "skipped_non_string":
             counts["skipped_non_string"] += 1
         elif kind == "unverifiable":
