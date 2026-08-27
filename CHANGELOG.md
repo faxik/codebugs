@@ -23,8 +23,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   than none, and the tracker will tell you it has none rather than guess. Where a token names a
   different file from the card's own, the anchor is declined for the same reason, instead of reading
   one file's line numbers against another.
+### Fixed
+- **"Last changed" means last changed again: routine housekeeping no longer looks like an edit to
+  your card.** The tracker keeps each card's code location pinned to the surrounding text, so the
+  card still points at the right lines after the file is edited around it. Refreshing that pin is
+  bookkeeping the tracker does for itself — but it was going in through the same door as a human
+  edit, so every refreshed card came back reading as though somebody had just changed it. A
+  housekeeping pass across the whole tracker therefore reset the "last changed" date of most cards
+  in it, all to the same moment.
+
+  Housekeeping now says it is housekeeping, and leaves that date alone. Closing, re-triaging,
+  re-tagging or annotating a card still moves it, exactly as before — and a status change can no
+  longer be filed as housekeeping at all, so nothing can quietly close a card without leaving a
+  date behind.
+
+  **What this does not fix, said plainly: this change repairs the cause and touches no existing
+  row.** A date already overwritten by such a pass is not recomputed and not guessed — inventing a
+  plausible date inside a tool whose job is to record history would be worse than admitting the
+  gap. The only way back is a backup taken before the pass, restored by hand; if you have no such
+  copy, treat the affected cards' "last changed" as no older than the day the pass ran, rather than
+  as the truth about the card's earlier life. (This project's own trackers were repaired that way
+  from a copy dated 23 August 2026, which is why their dates read correctly again — that was a
+  separate act on the data, not something this release does for you.) Cards filed since are
+  unaffected, and from now on the date means what it says.
 
 ### Changed
+- **Four places where a surface still promised more than the code delivers, and the reader was
+  acting on the promise.** Starting the MCP server with `--mode usage` was described as a server
+  with nothing to offer; in fact it does not start at all — that mode exists only on the CLI, and
+  the server refuses the value with exit code 2. `init` under `--tracker-root DIR` was described as
+  ignoring the flag and creating where you stand; it creates in `DIR`, and it is the `CODEBUGS_ROOT`
+  environment variable — the one you may have exported days ago — that is deliberately ignored for
+  creation. The server's startup diagnostic was described as one line to stderr; when no tracker is
+  reachable it writes two, the second telling you calls will fail until one is. And the sample
+  `anchor-resolve` output had quietly lost a field from the middle of the record, so a reader
+  matching it against a real run would have found a key the documentation did not show. The
+  anchor example now shows every field it lists, marks where it is an excerpt, and explains that
+  `"reason": null` means *nothing to explain* rather than *field missing*.
+- **The instructions the MCP server hands every connecting client no longer promise that a card
+  survives an edit of its file.** That is true when the report named a line or a line range, and
+  only then — most reports name a file and nothing more, so for most cards there is no anchor to
+  survive anything. The text now states the condition, and says that `anchor_resolve` is how to
+  tell which kind of card you are holding.
+- **The two lists of `--mode` values are now compared with each other by the test suite.** They
+  disagree — `usage` is a CLI mode and not a server one — and nothing checked that the README's
+  account of the disagreement was right, which is how the wrong account above survived. A mode that
+  appears on one surface and not the other now turns a test red instead of surprising a reader.
+  The same suite's reader of README examples was widened from matching particular spellings to
+  recognising the thing itself: a code fence is a fence at any indentation, in backticks or tildes,
+  at any length; a table is found by its column names rather than one exact header line. Measured
+  over 31 ways of writing a false claim into the README, it caught 8 before and 27 after, and the
+  four it still cannot see are now named one by one in its own documentation.
 - **The README now says what this tracker does differently, and no longer promises things the code
   does not do.** It opened on "durable memory for AI assistants" — true, but true of any tracker —
   and never mentioned the one thing that actually separates this one: a finding here has an

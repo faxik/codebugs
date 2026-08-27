@@ -21,6 +21,14 @@ declared somewhere below:
 4. the CLI parser's argparse dests, captured with a fake ``sub`` (what an
    operator can type).
 
+A parameter is declared in one of two ways, and CB-230 added the second. Either
+some column claims it in ``MUTABLE`` (it writes that column), or it is named in
+``NON_WRITING`` with a reason (it writes no column at all and only changes HOW
+the others are written). The second class exists because the first message this
+gate produced for such a parameter advised the one repair that must not be made
+— declaring a suppressing flag a writer of the column it suppresses would put a
+falsehood into the gate about that column. Both tables are self-deleting.
+
 The shape is the ratchet-allowlist of
 ``tests/test_claims.py::test_24_no_plain_begin_ratchet``: the declarations are
 module constants, and the gate's honest scope is stated rather than implied.
@@ -136,8 +144,20 @@ FINDINGS_IMMUTABLE: dict[str, str] = {
     ),
     "created_at": "Stamped by the writer at insert, never supplied by a caller.",
     "updated_at": (
-        "Stamped by the writer on every write, never supplied by a caller — an "
-        "argument for it would let a caller lie about when the row moved."
+        "Never supplied by a caller: there is no argument that sets this column "
+        "to a value, so a caller still cannot lie about WHEN the row moved. "
+        "That is the whole of the immutability claim, and it is unchanged. "
+        "What is no longer true is the wording this reason used to carry — "
+        "'stamped by the writer on every write'. Since CB-230 update_finding "
+        "takes authored=False, and on that path the writer does not stamp at "
+        "all: a service write (the anchor capture in loc.py) records that the "
+        "row's machinery-owned meta moved without claiming a human edited the "
+        "card. The flag can only SUPPRESS the stamp, never choose its value, "
+        "and it is refused outright alongside status=, so it cannot be used to "
+        "hide an authored change. Note the sibling entity's reason still says "
+        "'on every write' and is still correct: update_requirement has no such "
+        "flag, deliberately (no service writer to requirements exists), and "
+        "that asymmetry is declared here rather than left to be discovered."
     ),
     "fingerprint": (
         "The identity key itself (CB-43 item 6: INSERT-settable, documented "
@@ -183,6 +203,46 @@ REQS_IMMUTABLE: dict[str, str] = {
         "argument anywhere."
     ),
 }
+
+# parameter -> WHY it writes no column at all.
+#
+# The third kind of updater parameter, and the one this gate had no vocabulary
+# for until CB-230. MUTABLE says "this parameter writes that column"; IMMUTABLE
+# says "no parameter writes this column". A parameter that writes NOTHING — it
+# changes HOW the other parameters are written — fits neither, and the updater
+# axis refused it with a message advising the one repair that must not be made:
+# declaring it a writer of the column it suppresses would put a falsehood into
+# the gate, about the very column the card exists to protect.
+#
+# The table is SELF-DELETING, in both directions a signature reader can see, on
+# the model of `DECLARED_EXCEPTIONS` in `tests/test_strict_bool_gates.py`: a row
+# naming a parameter the updater no longer has is refused, and so is a row
+# naming a parameter that some column now claims in MUTABLE. A table that can
+# grow silently is the same hole this file exists to close, one level up.
+#
+# HONEST LIMIT, and it is this file's standing one: the gate reads SIGNATURES,
+# never bodies. It cannot prove that a parameter listed here writes no column —
+# only that nobody has DECLARED it a writer. The reason text is an assertion by
+# whoever added the row; what the gate enforces is that the assertion exists,
+# stays current, and does not contradict MUTABLE.
+FINDINGS_NON_WRITING: dict[str, str] = {
+    "authored": (
+        "CB-230. Writes no column. It governs whether the writer appends its "
+        "own `updated_at = ?` assignment, which is the one column no caller may "
+        "set to a value — so it belongs to neither table above. `updated_at` "
+        "stays IMMUTABLE, correctly: this parameter cannot choose a timestamp, "
+        "only decline to claim one, and it is refused outright when combined "
+        "with `status=` so it cannot suppress the stamp of an authored change. "
+        "Its one in-package caller is loc.recapture_findings; the count is "
+        "pinned by tests/test_cb230_service_write.py, and the flag is "
+        "deliberately absent from the MCP tool and the CLI verb."
+    ),
+}
+
+# Requirements have no service writer, so no non-writing parameter (CB-230 §3.4:
+# a parameter with no consumer is dead code, and this package has twice refused
+# to build one speculatively — CB-44, CB-184). An empty table is a real answer.
+REQS_NON_WRITING: dict[str, str] = {}
 
 # (parameter, layer) -> why the parameter is not reachable on that surface.
 # Layer is "mcp" or "cli". A hole declared here must be REAL: the gate refuses a
@@ -249,6 +309,7 @@ ENTITIES = {
         "cli_verb": "update",
         "mutable": FINDINGS_MUTABLE,
         "immutable": FINDINGS_IMMUTABLE,
+        "non_writing": FINDINGS_NON_WRITING,
         "gaps": FINDINGS_SURFACE_GAPS,
         "extras": FINDINGS_SURFACE_EXTRAS,
     },
@@ -260,6 +321,7 @@ ENTITIES = {
         "cli_verb": "reqs-update",
         "mutable": REQS_MUTABLE,
         "immutable": REQS_IMMUTABLE,
+        "non_writing": REQS_NON_WRITING,
         "gaps": REQS_SURFACE_GAPS,
         "extras": REQS_SURFACE_EXTRAS,
     },
@@ -421,12 +483,49 @@ class TestUpdaterAxis:
         """
         spec = ENTITIES[entity]
         declared = _declared_params(spec["mutable"])
-        undeclared = sorted(_updater_params(spec["updater"]) - declared)
+        non_writing = set(spec["non_writing"])
+        undeclared = sorted(_updater_params(spec["updater"]) - declared - non_writing)
         assert not undeclared, (
             f"{entity}: {spec['updater'].__name__} takes parameters no column claims: "
             f"{undeclared}. Add each to the MUTABLE entry of the column it writes "
-            f"(and move that column out of IMMUTABLE if it is there)."
+            f"(and move that column out of IMMUTABLE if it is there) — or, if it "
+            f"writes NO column and only changes how the others are written, to "
+            f"NON_WRITING with the reason. Do NOT declare a suppressing flag a "
+            f"writer of the column it suppresses: that puts a falsehood into the "
+            f"gate about the column (CB-230)."
         )
+
+    def test_no_non_writing_row_is_stale(self, entity):
+        """The non-writing table may only shrink, and it is checked both ways.
+
+        A row naming a parameter the updater no longer has is a declaration
+        about nothing; a row naming a parameter that some column now claims in
+        MUTABLE is a declaration that contradicts the table beside it. Either
+        way the row would keep licensing a hole after the hole closed, which is
+        precisely how an exceptions table becomes the place real gaps are
+        parked (`tests/test_strict_bool_gates.py` says the same about its own).
+        """
+        spec = ENTITIES[entity]
+        actual = _updater_params(spec["updater"])
+        declared = _declared_params(spec["mutable"])
+        for param in spec["non_writing"]:
+            assert param in actual, (
+                f"{entity}: NON_WRITING names {param!r}, which "
+                f"{spec['updater'].__name__} no longer takes. Delete the row."
+            )
+            assert param not in declared, (
+                f"{entity}: {param!r} is declared BOTH non-writing and as a writer "
+                f"of a column in MUTABLE. One of the two is wrong."
+            )
+
+    def test_every_non_writing_row_carries_a_real_reason(self, entity):
+        """Same bar as an immutability reason: a blank row declares nothing."""
+        for param, reason in ENTITIES[entity]["non_writing"].items():
+            assert isinstance(reason, str), f"{entity}.{param}: reason is not a string"
+            assert len(reason.strip()) >= MIN_REASON_LEN, (
+                f"{entity}.{param}: non-writing reason is too short to be a reason: "
+                f"{reason!r}"
+            )
 
 
 @pytest.mark.parametrize("entity", ENTITY_IDS)
