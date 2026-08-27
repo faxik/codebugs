@@ -866,3 +866,410 @@ class TestMcpMergeSurface:
             )
 
         assert _categories(conn) == [MERGE_FROM]
+
+
+# ===========================================================================
+# CB-207 + CB-209 — THE DRY RUN ANSWERS ITS OWN QUESTION
+#
+# A dry run exists for one question: "will this do what I meant?" Two things it
+# did silently, both measured before this change:
+#
+#   CB-207  a fold_map KEY matching no stored category renamed nothing and
+#           appeared in no part of the report — not `renames`, not a counter —
+#           so a typo on the left-hand side was visible only to someone
+#           diffing the `from -> to` table against their own map by eye.
+#   CB-209  the collision stop-rule reads LIVE rows only, because the partial
+#           unique index it defends is live-only. Every other identity merge —
+#           two closed cards onto one hash, or a closed card onto a live one —
+#           applied at exit 0 with an empty `collisions`.
+#
+# Both are answered by REPORTING, never by refusing: `unmatched_fold_keys` and
+# `merged_identities` are unconditional lists on the `attention` discipline,
+# and neither touches `stopped` or the exit code. The states they describe are
+# legal — an inert key writes nothing, and CB-43's `recurrence_of` contract
+# reaches a shared terminal hash with no fold at all. Creating them in SILENCE
+# is what was wrong.
+# ===========================================================================
+
+
+def _live_recurrence_twins(conn):
+    """Two TERMINAL rows sharing one fingerprint, reached with NO fold at all.
+
+    TWO STEPS, and the second is the whole point. The obvious construction —
+    file, dismiss, re-observe — stops at `(wont_fix, open)`, which is a
+    (terminal, LIVE) pair and legal for a different reason: the partial unique
+    index forbids two LIVE rows and says nothing about a terminal beside a live
+    one. Closing the recurrence row as well is what produces the pair this
+    fixture is named for, and a test built on one step would conclude the whole
+    premise of CB-209 was false.
+    """
+    first = findings.add_finding(
+        conn, severity="high", category=MERGE_TO, file="a.py",
+        description=DESC, new_category=True,
+    )
+    findings.update_finding(conn, finding_id=first["id"], status="wont_fix")
+    second = findings.add_finding(
+        conn, severity="high", category=MERGE_TO, file="a.py", description=DESC
+    )
+    assert second["id"] != first["id"], "premise: a dismissed card refiles a recurrence"
+    findings.update_finding(conn, finding_id=second["id"], status="fixed")
+    rows = conn.execute("SELECT status, fingerprint FROM findings").fetchall()
+    assert len(rows) == 2 and len({r["fingerprint"] for r in rows}) == 1, (
+        "premise: the two rows share one fingerprint"
+    )
+    assert all(r["status"] in ("wont_fix", "fixed") for r in rows), (
+        "premise: BOTH rows are terminal — a (terminal, live) pair is a different state"
+    )
+    return first["id"], second["id"]
+
+
+class TestUnmatchedFoldKeys:
+    """Oracle rows 1-4 (CB-207)."""
+
+    def test_a_key_matching_no_stored_category_is_named(self, conn):
+        """Row 1. The motivating shape: one pair right, one letter wrong."""
+        _insert_raw(conn, fid="CB-1", category=MERGE_FROM)
+        # The target has to be a category this tracker holds, or CB-223's gate
+        # refuses the whole call before any of this is reached.
+        _insert_raw(conn, fid="CB-2", category=MERGE_TO, description=DESC_B)
+
+        report = findings.normalize_categories(
+            conn, fold_map={MERGE_FROM: MERGE_TO, "data_looss": MERGE_TO}
+        )
+
+        assert report["unmatched_fold_keys"] == ["data_looss"]
+        # The typo really was inert: the good pair still did its work.
+        assert [r["id"] for r in report["renames"]] == ["CB-1"]
+
+    def test_a_key_whose_target_equals_the_stored_value_is_not_called_unmatched(self, conn):
+        """Row 2, and the reason this list CANNOT be derived from `renames`.
+
+        Such a key names its category perfectly and asks for no change, so
+        `_fold_row_decision` returns `unchanged` and the row reaches neither
+        `renames` nor any counter. A report computed from the RESULT would
+        therefore accuse a correct key of matching nothing — measured against
+        exactly that mutant. The set is built from the stored categories the
+        traversal SAW instead.
+        """
+        _insert_raw(conn, fid="CB-1", category=MERGE_TO)
+
+        report = findings.normalize_categories(conn, fold_map={MERGE_TO: MERGE_TO})
+
+        assert report["renames"] == [], "premise: an identity pair renames nothing"
+        assert report["unmatched_fold_keys"] == []
+
+    def test_a_non_string_stored_category_is_not_something_a_key_can_match(self, conn):
+        """A BLOB category is skipped by the fold, so it is not in the set a key
+        is judged against either — one predicate, read from the row's own kind
+        rather than re-spelled here."""
+        _insert_raw(conn, fid="CB-1", category=MERGE_TO)
+        _insert_raw(conn, fid="CB-2", category=MERGE_FROM, description=DESC_B)
+        conn.execute("UPDATE findings SET category = CAST(7 AS BLOB) WHERE id = 'CB-2'")
+        conn.commit()
+
+        report = findings.normalize_categories(conn, fold_map={"7": MERGE_TO})
+
+        assert report["counts"]["skipped_non_string"] == 1
+        assert report["unmatched_fold_keys"] == ["7"]
+
+    def test_a_precanonical_stored_spelling_is_matched_exactly_and_not_normalized(self, conn):
+        """The match is EXACT against the stored string, because that is what the
+        fold does (`fold_map.get(stored)`). A key typed in canonical form does
+        not reach a stored "Process Improvement", and saying so is the truth
+        about that run — this pins the report agreeing with the fold rather than
+        judging by a second, kinder rule."""
+        _insert_raw(conn, fid="CB-1", category=VARIANT)
+
+        report = findings.normalize_categories(conn, fold_map={CANON: MERGE_TO},
+                                               new_category=True)
+
+        assert report["renames"] == [], "premise: the canonical key does not match"
+        assert report["unmatched_fold_keys"] == [CANON]
+
+    def test_a_fully_matched_map_leaves_the_key_present_and_empty(self, conn):
+        """Row 3. `[]` means "looked, there are none" and must never collapse into
+        an absent key — the `attention`/`stripped_meta_keys` discipline."""
+        _insert_raw(conn, fid="CB-1", category=MERGE_FROM)
+        _insert_raw(conn, fid="CB-2", category=MERGE_TO, description=DESC_B)
+
+        report = findings.normalize_categories(conn, fold_map={MERGE_FROM: MERGE_TO})
+
+        assert "unmatched_fold_keys" in report
+        assert report["unmatched_fold_keys"] == []
+
+    def test_the_derived_mode_reports_nothing_and_still_carries_the_key(self, conn):
+        """Row 4 — A PIN OF PRESERVED BEHAVIOUR, not a guard against a mutant.
+
+        With no `fold_map` there are no keys to miss: the targets ARE the stored
+        spellings. `[]` is the honest answer there, and the key is still present
+        for the same reason it is everywhere else.
+        """
+        _insert_raw(conn, fid="CB-1", category=VARIANT)
+
+        report = findings.normalize_categories(conn)
+
+        assert "unmatched_fold_keys" in report
+        assert report["unmatched_fold_keys"] == []
+        assert report["renames"] != [], "premise: the derived fold still had work to do"
+
+
+class TestMergedIdentities:
+    """Oracle rows 5-7 (CB-209)."""
+
+    def test_a_fold_that_fuses_two_terminal_cards_names_the_pair(self, conn):
+        """Row 5, the card's own scenario. Two closed cards with the same file and
+        description under different category names; the fold makes their hashes
+        equal, and the stop-rule cannot see it because neither row is live."""
+        _insert_raw(conn, fid="CB-1", category=MERGE_FROM, status="fixed")
+        _insert_raw(conn, fid="CB-2", category=MERGE_TO, status="fixed")
+
+        report = findings.normalize_categories(conn, fold_map={MERGE_FROM: MERGE_TO})
+
+        assert report["collisions"] == [], "premise: the live stop-rule stays blind here"
+        assert len(report["merged_identities"]) == 1
+        group = report["merged_identities"][0]
+        assert sorted(r["id"] for r in group["rows"]) == ["CB-1", "CB-2"]
+        assert {r["status"] for r in group["rows"]} == {"fixed"}
+        assert group["fingerprint"] == report["renames"][0]["new_fingerprint"]
+
+    def test_a_fold_that_fuses_a_closed_card_onto_a_live_one_is_named_too(self, conn):
+        """MEASURED SCOPE, WIDER THAN THE CARD'S WORDING AND DELIBERATELY SO.
+
+        CB-209 speaks of terminal pairs. The same silence covers a closed card
+        folded onto a LIVE card's hash: exactly one live member, so the stop-rule
+        does not fire, and before this change that applied at exit 0 with an empty
+        `collisions` — measured. Scoping the report to all-terminal groups would
+        have left an identity merge of the same class reported by nothing at all.
+        """
+        _insert_raw(conn, fid="CB-1", category=MERGE_FROM, status="fixed")
+        _insert_raw(conn, fid="CB-2", category=MERGE_TO, status="open")
+
+        report = findings.normalize_categories(conn, fold_map={MERGE_FROM: MERGE_TO})
+
+        assert report["stopped"] is False
+        assert len(report["merged_identities"]) == 1
+        assert sorted(
+            (r["id"], r["status"]) for r in report["merged_identities"][0]["rows"]
+        ) == [("CB-1", "fixed"), ("CB-2", "open")]
+
+    def test_a_legal_recurrence_pair_that_predates_the_run_is_not_reported(self, conn):
+        """ROW 6, AND THE WHOLE DIFFICULTY OF CB-209.
+
+        Two terminal rows on one fingerprint are a legal, ordinary state reached
+        with no fold at all. Without this row, "widen the stop-rule to every
+        status" passes every other row in this class and starts crying wolf on
+        `recurrence_of` twins the migration never touched.
+        """
+        _live_recurrence_twins(conn)
+
+        derived = findings.normalize_categories(conn)
+        explicit = findings.normalize_categories(conn, fold_map={MERGE_TO: MERGE_TO})
+
+        assert derived["merged_identities"] == []
+        assert explicit["merged_identities"] == []
+
+    def test_a_legal_pair_renamed_wholesale_is_not_reported(self, conn):
+        """The pair moves TOGETHER to a new hash. Its membership at that
+        fingerprint goes from nobody to both, so a rule phrased as "the
+        membership changed" flags it — and nothing was merged. Counting the
+        DISTINCT PRE-FOLD fingerprints the members arrived carrying answers
+        correctly: one value, one identity, already together.
+        """
+        _live_recurrence_twins(conn)
+
+        report = findings.normalize_categories(
+            conn, fold_map={MERGE_TO: MERGE_FROM}, new_category=True
+        )
+
+        assert len(report["renames"]) == 2, "premise: both rows really were renamed"
+        assert report["merged_identities"] == []
+
+    def test_premise_a_member_cannot_leave_an_auto_v1_group(self, conn):
+        """THE MIRROR CASE IS UNREACHABLE, AND THIS RECORDS WHY RATHER THAN
+        PRETENDING TO TEST IT.
+
+        The other way a membership can change is by LOSING a member, which would
+        also be a false alarm. It cannot be built: members of one `auto:v1` group
+        share every hash input, category included, so a fold_map keyed on the
+        stored category either renames all of them or none. A SUPPLIED or NULL
+        hash is never re-keyed at all, and an `unverifiable` row is skipped whole
+        — so no row can be moved out from under its neighbours. The rule handles
+        the case for free; there is simply no fixture for it, and a test that
+        claimed to cover it would be the vacuous kind this repository keeps
+        finding. Written as a PREMISE, so that a future change making departure
+        possible turns this red instead of quietly leaving the case unguarded.
+        """
+        shared = findings._derive_fingerprint(MERGE_TO, "a.py", DESC, {})
+        _insert_raw(conn, fid="CB-1", category=MERGE_TO, status="fixed", fingerprint=shared)
+        _insert_raw(conn, fid="CB-2", category=MERGE_TO, status="fixed", fingerprint=shared)
+        # A THIRD row cannot join them under a different category name: the hash
+        # encodes the category, so this one fails its own round trip.
+        _insert_raw(conn, fid="CB-3", category=MERGE_FROM, status="fixed", fingerprint=shared)
+
+        report = findings.normalize_categories(
+            conn, fold_map={MERGE_FROM: ABSENT_TARGET}, new_category=True
+        )
+
+        assert report["counts"]["unverifiable"] == 1, (
+            "premise: a row carrying another category's auto:v1 hash cannot be re-keyed"
+        )
+        assert report["renames"] == [], "premise: so nothing departs the group"
+        assert report["merged_identities"] == []
+
+    def test_a_row_with_a_null_fingerprint_never_joins_a_group(self, conn):
+        """A NULL hash is not an identity — it matches nothing — so such a row is
+        outside both the stop-rule's map and this one, exactly as before."""
+        _insert_raw(conn, fid="CB-1", category=MERGE_FROM, status="fixed", fingerprint=None)
+        _insert_raw(conn, fid="CB-2", category=MERGE_TO, status="fixed", fingerprint=None)
+
+        report = findings.normalize_categories(conn, fold_map={MERGE_FROM: MERGE_TO})
+
+        assert report["counts"]["null_untouched"] == 1
+        assert report["merged_identities"] == []
+
+    def test_the_live_stop_rule_is_unchanged(self, conn):
+        """Row 7 — A PIN OF PRESERVED BEHAVIOUR. Two LIVE rows fused by the fold
+        still stop the run, still write nothing, and are NOT listed a second time
+        under the new key: that run's refusal is the operator's whole answer."""
+        _insert_raw(conn, fid="CB-1", category=MERGE_FROM, status="open")
+        _insert_raw(conn, fid="CB-2", category=MERGE_TO, status="open")
+        before = _snapshot(conn)
+
+        report = findings.normalize_categories(
+            conn, fold_map={MERGE_FROM: MERGE_TO}, apply=True
+        )
+
+        assert report["stopped"] is True
+        assert report["applied"] is False
+        assert len(report["collisions"]) == 1
+        assert report["merged_identities"] == []
+        assert _snapshot(conn) == before
+
+    def test_the_key_is_present_and_empty_on_an_ordinary_fold(self, conn):
+        """`[]` means "looked, none", never "no such channel"."""
+        _insert_raw(conn, fid="CB-1", category=MERGE_FROM)
+        _insert_raw(conn, fid="CB-2", category=MERGE_TO, description=DESC_B)
+
+        report = findings.normalize_categories(conn, fold_map={MERGE_FROM: MERGE_TO})
+
+        assert "merged_identities" in report
+        assert report["merged_identities"] == []
+
+
+class TestNeitherKeyRefuses:
+    """Oracle row 8. Both are information; `stopped` stays the stop-rule's alone."""
+
+    def test_a_run_carrying_both_signals_still_applies_and_exits_0(
+        self, conn, tmp_project, monkeypatch, capsys
+    ):
+        _insert_raw(conn, fid="CB-1", category=MERGE_FROM, status="fixed")
+        _insert_raw(conn, fid="CB-2", category=MERGE_TO, status="fixed")
+        conn.commit()
+
+        report = findings.normalize_categories(
+            conn,
+            fold_map={MERGE_FROM: MERGE_TO, "data_looss": MERGE_TO},
+            apply=True,
+        )
+
+        assert report["unmatched_fold_keys"] == ["data_looss"]
+        assert len(report["merged_identities"]) == 1
+        assert report["stopped"] is False
+        assert report["applied"] is True
+
+        from codebugs import cli
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["codebugs", "--tracker-root", tmp_project, "categories-normalize",
+             "--fold-map", json.dumps({MERGE_TO: MERGE_TO, "data_looss": MERGE_TO}),
+             "--apply"],
+        )
+        cli.main()  # no SystemExit: neither key is a refusal
+        assert "data_looss" in capsys.readouterr().out
+
+
+class TestFoldReportCliAndJson:
+    """Oracle row 9. Human output prints a section only when it has something to
+    say; `--json` carries both keys always, because there "checked, none" is the
+    answer a machine reader needs."""
+
+    def _run(self, tmp_project, monkeypatch, capsys, *args):
+        from codebugs import cli
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["codebugs", "--tracker-root", tmp_project, "categories-normalize", *args],
+        )
+        cli.main()
+        return capsys.readouterr().out
+
+    def test_both_sections_print_when_they_have_content(
+        self, conn, tmp_project, monkeypatch, capsys
+    ):
+        _insert_raw(conn, fid="CB-1", category=MERGE_FROM, status="fixed")
+        _insert_raw(conn, fid="CB-2", category=MERGE_TO, status="fixed")
+        conn.commit()
+
+        out = self._run(
+            tmp_project, monkeypatch, capsys,
+            "--fold-map", json.dumps({MERGE_FROM: MERGE_TO, "data_looss": MERGE_TO}),
+        )
+
+        assert "matched NO stored category" in out
+        assert "'data_looss'" in out
+        assert "would be SHARED" in out
+        assert "CB-1" in out and "CB-2" in out
+
+    def test_neither_section_prints_when_empty(
+        self, conn, tmp_project, monkeypatch, capsys
+    ):
+        _insert_raw(conn, fid="CB-1", category=MERGE_FROM)
+        _insert_raw(conn, fid="CB-2", category=MERGE_TO, description=DESC_B)
+        conn.commit()
+
+        out = self._run(
+            tmp_project, monkeypatch, capsys,
+            "--fold-map", json.dumps({MERGE_FROM: MERGE_TO}),
+        )
+
+        assert "matched NO stored category" not in out
+        assert "would be SHARED" not in out
+        assert "unmatched_fold_keys" not in out
+        assert "merged_identities" not in out
+
+    def test_json_carries_both_keys_even_when_empty(
+        self, conn, tmp_project, monkeypatch, capsys
+    ):
+        _insert_raw(conn, fid="CB-1", category=MERGE_FROM)
+        _insert_raw(conn, fid="CB-2", category=MERGE_TO, description=DESC_B)
+        conn.commit()
+
+        out = self._run(
+            tmp_project, monkeypatch, capsys,
+            "--fold-map", json.dumps({MERGE_FROM: MERGE_TO}), "--json",
+        )
+        payload = json.loads(out)
+
+        assert payload["unmatched_fold_keys"] == []
+        assert payload["merged_identities"] == []
+
+
+class TestFoldReportDocumentsItsOwnKeys:
+    """The three surfaces used to promise the opposite of what the code now does
+    — "accepted in silence and appears nowhere in the report" was in the domain
+    docstring, the MCP tool description and the CHANGELOG at once. A contract
+    described in three places and fixed in one is this repository's most-repeated
+    defect, so the prose is pinned against the code."""
+
+    def test_the_domain_docstring_names_both_new_keys(self):
+        doc = findings.normalize_categories.__doc__ or ""
+        assert "unmatched_fold_keys" in doc
+        assert "merged_identities" in doc
+        assert "appears NOWHERE in the report" not in doc
+
+    def test_the_changelog_no_longer_says_an_unmatched_key_is_invisible(self):
+        text = (pathlib.Path(__file__).resolve().parent.parent / "CHANGELOG.md").read_text()
+        assert "appears nowhere in the report" not in text
