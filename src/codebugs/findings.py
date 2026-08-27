@@ -3624,6 +3624,10 @@ _FOLD_KIND_ACTION = {
     "null_untouched": "untouched_null",
 }
 
+# How many `merged_identities` groups the HUMAN report prints before it stops and
+# says how many it did not. `--json` is never capped. See `_print_fold_report`.
+_FOLD_MERGED_GROUPS_SHOWN = 20
+
 
 def _validate_fold_map(fold_map: object) -> dict[str, str] | None:
     """Validate a caller-supplied fold map. ``None`` means "derive the map".
@@ -3771,11 +3775,31 @@ def _plan_category_fold(
         "skipped_non_string": 0,
     }
     by_fingerprint: dict[str, list[dict[str, Any]]] = {}
+    # Every row that will hold an identity after the fold, live or not. The map
+    # above is the LIVE half of this one and stays exactly what it was: it feeds
+    # the stop-rule, whose whole argument rests on the partial unique index being
+    # live-only. This one feeds `merged_identities`, which reports and never stops.
+    by_fingerprint_all: dict[str, list[dict[str, Any]]] = {}
+    # The categories the corpus actually holds, as STORED. This is what a fold_map
+    # key is matched against, so it is what decides whether a key matched at all.
+    stored_categories: set[str] = set()
     rows_scanned = 0
 
     for row in conn.execute(_FOLD_SELECT):
         rows_scanned += 1
         kind, target, new_fingerprint = _fold_row_decision(row, fold_map)
+        # CB-207, and the trap is that this set CANNOT be derived from `renames`:
+        # a key whose target EQUALS the stored value decides `unchanged`, so it
+        # reaches neither `renames` nor any counter, and a report built from the
+        # RESULT would call a key that named its category perfectly a miss
+        # (measured). The test is the row's own KIND rather than a second
+        # `isinstance` — `skipped_non_string` IS "the stored category is not a
+        # str" — so the report judges by the same predicate the fold acts on
+        # instead of by a copy of it. It sits beside the counting chain rather
+        # than inside it because `unchanged` rows take no branch there at all.
+        if kind != "skipped_non_string":
+            stored_categories.add(row["category"])
+
         if kind == "skipped_non_string":
             counts["skipped_non_string"] += 1
         elif kind == "unverifiable":
@@ -3810,15 +3834,45 @@ def _plan_category_fold(
         # (`ux_findings_fingerprint_live`): live rows, non-NULL hash. A row this
         # run does NOT re-key still occupies its stored value.
         effective = new_fingerprint if kind == "refingerprinted" else row["fingerprint"]
-        if effective is not None and row["status"] in LIVE_STATUSES:
-            by_fingerprint.setdefault(effective, []).append(
-                {
-                    "id": row["id"],
-                    "status": row["status"],
-                    "from": row["category"],
-                    "to": target if kind in _FOLD_KIND_ACTION else None,
-                }
-            )
+        if effective is not None:
+            member = {
+                "id": row["id"],
+                "status": row["status"],
+                "from": row["category"],
+                "to": target if kind in _FOLD_KIND_ACTION else None,
+                # The PRE-fold identity, and the whole discriminator for CB-209
+                # below: members that already carried this value were not brought
+                # together by this run. A row in this map always has one — a NULL
+                # hash is `null_untouched`, whose effective value is NULL too, so
+                # it never reaches here.
+                "old_fingerprint": row["fingerprint"],
+            }
+            # `from` is the RAW column value, as it has always been in the
+            # stop-rule's row. A BLOB category therefore makes the whole report
+            # unserializable, on `--json` and over MCP — pre-existing for a LIVE
+            # collision, and reaching a CLOSED row through this map. Not repaired
+            # here: the only lossless repair decides how the report REPRESENTS a
+            # non-string category and must apply to both lists at once, or one
+            # field means two things. CB-229 carries it.
+            # A NON-STRING token is left out of THIS map, and the exclusion is
+            # PROVABLY LOSSLESS rather than defensive. SQLite's dynamic typing
+            # permits one exactly as it permits a non-string category, and such a
+            # row is `supplied_untouched`: the fold never re-keys it, and nothing
+            # can arrive at its value either, because a re-derived fingerprint is
+            # always a `str` beginning with `auto:v1:`. So it can never take part
+            # in a merge this run creates, and keeping it would buy nothing while
+            # WIDENING a pre-existing crash — `sorted()` cannot order bytes
+            # against str, and until this map existed only the live one, which is
+            # left exactly as it was, could meet that. Measured on both sides.
+            if isinstance(effective, str):
+                by_fingerprint_all.setdefault(effective, []).append(member)
+            if row["status"] in LIVE_STATUSES:
+                # The stop-rule's row shape is UNCHANGED, and it is PROJECTED from
+                # the record above rather than spelled a second time — two literals
+                # of one row shape are one edit from disagreeing.
+                by_fingerprint.setdefault(effective, []).append(
+                    {k: member[k] for k in ("id", "status", "from", "to")}
+                )
 
     # Two live rows cannot already share a hash — the partial unique index forbids
     # it — so any collision here was CREATED by this fold. Ratified: name it and
@@ -3830,14 +3884,71 @@ def _plan_category_fold(
         if len(members) > 1
     ]
 
+    # CB-209. The stop-rule above can only see a group that is ENTIRELY live,
+    # because that is the only group the partial unique index forbids. Every other
+    # identity merge this fold performs was therefore silent — measured on both
+    # shapes: two `fixed` cards folded onto one hash, and a `fixed` card folded
+    # onto a LIVE card's hash, each applying at exit 0 with an empty `collisions`.
+    # Both are REPORTED here and neither is refused, because the resulting state
+    # is LEGAL: the index permits it, and CB-43's `recurrence_of` contract reaches
+    # it with no fold at all. What is not legal is creating it in silence.
+    #
+    # THE DISCRIMINATOR IS AUTHORSHIP, AND IT IS SPELLED AS "MORE THAN ONE PRE-FOLD
+    # IDENTITY", not as "the membership changed". Those are not the same rule, and
+    # the second cries wolf on a REACHABLE case: a legal pair renamed WHOLESALE
+    # lands on a new fingerprint whose membership went from nobody to both, while
+    # remaining the one identity it always was. Asking how many distinct values the
+    # members arrived carrying answers it — one value means they were already one
+    # identity, two or more means this run fused them.
+    #
+    # THE MIRROR CASE — a group that LOSES a member — IS REACHABLE, and the first
+    # draft of this comment called it impossible. Adversarial review built it: a
+    # row can sit in the group carrying a hash derived from a category the map
+    # does not name, so it stays put while the rows that CAN move are renamed out
+    # from under it. What makes the rule immune is not that the case cannot happen
+    # but its shape: every member still sitting on a fingerprint it did not move
+    # to carries that same value as its PRE-fold one, so a group that only ever
+    # shrinks holds exactly ONE distinct value and can never be reported. Immune
+    # by construction, not by luck.
+    #
+    # Groups the stop-rule already refuses are excluded rather than listed twice.
+    # KNOWN LIMIT, named rather than claimed away (adversarial review): the
+    # stop-rule's own row list has always been LIVE-ONLY, so a CLOSED row that the
+    # same fingerprint also collects appears in neither list. It costs one cycle —
+    # the closed member surfaces here on the re-run, once the live collision that
+    # stopped this one has been resolved — and the alternative, listing a refused
+    # fingerprint in both, reports one group twice on a run that writes nothing.
+    refused = {fp for fp, members in by_fingerprint.items() if len(members) > 1}
+    merged_identities = [
+        {"fingerprint": fp, "rows": members}
+        for fp, members in sorted(by_fingerprint_all.items())
+        if len(members) > 1
+        and fp not in refused
+        and len({m["old_fingerprint"] for m in members}) > 1
+    ]
+
+    # CB-207. Derived mode has no keys to miss — its targets ARE the stored
+    # spellings — so `[]` there is the honest answer and not a channel that went
+    # missing. Sorted so two runs over one tracker cannot disagree about order.
+    unmatched_fold_keys = (
+        []
+        if fold_map is None
+        else sorted(key for key in fold_map if key not in stored_categories)
+    )
+
     return {
         "applied": False,
+        # NEITHER new key touches this. `stopped` stays the live stop-rule's alone:
+        # both are information, and turning a report into a refusal would deny the
+        # operator the picture over a state the database itself permits.
         "stopped": bool(collisions),
         "fold_map": {r["from"]: r["to"] for r in renames},
+        "unmatched_fold_keys": unmatched_fold_keys,
         "rows_scanned": rows_scanned,
         "renames": renames,
         "counts": counts,
         "collisions": collisions,
+        "merged_identities": merged_identities,
         "unverifiable": unverifiable,
     }
 
@@ -3873,12 +3984,22 @@ def normalize_categories(
     default) derives the map mechanically — each stored spelling folds to its own
     normalized form. ``{}`` is an explicit no-op, not the default.
 
-    READ THE DRY RUN'S ``from -> to`` TABLE AGAINST YOUR OWN MAP BEFORE
-    ``apply=True``. A key that matches no stored category is accepted in silence
-    and appears NOWHERE in the report — not in ``renames``, not in any counter —
-    so a typo in a KEY is visible only as a pair missing from that table (CB-207,
-    open). A typo in a TARGET is a different matter and is refused outright, see
-    ``new_category`` below.
+    A KEY THAT MATCHES NO STORED CATEGORY IS ACCEPTED AND NAMED (CB-207). It
+    renames nothing — it is inert — but it no longer passes in silence: every such
+    key is listed in ``unmatched_fold_keys``. That it is a REPORT while a bad
+    TARGET is a REFUSAL (``new_category`` below) is deliberate, and the line runs
+    between creating state and creating nothing: an unknown target would MINT a
+    category name, which is the one thing an operation that exists to reduce their
+    number must not do by typo, while an unmatched key leaves the tracker exactly
+    as it was. Refusing it would also cost a real case — one map is reasonably
+    kept across several trackers, and a key some of them do not hold is normal.
+
+    The match is EXACT against the stored string, because that is how the fold
+    itself matches (``fold_map.get(stored)``). So on a pre-CB-60 corpus a key
+    typed in canonical form does not reach a stored ``"Process Improvement"`` and
+    is reported as unmatched — which is the truth about that run, not a defect to
+    file. Rows whose stored category is not a string are not part of the set a key
+    is judged against, for ``_existing_categories``' reason.
 
     ``new_category`` is PERMISSION TO MINT — the same flag name and the same
     meaning as on ``add_finding`` (CB-60), and it applies to the whole map at once.
@@ -3929,9 +4050,32 @@ def normalize_categories(
     the final state doing so — that raises ``sqlite3.IntegrityError`` and rolls the
     whole transaction back, so nothing lands either way.
 
+    EVERY OTHER IDENTITY MERGE IS REPORTED, NOT REFUSED (CB-209), under
+    ``merged_identities``. That rule reaches only groups that are entirely live,
+    because that is all the index forbids; a fold that puts two CLOSED cards — or a
+    closed card and a live one — on one fingerprint applied at exit 0 with an empty
+    ``collisions`` (measured, both shapes). The state is legal, and CB-43's
+    ``recurrence_of`` contract reaches it with no fold at all, so refusing would
+    fire on states this migration never touched. Creating it SILENTLY is the
+    defect: the lookup that reopens a closed card takes one row by
+    ``updated_at DESC``, so of two closed twins on one hash a later observation
+    revives whichever that order picks and the other is never reopened again. A
+    group is reported when its members arrived carrying MORE THAN ONE pre-fold
+    fingerprint — the test is authorship, not membership, because a group that
+    merely LOSES a member to a rename, and one renamed wholesale onto a new hash,
+    both have a changed membership and merge nothing. The CONSEQUENCE differs by
+    the members' statuses and is worth stating precisely: two CLOSED twins on one
+    hash mean a later observation revives one and abandons the other, while a
+    closed card beside a LIVE one simply leaves the live card taking the
+    observations, which is the ordinary shape closing a CB-113(a) fork produces.
+
     Returns the same report shape in both modes: ``applied``, ``stopped``,
-    ``fold_map`` (only the pairs that actually matched rows), ``rows_scanned``,
-    ``renames``, ``counts``, ``collisions``, ``unverifiable``.
+    ``fold_map`` (only the pairs that actually matched rows), ``unmatched_fold_keys``,
+    ``rows_scanned``, ``renames``, ``counts``, ``collisions``, ``merged_identities``,
+    ``unverifiable``. The two lists named for CB-207 and CB-209 are UNCONDITIONAL,
+    on the ``attention``/``stripped_meta_keys`` discipline: ``[]`` means "looked,
+    there are none" and never "no such channel", and neither moves ``stopped`` or
+    the exit code.
     """
     validated = _validate_fold_map(fold_map)
     if not apply:
@@ -4615,11 +4759,13 @@ def register_tools(mcp, conn_factory) -> None:
         is how a tracker's rare category names are collapsed into its common ones.
 
         DRY RUN BY DEFAULT — without `apply=true` nothing is written and the
-        report tells you exactly what would change. READ ITS `from -> to` TABLE
-        AGAINST YOUR OWN MAP before applying: a key that matches no stored
-        category is accepted in silence and appears nowhere in the report, so a
-        typo in a KEY shows up only as a pair missing from that table. A typo in
-        a TARGET is refused instead — see `new_category`. Take an `export-csv`
+        report tells you exactly what would change. A key that matches no stored
+        category is accepted and renames nothing, and `unmatched_fold_keys` names
+        every one of them, so a typo on the left-hand side is stated rather than
+        left to be spotted as a pair missing from the `from -> to` table. A typo
+        in a TARGET is refused instead — see `new_category`. Matching is exact
+        against the stored spelling, so a canonical key does not reach a stored
+        `Process Improvement` and is reported unmatched. Take an `export-csv`
         backup before applying; `restore-csv` puts findings back verbatim into an
         EMPTY tracker, but milestone items and audit history are not in a CSV
         export and are not restored.
@@ -4633,7 +4779,11 @@ def register_tools(mcp, conn_factory) -> None:
 
         If the fold would put two LIVE findings on one fingerprint, the run
         writes NOTHING and reports the colliding pair by id — merging two cards
-        is a decision, not a migration step.
+        is a decision, not a migration step. Any OTHER identity merge — two closed
+        cards, or a closed card and a live one — is legal, so it is reported under
+        `merged_identities` rather than refused: the run proceeds, and you are told
+        which cards this fold fused. Both `unmatched_fold_keys` and
+        `merged_identities` are always present; `[]` means "checked, none".
 
         Args:
             fold_map: Optional {stored category name: canonical target name} map,
@@ -5163,6 +5313,70 @@ def register_cli(sub, commands) -> None:
             ]
             print()
             print(format_table(rows, ["from", "to", "rows"]))
+
+        # Both CB-207/CB-209 sections print ONLY when non-empty, exactly like the
+        # two blocks below them. The empty list keeps its meaning in `--json`,
+        # where a machine reader needs "checked, none"; on a terminal the same
+        # line would be noise on every healthy run.
+        if report["unmatched_fold_keys"]:
+            print()
+            print(
+                f"!! {len(report['unmatched_fold_keys'])} fold_map keys matched NO stored "
+                f"category — they rename nothing. The match is exact against the stored "
+                f"spelling, so a pre-canonical name must be typed as it is stored:"
+            )
+            for key in report["unmatched_fold_keys"]:
+                print(f"   {key!r}")
+
+        if report["merged_identities"]:
+            merged_rows = report["merged_identities"]
+            print()
+            if report["stopped"]:
+                # A STOPPED run writes nothing, so this section describes something
+                # that does not happen. The unconditional wording put two sentences
+                # in one report asserting opposite things about whether the run
+                # proceeds — found by adversarial review on a fixture carrying a
+                # live collision and a terminal merge at once.
+                print(
+                    f"!! {len(merged_rows)} more fingerprints WOULD be shared by cards this "
+                    f"fold brings together — but the collisions below stop the run, so none "
+                    f"of this happens either. It is what the map would do once they are "
+                    f"resolved:"
+                )
+            else:
+                # The consequence differs by the members' STATUSES, and the first
+                # draft of this line stated the closed-twins one for both. That is
+                # false on the shape this feature most often meets: closing the
+                # CB-113(a) fork puts a closed card beside a LIVE one, and there
+                # the live card simply goes on taking the observations — measured,
+                # `dedup_action: "bumped"`. Nothing is revived and nothing is lost.
+                print(
+                    f"!! {len(merged_rows)} fingerprints would be SHARED by cards this fold "
+                    f"brings together. This is allowed and the run is not refused. Where BOTH "
+                    f"cards are closed, a later report of the defect can revive only ONE of "
+                    f"them and the other stays behind; where one is still open, that open card "
+                    f"goes on taking the observations:"
+                )
+            # CAPPED, unlike the blocks around it, because this list is O(the merges
+            # the fold performs) rather than O(a rare accident): on a corpus forked
+            # by CB-113(a) at scale, adversarial review measured the human output
+            # growing from 11 lines to 4513, past the pipe buffer, so that
+            # `… | head` began exiting 141. The count is always stated, so nothing
+            # is hidden, and the full list is one `--json` away. `unmatched_fold_keys`
+            # needs no cap: it is bounded by the map the operator typed.
+            for merged in merged_rows[:_FOLD_MERGED_GROUPS_SHOWN]:
+                print(f"   {merged['fingerprint']}")
+                for member in merged["rows"]:
+                    target = "(not renamed)" if member["to"] is None else repr(member["to"])
+                    print(
+                        f"     {member['id']} [{member['status']}]  "
+                        f"{member['from']!r} -> {target}"
+                    )
+            if len(merged_rows) > _FOLD_MERGED_GROUPS_SHOWN:
+                print(
+                    f"   … and {len(merged_rows) - _FOLD_MERGED_GROUPS_SHOWN} more not shown; "
+                    f"--json carries the whole list."
+                )
 
         if report["unverifiable"]:
             print()

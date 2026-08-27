@@ -84,14 +84,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   fingerprint you supplied yourself is left byte-identical. If the rename would put two LIVE
   findings on one fingerprint the run writes **nothing at all** and names the pair — merging
   two cards is your decision, not a migration step.
-  **Read the `from → to` table against your own map before you type `--apply`.** A key that
-  matches no stored category is accepted in silence and appears nowhere in the report, so the
-  only sign of a typo on the left-hand side is a pair missing from that table.
+  **A key that matches no stored category is accepted and renames nothing — and the report
+  now names it** (see the CB-207 entry below), so a typo on the left-hand side no longer has
+  to be spotted by reading the `from → to` table against your own map.
   **And take a backup first:** `codebugs export-csv backup.csv` writes the findings, and
   `codebugs restore-csv backup.csv` puts them back verbatim — ids, statuses, occurrence
   counts and fingerprints — into an **empty** tracker. Its limit is real and worth knowing
   before you rely on it: milestone items and the audit history are not part of a CSV export
   and are not restored.
+- **The category-fold dry run now answers the question you run it for (CB-207, CB-209).** Its
+  whole purpose is to tell you whether the fold will do what you meant, and there were two
+  things it did without saying so. **A line of your map that matched nothing is now named.**
+  If you write `--fold-map '{"data_looss": "correctness"}'` and no card is stored under
+  `data_looss`, that line renames nothing — it never did — but the report used to be silent
+  about it: every counter looked healthy and the rename simply did not happen, and the only
+  way to notice was to read the `from → to` table against your own map line by line. Such keys
+  are now listed, on the command line and under `unmatched_fold_keys` in `--json`. Matching is
+  exact against the spelling that is stored, so if a tracker still holds
+  `Process Improvement` you have to type it that way; a key written in canonical form is
+  reported as matching nothing, which is the truth about that run. **And you are now told
+  which cards the fold puts on one identity.** The command has always refused to give two OPEN
+  findings the same fingerprint, because merging two live cards is your decision. It said
+  nothing about any other pair. When **both cards are closed**, that matters: the next time the
+  defect is reported only one of them can be revived, and the other stays behind for good. When
+  one is closed and the other still open — which is what closing an old spelling fork usually
+  looks like — nothing is lost, and the open card simply goes on collecting the reports. Either
+  way the fold performs the merge and you were not told; both are now listed under
+  `merged_identities`, with each card's status, so you can tell the two cases apart. On the
+  command line that list is capped at twenty groups with a count of the rest, because on a badly
+  forked tracker it can be long; `--json` always carries all of it. **Both of these are
+  messages, not refusals.** The exit code does not change, nothing new is written or withheld,
+  and a run with nothing to say prints nothing extra. In `--json` both keys are always present,
+  and an empty list there means "checked, none".
 - **A fold target that does not exist now needs `--new-category` (CB-223).** This is the one
   behaviour change here, and it is worth stating plainly. Previously,
   `--fold-map '{"correctness": "corectness"}' --apply` — one letter wrong on the right-hand
