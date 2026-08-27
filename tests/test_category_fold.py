@@ -1084,36 +1084,36 @@ class TestMergedIdentities:
         assert len(report["renames"]) == 2, "premise: both rows really were renamed"
         assert report["merged_identities"] == []
 
-    def test_premise_a_member_cannot_leave_an_auto_v1_group(self, conn):
-        """THE MIRROR CASE IS UNREACHABLE, AND THIS RECORDS WHY RATHER THAN
-        PRETENDING TO TEST IT.
+    def test_a_group_that_only_loses_members_is_not_reported(self, conn):
+        """THE MIRROR CASE, AND IT IS REACHABLE — the first version of this test
+        asserted it was not, and adversarial review built it.
 
-        The other way a membership can change is by LOSING a member, which would
-        also be a false alarm. It cannot be built: members of one `auto:v1` group
-        share every hash input, category included, so a fold_map keyed on the
-        stored category either renames all of them or none. A SUPPLIED or NULL
-        hash is never re-keyed at all, and an `unverifiable` row is skipped whole
-        — so no row can be moved out from under its neighbours. The rule handles
-        the case for free; there is simply no fixture for it, and a test that
-        claimed to cover it would be the vacuous kind this repository keeps
-        finding. Written as a PREMISE, so that a future change making departure
-        possible turns this red instead of quietly leaving the case unguarded.
+        Three rows share one hash. Two carry the category the map names and are
+        re-keyed; the third carries that hash under a category the map leaves
+        alone, so it stays put. Folding renames those two OUT from under it: the
+        old group shrinks to one, and the pair lands together on a new hash.
+        Nothing was merged, and nothing is reported.
+
+        What makes the rule immune is not that the case cannot happen but its
+        shape: every member still sitting on a fingerprint it did not move to
+        carries that same value as its pre-fold one, so a shrinking group holds
+        exactly one distinct value and can never clear the authorship test.
         """
         shared = findings._derive_fingerprint(MERGE_TO, "a.py", DESC, {})
         _insert_raw(conn, fid="CB-1", category=MERGE_TO, status="fixed", fingerprint=shared)
         _insert_raw(conn, fid="CB-2", category=MERGE_TO, status="fixed", fingerprint=shared)
-        # A THIRD row cannot join them under a different category name: the hash
-        # encodes the category, so this one fails its own round trip.
         _insert_raw(conn, fid="CB-3", category=MERGE_FROM, status="fixed", fingerprint=shared)
 
-        report = findings.normalize_categories(
-            conn, fold_map={MERGE_FROM: ABSENT_TARGET}, new_category=True
+        assert len({r["fingerprint"] for r in _snapshot(conn)}) == 1, (
+            "premise: all three really do start on one hash"
         )
 
-        assert report["counts"]["unverifiable"] == 1, (
-            "premise: a row carrying another category's auto:v1 hash cannot be re-keyed"
+        report = findings.normalize_categories(conn, fold_map={MERGE_TO: MERGE_FROM})
+
+        assert sorted(r["id"] for r in report["renames"]) == ["CB-1", "CB-2"], (
+            "premise: exactly the two movable rows depart, leaving the third alone"
         )
-        assert report["renames"] == [], "premise: so nothing departs the group"
+        assert report["renames"][0]["new_fingerprint"] != shared
         assert report["merged_identities"] == []
 
     def test_a_terminal_row_with_a_non_string_fingerprint_does_not_break_the_run(self, conn):
@@ -1271,6 +1271,78 @@ class TestFoldReportCliAndJson:
         assert "would be SHARED" not in out
         assert "unmatched_fold_keys" not in out
         assert "merged_identities" not in out
+
+    def test_a_stopped_run_does_not_claim_the_merges_happen(
+        self, conn, tmp_project, monkeypatch, capsys
+    ):
+        """Found by adversarial review. With a live collision AND a terminal merge
+        in one run, the unconditional wording put two sentences in one report
+        asserting opposite things: the collision block says NOTHING was written,
+        while the merge block said the run is not refused."""
+        _insert_raw(conn, fid="CB-1", category=MERGE_FROM, status="open")
+        _insert_raw(conn, fid="CB-2", category=MERGE_TO, status="open")
+        _insert_raw(conn, fid="CB-3", category=MERGE_FROM, status="fixed", description=DESC_B)
+        _insert_raw(conn, fid="CB-4", category=MERGE_TO, status="fixed", description=DESC_B)
+        conn.commit()
+
+        out = self._run(
+            tmp_project, monkeypatch, capsys,
+            "--fold-map", json.dumps({MERGE_FROM: MERGE_TO}),
+        )
+
+        assert "STOPPED — nothing written" in out
+        assert "WOULD be shared" in out
+        assert "none of this happens either" in out
+        assert "the run is not refused" not in out
+
+    def test_the_consequence_named_for_a_live_member_is_not_the_closed_twin_one(
+        self, conn, tmp_project, monkeypatch, capsys
+    ):
+        """Found by adversarial review, and it is the shape this feature meets
+        most often: closing a CB-113(a) spelling fork puts a CLOSED card beside a
+        LIVE one. There nothing is revived and nothing is abandoned — the live
+        card keeps taking the observations. The first draft of this line stated
+        the closed-twins consequence for every group, which is false here."""
+        _insert_raw(conn, fid="CB-1", category=MERGE_FROM, status="fixed")
+        _insert_raw(conn, fid="CB-2", category=MERGE_TO, status="open")
+        conn.commit()
+
+        out = self._run(
+            tmp_project, monkeypatch, capsys,
+            "--fold-map", json.dumps({MERGE_FROM: MERGE_TO}),
+        )
+
+        assert "would be SHARED" in out
+        assert "Where BOTH" in out and "still open" in out
+
+    def test_the_human_list_is_capped_and_says_how_many_it_did_not_show(
+        self, conn, tmp_project, monkeypatch, capsys
+    ):
+        """Found by adversarial review, which measured this section growing to
+        4513 lines on a corpus forked at scale — past the pipe buffer, so
+        `… | head` began exiting 141. Capping the HUMAN list hides nothing,
+        because the count is stated and `--json` is never capped."""
+        wanted = findings._FOLD_MERGED_GROUPS_SHOWN + 3
+        for i in range(wanted):
+            _insert_raw(conn, fid=f"CB-{2 * i + 1}", category=MERGE_FROM,
+                        status="fixed", description=f"{DESC} number {i}")
+            _insert_raw(conn, fid=f"CB-{2 * i + 2}", category=MERGE_TO,
+                        status="fixed", description=f"{DESC} number {i}")
+        conn.commit()
+
+        out = self._run(
+            tmp_project, monkeypatch, capsys,
+            "--fold-map", json.dumps({MERGE_FROM: MERGE_TO}),
+        )
+
+        assert f"!! {wanted} fingerprints would be SHARED" in out
+        assert "… and 3 more not shown; --json carries the whole list." in out
+
+        payload = json.loads(
+            self._run(tmp_project, monkeypatch, capsys,
+                      "--fold-map", json.dumps({MERGE_FROM: MERGE_TO}), "--json")
+        )
+        assert len(payload["merged_identities"]) == wanted, "--json is never capped"
 
     def test_json_carries_both_keys_even_when_empty(
         self, conn, tmp_project, monkeypatch, capsys

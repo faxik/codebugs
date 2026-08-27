@@ -67,15 +67,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   exact against the spelling that is stored, so if a tracker still holds
   `Process Improvement` you have to type it that way; a key written in canonical form is
   reported as matching nothing, which is the truth about that run. **And you are now told
-  which closed cards the fold puts on one identity.** The command has always refused to give
-  two OPEN findings the same fingerprint, because merging two live cards is your decision. It
-  said nothing when the two cards were closed — or when one was closed and the other open —
-  even though the result is the same shared identity: when the defect is next reported, only
-  one of those cards can be revived and the other stays behind for good. That is a legal state
-  and the fold still performs it; it is now listed under `merged_identities` so you can see it
-  coming. **Both of these are messages, not refusals.** The exit code does not change, nothing
-  new is written or withheld, and a run with nothing to say prints nothing extra. In `--json`
-  both keys are always present, and an empty list there means "checked, none".
+  which cards the fold puts on one identity.** The command has always refused to give two OPEN
+  findings the same fingerprint, because merging two live cards is your decision. It said
+  nothing about any other pair. When **both cards are closed**, that matters: the next time the
+  defect is reported only one of them can be revived, and the other stays behind for good. When
+  one is closed and the other still open — which is what closing an old spelling fork usually
+  looks like — nothing is lost, and the open card simply goes on collecting the reports. Either
+  way the fold performs the merge and you were not told; both are now listed under
+  `merged_identities`, with each card's status, so you can tell the two cases apart. On the
+  command line that list is capped at twenty groups with a count of the rest, because on a badly
+  forked tracker it can be long; `--json` always carries all of it. **Both of these are
+  messages, not refusals.** The exit code does not change, nothing new is written or withheld,
+  and a run with nothing to say prints nothing extra. In `--json` both keys are always present,
+  and an empty list there means "checked, none".
 - **A fold target that does not exist now needs `--new-category` (CB-223).** This is the one
   behaviour change here, and it is worth stating plainly. Previously,
   `--fold-map '{"correctness": "corectness"}' --apply` — one letter wrong on the right-hand

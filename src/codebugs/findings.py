@@ -3624,6 +3624,10 @@ _FOLD_KIND_ACTION = {
     "null_untouched": "untouched_null",
 }
 
+# How many `merged_identities` groups the HUMAN report prints before it stops and
+# says how many it did not. `--json` is never capped. See `_print_fold_report`.
+_FOLD_MERGED_GROUPS_SHOWN = 20
+
 
 def _validate_fold_map(fold_map: object) -> dict[str, str] | None:
     """Validate a caller-supplied fold map. ``None`` means "derive the map".
@@ -3843,6 +3847,13 @@ def _plan_category_fold(
                 # it never reaches here.
                 "old_fingerprint": row["fingerprint"],
             }
+            # `from` is the RAW column value, as it has always been in the
+            # stop-rule's row. A BLOB category therefore makes the whole report
+            # unserializable, on `--json` and over MCP — pre-existing for a LIVE
+            # collision, and reaching a CLOSED row through this map. Not repaired
+            # here: the only lossless repair decides how the report REPRESENTS a
+            # non-string category and must apply to both lists at once, or one
+            # field means two things. CB-229 carries it.
             # A NON-STRING token is left out of THIS map, and the exclusion is
             # PROVABLY LOSSLESS rather than defensive. SQLite's dynamic typing
             # permits one exactly as it permits a non-string category, and such a
@@ -3888,14 +3899,25 @@ def _plan_category_fold(
     # lands on a new fingerprint whose membership went from nobody to both, while
     # remaining the one identity it always was. Asking how many distinct values the
     # members arrived carrying answers it — one value means they were already one
-    # identity, two or more means this run fused them. (The mirror case, a group
-    # that LOSES a member, would also be a false alarm and is UNREACHABLE: an
-    # `auto:v1` group's members share every hash input including the category, so a
-    # fold keyed on that category moves all of them or none, and supplied/NULL
-    # hashes are never re-keyed. Pinned as a premise beside the rest.)
+    # identity, two or more means this run fused them.
     #
-    # Groups the stop-rule already refuses are excluded rather than listed twice;
-    # that run writes nothing, so its refusal is the operator's whole answer.
+    # THE MIRROR CASE — a group that LOSES a member — IS REACHABLE, and the first
+    # draft of this comment called it impossible. Adversarial review built it: a
+    # row can sit in the group carrying a hash derived from a category the map
+    # does not name, so it stays put while the rows that CAN move are renamed out
+    # from under it. What makes the rule immune is not that the case cannot happen
+    # but its shape: every member still sitting on a fingerprint it did not move
+    # to carries that same value as its PRE-fold one, so a group that only ever
+    # shrinks holds exactly ONE distinct value and can never be reported. Immune
+    # by construction, not by luck.
+    #
+    # Groups the stop-rule already refuses are excluded rather than listed twice.
+    # KNOWN LIMIT, named rather than claimed away (adversarial review): the
+    # stop-rule's own row list has always been LIVE-ONLY, so a CLOSED row that the
+    # same fingerprint also collects appears in neither list. It costs one cycle —
+    # the closed member surfaces here on the re-run, once the live collision that
+    # stopped this one has been resolved — and the alternative, listing a refused
+    # fingerprint in both, reports one group twice on a run that writes nothing.
     refused = {fp for fp, members in by_fingerprint.items() if len(members) > 1}
     merged_identities = [
         {"fingerprint": fp, "rows": members}
@@ -4041,7 +4063,11 @@ def normalize_categories(
     group is reported when its members arrived carrying MORE THAN ONE pre-fold
     fingerprint — the test is authorship, not membership, because a group that
     merely LOSES a member to a rename, and one renamed wholesale onto a new hash,
-    both have a changed membership and merge nothing.
+    both have a changed membership and merge nothing. The CONSEQUENCE differs by
+    the members' statuses and is worth stating precisely: two CLOSED twins on one
+    hash mean a later observation revives one and abandons the other, while a
+    closed card beside a LIVE one simply leaves the live card taking the
+    observations, which is the ordinary shape closing a CB-113(a) fork produces.
 
     Returns the same report shape in both modes: ``applied``, ``stopped``,
     ``fold_map`` (only the pairs that actually matched rows), ``unmatched_fold_keys``,
@@ -5303,13 +5329,42 @@ def register_cli(sub, commands) -> None:
                 print(f"   {key!r}")
 
         if report["merged_identities"]:
+            merged_rows = report["merged_identities"]
             print()
-            print(
-                f"!! {len(report['merged_identities'])} fingerprints would be SHARED by cards "
-                f"this fold brings together. This is allowed and nothing is refused — but a "
-                f"later report of the defect can only revive ONE of the cards on each:"
-            )
-            for merged in report["merged_identities"]:
+            if report["stopped"]:
+                # A STOPPED run writes nothing, so this section describes something
+                # that does not happen. The unconditional wording put two sentences
+                # in one report asserting opposite things about whether the run
+                # proceeds — found by adversarial review on a fixture carrying a
+                # live collision and a terminal merge at once.
+                print(
+                    f"!! {len(merged_rows)} more fingerprints WOULD be shared by cards this "
+                    f"fold brings together — but the collisions below stop the run, so none "
+                    f"of this happens either. It is what the map would do once they are "
+                    f"resolved:"
+                )
+            else:
+                # The consequence differs by the members' STATUSES, and the first
+                # draft of this line stated the closed-twins one for both. That is
+                # false on the shape this feature most often meets: closing the
+                # CB-113(a) fork puts a closed card beside a LIVE one, and there
+                # the live card simply goes on taking the observations — measured,
+                # `dedup_action: "bumped"`. Nothing is revived and nothing is lost.
+                print(
+                    f"!! {len(merged_rows)} fingerprints would be SHARED by cards this fold "
+                    f"brings together. This is allowed and the run is not refused. Where BOTH "
+                    f"cards are closed, a later report of the defect can revive only ONE of "
+                    f"them and the other stays behind; where one is still open, that open card "
+                    f"goes on taking the observations:"
+                )
+            # CAPPED, unlike the blocks around it, because this list is O(the merges
+            # the fold performs) rather than O(a rare accident): on a corpus forked
+            # by CB-113(a) at scale, adversarial review measured the human output
+            # growing from 11 lines to 4513, past the pipe buffer, so that
+            # `… | head` began exiting 141. The count is always stated, so nothing
+            # is hidden, and the full list is one `--json` away. `unmatched_fold_keys`
+            # needs no cap: it is bounded by the map the operator typed.
+            for merged in merged_rows[:_FOLD_MERGED_GROUPS_SHOWN]:
                 print(f"   {merged['fingerprint']}")
                 for member in merged["rows"]:
                     target = "(not renamed)" if member["to"] is None else repr(member["to"])
@@ -5317,6 +5372,11 @@ def register_cli(sub, commands) -> None:
                         f"     {member['id']} [{member['status']}]  "
                         f"{member['from']!r} -> {target}"
                     )
+            if len(merged_rows) > _FOLD_MERGED_GROUPS_SHOWN:
+                print(
+                    f"   … and {len(merged_rows) - _FOLD_MERGED_GROUPS_SHOWN} more not shown; "
+                    f"--json carries the whole list."
+                )
 
         if report["unverifiable"]:
             print()
