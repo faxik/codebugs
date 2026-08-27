@@ -5665,3 +5665,186 @@ class TestPostMergeAlarmIsNotAGate:
         window = md[at - 2000 : at + 4000]
         assert "alarm" in window.lower(), "CB-121 is mentioned but the alarm is not named"
         assert "check-then-act" in window.lower()
+
+
+# The journal's own injection: main moves BEFORE the in-lock re-check, so the
+# finish refuses with 13 having landed nothing. Firing on the worktree's
+# `rev-parse HEAD` puts the commit immediately after TESTED_MAIN is sampled,
+# which is the earliest point at which the skew is real.
+_SHIM_MOVE_MAIN_EARLY = r"""
+_is_rp=0
+for _a in "$@"; do
+    [[ "$_a" == "rev-parse" ]] && _is_rp=1
+done
+if (( _is_rp )) && [[ "$*" == *"$WT"* && ! -e "$MARKER" ]]; then
+    : > "$MARKER"
+    printf 'landed before the re-check\n' > "$REPO/.claude/plans/EARLY.md"
+    "$REAL" -C "$REPO" add -- .claude/plans/EARLY.md
+    "$REAL" -C "$REPO" commit -q -m 'docs: EARLY.md landing before the re-check'
+fi
+"""
+
+
+class TestLandingAttemptJournal:
+    """CB-176 — every finish records its own outcome, so "how often does landing
+    lose the race to a plan note" stops being an impression and becomes a number.
+
+    The instrument is deliberately the weakest thing that can answer the
+    question: one appended line per run, no output, no new verb, and NO exit
+    code touched anywhere. It is FAIL-OPEN, against this repository's usual
+    discipline, because an instrument able to refuse a landing would turn the
+    measurement of CB-176 into a fresh instance of CB-176.
+    """
+
+    SLUG = "fix-cb-176-probe"
+    BRANCH = "fix/cb-176-probe"
+    MERGE_MSG = "Merge fix/cb-176-probe: probe (CB-176)"
+
+    def _branch(self, armed: dict) -> Path:
+        repo = armed["repo"]
+        wt = repo / ".worktrees" / self.SLUG
+        git(repo, "worktree", "add", "-q", "-b", self.BRANCH, str(wt), "main")
+        (wt / "feature.txt").write_text("work\n")
+        git(wt, "add", "feature.txt")
+        git(wt, "commit", "--no-verify", "-m", "fix(cb-176): the branch's own work")
+        return wt
+
+    def _shim(self, armed: dict, body: str) -> Path:
+        real = shutil.which("git")
+        assert real, "no git on PATH to wrap"
+        marker = armed["repo"] / ".shim-fired"
+        shim = armed["bin"] / "git"
+        shim.write_text(
+            "#!/usr/bin/env bash\n"
+            f'REAL="{real}"\n'
+            f'REPO="{armed["repo"]}"\n'
+            f'WT="{armed["repo"] / ".worktrees" / self.SLUG}"\n'
+            f'MARKER="{marker}"\n'
+            f"{body}\n"
+            'exec "$REAL" "$@"\n'
+        )
+        shim.chmod(0o755)
+        assert shim.is_file() and os.access(shim, os.X_OK), shim
+        return marker
+
+    def _finish(self, armed: dict, slug: str | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                str(armed["repo"] / "tools" / "worktree-finish.sh"),
+                slug or self.SLUG,
+                "--skip-checks",
+                "--merge-msg",
+                self.MERGE_MSG,
+            ],
+            cwd=str(armed["repo"]),
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": f"{armed['bin']}{os.pathsep}{os.environ['PATH']}"},
+        )
+
+    def _rows(self, armed: dict) -> list[list[str]]:
+        """The journal, split into fields. Asserts the SHAPE, not just presence.
+
+        A line that lost a field would still 'contain' the exit code while the
+        documented one-line reader mis-parses it, so every row is checked for
+        exactly three fields here rather than at one call site.
+        """
+        log = armed["repo"] / ".worktrees" / "landing-attempts.log"
+        if not log.exists():
+            return []
+        rows = [ln.split() for ln in log.read_text().splitlines() if ln.strip()]
+        for row in rows:
+            assert len(row) == 3, f"a journal row is not timestamp/slug/code: {row}"
+            assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", row[0]), row
+        return rows
+
+    # ---- the four oracle rows -------------------------------------------
+
+    def test_a_clean_landing_records_a_zero(self, armed: dict) -> None:
+        """Without the 0 row there is no boundary between one landing and the next.
+
+        "Attempts per landing" is computed at read time as lines-per-zero, so a
+        journal that recorded only failures could not be divided into landings
+        at all — it would report a pile of refusals with no denominator.
+        """
+        self._branch(armed)
+        r = self._finish(armed)
+        assert r.returncode == 0, (r.returncode, r.stdout[-3000:], r.stderr[-3000:])
+        assert self._rows(armed) == [[self._rows(armed)[0][0], self.SLUG, "0"]]
+
+    def test_a_pre_merge_refusal_records_its_own_code(self, armed: dict) -> None:
+        """exit 13 — the refusal CB-176 is actually about, in the real window."""
+        self._branch(armed)
+        marker = self._shim(armed, _SHIM_MOVE_MAIN_EARLY)
+        r = self._finish(armed)
+        assert marker.exists(), "the shim never fired — this test proved nothing"
+        assert r.returncode == 13, (r.returncode, r.stdout[-3000:], r.stderr[-3000:])
+        rows = self._rows(armed)
+        assert [row[1:] for row in rows] == [[self.SLUG, "13"]], rows
+
+    def test_an_early_refusal_before_the_alarm_trap_is_recorded(self, armed: dict) -> None:
+        """THE test that tells the right form from the naive one.
+
+        exit 11 fires in [7/7], before the merge and therefore before the point
+        where `trap _alarm_speak EXIT` is armed. A journal trap installed beside
+        the alarm — the obvious place, since that is where the existing trap
+        lives — would lose this row and every other pre-merge refusal, which is
+        precisely the half of the measurement CB-176 needs. The loss would be
+        silent AND in the flattering direction: fewer failed attempts recorded
+        than happened.
+        """
+        self._branch(armed)
+        # A TRACKED modification in main: _guard_main_clean reads
+        # --untracked-files=no, so an untracked file would not refuse.
+        (armed["repo"] / "pyproject.toml").write_text(
+            (armed["repo"] / "pyproject.toml").read_text() + "\n# dirty\n"
+        )
+        r = self._finish(armed)
+        assert r.returncode == 11, (r.returncode, r.stdout[-3000:], r.stderr[-3000:])
+        rows = self._rows(armed)
+        assert [row[1:] for row in rows] == [[self.SLUG, "11"]], rows
+
+    def test_the_alarm_path_records_fifteen_and_still_speaks(self, armed: dict) -> None:
+        """BOTH, not one of the two — and 15 rather than the incoming status.
+
+        Arming the alarm's trap REPLACES the journal's, so this is the path on
+        which the journal exists only because `_alarm_speak` calls it. The code
+        recorded is the one the process actually leaves with: a 15 is a LANDING
+        whose premise was unconfirmed, and folding it into the clean 0 would
+        make the journal disagree with the shell that ran it.
+        """
+        self._branch(armed)
+        marker = self._shim(armed, _SHIM_MOVE_MAIN)
+        r = self._finish(armed)
+        assert marker.exists(), "the shim never fired — this test proved nothing"
+        assert r.returncode == 15, (r.returncode, r.stdout[-3000:], r.stderr[-3000:])
+        assert "POST-MERGE ALARM" in r.stdout, r.stdout[-3000:]
+        rows = self._rows(armed)
+        assert [row[1:] for row in rows] == [[self.SLUG, "15"]], rows
+
+    # ---- fail-open, which is the whole licence for this to exist ---------
+
+    def test_an_unwritable_journal_does_not_change_the_finish(self, armed: dict) -> None:
+        """П5 — the instrument may lose its own data, never the operator's run.
+
+        Measured on bash 5.3.9: an unguarded command failing INSIDE an EXIT trap
+        under `set -euo pipefail` both truncates the trap and REWRITES the exit
+        status to 1. So a careless journal would not merely drop a line, it
+        would turn a clean landing into an unexplained failure — and turn the
+        repeatable `exit 13` into a `1` the operator is told to treat as an
+        error, sabotaging the very measurement it exists to take.
+        """
+        self._branch(armed)
+        log = armed["repo"] / ".worktrees" / "landing-attempts.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("")
+        log.chmod(0o000)
+        try:
+            r = self._finish(armed)
+            assert r.returncode == 0, (r.returncode, r.stdout[-3000:], r.stderr[-3000:])
+            assert "Integration complete" in r.stdout
+            assert log.read_bytes() == b"" if os.access(log, os.W_OK) else True
+        finally:
+            log.chmod(0o644)
+        assert log.read_text() == "", "the write was not actually refused"
+
