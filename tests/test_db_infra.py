@@ -3216,3 +3216,175 @@ def ensure_schema(conn):
         conn.execute("ALTER TABLE t ADD COLUMN extra TEXT")
 '''
         assert self._offenders_in(source) == []
+
+
+class TestTheGitPointerReadsAreThreeValued:
+    """CB-227: the two reads on the worktree route that still guessed.
+
+    CB-218 made the walk's three probes three-valued and CB-224 added a third
+    value to `_linked_worktree_gitdir` — wired to ONE of the two reads that
+    function makes. What both fixes could not reach is a different LAYER of
+    question. `_path_state` answers *what is at this path*; these two ask *what
+    does this file SAY*, which no stat can answer, so no swap of primitives was
+    ever going to find them. Both swallowed their failure into a confident
+    negative: "confirmed, not a linked worktree" and "confirmed, no main
+    checkout".
+
+    The shape is built BY HAND rather than with `git worktree add`: git is not
+    needed to make a `.git` file that points at a directory holding a
+    `commondir`, and building it here keeps the wall exactly where each test
+    puts it, with nothing else in the fixture able to explain the result.
+    """
+
+    @staticmethod
+    def _unreadable(path):
+        """Remove every permission from `path`; returns the restore callable.
+
+        Skips rather than lies when the user can read it anyway — running as
+        root defeats the wall, and a test that cannot build its own state must
+        say so instead of asserting against a state it never made.
+        """
+        path.chmod(0o000)
+        if os.access(path, os.R_OK):
+            path.chmod(0o755)
+            pytest.skip("cannot make this unreadable as this user (running as root?)")
+        return lambda: path.chmod(0o755)
+
+    def _worktree(self, tmp_path, *, main_has_tracker=True):
+        main = tmp_path / "mainco"
+        gitdir = main / ".git" / "worktrees" / "wt"
+        gitdir.mkdir(parents=True)
+        (gitdir / "commondir").write_text("../..\n")
+        if main_has_tracker:
+            db.init_project(str(main))
+        link = tmp_path / "linked"
+        link.mkdir()
+        (link / ".git").write_text(f"gitdir: {gitdir}\n")
+        return main, link, gitdir
+
+    # -- the control, first: the whole fixture is only evidence if it works ---
+
+    def test_the_shape_resolves_to_the_main_checkout_with_no_wall(self, tmp_path, monkeypatch):
+        main, link, _gitdir = self._worktree(tmp_path)
+        monkeypatch.chdir(link)
+        info = db.describe_root()
+        assert info["root"] == str(main), "the hand-built worktree must resolve like a real one"
+        assert info["unexamined"] == ()
+
+    # -- door two: the `.git` FILE stats fine and cannot be read ------------
+
+    def test_an_unreadable_git_file_no_longer_reads_as_not_a_worktree(self, tmp_path, monkeypatch):
+        """Measured before the fix: "no .codebugs/ found in <link> or any
+        parent", exit 1, unexamined EMPTY — with the tracker one hop away."""
+        _main, link, _gitdir = self._worktree(tmp_path)
+        monkeypatch.chdir(link)
+        restore = self._unreadable(link / ".git")
+        try:
+            info = db.describe_root()
+        finally:
+            restore()
+        assert info["root"] is None
+        assert [path for path, _why in info["unexamined"]] == [str(link / ".git")], (
+            "the one question that went unanswered must be the one reported"
+        )
+        assert "or any parent;" not in info["error"], (
+            "the bare refusal asserts an absence about a place nobody could look at"
+        )
+        assert "could not be examined" in info["error"]
+
+    def test_an_unreadable_git_file_no_longer_lets_init_create_a_doomed_tracker(
+        self, tmp_path, monkeypatch
+    ):
+        """The destructive arm, and the reason this is not a policy question:
+        `init` has refused inside a worktree since long before this card. The
+        swallowed read made that ratified refusal a gate that could not fire."""
+        _main, link, _gitdir = self._worktree(tmp_path, main_has_tracker=False)
+        monkeypatch.chdir(link)
+        restore = self._unreadable(link / ".git")
+        try:
+            with pytest.raises(db.WorktreeTrackerError) as excinfo:
+                db.init_project(str(link))
+        finally:
+            restore()
+        assert "cannot tell whether" in str(excinfo.value)
+        assert "--force" in str(excinfo.value), "a gate with no way out is a wall"
+        assert not (link / ".codebugs").exists(), "nothing may be created on a refusal"
+
+    def test_cb224s_own_door_also_stopped_creating_a_doomed_tracker(self, tmp_path, monkeypatch):
+        """CB-224 fixed the `where` half of its own defect and left the `init`
+        half: with the bookkeeping DIRECTORY unexaminable, `init` still created
+        a tracker inside the worktree at exit 0. One probe, two callers — the
+        second one never got the third value."""
+        _main, link, gitdir = self._worktree(tmp_path, main_has_tracker=False)
+        monkeypatch.chdir(link)
+        restore = self._unreadable(gitdir)
+        try:
+            with pytest.raises(db.WorktreeTrackerError):
+                db.init_project(str(link))
+        finally:
+            restore()
+        assert not (link / ".codebugs").exists()
+
+    # -- door three: `commondir` stats fine and its CONTENT cannot be read ---
+
+    def test_an_unreadable_commondir_no_longer_asserts_the_main_checkout_is_empty(
+        self, tmp_path, monkeypatch
+    ):
+        """The sharpest form: the main checkout HAS the tracker, and the
+        refusal said it did not. Measured before the fix, verbatim: "this is a
+        git worktree (<link>) and its main checkout has no tracker either"."""
+        _main, link, gitdir = self._worktree(tmp_path)
+        monkeypatch.chdir(link)
+        restore = self._unreadable(gitdir / "commondir")
+        try:
+            info = db.describe_root()
+        finally:
+            restore()
+        assert info["root"] is None
+        assert "has no tracker either" not in info["error"], (
+            "a claim about a checkout this process never located"
+        )
+        assert "could not be located from here" in info["error"]
+        assert [path for path, _why in info["unexamined"]] == [str(gitdir / "commondir")]
+
+    def test_the_healthy_worktree_refusal_is_unchanged(self, tmp_path, monkeypatch):
+        """The other half of the oracle, and the one a careless fix breaks: when
+        the main checkout really WAS examined and really has no tracker, the
+        sentence that says so must survive byte for byte."""
+        _main, link, _gitdir = self._worktree(tmp_path, main_has_tracker=False)
+        monkeypatch.chdir(link)
+        info = db.describe_root()
+        assert "and its main checkout has no tracker either" in info["error"]
+        assert info["unexamined"] == ()
+
+    # -- and the two functions themselves, so the layer is pinned directly --
+
+    def test_the_two_reads_return_the_third_value_rather_than_a_bare_none(self, tmp_path):
+        _main, link, gitdir = self._worktree(tmp_path)
+        restore = self._unreadable(link / ".git")
+        try:
+            assert db._linked_worktree_gitdir(link / ".git") == (
+                None,
+                (str(link / ".git"), "could not read it (Permission denied)"),
+            )
+        finally:
+            restore()
+        restore = self._unreadable(gitdir / "commondir")
+        try:
+            root, entry = db._worktree_main_root(link / ".git")
+        finally:
+            restore()
+        assert root is None
+        assert entry is not None and entry[0] == str(gitdir / "commondir")
+
+    def test_a_git_file_that_was_read_and_carries_no_pointer_is_still_a_determined_no(
+        self, tmp_path
+    ):
+        """The narrowing that keeps this honest: the text WAS read and records
+        no `gitdir:`, so "not a linked worktree" is a confirmed answer, not a
+        failure to look. A fix that made every negative undetermined would turn
+        every submodule into an unexamined candidate."""
+        plain = tmp_path / "sub"
+        plain.mkdir()
+        (plain / ".git").write_text("this is not a pointer\n")
+        assert db._linked_worktree_gitdir(plain / ".git") == (None, None)
