@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-08-27
+
+This release is about the tracker telling you the truth about itself, and about a card keeping
+its place in the code.
+
+`codebugs where` and the MCP server's startup line no longer hand you a stranger's tracker in
+silence. Before running anything, `codebugs` walks up from where you are standing looking for the
+nearest `.codebugs/`; when a directory on the way up could not be looked into at all — its
+permissions changed under you, a mount answered with an error, a `.git` in it turned out to be a
+broken link — the walk used to read *I could not look* as *there is nothing here* and carry on
+upwards, binding you to whatever it found above. It now says so and names what it had to skip.
+
+A card's "last changed" date means last changed again. Where a card has a pin into the code, the
+tracker refreshes it as the file moves — bookkeeping it does for itself — but that bookkeeping
+was going in through the same door as a human edit, so a housekeeping pass made most of the
+tracker look as though somebody had just been through it. Housekeeping now says it is
+housekeeping and leaves the date alone, and a status change can no longer be filed as
+housekeeping at all.
+
+Filing a finding, you can now name the line it is on: `lines` on the `add` and `batch_add` tools
+takes `"1850"`, a range, a full `path:line`, or a list, and the card keeps pointing at that code
+after the file is edited around it. The command line has had this all along; what is new is that
+it exists on the surface agents actually file through.
+
+And the text this tracker hands to an AI client, together with the README a person reads, stopped
+promising more than the code delivers. A card survives an edit of its file only when the report
+named a line or a line range — most cards name a file and nothing more — and that condition is
+now stated instead of implied, with `anchor_resolve` to tell you which kind of card you are
+holding.
+
+Alongside those: category names can be folded into one another with one command, and a target the
+tracker has never seen is refused by name instead of quietly minted; a negative `--limit` is an
+error instead of silently meaning "no limit"; and marking a sweep item refuses contradictory flags
+instead of ignoring one of them.
+
+**If you use the MCP server, reconnect it after upgrading.** The instructions the server hands
+every connecting client are read once, at startup, so a server that is already running keeps
+serving the previous text until it is restarted.
+
 ### Added
 - **Filing a finding, you can now name the line it is on, and the card stays pointed at that code
   after the file is edited.** Pass `lines` to the `add` or `batch_add` tool — `"1850"`, a range
@@ -71,9 +110,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   appears on one surface and not the other now turns a test red instead of surprising a reader.
   The same suite's reader of README examples was widened from matching particular spellings to
   recognising the thing itself: a code fence is a fence at any indentation, in backticks or tildes,
-  at any length; a table is found by its column names rather than one exact header line. Measured
-  over 31 ways of writing a false claim into the README, it caught 8 before and 27 after, and the
-  four it still cannot see are now named one by one in its own documentation.
+  at any length; a table is found by its column names rather than one exact header line. It was
+  measured before and after against deliberately falsified README claims, and it catches
+  substantially more of them than the version it replaces; what it still cannot see is named one
+  by one in its own documentation, which ships in the tree beside it.
 - **The README now says what this tracker does differently, and no longer promises things the code
   does not do.** It opened on "durable memory for AI assistants" — true, but true of any tracker —
   and never mentioned the one thing that actually separates this one: a finding here has an
