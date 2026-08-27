@@ -619,7 +619,22 @@ class TestIdentityIsUnaffected:
     Measured on this branch: it does not. The fingerprint is identical with the
     parameter, without it, with a DIFFERENT value in it, and whether or not the
     description happens to quote the same number. These tests exist so that stays
-    true rather than being rediscovered on a live tracker."""
+    true rather than being rediscovered on a live tracker.
+
+    **WHICH DEDUP BRANCHES ARE ACTUALLY PINNED HERE, because the claim above is
+    wider than the check below and saying so is cheaper than implying otherwise.**
+    Findings have four dedup outcomes (CB-43): `created`, `bumped`, `reopened`
+    (a hit on a `fixed` row) and `recurrence_of_closed` (a hit on a dismissed
+    one). This class exercises the first TWO. The other two are NOT covered by
+    any test in this file, and no test elsewhere covers them for this parameter
+    either. The argument that they are safe is a structural one rather than a
+    measured one — the parameter is consumed at the surface, before
+    `add_finding`, so every branch below receives an observation that differs
+    only in `meta`, and the fingerprint tests above show that difference does not
+    reach identity — but a structural argument is what this repository routinely
+    finds to be true of the elements and false of their composition. Read this
+    class as covering the live-row half, and treat the terminal half as
+    reasoned-about rather than pinned."""
 
     def _fingerprint(self, tools, description, **kw):
         return _add(tools, description=description, **kw)["fingerprint"]
