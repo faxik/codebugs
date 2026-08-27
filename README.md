@@ -1,27 +1,37 @@
 # codebugs
 
-**Persistent code finding, requirements, and release tracker for AI assistants.** SQLite-backed, exposed via MCP server + CLI.
+**A code-finding, requirements, and release tracker for AI assistants — one where a finding has an identity.** SQLite-backed, exposed via an MCP server and a CLI.
 
-AI assistants lose context between sessions. codebugs gives them durable memory for code review findings, requirements, dependency blockers, parallel-agent coordination, and release milestones — with minimal token overhead.
+Most trackers treat every report as a new row, so the second agent to notice the same bug files it again, and the queue fills with copies of one defect. codebugs treats a finding as **a defect**, and each report of it as **one observation of that defect**:
 
 ```
-Session 1:  Review code → log 50 findings → forget them
-Session 2:  summary → instant orientation → fix 20 → update status
-Session 3:  pull_next → claim work → mark integrated → next agent picks up
+$ codebugs add -s high -c n_plus_one -f src/api.py -d "Query in loop at line 42" --new-category
+Added: CB-1
+$ codebugs add -s high -c n_plus_one -f src/api.py -d "Query in loop at line 42"
+Bumped: CB-1 (occurrence 2)
+$ codebugs update CB-1 --status fixed
+Updated: CB-1 (status=fixed, severity=high)
+$ codebugs add -s high -c n_plus_one -f src/api.py -d "Query in loop at line 42"
+Reopened as regression: CB-1 (occurrence 3)
 ```
 
-No context lost. No re-reading files. No token-heavy recaps. Parallel agents don't race.
+One card, three observations, and a regression recorded on the row it belongs to. Filing an observation again is normal and useful, not noise.
 
-## Why codebugs
+## What makes this different
 
-Building a real codebase with AI assistants creates four problems that compound over time:
+Deduplication is the point, not a side effect — and the rest of the design falls out of that one decision.
 
-1. **Findings get lost.** You spend 20K tokens reviewing a file, log 12 bugs in chat, and the next session has no idea they exist.
-2. **Requirements drift.** REQUIREMENTS.md gets edited by hand, forgotten, contradicted by code, and nobody catches it.
-3. **Parallel agents race.** Two agents both pick the same bug, both edit the same file, both think they've shipped it.
-4. **Releases lose track of what's in them.** Work sits stranded on feature branches for 9 days. "Where are we on 1.1?" has no single answer.
+- **Filing the same finding twice does not create two cards.** The second report bumps the first: its occurrence count goes up, and its severity rises if this sighting was worse than the last. Severity only ever escalates under observation, so a card filed `low` and re-seen `critical` stops hiding from a `--severity critical` query. Lowering it back is a deliberate `update`, never an accident of the last report.
+- **A card that was fixed and comes back is a regression, not a duplicate.** Re-filing reopens the same card and records the regression on it, so one defect's whole history stays on one row.
+- **A decision stays decided.** Re-filing something already dismissed as `wont_fix` or `not_a_bug` does not quietly reopen the argument. It files a new card pointing back at the dismissal, so the recurrence is visible and the original ruling survives.
+- **The place in the code outlives the edit.** When a report names a line range, the location is anchored at filing time from git. After the file is edited around it, `anchor_resolve` reports where that code went — `moved`, with the new line numbers — instead of pointing at whatever now occupies the old line.
+- **Parallel agents don't collide.** `claims_claim` gives one agent a card and refuses the second, naming who holds it and from which repo, so two agents cannot silently fix the same thing. Closing a card releases the claim in the same transaction.
+- **Findings can be related and grouped.** Cards link to each other, and a similarity report proposes families of near-duplicate findings as a dry run you inspect before merging anything.
+- **It tells you when it could not look.** A tracker it cannot read, a file it cannot stat, an anchor whose card never named a code span — each of these comes back as *undetermined*, with the reason, rather than as a confident wrong answer. `codebugs where` will tell you which tracker a command is actually bound to and which channel decided that, because a binding you cannot see is a binding you cannot debug.
 
-codebugs is one SQLite database (`.codebugs/findings.db`) that solves all four. Nine self-contained modules, 66 MCP tools, one CLI.
+Underneath that, it is durable memory across sessions: findings survive the conversation that produced them, requirements are checked against the code that claims to implement them, blocked work resurfaces when its dependency resolves, and a release knows what is still stranded on a branch.
+
+codebugs is one SQLite database (`.codebugs/findings.db`). Modules are self-registering, and the running server reports its own tool catalogue — the module table below is the set of them.
 
 ## Install
 
@@ -43,7 +53,7 @@ Run this once per project, in the project root:
 codebugs init
 ```
 
-This creates `.codebugs/findings.db`. **`init` is the only command that creates a tracker** — every other command discovers an existing one by walking up from the current directory (unless you point it somewhere explicitly, see below), and refuses with an actionable error if there is none. That refusal is deliberate: silently creating an empty database is how findings go missing.
+This creates `.codebugs/findings.db`. **`init` is the only command that creates the `.codebugs/` directory** — every other command discovers an existing one by walking up from the current directory (unless you point it somewhere explicitly, see below), and refuses with an actionable error if there is none. That refusal is deliberate: silently creating an empty database is how findings go missing.
 
 There is one deliberate exception, and it is worth stating precisely because it looks like the rule being broken. **The upward walk treats an existing `.codebugs/` directory as the opt-in**, so if that directory is there but holds no `findings.db`, the next command creates the database inside it rather than refusing. The common way to end up in that state is an interrupted `init` — the directory is created before the database — and self-healing on the next command is more useful there than demanding a second `init`.
 
@@ -125,26 +135,17 @@ Use `--mode` to load only the tools you need:
 }
 ```
 
-| Mode | Tools | Use it when |
-|------|-------|-------------|
-| `findings` | 8 | Code review / bug tracking only |
-| `provenance` | 1 | Staleness checks against git history |
-| `reqs` | 12 | Specification tracking only |
-| `sweep` | 9 | Batch iteration / state-machine tasks |
-| `bench` | 4 | Performance benchmarks |
-| `merge` | 5 | Multi-agent merge coordination |
-| `blockers` | 4 | Cross-entity dependency tracking |
-| `milestones` | 18 | Release + stream + capacity-aware pull |
-| `claims` | 5 | "Who holds this card" for parallel agents |
-| `all` | **66** | Default — everything |
+Any module name from [the module table below](#the-modules) is a valid mode, and `all` — the default — loads everything. The CLI takes the same flag: `codebugs --mode findings summary`.
 
-The CLI takes the same flag: `codebugs --mode findings summary`.
+One asymmetry is worth knowing before you rely on it: `usage` is a **CLI-only** mode. It registers a command but no MCP tools, so `codebugs --mode usage usage` works while an MCP server started with `--mode usage` would have nothing to offer.
 
 ### Other MCP Clients
 
 Any MCP-compatible client can connect to `codebugs-mcp` via stdio transport.
 
-## The nine modules
+## The modules
+
+Every name in this table is a valid `--mode` value.
 
 | Module | Domain | Headline tools |
 |--------|--------|----------------|
@@ -157,8 +158,15 @@ Any MCP-compatible client can connect to `codebugs-mcp` via stdio transport.
 | **milestones** | Releases, streams, capacity-aware pull | `pull_next`, `milestone_status`, `milestone_close` |
 | **provenance** | Staleness vs git history, commit trailers | `staleness_check` |
 | **claims** | Which agent holds a finding or requirement | `claims_claim`, `claims_release`, `claims_who_holds` |
+| **loc** | Where in the code a finding is, across edits | `anchor_resolve`, `anchor_recapture` |
+| **similarity** | Near-duplicate findings, as a dry run | `similarity_check`, `similarity_report` |
+| **relations** | Typed, retractable links between findings | `relations_relate`, `relations_query` |
+| **grouping** | Reads the axes the tracker stores but never exposed | `grouping_citations`, `grouping_tags`, `grouping_filing` |
+| **usage** | Tool-call counters (**CLI only** — no MCP tools) | — |
 
 Modules are self-registering — adding a new one is local to its own file. See [`docs/superpowers/specs/`](docs/superpowers/specs/) for the architecture history.
+
+**Not every MCP tool has a CLI verb.** The milestones module is where the gap is widest: `milestone_create`, `milestone_update`, `milestone_add_item`, `milestone_move_item`, `milestone_set_status`, `milestone_defer`, `milestone_close`, `triage_dismiss`, `triage_promote`, `pull_next` and `release_item` are reachable through MCP only. From a terminal you can inspect a release, but you cannot create one or pull work from it.
 
 ## Quick tour
 
@@ -169,23 +177,29 @@ Modules are self-registering — adding a new one is local to its own file. See 
 | Tool | Purpose |
 |------|---------|
 | `summary` | Dashboard overview — **start here** for orientation |
-| `add` | Log a finding with severity, category, file, description |
-| `batch_add` | Log multiple findings at once |
+| `add` | File an observation. Creates, bumps, reopens or refiles — read `dedup_action` to see which |
+| `batch_add` | File several observations at once |
 | `update` | Change status, severity, notes, tags or metadata (`append_note` adds, `notes` replaces) |
 | `query` | Search/filter with pagination and group-by |
+| `get` | Fetch one finding by id, with its full body and occurrence history |
+| `recent` | Findings touched at or after a date — the one call for "what closed since" |
 | `stats` | Cross-tabulated counts (severity x category/file/status) |
 | `categories` | List existing categories — **call before `add`** for consistency |
-| `staleness_check` | Compare against git history; mark obsolete findings stale |
+| `categories_normalize` | Fold twin category spellings together. **Dry run by default** |
+
+`staleness_check` lives in the **provenance** module rather than here, and `anchor_resolve` in **loc**; both are listed in [the module table](#the-modules). The tools behind the opening section — anchors, similarity, relations and grouping — have their own entry under [Identity, location and grouping](#identity-location-and-grouping) below.
 
 **CLI:**
 
 ```bash
-codebugs add -s high -c n_plus_one -f src/api.py -d "Query in loop at line 42"
+codebugs add -s high -c n_plus_one -f src/api.py -d "Query in loop at line 42" --new-category
 codebugs summary
 codebugs query --status open --severity critical
 codebugs update CB-1 --status fixed --append-note "Fixed in PR #42"
 codebugs categories
 ```
+
+**`--new-category` is needed the first time a category is used, and only then.** A category the tracker has never seen is refused, naming the closest existing spellings, because the common way a category set fragments is a typo — `n-plus-one` beside `n_plus_one` — and a fragmented category set is what makes `categories` stop revealing patterns. Once `n_plus_one` exists, later findings use it without the flag. Spelling is normalized on the way in, so hyphens, spaces and case do not mint twins.
 
 `--append-note` adds to a finding's notes; `--notes` **replaces** them wholesale. Prefer `--append-note` when recording investigation history — `--notes` will discard whatever was there, which is usually not what you want on a finding others have been working.
 
@@ -201,6 +215,7 @@ When a new finding is added, the **milestones auto-router** automatically attach
 | `reqs_add` | Add a requirement (FR-001, priority, status, test coverage) |
 | `reqs_update` | Change status, description, priority, test coverage |
 | `reqs_query` | Search/filter by status, priority, section, free text |
+| `reqs_get` | Fetch a single requirement by ID with full body |
 | `reqs_stats` | Cross-tabulated counts (status x priority) |
 | `reqs_verify` | Automated checks: ghost test files, duplicate IDs, status contradictions |
 | `reqs_import` | Import from REQUIREMENTS.md (parses markdown tables) |
@@ -351,6 +366,42 @@ codebugs sweep-archive-items retro-findings --state RESOLVED --older-than 30d
 | `codemerge_check` | Check for overlapping claims against `main` |
 | `codemerge_merge` | Mark merge in progress (acquires the global merge lock with TTL) |
 | `codemerge_finish` | Release the lock |
+| `codemerge_claims` | List all files a session has claimed, in claim order |
+| `codemerge_sessions` | List merge sessions with claim counts |
+| `codemerge_status` | Dashboard: session counts by status, total active claims |
+| `codemerge_abandon` | Close a session for good, so its files stop blocking everyone else |
+
+### Identity, location and grouping
+
+These four modules are what the opening section is about, and none of them had an entry here before.
+
+| Tool | Purpose |
+|------|---------|
+| `anchor_resolve` | Where a finding's code is **now** — `current`, `moved`, `moved_file`, `lost`, `ambiguous`, or `unknown` with a reason |
+| `anchor_recapture` | Rebuild stored anchors from the git object store. **Dry run by default** |
+| `similarity_check` | Preview what the file-time annotator would stamp for an observation |
+| `similarity_report` | Similarity families as auditable evidence — a scrub you read, never a merge it performs |
+| `relations_relate` | Assert a typed relation (`duplicate_of`, `follow_up_of`, `split_from`, ...) between two findings |
+| `relations_query` | List relations touching a finding, in both directions |
+| `relations_unrelate` | Retract a relation. Tombstones it — the row and its history remain |
+| `grouping_citations` | Connected components of the hand-written CB-id reference graph |
+| `grouping_tags` | Tag pivots: counts, co-occurrence, near-duplicate taxonomy strings |
+| `grouping_filing` | Split lineages and shared filing events |
+
+**An anchor needs the filing to name a code span.** The location is captured from `meta.line` / `meta.lines` (and a few equivalent spellings) at the moment the finding is filed. A report that names only a file has nothing to anchor, and `anchor_resolve` says so — `unknown`, reason `no_grammar` — instead of guessing a line. Most findings in practice name no span, so this is the ordinary case, not an error:
+
+```
+$ codebugs anchor-resolve --finding-id CB-2 --repo . --json
+      "anchor": {
+        "status": "moved",
+        "path": "src_api.py",
+        "line": 25,
+        "end": 27,
+        "channel": "git",
+        "survived": "3/3",
+```
+
+That card was filed against lines 5–7. Twenty lines were then inserted above it. The stored line numbers are stale; the anchor is not.
 
 ## How It Works
 
@@ -362,16 +413,22 @@ AI code review sessions produce findings that get lost. Multiple agents working 
 
 codebugs stores everything in one local SQLite database. AI assistants write findings, requirements, and milestone items as they discover them, then query the database in future sessions for instant context recovery. Concurrent agents coordinate via the same database — no race conditions, atomic claims.
 
-**Token savings**: A `summary` call returns a structured JSON overview in ~200 tokens. Without codebugs, re-establishing the same context costs 2K–10K+ tokens of file reading and conversation history.
+**Token savings**: a `summary` call returns one small structured overview — counts by severity, the top categories, the hottest files — instead of the file reading and conversation replay it would otherwise take to re-establish the same picture.
 
 ### Typical Workflows
 
-**Code review loop**:
+**Code review loop.** This is the same loop the MCP server tells every client that connects, so the two cannot drift apart:
 
-1. AI reviews code, calls `categories` for naming consistency, then `add` for each finding.
-2. Each `add` auto-routes the finding to `stream/triage`.
-3. Next session: AI calls `summary` → 50 open findings → `query --severity critical` → fixes the worst → `update CB-N --status fixed`.
-4. Over time, `categories` reveals systemic issues — "12 `tz_naive_datetime` fixed across 9 files → time for a lint rule."
+1. File the observation with `add` (or `batch_add` for several at once). Call `categories` first when you are unsure of the naming.
+2. **Read what came back before doing anything else.** `dedup_action` says whether this created a new card, bumped or reopened an existing one, or refiled one already dismissed. `attention` is the server's own flag when your observation raised the card's severity or diverged from its stored category — a card you thought you were filing fresh but which the tracker already knew about, differently.
+3. The code location is anchored at file time when the observation names one; `anchor_resolve` reports whether that anchor still points at live code.
+4. Close the card with `update CB-N --status fixed` once it is actually fixed.
+
+Working alongside other agents on the same tracker? Claim the card with `claims_claim` before starting and release it with `claims_release` when done, or two agents can end up fixing the same thing. Closing the card releases the claim on its own.
+
+Each `add` also auto-routes the finding to `stream/triage`, and over time `categories` reveals systemic issues — "12 `tz_naive_datetime` fixed across 9 files → time for a lint rule."
+
+Requirements (`reqs_add`, `reqs_query`, ...) are a separate, authored entity next to findings, and they have **no** deduplication. Do not file a requirement through `add`, or a defect through `reqs_add`.
 
 **Release loop**:
 
@@ -442,13 +499,16 @@ Item kinds are `bug` (validated against `findings`), `requirement` (validated ag
 
 ```
 $ codebugs categories
-category                        total  open  fixed
-tz_naive_datetime                  15     3     12
-n_plus_one                          8     2      6
-missing_input_validation            6     4      2
+category                  total  open  fixed
+------------------------  -----  ----  -----
+tz_naive_datetime         15     3     12
+n_plus_one                8      2     6
+missing_input_validation  6      4     2
 ```
 
 If you keep fixing the same category → time for a lint rule. codebugs turns reactive bug-fixing into proactive prevention.
+
+This is the view the category gate above protects. Had half those findings been filed as `tz_naive_dt`, the table would show two rows of 8 and 7 instead of one row of 15, and there would be no pattern to see. Normalization handles the punctuation-and-case twins on its own; the gate is what catches a genuinely different name for the same thing.
 
 ### Requirements verification
 
@@ -456,14 +516,16 @@ If you keep fixing the same category → time for a lint rule. codebugs turns re
 
 ```
 $ codebugs reqs-verify
-Verified 683 requirements.
+Verified 3 requirements.
 
-12 issue(s) found:
-check   sev       id      message
-tests   high      FR-350  Test file not found: test_entity_graph.py
-status  high      FR-090  Description mentions 'superseded' but status is 'Planned'
-status  medium    FR-006  Must-priority requirement implemented without test coverage
-ids     medium    --      Numbering gaps (5+): FR-025..FR-029, FR-316..FR-329
+4 issue(s) found:
+
+check   sev     id      message
+------  ------  ------  -----------------------------------------------------------
+ids     medium  --      Numbering gaps (5+): FR-007..FR-089, FR-091..FR-349
+status  medium  FR-006  Must-priority requirement implemented without test coverage
+status  high    FR-090  Description mentions 'superseded' but status is 'planned'
+status  medium  FR-350  Must-priority requirement implemented without test coverage
 ```
 
 ### Semantic requirements search
@@ -479,46 +541,52 @@ Float32 BLOB storage in SQLite; brute-force cosine similarity — fast for thous
 
 ### Close-gate enforcement
 
-`milestone_close("release/1.1")` won't let you ship a release with work stranded on a branch:
+`milestone_close` won't let you ship a release with work stranded on a branch. First, what the release looks like:
 
 ```
 $ codebugs milestone-status release/1.1
 release/1.1  (release, state=open)
-  target: 2026-06-15 (35 days)
+  target: 2026-09-15 (19 days)
+  First post-1.0 feature release. Target date set later.
 
-Items: 12 total (3 open/in_progress, 9 done)
-  Branch-only: CB-1234
-  Blocked: CB-1240
+Items: 3 total (3 open/in_progress, 0 done)
+
+  By status:
+    open              3
+  By size:
+    small             3
+
+  Branch-only: CB-1
+  Blocked: CB-2
 ```
 
-When you try to close it:
+Then closing it. **`milestone_close` is one of the milestone tools with no CLI verb** — this is the error the MCP tool returns, raised as a `ValueError` from the domain function, on a single line:
+
 ```
-ValueError: cannot close release/1.1: unfinished items (3): CB-1234, CB-1240, CB-1242;
-            branch-only items (1): CB-1234@feat/CB-1234;
-            items with active blockers (1): CB-1240
-            (use force=True with reason to override)
+cannot close release/1.1: unfinished items (3): CB-1, CB-2, CB-3; branch-only items (1): CB-1@feat/CB-1; items with active blockers (1): CB-2  (use force=True with reason to override)
 ```
 
-Streams (`stream/*`) refuse to close at all — they're permanent buckets.
+`force=True` with a logged reason overrides that. Streams do not have an override — `milestone_close(id="stream/triage", force=True, reason="x")` still refuses with `streams cannot be closed (milestone=stream/triage)`, because they are permanent buckets rather than things that ship.
 
 ## Requirements
 
 - Python 3.11+
-- No external runtime dependencies beyond `mcp>=1.0.0` (for the server)
+- One runtime dependency: `mcp>=2.0.0,<3`, for the server. The 2.0 floor is not cosmetic — `server.py` uses `MCPServer`, the class that replaced `FastMCP` in the 2.0 SDK, so an older `mcp` will not start.
 - SQLite (bundled with Python)
 
 ## Development
 
 ```bash
 # Run tests
-uv run python -m pytest tests/ -v
+uv run --extra dev python -m pytest tests/ -q
 
-# Lint
-uv run ruff check src/ tests/
-
-# Format
-uv run ruff format src/ tests/
+# Lint — this is the gate
+uv run --extra dev ruff check src/ tests/
 ```
+
+`pytest` and `ruff` live in the `dev` extra, which `uv run` does not install by default, so `--extra dev` is not optional in a fresh clone.
+
+**`ruff format` is deliberately not run over this tree.** Much of the existing code does not conform to it, so `ruff format src/ tests/` would rewrite most of the repository in one commit. `ruff check` is the gate; formatting is left alone on purpose.
 
 See [CLAUDE.md](CLAUDE.md) for architectural rules and conventions.
 

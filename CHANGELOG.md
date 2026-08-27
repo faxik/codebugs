@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **The README now says what this tracker does differently, and no longer promises things the code
+  does not do.** It opened on "durable memory for AI assistants" — true, but true of any tracker —
+  and never mentioned the one thing that actually separates this one: a finding here has an
+  identity. Filing the same thing twice bumps one card instead of creating two; a card that was
+  fixed and comes back is recorded as a regression on the same row; something you already dismissed
+  is not quietly reopened; a finding that named a line range can still be found after the file is
+  edited around it; and a claim stops two agents fixing the same card. The opening section is now
+  about that, and every example in it is real output from a real run rather than an illustration.
+  The tool now also admits, in the same place, where it declines to answer — an anchor whose card
+  never named a code span comes back as *undetermined with a reason*, not as a confident guess.
+- **Several things the README stated were simply false, and one of them broke the very first
+  command a new user types.** `codebugs add` with a category the tracker has never seen is refused
+  unless you pass `--new-category`, which is a deliberate guard against a typo splitting your
+  category set in two — and the README neither used the flag in its first example nor mentioned it
+  existed, so the opening command failed with an error the surrounding text did not explain. It is
+  explained now. The dependency line promised `mcp>=1.0.0`; the package has required `mcp>=2.0.0,<3`
+  since the server moved to the 2.0 SDK class, so the version the README named would not have
+  started at all. The `codebugs categories` sample output did not match what the command prints.
+- **The module and tool listings were missing about a third of the product.** Five modules — the
+  code-location anchors, near-duplicate similarity, typed relations between findings, the grouping
+  reports and the usage counters — appeared nowhere at all, and two of those are exactly the
+  features the opening section is about. Half of the merge module's tools were unlisted, as were
+  three findings tools and one requirements tool. There were two separate module tables that had to
+  agree and did not; there is one now, it lists every module, and it marks `usage` as the CLI-only
+  mode it is. Fixed counts ("nine modules", "66 MCP tools", and a per-module tool count that was
+  wrong for four of the ten rows) have been removed rather than corrected, because a number written
+  into prose is a number that goes stale — the running server reports its own catalogue.
+- **The README also now says which tools you cannot reach from a terminal.** Eleven milestone tools,
+  including `pull_next` and `milestone_close`, exist only over MCP. The README previously showed
+  them in a "typical loop" without mentioning that typing them into a shell will not work.
+- **The workflow the README teaches is now the workflow the server teaches.** The MCP server sends
+  every client that connects a short recommended loop; the README described a different one. They
+  are one loop now, with the README following the server, so a reader and an agent are not given
+  two different sets of instructions for the same tool.
+
 ### Added
 - **Every run of `tools/worktree-finish.sh` now records how it ended, so "landing has become
   painful" can stop being a feeling and become a number (CB-176).** Landing a branch runs the whole
@@ -70,14 +106,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   fingerprint you supplied yourself is left byte-identical. If the rename would put two LIVE
   findings on one fingerprint the run writes **nothing at all** and names the pair — merging
   two cards is your decision, not a migration step.
-  **Read the `from → to` table against your own map before you type `--apply`.** A key that
-  matches no stored category is accepted in silence and appears nowhere in the report, so the
-  only sign of a typo on the left-hand side is a pair missing from that table.
+  **A key that matches no stored category is accepted and renames nothing — and the report
+  now names it** (see the CB-207 entry below), so a typo on the left-hand side no longer has
+  to be spotted by reading the `from → to` table against your own map.
   **And take a backup first:** `codebugs export-csv backup.csv` writes the findings, and
   `codebugs restore-csv backup.csv` puts them back verbatim — ids, statuses, occurrence
   counts and fingerprints — into an **empty** tracker. Its limit is real and worth knowing
   before you rely on it: milestone items and the audit history are not part of a CSV export
   and are not restored.
+- **The category-fold dry run now answers the question you run it for (CB-207, CB-209).** Its
+  whole purpose is to tell you whether the fold will do what you meant, and there were two
+  things it did without saying so. **A line of your map that matched nothing is now named.**
+  If you write `--fold-map '{"data_looss": "correctness"}'` and no card is stored under
+  `data_looss`, that line renames nothing — it never did — but the report used to be silent
+  about it: every counter looked healthy and the rename simply did not happen, and the only
+  way to notice was to read the `from → to` table against your own map line by line. Such keys
+  are now listed, on the command line and under `unmatched_fold_keys` in `--json`. Matching is
+  exact against the spelling that is stored, so if a tracker still holds
+  `Process Improvement` you have to type it that way; a key written in canonical form is
+  reported as matching nothing, which is the truth about that run. **And you are now told
+  which cards the fold puts on one identity.** The command has always refused to give two OPEN
+  findings the same fingerprint, because merging two live cards is your decision. It said
+  nothing about any other pair. When **both cards are closed**, that matters: the next time the
+  defect is reported only one of them can be revived, and the other stays behind for good. When
+  one is closed and the other still open — which is what closing an old spelling fork usually
+  looks like — nothing is lost, and the open card simply goes on collecting the reports. Either
+  way the fold performs the merge and you were not told; both are now listed under
+  `merged_identities`, with each card's status, so you can tell the two cases apart. On the
+  command line that list is capped at twenty groups with a count of the rest, because on a badly
+  forked tracker it can be long; `--json` always carries all of it. **Both of these are
+  messages, not refusals.** The exit code does not change, nothing new is written or withheld,
+  and a run with nothing to say prints nothing extra. In `--json` both keys are always present,
+  and an empty list there means "checked, none".
 - **A fold target that does not exist now needs `--new-category` (CB-223).** This is the one
   behaviour change here, and it is worth stating plainly. Previously,
   `--fold-map '{"correctness": "corectness"}' --apply` — one letter wrong on the right-hand
