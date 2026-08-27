@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Filing a finding, you can now name the line it is on, and the card stays pointed at that code
+  after the file is edited.** Pass `lines` to the `add` or `batch_add` tool — `"1850"`, a range
+  `"1850-1870"`, a full `"src/thing.py:1850"`, or a list of separate lines — and the tracker records
+  not just the number but the surrounding source text and the commit it read it at. That is what
+  survives: when the file is edited later and everything moves down forty lines, the card still finds
+  its place, whereas a path and a line number typed into the description are just words and go stale
+  the moment anyone touches the file. A bare number is usually all you need, because the path is
+  already on the card in its `file` field. The command line has had this as `-l/--lines` all along;
+  what is new is that it exists on the tool that agents actually file through, and that the tool now
+  says what the field is for instead of listing it as an example of arbitrary metadata.
+  Two honest limits. Cards filed **before** this change do not acquire an anchor from it — nothing
+  goes back and re-reads them. And a card that describes no place in the code — a process decision, a
+  whole-file concern, a piece of design — should be filed **without** it: an invented anchor is worse
+  than none, and the tracker will tell you it has none rather than guess. Where a token names a
+  different file from the card's own, the anchor is declined for the same reason, instead of reading
+  one file's line numbers against another.
+
 ### Changed
 - **The README now says what this tracker does differently, and no longer promises things the code
   does not do.** It opened on "durable memory for AI assistants" — true, but true of any tracker —
