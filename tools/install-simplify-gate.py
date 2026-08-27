@@ -3,7 +3,7 @@
 
 ЧТО ЭТО. Вставка не живёт внутри `tools/worktree-finish.sh`; она стоит СНАРУЖИ — это
 `PreToolUse`-хук на инструмент Bash. Хук разбирает командную строку и опознаёт вызов
-`worktree-finish`, но НЕ ОТМЕНЯЕТ его: сам хук объявляет `exit: always 0 — this gate
+`worktree-finish`, но НЕ БЛОКИРУЕТ его: сам хук объявляет `exit: always 0 — this gate
 advises, it must never block an unrelated command`, всегда возвращает 0 и отдаёт
 `additionalContext` (текст-предписание), а не `permissionDecision: deny`. Хук также НЕ
 ПРОВЕРЯЕТ, был ли проход `/simplify-traced` в этой сессии: он не читает стенограмму и не
