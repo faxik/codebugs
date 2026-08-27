@@ -893,7 +893,7 @@ def _abs_from(base: Path, raw: str) -> Path:
     return p.resolve() if p.is_absolute() else (base / p).resolve()
 
 
-def _linked_worktree_gitdir(git_file: Path) -> Path | None:
+def _linked_worktree_gitdir(git_file: Path) -> tuple[Path | None, tuple[str, str] | None]:
     """Return the gitdir `git_file` points at, but only for a LINKED WORKTREE.
 
     Both linked worktrees and submodules present `.git` as a file holding
@@ -907,47 +907,76 @@ def _linked_worktree_gitdir(git_file: Path) -> Path | None:
     unrecoverable (bare and `--separate-git-dir` mains record no back-pointer),
     but the worktree itself is always recognizable. Creation guards need the
     former question, discovery needs the latter.
+
+    Returns `(gitdir, unexamined)` (CB-224 — this used to collapse "confirmed not
+    a worktree" and "could not tell" into the same `None`, exactly the two-valued
+    shape CB-218 fixed at the three probes in `_walk_db_root` and left standing
+    here):
+
+    - `(gitdir, None)` — confirmed: `commondir` is a real file there, so this
+      really is a linked worktree's gitdir.
+    - `(None, None)` — confirmed NOT a linked worktree: the `.git` file's own
+      text could not be read, its pointer does not parse, or `commondir` is
+      affirmatively absent or is something other than a regular file (the
+      submodule shape, among others).
+    - `(None, (path, detail))` — undetermined: whether `commondir` is there
+      could not be determined. `(path, detail)` is already shaped as an
+      `unexamined` entry (see `_walk_db_root`), ready for a caller that tracks
+      one to append verbatim, so the two cannot drift into two spellings of the
+      same fact.
     """
     try:
         text = git_file.read_text(errors="replace")
     except OSError:
-        return None
+        return None, None
 
     pointer = next(
         (ln[len("gitdir:") :].strip() for ln in text.splitlines() if ln.startswith("gitdir:")),
         "",
     )
     if not pointer:
-        return None
+        return None, None
 
     gitdir = _abs_from(git_file.parent, pointer)
-    return gitdir if (gitdir / "commondir").is_file() else None
+    marker = gitdir / "commondir"
+    kind, detail = _path_state(str(marker))
+    if kind == PATH_FILE:
+        return gitdir, None
+    if kind is None:
+        return None, (str(marker), detail or "could not look at it")
+    return None, None
 
 
-def _worktree_main_root(git_file: Path) -> str | None:
+def _worktree_main_root(git_file: Path) -> tuple[str | None, tuple[str, str] | None]:
     """Resolve a `.git` FILE to the main repo's root, or None if it can't be known.
 
-    Returning None is common and correct: git records no back-pointer from a
-    worktree to its main CHECKOUT, only to the common git DIR. Where that dir is
-    not literally `<checkout>/.git` — a bare main, or `--separate-git-dir` — the
-    checkout path is genuinely unrecoverable (git's own `worktree list` reports
-    the git dir in these layouts), so we refuse rather than guess. Callers that
-    only need to know they are IN a worktree must use `_linked_worktree_gitdir`.
+    Returns `(main_root, unexamined)`, in the same shape as
+    `_linked_worktree_gitdir` and for the same reason: a caller tracking an
+    `unexamined` list appends the second element verbatim rather than
+    reconstructing it.
+
+    A `None` main root is common and correct even with `unexamined` also `None`:
+    git records no back-pointer from a worktree to its main CHECKOUT, only to
+    the common git DIR. Where that dir is not literally `<checkout>/.git` — a
+    bare main, or `--separate-git-dir` — the checkout path is genuinely
+    unrecoverable (git's own `worktree list` reports the git dir in these
+    layouts), so we refuse rather than guess. Callers that only need to know
+    they are IN a worktree must use `_linked_worktree_gitdir`.
     """
-    gitdir = _linked_worktree_gitdir(git_file)
+    gitdir, unexamined_entry = _linked_worktree_gitdir(git_file)
     if gitdir is None:
-        return None
+        return None, unexamined_entry
     try:
         common = (gitdir / "commondir").read_text().strip()
     except OSError:
-        return None
+        return None, None
     if not common:
-        return None
+        return None, None
 
     common_git = _abs_from(gitdir, common)
     if common_git.name != DOT_GIT:
         # Bare or otherwise unconventional main repo — refuse rather than guess.
-        return None
+        return None, None
     # KNOWN LIMIT, DELIBERATELY UNFIXED (CB-13): this basename test is exactly
     # git's own heuristic, and a `--separate-git-dir` repo whose git dir happens
     # to be named `.git` defeats it — we return the ADMIN directory rather than
@@ -955,7 +984,7 @@ def _worktree_main_root(git_file: Path) -> str | None:
     # discriminator: git reports that directory as a valid work tree too, so any
     # "fix" here would be a different guess, not a proof. The escape hatch is a
     # declared root — see `declared_tracker_root`.
-    return str(common_git.parent)
+    return str(common_git.parent), None
 
 
 def _enclosing_worktree_root(start: str) -> str | None:
@@ -985,7 +1014,8 @@ def _enclosing_worktree_root(start: str) -> str | None:
         if kind == PATH_DIR:
             return None
         if kind == PATH_FILE:
-            return str(cur) if _linked_worktree_gitdir(git) is not None else None
+            gitdir, _unexamined = _linked_worktree_gitdir(git)
+            return str(cur) if gitdir is not None else None
         if cur.parent == cur:
             return None
         cur = cur.parent
@@ -1062,7 +1092,17 @@ def _walk_db_root(start: str | None = None) -> tuple[str | None, Unexamined]:
         if kind == PATH_DIR:
             return None, tuple(unexamined)
         if kind == PATH_FILE:
-            main_root = _worktree_main_root(git)
+            main_root, unexamined_entry = _worktree_main_root(git)
+            if unexamined_entry is not None:
+                # CB-224: the fourth two-valued probe CB-218 left standing.
+                # `_worktree_main_root`/`_linked_worktree_gitdir` could not tell
+                # whether this `.git` file's `commondir` marker is there, so the
+                # candidate is recorded here exactly as the three probes above
+                # already are — the walk still stops at this boundary (whether
+                # it is a worktree or a submodule remains genuinely unknown, and
+                # crossing on a guess would be worse), but the guess is no
+                # longer silent.
+                unexamined.append(unexamined_entry)
             if main_root is None:
                 return None, tuple(unexamined)
             cur = Path(main_root)
@@ -1499,7 +1539,7 @@ def _resolve_db(project_dir: str | None = None) -> tuple[str, bool, Unexamined]:
         if worktree is not None:
             # Never advise `init` here: it would create a tracker that dies
             # with the worktree. Name the main checkout when we can find it.
-            main = _worktree_main_root(Path(worktree) / DOT_GIT)
+            main, _unexamined = _worktree_main_root(Path(worktree) / DOT_GIT)
             where = f"in the main checkout ({main})" if main else "in the main checkout"
             found = (
                 "and its main checkout has no tracker either"
@@ -1834,11 +1874,31 @@ def init_project(project_dir: str | None = None, *, force: bool = False) -> dict
     finding written beneath it. `force=True` allows the deliberate nested case.
     """
     root = os.path.abspath(project_dir or os.getcwd())
-    if not os.path.isdir(root):
+    # CB-224: both reads below used to be `os.path.isdir`/`os.path.exists`, which
+    # answer this exact question with two values — swallowing every `OSError`
+    # the underlying stat raises, so *could not look* read as *nothing is
+    # there* and `init` could proceed on a directory it never actually saw.
+    # `_path_state` makes the undetermined case a refusal with an honest
+    # reason instead of a guess. This changes no DETERMINED outcome: a real
+    # directory still passes, a genuinely absent one still refuses with the
+    # same message as before. It does NOT touch the worktree shadow-guard
+    # question below (CB-220's territory) — these two checks are ordinary
+    # existence validation, unrelated to that policy decision.
+    kind, detail = _path_state(root)
+    if kind is None:
+        raise ValueError(
+            f"cannot initialize {root}: could not determine whether it exists — {detail}"
+        )
+    if kind != PATH_DIR:
         raise ValueError(f"cannot initialize {root}: no such directory")
 
     tracker_dir = os.path.join(root, DB_DIR)
-    if os.path.exists(tracker_dir) and not os.path.isdir(tracker_dir):
+    kind, detail = _path_state(tracker_dir)
+    if kind is None:
+        raise ValueError(
+            f"cannot initialize {root}: could not determine what {tracker_dir} is — {detail}"
+        )
+    if kind not in (PATH_ABSENT, PATH_DIR):
         raise ValueError(f"cannot initialize {root}: {tracker_dir} exists and is not a directory")
 
     if not force:
@@ -1854,7 +1914,7 @@ def init_project(project_dir: str | None = None, *, force: bool = False) -> dict
         # tracker would still be created inside the worktree and die with it.
         worktree = _enclosing_worktree_root(root)
         if worktree is not None:
-            main = _worktree_main_root(Path(worktree) / DOT_GIT)
+            main, _unexamined = _worktree_main_root(Path(worktree) / DOT_GIT)
             where = f" Run it in the main checkout ({main}) instead." if main else ""
             place = (
                 f"{root} is a git worktree"
