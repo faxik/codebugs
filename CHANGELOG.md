@@ -7,6 +7,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- **Four places where a surface still promised more than the code delivers, and the reader was
+  acting on the promise.** Starting the MCP server with `--mode usage` was described as a server
+  with nothing to offer; in fact it does not start at all — that mode exists only on the CLI, and
+  the server refuses the value with exit code 2. `init` under `--tracker-root DIR` was described as
+  ignoring the flag and creating where you stand; it creates in `DIR`, and it is the `CODEBUGS_ROOT`
+  environment variable — the one you may have exported days ago — that is deliberately ignored for
+  creation. The server's startup diagnostic was described as one line to stderr; when no tracker is
+  reachable it writes two, the second telling you calls will fail until one is. And the sample
+  `anchor-resolve` output had quietly lost a field from the middle of the record, so a reader
+  matching it against a real run would have found a key the documentation did not show. The
+  anchor example now shows every field it lists, marks where it is an excerpt, and explains that
+  `"reason": null` means *nothing to explain* rather than *field missing*.
+- **The instructions the MCP server hands every connecting client no longer promise that a card
+  survives an edit of its file.** That is true when the report named a line or a line range, and
+  only then — most reports name a file and nothing more, so for most cards there is no anchor to
+  survive anything. The text now states the condition, and says that `anchor_resolve` is how to
+  tell which kind of card you are holding.
+- **The two lists of `--mode` values are now compared with each other by the test suite.** They
+  disagree — `usage` is a CLI mode and not a server one — and nothing checked that the README's
+  account of the disagreement was right, which is how the wrong account above survived. A mode that
+  appears on one surface and not the other now turns a test red instead of surprising a reader.
+  The same suite's reader of README examples was widened from matching particular spellings to
+  recognising the thing itself: a code fence is a fence at any indentation, in backticks or tildes,
+  at any length; a table is found by its column names rather than one exact header line. Measured
+  over 31 ways of writing a false claim into the README, it caught 8 before and 27 after, and the
+  four it still cannot see are now named one by one in its own documentation.
 - **The README now says what this tracker does differently, and no longer promises things the code
   does not do.** It opened on "durable memory for AI assistants" — true, but true of any tracker —
   and never mentioned the one thing that actually separates this one: a finding here has an
