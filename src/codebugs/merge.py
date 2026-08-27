@@ -605,7 +605,32 @@ def get_sessions(
 
 
 def get_status(conn: sqlite3.Connection) -> dict[str, Any]:
-    """Dashboard summary."""
+    """Dashboard summary.
+
+    `abandoned_sessions` CONFLATES TWO OUTCOMES, and this record cannot tell
+    them apart (CB-110, decided rather than fixed). `done` is written in
+    exactly one place — `finish(success=True)`, which guards on
+    `status == 'merging'` — and `merging` is reachable only through `merge()`,
+    whose compare-and-swap on main's HEAD legitimately refuses with
+    `main_moved` once the branch has already been integrated by another route.
+    In a repository whose real integration gate is something else (here,
+    `tools/worktree-finish.sh` with its own flock), that refusal is the NORMAL
+    case, so a session that did exactly what it was supposed to do can only
+    ever reach `abandoned`. This counter therefore sums "the session was thrown
+    away" and "the session's work shipped by another route".
+
+    Why the count is not split: a distinct terminal status (`superseded`) would
+    migrate the CHECK constraint on `codemerge_sessions`, `types.MERGE_STATUSES`,
+    `get_sessions`' vocabulary, these buckets and the `status IN
+    ('active','merging')` conflict predicate — a schema migration bought for a
+    population of three sessions, one of them miscounted, with none created
+    since 2026-08-19. Declaring the conflation is the cheaper honest answer;
+    the alternative reading of `done` (meaning "the work landed", whoever
+    merged it) was rejected because it weakens the `merging` guard that
+    serializes two concurrent finishers, trading a real concurrency invariant
+    for audit cosmetics. Revisit if a new codemerge session ever appears, or if
+    something starts reading `abandoned_sessions` as a metric.
+    """
     counts = {}
     for r in conn.execute(
         "SELECT status, COUNT(*) as c FROM codemerge_sessions GROUP BY status"
