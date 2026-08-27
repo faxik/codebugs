@@ -1,27 +1,37 @@
 # codebugs
 
-**Persistent code finding, requirements, and release tracker for AI assistants.** SQLite-backed, exposed via MCP server + CLI.
+**A code-finding, requirements, and release tracker for AI assistants — one where a finding has an identity.** SQLite-backed, exposed via an MCP server and a CLI.
 
-AI assistants lose context between sessions. codebugs gives them durable memory for code review findings, requirements, dependency blockers, parallel-agent coordination, and release milestones — with minimal token overhead.
+Most trackers treat every report as a new row, so the second agent to notice the same bug files it again, and the queue fills with copies of one defect. codebugs treats a finding as **a defect**, and each report of it as **one observation of that defect**:
 
 ```
-Session 1:  Review code → log 50 findings → forget them
-Session 2:  summary → instant orientation → fix 20 → update status
-Session 3:  pull_next → claim work → mark integrated → next agent picks up
+$ codebugs add -s high -c n_plus_one -f src/api.py -d "Query in loop at line 42" --new-category
+Added: CB-1
+$ codebugs add -s high -c n_plus_one -f src/api.py -d "Query in loop at line 42"
+Bumped: CB-1 (occurrence 2)
+$ codebugs update CB-1 --status fixed
+Updated: CB-1 (status=fixed, severity=high)
+$ codebugs add -s high -c n_plus_one -f src/api.py -d "Query in loop at line 42"
+Reopened as regression: CB-1 (occurrence 3)
 ```
 
-No context lost. No re-reading files. No token-heavy recaps. Parallel agents don't race.
+One card, three observations, and a regression recorded on the row it belongs to. Filing an observation again is normal and useful, not noise.
 
-## Why codebugs
+## What makes this different
 
-Building a real codebase with AI assistants creates four problems that compound over time:
+Deduplication is the point, not a side effect — and the rest of the design falls out of that one decision.
 
-1. **Findings get lost.** You spend 20K tokens reviewing a file, log 12 bugs in chat, and the next session has no idea they exist.
-2. **Requirements drift.** REQUIREMENTS.md gets edited by hand, forgotten, contradicted by code, and nobody catches it.
-3. **Parallel agents race.** Two agents both pick the same bug, both edit the same file, both think they've shipped it.
-4. **Releases lose track of what's in them.** Work sits stranded on feature branches for 9 days. "Where are we on 1.1?" has no single answer.
+- **Filing the same finding twice does not create two cards.** The second report bumps the first: its occurrence count goes up, and its severity rises if this sighting was worse than the last. Severity only ever escalates under observation, so a card filed `low` and re-seen `critical` stops hiding from a `--severity critical` query. Lowering it back is a deliberate `update`, never an accident of the last report.
+- **A card that was fixed and comes back is a regression, not a duplicate.** Re-filing reopens the same card and records the regression on it, so one defect's whole history stays on one row.
+- **A decision stays decided.** Re-filing something already dismissed as `wont_fix` or `not_a_bug` does not quietly reopen the argument. It files a new card pointing back at the dismissal, so the recurrence is visible and the original ruling survives.
+- **The place in the code outlives the edit.** When a report names a line range, the location is anchored at filing time from git. After the file is edited around it, `anchor_resolve` reports where that code went — `moved`, with the new line numbers — instead of pointing at whatever now occupies the old line.
+- **Parallel agents don't collide.** `claims_claim` gives one agent a card and refuses the second, naming who holds it and from which repo, so two agents cannot silently fix the same thing. Closing a card releases the claim in the same transaction.
+- **Findings can be related and grouped.** Cards link to each other, and a similarity report proposes families of near-duplicate findings as a dry run you inspect before merging anything.
+- **It tells you when it could not look.** A tracker it cannot read, a file it cannot stat, an anchor whose card never named a code span — each of these comes back as *undetermined*, with the reason, rather than as a confident wrong answer. `codebugs where` will tell you which tracker a command is actually bound to and which channel decided that, because a binding you cannot see is a binding you cannot debug.
 
-codebugs is one SQLite database (`.codebugs/findings.db`) that solves all four. Nine self-contained modules, 66 MCP tools, one CLI.
+Underneath that, it is durable memory across sessions: findings survive the conversation that produced them, requirements are checked against the code that claims to implement them, blocked work resurfaces when its dependency resolves, and a release knows what is still stranded on a branch.
+
+codebugs is one SQLite database (`.codebugs/findings.db`). Modules are self-registering, and the running server reports its own tool catalogue — the module table below is the set of them.
 
 ## Install
 
