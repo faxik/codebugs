@@ -53,7 +53,7 @@ Run this once per project, in the project root:
 codebugs init
 ```
 
-This creates `.codebugs/findings.db`. **`init` is the only command that creates a tracker** — every other command discovers an existing one by walking up from the current directory (unless you point it somewhere explicitly, see below), and refuses with an actionable error if there is none. That refusal is deliberate: silently creating an empty database is how findings go missing.
+This creates `.codebugs/findings.db`. **`init` is the only command that creates the `.codebugs/` directory** — every other command discovers an existing one by walking up from the current directory (unless you point it somewhere explicitly, see below), and refuses with an actionable error if there is none. That refusal is deliberate: silently creating an empty database is how findings go missing.
 
 There is one deliberate exception, and it is worth stating precisely because it looks like the rule being broken. **The upward walk treats an existing `.codebugs/` directory as the opt-in**, so if that directory is there but holds no `findings.db`, the next command creates the database inside it rather than refusing. The common way to end up in that state is an interrupted `init` — the directory is created before the database — and self-healing on the next command is more useful there than demanding a second `init`.
 
@@ -187,7 +187,7 @@ Modules are self-registering — adding a new one is local to its own file. See 
 | `categories` | List existing categories — **call before `add`** for consistency |
 | `categories_normalize` | Fold twin category spellings together. **Dry run by default** |
 
-`staleness_check` lives in the **provenance** module rather than here, and `anchor_resolve` in **loc**; both are listed in [the module table](#the-modules).
+`staleness_check` lives in the **provenance** module rather than here, and `anchor_resolve` in **loc**; both are listed in [the module table](#the-modules). The tools behind the opening section — anchors, similarity, relations and grouping — have their own entry under [Identity, location and grouping](#identity-location-and-grouping) below.
 
 **CLI:**
 
