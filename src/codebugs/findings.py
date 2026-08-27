@@ -10,6 +10,7 @@ import os
 import re
 import sqlite3
 import sys
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Annotated, Any, Literal, NamedTuple, TypedDict
 
@@ -488,13 +489,110 @@ REFUSAL_COUNT_META_KEY = "fingerprint_refusals"
 # suppression -- there is no interpolated SQL here to suppress.
 _REFUSAL_COUNT_JSON_PATH = f"$.{REFUSAL_COUNT_META_KEY}"
 
-# Every `codebugs add` FLAG that writes into `meta`, paired with the meta key it
-# writes and the spelling a caller types. `_cmd_add` reads this tuple twice — once
-# to seed `meta` and once to refuse a conflict with the same key arriving through
-# `--meta` — so the two can never drift apart, and a second such flag is covered the
-# day it is declared rather than the day someone remembers the check (CB-129).
-# (dest, meta key, spelling)
+# Every DEDICATED NAMED INPUT that writes into `meta`, paired with the meta key it
+# writes and the spelling a CLI caller types. A second such input is covered the day
+# it is declared rather than the day someone remembers the check (CB-129).
+#
+# CB-233 renamed what this declares without changing a byte of it. It used to be
+# read as "every `codebugs add` FLAG", and that reading was true only while the CLI
+# was the only surface carrying a named input for a `meta` field. The MCP `add` and
+# `batch_add` tools now carry one too, under the SAME spelling and writing the SAME
+# key, so the tuple declares a cross-surface fact and the CLI column is one
+# surface's rendering of it. The first field is therefore the PARAMETER NAME on
+# every surface (argparse `dest` and MCP parameter alike), which is why nothing had
+# to move: `lines` was already both.
+# (parameter name, meta key, CLI spelling)
 _ADD_META_FLAGS: tuple[tuple[str, str, str], ...] = (("lines", "lines", "-l/--lines"),)
+
+
+def _compose_add_meta(
+    lookup: Callable[[str], Any],
+    meta: Any,
+    *,
+    spelling: Callable[[str, str], str],
+    meta_spelling: str,
+    prefix: str,
+) -> dict[str, Any] | None:
+    """Fold the dedicated named inputs into *meta*, refusing what one field named
+    twice can produce. ONE rule, read by every surface that has such an input.
+
+    This is CB-129's and CB-133's rule, and it is a FUNCTION rather than a passage
+    of prose in `_cmd_add` because CB-233 gave it a second caller. A second copy is
+    one edit away from disagreeing with the first, and the two halves it enforces
+    are exactly the pair a copy would drift on:
+
+    * **An explicitly supplied EMPTY value is refused, never treated as absent**
+      (CB-133). On a WRITE path `None` is the only "not supplied" (CB-82); the
+      query-side rule that `""` ALSO means absent (CB-25) is the opposite one and
+      must not be borrowed here. Under truthiness an explicitly typed `-l ""` (or
+      `lines=[]`) landed nowhere, counted as no conflict, and reported success —
+      CB-129's own success-shaped discard, surviving on the empty value.
+    * **A named input and the same key inside `meta` are refused when they
+      DISAGREE, and pass when they are equal** (CB-129). There is no "honour both"
+      path — one key, one value — so CB-28's rule leaves refusal as the only honest
+      answer. Letting `meta` win silently discarded an explicitly passed argument;
+      applying the named input last was rejected because it would silently invert
+      the stored type for every caller already passing both.
+
+    It RAISES `ValueError` and prints nothing, so each surface reports in its own
+    vocabulary: the CLI converts it into a one-line stderr refusal and `sys.exit(1)`
+    (before `db.connect()`, so a refusal costs no partial work and no open
+    connection — CB-82), while an MCP tool lets it propagate to the SDK's error
+    handling, which is this package's rule for tools.
+
+    Args:
+        lookup: given a parameter name from `_ADD_META_FLAGS`, the value THIS
+            surface received for it — `None` when it was not supplied.
+        meta: the caller's own `meta` mapping, or `None`. Must already be a mapping
+            or `None`; a surface that can receive another shape (the CLI's
+            `--meta '[1,2]'`) refuses that itself, before calling, because
+            `key in <str>` is a SUBSTRING test rather than an error.
+        spelling: given the parameter name and its CLI spelling, how to name the
+            input in a message on THIS surface.
+        meta_spelling: how THIS surface names the `meta` container itself
+            (`--meta` on the CLI, `meta` on MCP). A message that named the
+            dedicated input in one surface's vocabulary and the container in
+            another's would tell the caller to delete a line it never typed.
+        prefix: what to put in front of a refusal, e.g. `codebugs add`.
+    """
+    named: dict[str, Any] = {}
+    for param, key, cli_spelling in _ADD_META_FLAGS:
+        value = lookup(param)
+        if value is None:
+            continue
+        said = spelling(param, cli_spelling)
+        if not value:
+            raise ValueError(
+                f"{prefix}: {said} was given an empty value, which is not "
+                f"a {key} anyone could have meant. An empty value is not the same "
+                f"as leaving it out.\n"
+                f"Omit {said}, or give it a value."
+            )
+        named[key] = value
+
+    supplied_meta: Mapping[str, Any] = meta if meta is not None else {}
+    for param, key, cli_spelling in _ADD_META_FLAGS:
+        if key in named and key in supplied_meta and supplied_meta[key] != named[key]:
+            said = spelling(param, cli_spelling)
+            raise ValueError(
+                f"{prefix}: {said} and the {key!r} key in {meta_spelling} name the "
+                f"same field with different values, and only one of them can be "
+                f"stored.\n"
+                f"  {said} gives {named[key]!r}\n"
+                f"  {meta_spelling} gives {supplied_meta[key]!r}"
+                f"  <- this one would have won, silently discarding {said}.\n"
+                f"Pass only one of the two spellings, or make them equal."
+            )
+
+    if not named:
+        # Nothing to fold, so *meta* travels on UNCHANGED — including `None`.
+        # Returning `{}` here instead would quietly convert "no metadata at all"
+        # into "an empty mapping" on every call that names no location, which is a
+        # different value to hand a domain function than the one the caller passed.
+        return meta
+    merged = dict(named)
+    merged.update(supplied_meta)
+    return merged
 
 
 def _levenshtein(a: str, b: str) -> int:
@@ -4303,6 +4401,7 @@ def register_tools(mcp, conn_factory) -> None:
         category: str,
         file: str,
         description: str,
+        lines: str | list | None = None,
         source: str = "claude",
         tags: list[str] | None = None,
         meta: dict[str, Any] | None = None,
@@ -4390,13 +4489,37 @@ def register_tools(mcp, conn_factory) -> None:
                       the observed category kept in the occurrence ring.
             file: File path relative to project root
             description: What's wrong
+            lines: WHERE IN THE CODE this finding is, and the only input that
+                   gives the card a durable ANCHOR. An anchor stores the
+                   surrounding source text and the commit it was read at, so the
+                   card still points at the right code after the file is edited
+                   and the line numbers move; a path written in `description`
+                   does not, and is never read as a location. WITHOUT THIS THE
+                   CARD HAS NO ANCHOR — nothing else in this call supplies one.
+                   Four spellings, all accepted: a bare line number ("1850") or
+                   range ("1850-1870"), which are read against the `file`
+                   argument above; a full "path/file.py:1850" token, whose path
+                   must name the same file as `file` or the anchor is refused
+                   rather than pointed at another file's line numbers; and a
+                   list ("[1850, 1870]"), which is N SEPARATE lines and never a
+                   range. Pass it whenever the finding is about a place in the
+                   code. Omit it — do not invent one — when the finding is about
+                   a process, a decision or a whole file: a made-up anchor is
+                   worse than none. Same field as `meta.lines`; supplying both
+                   with different values is refused.
             source: First reporter of this defect (default: claude). Frozen at
                     first report by design (BT-4): a re-observation keeps the
                     original; newest sources live in the occurrence ring
                     (meta.occurrences[*].source) — and an imported observation's
                     ring source can be a peer tracker's.
             tags: Optional tags for grouping
-            meta: Optional JSON metadata (lines, module, rule_code, etc.).
+            meta: Optional JSON metadata for anything this call has no argument
+                  for (module, rule_code, and so on). The code location is NOT
+                  one of those: it has its own `lines` argument above, and that
+                  is the spelling to use. `meta.lines` remains the same field
+                  and still works, so the two must not disagree — passing both
+                  with different values is refused rather than one silently
+                  winning.
                   Top-level meta is the row's AUTHORED state, observation-frozen
                   (BT-4): a re-observation's meta lands only as per-occurrence
                   evidence in meta.occurrences[*].meta. Promoting specific keys
@@ -4419,6 +4542,22 @@ def register_tools(mcp, conn_factory) -> None:
                           meta.category_minted for later counting. Existing
                           categories never need this.
         """
+        # CB-233. `lines` is a NAMED input onto the `meta.lines` field the location
+        # grammar already reads, exactly as the CLI's `-l/--lines` has been since
+        # CB-129 — same spelling, same key, same refusals, and the refusals come
+        # from the one shared `_compose_add_meta` rather than a second copy. It is
+        # folded HERE, at the surface, and not in `add_finding`, for the same
+        # reason `_cmd_add` folds it: the domain's contract is that a location
+        # lives in `meta`, and a surface that offers a friendlier way to say so
+        # must not turn that into two domain contracts. `ValueError` propagates to
+        # the SDK's error handling, which is this package's rule for MCP tools.
+        meta = _compose_add_meta(
+            {"lines": lines}.get,
+            meta,
+            spelling=lambda param, _cli: param,
+            meta_spelling="meta",
+            prefix="add",
+        )
         project_dir = _ambient_project_dir()
         if reported_at_commit is None:
             reported_at_commit = _ambient_head(project_dir)
@@ -4491,7 +4630,17 @@ def register_tools(mcp, conn_factory) -> None:
         Args:
             findings: List of finding objects, each with keys:
                 severity, category, file, description, and optionally:
-                source, tags, meta, reported_at_commit, reported_at_ref, fingerprint
+                lines, source, tags, meta, reported_at_commit, reported_at_ref,
+                fingerprint.
+                `lines` is per-member and works exactly as it does on `add`: it
+                is WHERE IN THE CODE that member is, and the only input that
+                gives its card a durable ANCHOR surviving later edits to the
+                file. A bare number ("1850"), a range ("1850-1870"), a full
+                "path/file.py:1850" token (whose path must name that member's
+                own `file`) or a list of lines. Omit it on a member that
+                describes no place in the code rather than inventing one. It is
+                the same field as that member's `meta.lines`, and the two are
+                refused when they disagree.
             reported_at_commit: Default commit SHA for all findings (auto-detected if omitted).
                                 Per-finding values override this.
             reported_at_ref: Default version label for all findings.
@@ -4508,11 +4657,45 @@ def register_tools(mcp, conn_factory) -> None:
         )
         enriched = []
         for f in findings:
+            # NOT `enumerate(findings)`, and this is not a style preference.
+            # `tests/test_declared_params_reach_the_body.py` ratchets that every
+            # declared tool parameter reaches a call, with a self-deleting table
+            # of the few that instead reach the domain as the CONTENT of another
+            # argument — `findings` is one of those rows (CB-157), and its reason
+            # is still exactly true: what reaches `batch_add_findings` is
+            # `enriched`. `enumerate(findings)` would satisfy the ratchet
+            # MECHANICALLY, by handing the list to a builtin that forwards it
+            # nowhere, and the table's own rule is then to delete the row. That
+            # would shrink the ratchet's population for a reason that is not the
+            # row's reason. The index is taken from the list being built instead.
+            i = len(enriched)
             f = {**f}
             if "reported_at_commit" not in f:
                 f["reported_at_commit"] = default_commit
             if "reported_at_ref" not in f and reported_at_ref is not None:
                 f["reported_at_ref"] = reported_at_ref
+            # CB-233. The member's `lines` is CONSUMED here, by the same shared
+            # rule `add` and the CLI use, and never reaches `batch_add_findings`
+            # — which is why `_BATCH_MEMBER_KEYS` did not have to learn it. The
+            # domain contract stays "a location lives in `meta`"; `lines` is one
+            # surface's friendlier way to say so, exactly as `-l/--lines` is the
+            # CLI's. The refusal names the member by index, because "lines and
+            # meta.lines disagree" over a batch of thirty says nothing about
+            # WHICH thirtieth.
+            f["meta"] = _compose_add_meta(
+                {"lines": f.get("lines")}.get,
+                f.get("meta"),
+                spelling=lambda param, _cli: param,
+                meta_spelling="meta",
+                prefix=f"batch_add: findings[{i}]",
+            )
+            f.pop("lines", None)
+            if f["meta"] is None:
+                # `{**f}` may never have carried the key; putting an explicit
+                # `None` back would make `set(f) - _BATCH_MEMBER_KEYS` see a key
+                # the caller did not send. `meta` IS a known member key, so this
+                # is about faithfulness rather than about that check.
+                f.pop("meta", None)
             enriched.append(f)
         with conn_factory() as conn:
             return batch_add_findings(
@@ -4939,42 +5122,19 @@ def register_cli(sub, commands) -> None:
     from codebugs.fsio import atomic_write, diagnostic_stream
 
     def _cmd_add(args: argparse.Namespace) -> None:
-        # CB-129. Two spellings can name one `meta` field: a dedicated flag and a key
-        # inside `--meta`. `meta.update(json.loads(args.meta))` over a flag-seeded dict
-        # let the JSON win SILENTLY, so `-l "10-20" --meta '{"lines": [10, 20]}'` stored
-        # only the list and reported success — an explicitly typed argument discarded by
-        # a success-shaped call, the CB-15 class reached through composition rather than
-        # through validation. There is no "honour both" path (one key, one value), so
-        # CB-28's rule leaves refusal as the only honest answer; applying the flag LAST
-        # was rejected because it would silently invert the stored type for every caller
-        # that already passes both. Equal values are not a conflict and still pass.
+        # CB-129 and CB-133 both live in `_compose_add_meta`, ABOVE, and are not
+        # restated here — CB-233 gave that rule a second caller (the MCP `add` and
+        # `batch_add` tools, which grew the same dedicated `lines` input this
+        # handler has had all along), and a rule written out twice is one edit away
+        # from disagreeing with itself. Read the composer's docstring for what it
+        # refuses and why.
         #
-        # This runs BEFORE db.connect(): a refusal must cost no partial work and no open
-        # connection (CB-82). It exits directly rather than raising ValueError, so it
-        # cannot disturb the json.JSONDecodeError-before-ValueError arm ordering below.
-        # CB-133. A CLI flag is a WRITE path, so `None` is the ONLY "not supplied"
-        # (CB-82); the query-side rule that `""` ALSO means absent (CB-25) is
-        # deliberately the opposite one and must not be borrowed here. Under the
-        # previous `if value:` an explicitly typed `-l ""` landed nowhere, counted as
-        # no conflict, and reported success — CB-129's own success-shaped discard,
-        # surviving on the empty string. Refusing rather than storing `""` is what
-        # `bench._require_text` already does for exactly this state: a stored value
-        # that is absent means *invent one*, and nobody meant an empty line range.
-        flag_meta = {}
-        for dest, key, spelling in _ADD_META_FLAGS:
-            value = getattr(args, dest, None)
-            if value is None:
-                continue
-            if not value:
-                print(
-                    f"codebugs add: {spelling} was given an empty value, which is not "
-                    f"a {key} anyone could have meant. An empty string is not the same "
-                    f"as leaving the flag out.\n"
-                    f"Omit {spelling}, or give it a value.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            flag_meta[key] = value
+        # What is THIS surface's own, and stays here: the parse of `--meta` below,
+        # and the shape of the refusal. The composer raises `ValueError`; a CLI
+        # handler turns that into one stderr line and `sys.exit(1)`, BEFORE
+        # `db.connect()`, so a refusal costs no partial work and no open connection
+        # (CB-82). It exits directly rather than re-raising, so it cannot disturb
+        # the json.JSONDecodeError-before-ValueError arm ordering further down.
 
         # CB-132. `json.loads` had NO arm over it, so `--meta 'not json'` left the CLI
         # as a raw `json.JSONDecodeError` traceback and `--meta '[1,2]'` as
@@ -5022,22 +5182,17 @@ def register_cli(sub, commands) -> None:
                 )
                 sys.exit(1)
 
-        for _dest, key, spelling in _ADD_META_FLAGS:
-            if key in flag_meta and key in json_meta and json_meta[key] != flag_meta[key]:
-                print(
-                    f"codebugs add: {spelling} and the {key!r} key in --meta name the "
-                    f"same field with different values, and only one of them can be "
-                    f"stored.\n"
-                    f"  {spelling} gives {flag_meta[key]!r}\n"
-                    f"  --meta gives {json_meta[key]!r}"
-                    f"  <- this one would have won, silently discarding {spelling}.\n"
-                    f"Pass only one of the two spellings, or make them equal.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-
-        meta = dict(flag_meta)
-        meta.update(json_meta)
+        try:
+            meta = _compose_add_meta(
+                lambda param: getattr(args, param, None),
+                json_meta,
+                spelling=lambda _param, cli: cli,
+                meta_spelling="--meta",
+                prefix="codebugs add",
+            )
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
 
         conn = db.connect()
         tags = [t.strip() for t in args.tags.split(",")] if args.tags else []
@@ -5743,7 +5898,19 @@ def register_cli(sub, commands) -> None:
     p.add_argument("-c", "--category", required=True, help="Finding category")
     p.add_argument("-f", "--file", required=True, help="File path")
     p.add_argument("-d", "--description", required=True, help="Description")
-    p.add_argument("-l", "--lines", help="Line range (stored in meta)")
+    # CB-233. The help used to read "Line range (stored in meta)", which said where
+    # the value is PUT and never what it is FOR — so the one input that gives a card
+    # a durable anchor read like a filing detail. Where it lands is the least
+    # interesting true thing about it.
+    p.add_argument(
+        "-l",
+        "--lines",
+        help=(
+            "Where in the file this finding is — 1850, 1850-1870, or "
+            "path/file.py:1850. Anchors the card to that code so it survives "
+            "later edits; without it the card has no anchor."
+        ),
+    )
     p.add_argument("--source", help="Source (default: human)")
     p.add_argument("--tags", help="Comma-separated tags")
     p.add_argument("--meta", help="JSON metadata string")
