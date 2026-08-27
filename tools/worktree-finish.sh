@@ -77,9 +77,16 @@ set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"
 # no per-site line can catch a command that simply failed.
 #
 # ARMED HERE, BEFORE THE FIRST GUARD, because the early refusals are half of
-# what is being measured: _guard_main_clean (11), _guard_enforcement_armed (12)
-# and _guard_interpreter_matches_main (14) all fire before the merge, and a
-# trap armed next to the post-merge alarm would lose every one of them.
+# what is being measured: a dirty main (11), a clone that was never armed (12)
+# and an interpreter disagreeing with main's (14) all refuse BEFORE the merge,
+# and a trap armed next to the post-merge alarm would lose every one of them.
+#
+# The guards are described here rather than NAMED, and that is not style. The
+# structural tests in tests/test_worktree_harness.py search the RAW source for
+# a guard's name followed by a space, to find where it is CALLED and in which
+# phase. Writing one in this comment put a match above the real call site, so
+# the phase assertions read this sentence as the invocation and the call-site
+# count went from two to three. Measured: two tests red, from prose alone.
 #
 # EXIT PATHS THAT STILL LOSE THE LINE — named rather than left to be
 # rediscovered, because an undeclared gap costs more than a declared one:
