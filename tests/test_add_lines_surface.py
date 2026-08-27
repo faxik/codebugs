@@ -601,6 +601,83 @@ class TestNotSuppliedIsNotEmpty:
 
 
 # ---------------------------------------------------------------------------
+# What the new input must NOT disturb: identity.
+# ---------------------------------------------------------------------------
+
+
+class TestIdentityIsUnaffected:
+    """The failure mode nobody asked about, and the one that would hurt most.
+
+    A finding's identity is derived from its category, its file and its
+    NORMALIZED description — and that normalization strips the observation's own
+    `meta` STRING VALUES out of the text before hashing (CB-43 item 4). So on
+    paper, adding `meta.lines` to an observation could change what gets hashed,
+    and the day filers started passing the new parameter every card in the
+    tracker would be filed a second time as a new row instead of bumping the one
+    that is already there.
+
+    Measured on this branch: it does not. The fingerprint is identical with the
+    parameter, without it, with a DIFFERENT value in it, and whether or not the
+    description happens to quote the same number. These tests exist so that stays
+    true rather than being rediscovered on a live tracker."""
+
+    def _fingerprint(self, tools, description, **kw):
+        return _add(tools, description=description, **kw)["fingerprint"]
+
+    def test_naming_a_line_does_not_change_the_fingerprint(self, tools):
+        clean = "the retry loop misreads the deadline and reports success anyway"
+        assert self._fingerprint(tools, clean) == self._fingerprint(tools, clean, lines="12")
+
+    def test_nor_does_it_when_the_description_quotes_the_same_number(self, tools):
+        """The specific shape the meta-stripping rule makes plausible: the number
+        appears both in the text and in the field."""
+        quoted = "the retry loop misreads the deadline at line 12 and reports success"
+        assert self._fingerprint(tools, quoted) == self._fingerprint(tools, quoted, lines="12")
+        assert self._fingerprint(tools, quoted) == self._fingerprint(tools, quoted, lines="999")
+
+    def test_the_second_filing_bumps_rather_than_creating(self, tools):
+        """The property the fingerprints above only imply. This is what a filer
+        adopting the new parameter actually does: files a finding it has filed
+        before, now saying where it is."""
+        text = "a defect reported once without a location and once with one"
+        first = _add(tools, description=text)
+        second = _add(tools, description=text, lines="12")
+        assert second["id"] == first["id"]
+        assert second["was_new"] is False
+        assert second["dedup_action"] == "bumped"
+
+    def test_a_bumped_card_keeps_its_own_anchor(self, tools):
+        """BT-4: top-level `meta` is observation-FROZEN — a re-observation's meta
+        lands in the occurrence ring, not on the row. So a second observation
+        naming a DIFFERENT line must not silently move the card's anchor onto it.
+        Verified rather than taken on faith, because this is the one place the new
+        input could rewrite something a human decided."""
+        text = "a defect whose anchor must not move under a later observation"
+        first = _add(tools, description=text, lines="12")
+        assert first["meta"]["loc"]["line"] == 12
+        second = _add(tools, description=text, lines="40")
+        assert second["id"] == first["id"]
+        assert second["meta"]["loc"]["line"] == 12, "the later observation moved the anchor"
+        assert second["meta"]["lines"] == "12"
+
+    def test_the_first_filing_may_still_supply_the_anchor(self, tools):
+        """The other direction, and it is what stops the previous test from
+        reading as 'the parameter does nothing on a bump'. A card filed WITHOUT a
+        location does not acquire one from a later observation either — the ring
+        records it, the row does not — which is the honest, and slightly
+        disappointing, consequence of the freeze."""
+        text = "a defect filed first with no location at all, then with one"
+        first = _add(tools, description=text)
+        assert first["meta"]["loc"]["skipped"] == "no_grammar"
+        second = _add(tools, description=text, lines="12")
+        assert second["id"] == first["id"]
+        assert second["meta"]["loc"]["skipped"] == "no_grammar"
+        # The observation is not lost, it is just not the row's authored state.
+        ring = second["meta"].get("occurrences") or []
+        assert any((entry.get("meta") or {}).get("lines") == "12" for entry in ring), ring
+
+
+# ---------------------------------------------------------------------------
 # The surface declaration itself.
 # ---------------------------------------------------------------------------
 
