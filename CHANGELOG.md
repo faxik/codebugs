@@ -214,10 +214,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   actually exists, and whether a `.codebugs/` already sitting there is a directory rather than
   some other kind of file — got the identical honest treatment: an answer that could not be
   established now refuses with the actual reason instead of silently being read as "no, it
-  isn't". None of this changes anything about your worktree-detection policy question (whether
-  `init` should warn or refuse there is a separate, still-open decision) — it only makes sure
-  that when the check cannot see, it says so instead of guessing, and a test now holds every
-  such check in this file to that standard so a fifth one cannot go unnoticed the same way.
+  isn't". **Two things this entry claimed, or let you assume, that were not true — both corrected
+  by CB-227 below.** The `codebugs init` half of the story above was described and then not fixed:
+  the change reached the message `where` prints and never the check `init` makes, so `init` went
+  on creating the doomed tracker. That was not a policy question left open, as this entry
+  suggested — `init` has refused to create a tracker inside a worktree for a long time, and the
+  refusal simply could not fire when the check could not see. And the test that landed here was
+  promised as holding "every such check in this file", which was wider than what it did: it
+  matched calls by the exact text you happened to write, so the same check spelled another way
+  walked straight past it.
+- **Two more places where `codebugs` said "there is nothing here" about something it had not
+  managed to read — both inside git worktrees, and one of them still cost you a tracker
+  (CB-227).** A linked worktree keeps a small `.git` FILE at its root and a matching bookkeeping
+  file called `commondir` beside the main repository, and `codebugs` reads both to work out where
+  your real tracker lives. Neither read said anything when it failed. If the `.git` file itself
+  could not be read — permissions changed after the worktree was created, for instance —
+  `codebugs where` reported "no tracker found in this directory or any parent" at exit 1, with
+  its list of unchecked places EMPTY, while your project's tracker sat in the main checkout one
+  hop away; and `codebugs init`, run in the same spot, created a fresh tracker inside the
+  worktree, silently, reporting success — a tracker git deletes along with the worktree, findings
+  and all. If instead the `commondir` file could not be read, `where` announced as a plain fact
+  that "its main checkout has no tracker either", over a main checkout that had one and that
+  `codebugs` had never even located, sending you off to run `init` somewhere you did not need to.
+  Now: `where` names the file it could not read and the reason, and says in so many words that
+  this is not proof no tracker is there; it no longer claims anything at all about a main
+  checkout it could not find. And `init` refuses instead of creating the doomed tracker, telling
+  you what it could not read — `--force` still creates one there if that is genuinely what you
+  want. **This also closes the `init` half of CB-224 above**, where the same silent read let the
+  same doomed tracker be created; only the `where` half had been fixed.
+- **The test meant to stop that from recurring was checking the spelling, not the behaviour
+  (CB-227).** This one is invisible from the outside, but it is the reason the two holes above
+  survived a change written specifically to close holes like them. That test compared each check
+  in the file against a list of literal call texts, so writing the identical check a slightly
+  different way — importing the function by name instead of through its module, renaming the
+  module on import, catching the error under one of its older aliases — made it invisible. It
+  also let a note saying "this one particular harmless check is fine" quietly cover a second,
+  decisive check added to the same function later. Measured against thirteen variations, the old
+  test caught three, two of which were the deliberate controls. It now works out what a call
+  actually DOES rather than how it is written, and a note covers one specific check rather than a
+  whole function. Its own documentation now lists, by name, the kinds of evasion it still cannot
+  see, instead of promising to catch everything.
 - **`codebugs where` promised that the next command would create a database, without checking
   whether it could (CB-219).** When a `.codebugs/` directory exists but holds no database yet,
   `where` says "no database there yet — the next command creates one". That is usually right —
