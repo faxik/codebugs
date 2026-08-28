@@ -3364,6 +3364,8 @@ def query_findings(
     """Query findings with filters. Returns results or grouped counts.
 
     `id` / `ids` are AND-combined with other filters; missing IDs are silently absent.
+    `commit` matches the frozen first-report column OR any occurrence-ring entry
+    (CB-128) — any observation, not the newest (that is `provenance._effective_commit`).
 
     AN EXPLICIT `limit` ALWAYS WINS; a DERIVED one applies only when the caller
     named none at all, which is spelled `None` (CB-158). This used to be the
@@ -3393,8 +3395,6 @@ def query_findings(
     the same hazard `require_row_limit`'s docstring already records for a
     different value, where `recent_findings` and this function used to answer a
     NEGATIVE limit differently.
-    `commit` matches the frozen first-report column OR any occurrence-ring entry
-    (CB-128) — any observation, not the newest (that is `provenance._effective_commit`).
 
     Every returned finding carries an ``anchor`` summary while a read enricher is
     registered, and ``resolve_anchors`` decides only whether that summary COSTS
