@@ -54,9 +54,26 @@ MEASURED ESCAPES — the gate does NOT see these, and each was reproduced:
      That is CB-161's original class, not this one: those sites never bind, so
      "binds a limit" is false of them and this predicate is the wrong tool. It
      is named here so nobody reads this gate as covering all limit defects.
-  3. THE LIMIT REACHES SQL FROM SOMEWHERE OTHER THAN A PARAMETER — read off an
-     object attribute, a dict, or module state. The gate never looks at where
-     the bound VALUE came from; it only asks whether the function validated.
+  3. THE GUARD VALIDATED SOMEBODY ELSE'S ARGUMENT. The gate asks only WHETHER
+     the guard was called, never WHAT it was given, so a function that validates
+     `offset` and binds an unchecked `limit` walks past. This is not a contrived
+     shape: five of the fourteen binding sites in the tree carry an `offset`
+     beside their limit. Closing it means following the argument to the value
+     that is bound — data flow inside the function, the boundary this file draws
+     elsewhere — and no site in the tree is wrong today, so it is DECLARED.
+  4. THE GUARD SITS IN A BRANCH THAT CANNOT RUN. `if False:` around the call
+     vouches for the function, because the predicate walks the body rather than
+     executing it. Same trade as (3): reachability analysis for a defect nobody
+     has committed.
+
+BOTH OF THOSE ARE NEW ENTRIES, added by CB-158's second half, and they replace
+a listed escape that was NOT one. This list used to carry, as item 3, "the limit
+reaches SQL from an object attribute, a dict, or module state". Measured against
+the predicate: such a function is FLAGGED, and always was — binding an
+unvalidated limit is exactly what the gate looks for, whatever the value's
+origin. The true observation buried in that entry is item 3 above, which is
+about the guard's ARGUMENT rather than the bound value's SOURCE. Two rows in the
+`CAUGHT` battery now pin the correction, so it cannot rot back into prose.
 
 A CLAIMED ESCAPE THAT TURNED OUT NOT TO BE ONE, kept because the correction is
 the point. This list first said an explicit `"... LIMIT" + " ?"` escaped,
@@ -80,13 +97,26 @@ keywords (SQLite accepts `limit ?`, and a case-SENSITIVE predicate let that
 walk straight past — found by running the battery, not by reading the regex),
 `LIMIT :name` as well as `LIMIT ?`, a newline between keyword and placeholder,
 methods inside a class, `async def`, a nested function that binds on its own,
-and the three spellings of the guard call (`require_row_limit`,
-`t.require_row_limit`, `types.require_row_limit`) — resolved by ATTRIBUTE name
-so they are ONE capability rather than three strings to enumerate, which
-matters because `claims.py` really does use the middle one.
+and every spelling of the guard call (`require_row_limit`,
+`t.require_row_limit`, `types.require_row_limit`, or any alias the file itself
+binds) — resolved to the OBJECT through the file's own imports, so they are ONE
+capability rather than a list of strings, which matters because `claims.py`
+really does use the middle one.
+
+THAT RESOLUTION IS CB-158's DOING, AND IT REPLACED A NAME MATCH. The predicate
+used to collect the attribute name of every call and test the string
+`"require_row_limit"` for membership, which meant three impostors vouched for a
+site with no guard running at all: a module-local function of that name, an
+import aliased to it, and the name as a method on any unrelated receiver. All
+three measured silent. None was a live defect — every site in the tree calls the
+real function — but keying a gate on a SPELLING is the weakness this repository
+paid for in CB-227, and the model this docstring names two paragraphs up,
+`test_two_valued_path_gate.py`, compares objects for exactly that reason. This
+file cited it while doing the opposite. `_calls_the_guard` carries the detail.
 """
 
 import ast
+import builtins
 import functools
 import re
 import subprocess
@@ -96,6 +126,7 @@ from pathlib import Path
 import pytest
 
 from codebugs import blockers, claims, db, findings, usage
+from codebugs import types as codebugs_types
 from codebugs.milestones import foundation
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "codebugs"
@@ -135,6 +166,141 @@ DECLARED_EXCEPTIONS: dict[tuple[str, str], str] = {}
 _BINDS_A_LIMIT = re.compile(r"LIMIT\s+[?:]", re.IGNORECASE)
 
 
+#: The guard, as an OBJECT. A call counts only if it reaches THIS.
+_THE_GUARD = codebugs_types.require_row_limit
+
+
+# --- Resolving a call to the object it reaches -------------------------------
+#
+# The four helpers below are the SAME ALGORITHM as `tests/test_two_valued_path_gate.py`
+# uses, deliberately and by instruction: two gates in this repository now ask
+# "which object does this call reach", and inventing a second answer to one
+# question is one edit away from the two disagreeing. They are COPIED rather
+# than shared, and that copy is the residual: nothing here would notice if the
+# neighbour's version were improved and this one were not. Sharing them would
+# mean extracting a helper module out of a landed test file that belongs to
+# another card, so the copy is announced instead of quietly made -- the same
+# trade this file's own docstring makes for its escape list.
+
+
+def _dotted_name(node: ast.expr) -> str | None:
+    """Resolve an `ast.Attribute`/`ast.Name` chain to `a.b.c`, or None."""
+    parts: list[str] = []
+    cur: ast.expr = node
+    while isinstance(cur, ast.Attribute):
+        parts.append(cur.attr)
+        cur = cur.value
+    if isinstance(cur, ast.Name):
+        parts.append(cur.id)
+    else:
+        return None
+    return ".".join(reversed(parts))
+
+
+def _binding_map(tree: ast.Module) -> dict[str, str]:
+    """Local name -> the dotted path it is bound to, from this file's own source.
+
+    `from codebugs.types import require_row_limit` binds the bare name;
+    `from codebugs import types as t` binds `t` to `codebugs.types`, which is
+    what `claims.py` actually does. A plain `name = <dotted>` assignment binds
+    too, so an alias introduced by hand is name resolution rather than a hole.
+    """
+    bindings: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    bindings[alias.asname] = alias.name
+                else:
+                    top = alias.name.split(".")[0]
+                    bindings[top] = top
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                continue  # a relative import cannot be resolved from the text alone
+            module = node.module or ""
+            for alias in node.names:
+                local = alias.asname or alias.name
+                bindings[local] = f"{module}.{alias.name}" if module else alias.name
+        elif isinstance(node, ast.Assign):
+            if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+                continue
+            if not isinstance(node.value, (ast.Name, ast.Attribute)):
+                continue
+            value = _dotted_name(node.value)
+            if value is not None:
+                bindings[node.targets[0].id] = value
+    return bindings
+
+
+def _canonicalize(dotted: str, bindings: dict[str, str]) -> str:
+    """Rewrite the head of a dotted name through this file's own bindings."""
+    head, _, rest = dotted.partition(".")
+    base = bindings.get(head)
+    if base is None or base == head:
+        return dotted
+    return f"{base}.{rest}" if rest else base
+
+
+def _resolve_object(dotted: str) -> object | None:
+    """The live object a canonical dotted name refers to, or None.
+
+    Reads `sys.modules` and never imports: every package module is already
+    there, because this test module imports the package.
+    """
+    parts = dotted.split(".")
+    for cut in range(len(parts), 0, -1):
+        module = sys.modules.get(".".join(parts[:cut]))
+        if module is None:
+            continue
+        obj: object | None = module
+        for attr in parts[cut:]:
+            obj = getattr(obj, attr, None)
+            if obj is None:
+                break
+        if obj is not None:
+            return obj
+    if len(parts) == 1:
+        return getattr(builtins, parts[0], None)
+    return None
+
+
+def _calls_the_guard(nodes: list[ast.AST], bindings: dict[str, str]) -> bool:
+    """Does any call among `nodes` reach `types.require_row_limit` ITSELF?
+
+    KEYED ON THE OBJECT, NOT ON THE SPELLING, and that is CB-227's lesson
+    applied one file over. This test used to collect the ATTRIBUTE NAME of every
+    call and ask whether the string `"require_row_limit"` was among them, which
+    three things satisfied without any guard running (all three measured against
+    the old predicate, all three silent):
+
+      * a module-local `def require_row_limit(...)` that returns its argument;
+      * `from json import dumps as require_row_limit`;
+      * `anything.require_row_limit(...)` on an unrelated receiver.
+
+    None is a live defect today -- every site in the tree calls the real
+    function -- but a gate whose own subject is "a promise wider than its check"
+    must not be the thing making one. Note the irony that made this worth
+    closing rather than declaring: the model this file names in its own
+    docstring, `test_two_valued_path_gate.py`, compares objects for exactly this
+    reason, and this file cited it while doing the opposite.
+
+    FAIL-CLOSED: a name that resolves to nothing is NOT the guard, so the site is
+    FLAGGED. That is the safe direction and it matches the false positives this
+    file already accepts -- a loud, easily-answered failure rather than a silent
+    hole. A fixture with no import therefore reads as unguarded, which is why the
+    quiet cases in the evasion battery carry their imports like a real module.
+    """
+    for node in nodes:
+        if not isinstance(node, ast.Call):
+            continue
+        dotted = _dotted_name(node.func)
+        if dotted is None:
+            continue
+        if _resolve_object(_canonicalize(dotted, bindings)) is _THE_GUARD:
+            return True
+    return False
+
+
 def _own_nodes(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.AST]:
     """Nodes belonging to `fn` itself: docstring dropped, nested functions excluded.
 
@@ -164,7 +330,11 @@ def _own_nodes(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.AST]:
 def _unguarded_binding_sites(source: str, module: str) -> list[tuple[str, str]]:
     """(module, function) for every function that binds a limit without validating it."""
     out: list[tuple[str, str]] = []
-    for fn in ast.walk(ast.parse(source)):
+    tree = ast.parse(source)
+    # Built ONCE per module: the bindings are a property of the file, not of the
+    # function, and rebuilding them per function would re-walk the whole tree.
+    bindings = _binding_map(tree)
+    for fn in ast.walk(tree):
         if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
         nodes = _own_nodes(fn)
@@ -173,16 +343,11 @@ def _unguarded_binding_sites(source: str, module: str) -> list[tuple[str, str]]:
         )
         if not _BINDS_A_LIMIT.search(text):
             continue
-        called = {
-            (n.func.id if isinstance(n.func, ast.Name) else n.func.attr)
-            for n in nodes
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name | ast.Attribute)
-        }
-        # Resolved by ATTRIBUTE name, not by the full dotted spelling, so
-        # `require_row_limit(...)`, `t.require_row_limit(...)` and
-        # `types.require_row_limit(...)` are one capability rather than three
-        # strings to enumerate -- `claims.py` really does use the second form.
-        if "require_row_limit" not in called:
+        # Resolved to the OBJECT, so `require_row_limit(...)`,
+        # `t.require_row_limit(...)` and `types.require_row_limit(...)` are one
+        # capability -- and an impostor wearing the name is not it. See
+        # `_calls_the_guard` for the three spellings that used to walk past.
+        if not _calls_the_guard(nodes, bindings):
             out.append((module, fn.name))
     return out
 
@@ -263,7 +428,10 @@ class TestEveryBindingSiteIsGuarded:
             "def f(conn, limit):\n"
             '    return conn.execute("SELECT * FROM t LIMIT ?", [limit]).fetchall()\n'
         )
+        # The import is part of the fixture since CB-158: the guard is resolved
+        # to an OBJECT, so a bare name bound to nothing is not it (fail-closed).
         guarded = (
+            "from codebugs.types import require_row_limit\n"
             "def f(conn, limit):\n"
             '    limit = require_row_limit("limit", limit)\n'
             '    return conn.execute("SELECT * FROM t LIMIT ?", [limit]).fetchall()\n'
@@ -412,6 +580,33 @@ class TestTheGateAgainstAnEvasionBattery:
         "explicit + across two constants": (
             'def f(c, limit):\n    return c.execute("SELECT 1 LIMIT" + " ?", [limit])\n'
         ),
+        # --- The three impostors CB-158's second half closed. Each was SILENT
+        # against the name-matching predicate this gate used to carry; each is
+        # measured, not imagined. See `_calls_the_guard`.
+        "impostor: a local function of the same NAME": (
+            "def require_row_limit(label, value):\n    return value\n"
+            'def f(c, limit):\n    limit = require_row_limit("limit", limit)\n'
+            '    return c.execute("SELECT 1 LIMIT ?", [limit])\n'
+        ),
+        "impostor: an import ALIASED to the name": (
+            "from json import dumps as require_row_limit\n"
+            "def f(c, limit):\n    require_row_limit(limit)\n"
+            '    return c.execute("SELECT 1 LIMIT ?", [limit])\n'
+        ),
+        "impostor: the name as a METHOD on an unrelated receiver": (
+            "def f(c, limit, helper):\n    helper.require_row_limit(limit)\n"
+            '    return c.execute("SELECT 1 LIMIT ?", [limit])\n'
+        ),
+        # --- These two were LISTED AS ESCAPES and are not: the gate catches
+        # them, and always did. Kept as rows so the correction is a running
+        # test rather than an edit to prose nobody re-checks.
+        "the bound value comes from an ATTRIBUTE": (
+            "class K:\n    def f(self, c):\n"
+            '        return c.execute("SELECT 1 LIMIT ?", [self.limit])\n'
+        ),
+        "the bound value comes from MODULE STATE": (
+            'LIMIT = 100\ndef f(c):\n    return c.execute("SELECT 1 LIMIT ?", [LIMIT])\n'
+        ),
     }
 
     ESCAPES = {
@@ -427,19 +622,47 @@ class TestTheGateAgainstAnEvasionBattery:
         "SQL arrives as a parameter": (
             "def f(c, sql, limit):\n    return c.execute(sql, [limit])\n"
         ),
+        # --- The two the gate cannot see even after CB-158's object keying, and
+        # which are DECLARED rather than closed: the cost of a predicate for
+        # either is higher than the benefit while neither is a live defect
+        # (every site in the tree validates the right parameter, unconditionally).
+        "the guard validates SOMEBODY ELSE'S argument": (
+            "from codebugs.types import require_row_limit\n"
+            "def f(c, limit, offset):\n"
+            '    offset = require_row_limit("offset", offset)\n'
+            '    return c.execute("SELECT 1 LIMIT ? OFFSET ?", [limit, offset])\n'
+        ),
+        "the guard sits in an UNREACHABLE branch": (
+            "from codebugs.types import require_row_limit\n"
+            "def f(c, limit):\n    if False:\n"
+            '        limit = require_row_limit("limit", limit)\n'
+            '    return c.execute("SELECT 1 LIMIT ?", [limit])\n'
+        ),
     }
 
+    # The guard call is now resolved to an OBJECT, so these fixtures carry the
+    # import a real module carries. Without one the name resolves to nothing and
+    # the site is FLAGGED -- fail-closed, which is the point of the change, and
+    # a fixture that omitted the import would be testing an impostor.
     QUIET = {
         "guarded, bare name": (
+            "from codebugs.types import require_row_limit\n"
             'def f(c, limit):\n    limit = require_row_limit("limit", limit)\n'
             '    return c.execute("SELECT 1 LIMIT ?", [limit])\n'
         ),
         "guarded, t. prefix": (
+            "from codebugs import types as t\n"
             'def f(c, limit):\n    limit = t.require_row_limit("limit", limit)\n'
             '    return c.execute("SELECT 1 LIMIT ?", [limit])\n'
         ),
         "guarded, types. prefix": (
+            "from codebugs import types\n"
             'def f(c, limit):\n    limit = types.require_row_limit("limit", limit)\n'
+            '    return c.execute("SELECT 1 LIMIT ?", [limit])\n'
+        ),
+        "guarded, imported under a private alias": (
+            "from codebugs.types import require_row_limit as _guard\n"
+            'def f(c, limit):\n    limit = _guard("limit", limit)\n'
             '    return c.execute("SELECT 1 LIMIT ?", [limit])\n'
         ),
         "prose only": 'def f(c, limit):\n    """Discusses LIMIT ? in prose."""\n    return 1\n',
