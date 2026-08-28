@@ -207,9 +207,16 @@ trap _journal_record EXIT
 # ANIMAL — which is why both were measured instead of being lumped together in
 # one sentence, as the first draft of this comment did. SIGHUP behaves exactly
 # like the two above: untrapped it writes `rc=0`, and the same one-line form
-# would fix it (measured, `trap 'exit 129' HUP` records 129). It is left out
-# because no stop observed in this clone has arrived that way, and trapping on
-# evidence nobody has is how a list grows past what anyone checked. SIGQUIT
+# would fix it (measured, `trap 'exit 129' HUP` records 129). SIGPIPE is a third
+# of the same kind, also measured at `rc=0`. Neither is trapped here, and the
+# honest version of that decision names the argument AGAINST it rather than only
+# the one for it: a dropped session really is a plausible way for a long finish
+# to die, and an instrument that only records the failures somebody already
+# thought of is worth less than one that records them all. What holds the line
+# at two is scope, not evidence — this change was authorised for SIGINT and
+# SIGTERM, the widening is one line per signal, and it belongs to whoever owns
+# that decision rather than riding in unremarked on a fix for something else.
+# SIGQUIT
 # needs no trap and would not be helped by one: bash IGNORES it, so the signal
 # kills the FOREGROUND child, and `set -e` carries that child's own 131 into the
 # line — measured, twice. Where the child's failure is already handled, by an

@@ -19,6 +19,7 @@ import re
 import shutil
 import signal
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -5968,6 +5969,7 @@ class TestLandingAttemptJournal:
         wt_dir.mkdir(parents=True, exist_ok=True)
         fd = os.open(wt_dir / ".integrate.lock", os.O_CREAT | os.O_WRONLY, 0o644)
         proc: subprocess.Popen[str] | None = None
+        watchdog: threading.Timer | None = None
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             proc = subprocess.Popen(
@@ -5985,6 +5987,17 @@ class TestLandingAttemptJournal:
                 start_new_session=True,
                 env={**os.environ, "PATH": f"{armed['bin']}{os.pathsep}{os.environ['PATH']}"},
             )
+            # THE TWO READS OF THE SCRIPT'S STDOUT BELOW ARE THE ONLY UNBOUNDED
+            # WAITS IN THIS HELPER, and this suite installs no global test
+            # timeout, so a script that wedged before printing `[7/7]` would
+            # hang the whole run rather than fail one test. The bound has to
+            # come from outside the reads, because it cannot come from inside
+            # them: killing the group closes the pipe, both reads return, and
+            # the branch below reports what was seen. 90s against a measured
+            # 0.2s, so it can only fire on a genuine wedge.
+            watchdog = threading.Timer(90.0, self._kill_group_quietly, args=(proc,))
+            watchdog.daemon = True
+            watchdog.start()
             assert proc.stdout is not None
             seen: list[str] = []
             for line in proc.stdout:
@@ -5992,7 +6005,11 @@ class TestLandingAttemptJournal:
                 if "[7/7]" in line:
                     break
             else:
-                proc.wait(timeout=60)
+                # No `wait` here on purpose: the `finally` below already reaps
+                # or kills the child, and waiting first would turn the one
+                # failure this branch exists to explain — stdout ended without
+                # the marker — into an opaque TimeoutExpired with none of the
+                # captured output attached.
                 raise AssertionError(
                     "the script never reached [7/7], so nothing was signalled "
                     f"before the merge — this test proved nothing:\n{''.join(seen)}"
@@ -6001,12 +6018,28 @@ class TestLandingAttemptJournal:
             seen.append(proc.stdout.read())
             rc = proc.wait(timeout=60)
         finally:
+            if watchdog is not None:
+                watchdog.cancel()
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
             if proc is not None and proc.poll() is None:
                 proc.kill()
                 proc.wait(timeout=30)
         return rc, "".join(seen)
+
+    @staticmethod
+    def _kill_group_quietly(proc: subprocess.Popen[str]) -> None:
+        """The watchdog's hand. It never raises, and that is the whole contract.
+
+        This runs on a timer thread, where an exception is reported nowhere and
+        would replace a legible test failure with silence. The group is already
+        gone in every ordinary run — the timer is cancelled first — so a lookup
+        failure here is the expected case, not an error.
+        """
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except OSError:
+            pass
 
     def _assert_stopped_run_is_recorded(self, armed: dict, signum: int, code: str) -> None:
         """One row, carrying the signal's own code — and that refuses BOTH forms.
