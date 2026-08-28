@@ -415,22 +415,22 @@ def _record(
     sixfold margin over the observed p95. Ordinary concurrency is therefore
     absorbed without losing a row.
 
-    THIS IS A TRADE, MADE ON PURPOSE, AND IT IS NAMED HERE RATHER THAN
-    ARGUED AWAY (CB-243). Anywhere a foreign writer holds the lock LONGER
-    than the observed p95 — measured, reproducibly, across a band running
-    from roughly 50ms to the old 5-second ceiling — this telemetry row is
-    now LOST where it used to be recorded: the old 5000ms budget waited the
-    foreign hold out and wrote the row, and the current 50ms budget gives up
-    first. `tests/manual/probe_cb243_busy_timeout_band.py` reproduces this on
-    a real sqlite file at three points inside that band (200ms, 700ms,
-    2000ms of foreign hold) and prints a table of which budget lands the row
-    and which loses it; run it to see the trade rather than take this
-    docstring's word for it. The trade is accepted anyway, for the sake of a
+    THIS IS A TRADE, NAMED HERE RATHER THAN ARGUED AWAY (CB-243). Anywhere a
+    foreign writer holds the lock LONGER than the observed p95 — measured,
+    reproducibly, across a band running from roughly 50ms to the old
+    5-second ceiling — this telemetry row is now LOST where it used to be
+    recorded: the old 5000ms budget waited the foreign hold out and wrote
+    the row, and the current 50ms budget gives up first.
+    `tests/manual/probe_cb243_busy_timeout_band.py` reproduces this on a
+    real sqlite file at three points inside that band (200ms, 700ms, 2000ms
+    of foreign hold) and prints a table of which budget lands the row and
+    which loses it; run it to see the trade rather than take this
+    docstring's word for it. It is accepted on purpose, for the sake of a
     response-time ceiling: an MCP client must not wait seconds for telemetry
     about the very call it is waiting on, and a bounded ~54ms cost for a
     dropped row is judged cheaper than an unbounded wait for a kept one.
-    Nothing about this paragraph revisits that choice — the budget stays
-    50ms — it only says out loud what the choice costs.
+    The budget stays 50ms — this paragraph only says out loud what that
+    choice costs.
 
     Rule 2 (no silent swallow, below) is what keeps a shortened timeout
     honest: a row dropped by the 50ms budget still prints to stderr exactly
