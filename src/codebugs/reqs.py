@@ -839,7 +839,7 @@ def register_tools(mcp, conn_factory):
         source: str | None = None,
         tag: str | None = None,
         group_by: str | None = None,
-        limit: int = 100,
+        limit: int | None = None,
         offset: int = 0,
     ) -> dict[str, Any]:
         """Search and filter requirements.
@@ -859,10 +859,13 @@ def register_tools(mcp, conn_factory):
             source: Filter by source (substring match)
             tag: Filter by tag
             group_by: Group by: section, status, priority, source
-            limit: Max results (default 100). 0 means NO results, EXCEPT when
-                    `id`/`ids` is given, where the id list sets a floor and a
-                    smaller limit is raised to fit it. A negative value is an
-                    error (it used to mean "no limit").
+            limit: Max results. A limit you PASS is always honoured: 0 means NO
+                    results, and it means that with `id`/`ids` too (CB-158 — an
+                    id list used to raise any smaller limit to fit itself, so
+                    `limit=0` came back full). A negative value is an error (it
+                    used to mean "no limit"). Omit it and the page size is 100,
+                    widened to fit an `ids` list so a batch lookup returns every
+                    id it asked for.
             offset: Pagination offset
         """
         from codebugs import blockers
@@ -884,8 +887,14 @@ def register_tools(mcp, conn_factory):
                 )
                 if not deferred_ids:
                     # MUST NOT fall through as `ids=[]` — that reads as "no filter".
+                    # The EFFECTIVE limit is echoed, not the raw argument, for the
+                    # reason spelled out on the findings twin (CB-158): `None` here
+                    # means the caller named no page size, and this arm returns
+                    # without reaching `query_requirements`, so the argument would
+                    # report `null` where every other path reports what applied.
                     return {
-                        "grouped": False, "total": 0, "limit": limit,
+                        "grouped": False, "total": 0,
+                        "limit": DEFAULT_ROW_LIMIT if limit is None else limit,
                         "offset": offset, "requirements": [],
                     }
                 id, ids, status = None, deferred_ids, None
@@ -1039,8 +1048,10 @@ def register_cli(sub, commands) -> None:
                     group_by=args.group_by,
                     # CB-124: `or 100` silently turned `--limit 0` into 100
                     # rows. `argparse` gives None only when the flag is
-                    # absent.
-                    limit=args.limit if args.limit is not None else 100,
+                    # absent — and since CB-158 that None is FORWARDED, so the
+                    # domain (which alone knows the id list) picks the default.
+                    # See the findings twin for the whole argument.
+                    limit=args.limit,
                 )
         finally:
             conn.close()
@@ -1260,7 +1271,7 @@ def register_cli(sub, commands) -> None:
     p.add_argument(
         "--limit",
         type=int,
-        help="Max results (0 for none unless --id/--ids is given; negative is an error)",
+        help="Max results (default 100; 0 for none, even with --id; negative is an error)",
     )
 
     p = sub.add_parser("reqs-get", help="Fetch a single requirement by ID")

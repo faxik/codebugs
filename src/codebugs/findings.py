@@ -4818,7 +4818,7 @@ def register_tools(mcp, conn_factory) -> None:
         ref: str | None = None,
         fingerprint: str | None = None,
         group_by: str | None = None,
-        limit: int = 100,
+        limit: int | None = None,
         offset: int = 0,
         resolve_anchors: Annotated[bool, Field(strict=True)] = False,
     ) -> dict[str, Any]:
@@ -4874,10 +4874,13 @@ def register_tools(mcp, conn_factory) -> None:
                       that tool is a tag census with pair co-occurrence over
                       `status`/`category` only; this is a distribution that
                       composes with every filter on this tool.
-            limit: Max results (default 100). 0 means NO results, EXCEPT when
-                      `id`/`ids` is given, where the id list sets a floor and a
-                      smaller limit is raised to fit it. A negative value is an
-                      error (it used to mean "no limit").
+            limit: Max results. A limit you PASS is always honoured: 0 means NO
+                      results, and it means that with `id`/`ids` too (CB-158 —
+                      an id list used to raise any smaller limit to fit itself,
+                      so `limit=0` came back full). A negative value is an error
+                      (it used to mean "no limit"). Omit it and the page size is
+                      100, widened to fit an `ids` list so a batch lookup returns
+                      every id it asked for.
             offset: Pagination offset
             resolve_anchors: Resolve each result's location anchor against the
                       repository HEAD, so a card whose code moved reports its
@@ -4941,7 +4944,15 @@ def register_tools(mcp, conn_factory) -> None:
                     return {
                         "grouped": False,
                         "total": 0,
-                        "limit": limit,
+                        # The EFFECTIVE limit, not the raw argument (CB-158).
+                        # `limit` is now `None` when the caller named none, and
+                        # this arm returns without reaching `query_findings`, so
+                        # echoing the argument would report `null` where every
+                        # other path reports the page size that was applied. The
+                        # id list is empty on this branch by construction, so
+                        # the derivation the domain would run has nothing to
+                        # widen and lands on the plain default.
+                        "limit": DEFAULT_ROW_LIMIT if limit is None else limit,
                         "offset": offset,
                         "findings": [],
                     }
@@ -5379,8 +5390,13 @@ def register_cli(sub, commands) -> None:
                     group_by=args.group_by,
                     # CB-124: `or 100` silently turned `--limit 0` into 100
                     # rows, the truthiness shape CB-25/CB-82 condemn.
-                    # `argparse` gives None only when the flag is absent.
-                    limit=args.limit if args.limit is not None else 100,
+                    # `argparse` gives None only when the flag is absent — and
+                    # since CB-158 that None is FORWARDED rather than replaced
+                    # with a hundred here. The domain owns the default now,
+                    # because only the domain knows the id list it may have to
+                    # widen it to fit; substituting a number at this layer would
+                    # tell it a page size was named when none was.
+                    limit=args.limit,
                     resolve_anchors=args.resolve_anchors,
                     project_dir=args.repo,
                 )
@@ -5996,7 +6012,7 @@ def register_cli(sub, commands) -> None:
     p.add_argument(
         "--limit",
         type=int,
-        help="Max results (0 for none unless --id/--ids is given; negative is an error)",
+        help="Max results (default 100; 0 for none, even with --id; negative is an error)",
     )
     p.add_argument(
         "--resolve-anchors",
