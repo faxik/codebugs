@@ -3378,6 +3378,21 @@ def query_findings(
     distinguishable from "named a hundred". Before this, `None` was not a legal
     value here at all: it reached SQL and raised `sqlite3.IntegrityError`, so
     nothing is being redefined.
+
+    ONE SPELLING, TWO MEANINGS INSIDE THIS FILE, and it is written down here
+    rather than left for somebody to trip over. Three neighbours — the candidate
+    accessors `similarity_candidates`, `grouping_candidates` and
+    `anchor_candidates` — also take `limit: int | None = None`, and there `None`
+    means NO LIMIT CLAUSE AT ALL: the whole population, unbounded. Here it means
+    *no page size was named, so derive one*. The two readings are both correct
+    for their own callers (a candidate pool is assembled in full or not at all;
+    a query surface is paged), and unifying them would mean changing three
+    contracts this card did not negotiate. **So `query_findings(limit=None)` is
+    NOT how you ask for everything** — the CSV export shows the sanctioned way
+    two screens down, by reading `total` first and passing that number. This is
+    the same hazard `require_row_limit`'s docstring already records for a
+    different value, where `recent_findings` and this function used to answer a
+    NEGATIVE limit differently.
     `commit` matches the frozen first-report column OR any occurrence-ring entry
     (CB-128) — any observation, not the newest (that is `provenance._effective_commit`).
 
