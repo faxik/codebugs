@@ -28,6 +28,7 @@ from codebugs.types import (
     rank_case_sql,
     require_row_limit,
     resolve_finding_status,
+    resolve_row_limit,
     resolve_severity,
     severity_rank,
     utc_now,
@@ -3355,7 +3356,7 @@ def query_findings(
     ref: str | None = None,
     fingerprint: str | None = None,
     group_by: str | None = None,
-    limit: int = 100,
+    limit: int | None = None,
     offset: int = 0,
     resolve_anchors: bool = False,
     project_dir: str | None = None,
@@ -3365,6 +3366,35 @@ def query_findings(
     `id` / `ids` are AND-combined with other filters; missing IDs are silently absent.
     `commit` matches the frozen first-report column OR any occurrence-ring entry
     (CB-128) — any observation, not the newest (that is `provenance._effective_commit`).
+
+    AN EXPLICIT `limit` ALWAYS WINS; a DERIVED one applies only when the caller
+    named none at all, which is spelled `None` (CB-158). This used to be the
+    other way round: `ids` raised any smaller limit to `len(ids)`, so
+    `query(ids=[a, b], limit=1)` returned two rows and `limit=0` returned two
+    rather than none — a success-shaped answer to a request that was not
+    performed, which is CB-124's defect one layer further in. Note the defect was
+    NEVER only about zero: every explicit limit below the id count was overridden.
+    The derivation survives for the case it was actually built for — a batch
+    lookup by id that named no page size must return every id it asked for, not
+    the first `DEFAULT_ROW_LIMIT` of them — and `None` is what makes "named none"
+    distinguishable from "named a hundred". Before this, `None` was not a legal
+    value here at all: it reached SQL and raised `sqlite3.IntegrityError`, so
+    nothing is being redefined.
+
+    ONE SPELLING, TWO MEANINGS INSIDE THIS FILE, and it is written down here
+    rather than left for somebody to trip over. Three neighbours — the candidate
+    accessors `similarity_candidates`, `grouping_candidates` and
+    `anchor_candidates` — also take `limit: int | None = None`, and there `None`
+    means NO LIMIT CLAUSE AT ALL: the whole population, unbounded. Here it means
+    *no page size was named, so derive one*. The two readings are both correct
+    for their own callers (a candidate pool is assembled in full or not at all;
+    a query surface is paged), and unifying them would mean changing three
+    contracts this card did not negotiate. **So `query_findings(limit=None)` is
+    NOT how you ask for everything** — the CSV export shows the sanctioned way
+    two screens down, by reading `total` first and passing that number. This is
+    the same hazard `require_row_limit`'s docstring already records for a
+    different value, where `recent_findings` and this function used to answer a
+    NEGATIVE limit differently.
 
     Every returned finding carries an ``anchor`` summary while a read enricher is
     registered, and ``resolve_anchors`` decides only whether that summary COSTS
@@ -3377,15 +3407,23 @@ def query_findings(
     With the flag on, the page is resolved in ONE pass — the per-tree context is
     built once for the whole population, never per row.
     """
-    # CB-196. Validated HERE, at the top, and specifically ABOVE the `ids`
-    # widening below: that widening runs only inside `if ids:` and rewrites a
-    # caller's `-1` to `len(ids)`, so a check placed after it would be a gate
-    # that cannot fire for exactly the calls that carry an id list, while still
-    # firing for the bare call. One argument, two verdicts, decided by an
-    # unrelated parameter. Validating the ARGUMENT rather than the derived value
-    # is also this package's standing rule (CB-82): a refusal must cost no
-    # partial work.
+    # CB-196. Validated HERE, at the top, on the ARGUMENT rather than on
+    # anything derived from it — this package's standing rule (CB-82), because a
+    # refusal must cost no partial work. The reason this comment used to give
+    # was narrower and is now obsolete: the `ids` widening it guarded against
+    # rewrote a caller's `-1` to `len(ids)`, so a check below it could not fire
+    # for exactly the calls carrying an id list. CB-158 removed that widening,
+    # so the ordering no longer decides whether a negative limit is SEEN — but
+    # it still decides whether it is seen BEFORE work begins, and the derivation
+    # two lines down must never receive a value nobody validated.
     limit = require_row_limit("limit", limit)
+    # CB-158, and the rule itself lives in `types.resolve_row_limit` rather than
+    # here: `reqs.query_requirements` needs the identical derivation, and one
+    # rule written in two entities is one edit from the two answering
+    # differently — the pairing with `require_row_limit` above is deliberate,
+    # that one says which values are legal and this one says what an absent
+    # value means.
+    limit = resolve_row_limit(limit, ids)
 
     conditions: list[str] = []
     params: list[Any] = []
@@ -3409,8 +3447,6 @@ def query_findings(
     if ids:
         conditions.append(f"id IN ({','.join('?' for _ in ids)})")
         params.extend(ids)
-        if limit < len(ids):
-            limit = len(ids)
     if is_vocabulary_filter_active(status):
         conditions.append("status = ?")
         params.append(resolve_finding_status(status))
@@ -4797,7 +4833,7 @@ def register_tools(mcp, conn_factory) -> None:
         ref: str | None = None,
         fingerprint: str | None = None,
         group_by: str | None = None,
-        limit: int = 100,
+        limit: int | None = None,
         offset: int = 0,
         resolve_anchors: Annotated[bool, Field(strict=True)] = False,
     ) -> dict[str, Any]:
@@ -4853,10 +4889,13 @@ def register_tools(mcp, conn_factory) -> None:
                       that tool is a tag census with pair co-occurrence over
                       `status`/`category` only; this is a distribution that
                       composes with every filter on this tool.
-            limit: Max results (default 100). 0 means NO results, EXCEPT when
-                      `id`/`ids` is given, where the id list sets a floor and a
-                      smaller limit is raised to fit it. A negative value is an
-                      error (it used to mean "no limit").
+            limit: Max results. A limit you PASS is always honoured: 0 means NO
+                      results, and it means that with `id`/`ids` too (CB-158 —
+                      an id list used to raise any smaller limit to fit itself,
+                      so `limit=0` came back full). A negative value is an error
+                      (it used to mean "no limit"). Omit it and the page size is
+                      100, widened to fit an `ids` list so a batch lookup returns
+                      every id it asked for.
             offset: Pagination offset
             resolve_anchors: Resolve each result's location anchor against the
                       repository HEAD, so a card whose code moved reports its
@@ -4920,7 +4959,16 @@ def register_tools(mcp, conn_factory) -> None:
                     return {
                         "grouped": False,
                         "total": 0,
-                        "limit": limit,
+                        # The EFFECTIVE limit, not the raw argument (CB-158).
+                        # `limit` is now `None` when the caller named none, and
+                        # this arm returns without reaching `query_findings`, so
+                        # echoing the argument would report `null` where every
+                        # other path reports the page size that was applied.
+                        # It runs the SAME derivation the domain would, called
+                        # with the empty id list this branch has by
+                        # construction — spelling the collapsed answer out by
+                        # hand would be a third copy of the rule.
+                        "limit": resolve_row_limit(limit, None),
                         "offset": offset,
                         "findings": [],
                     }
@@ -5358,8 +5406,13 @@ def register_cli(sub, commands) -> None:
                     group_by=args.group_by,
                     # CB-124: `or 100` silently turned `--limit 0` into 100
                     # rows, the truthiness shape CB-25/CB-82 condemn.
-                    # `argparse` gives None only when the flag is absent.
-                    limit=args.limit if args.limit is not None else 100,
+                    # `argparse` gives None only when the flag is absent — and
+                    # since CB-158 that None is FORWARDED rather than replaced
+                    # with a hundred here. The domain owns the default now,
+                    # because only the domain knows the id list it may have to
+                    # widen it to fit; substituting a number at this layer would
+                    # tell it a page size was named when none was.
+                    limit=args.limit,
                     resolve_anchors=args.resolve_anchors,
                     project_dir=args.repo,
                 )
@@ -5975,7 +6028,7 @@ def register_cli(sub, commands) -> None:
     p.add_argument(
         "--limit",
         type=int,
-        help="Max results (0 for none unless --id/--ids is given; negative is an error)",
+        help="Max results (default 100; 0 for none, even with --id; negative is an error)",
     )
     p.add_argument(
         "--resolve-anchors",
