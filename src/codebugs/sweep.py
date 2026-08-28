@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from codebugs import db, surfacegen
-from codebugs.fmt import format_table
+from codebugs.fmt import empty_page_line, format_table
 from codebugs.types import require_row_limit, utc_now
 
 
@@ -999,7 +999,18 @@ def _cmd_sweep_next(args: argparse.Namespace) -> None:
         with domain_errors():
             result = next_batch(conn, args.sweep, limit=args.limit, tags=_parse_tags(args))
             if not result["items"]:
-                print("(no unprocessed items)")
+                # CB-210 -- see `fmt.empty_page_line`. The corpus number here is
+                # `remaining` rather than `total`: it is what the non-empty
+                # branch already prints, and it is what separates "there is
+                # nothing left" from "you asked for nothing".
+                print(
+                    empty_page_line(
+                        args.limit,
+                        result.get("remaining", 0),
+                        empty="(no unprocessed items)",
+                        requested="(limit was 0, so no items were requested — {n} remaining)",
+                    )
+                )
                 return
             data = [
                 {

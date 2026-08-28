@@ -236,7 +236,8 @@ def register_tools(mcp, conn_factory) -> None:
             item_ref: Filter by item id.
             actor: Filter by actor.
             since: ISO datetime — only rows at or after this time.
-            limit: Max rows (default 200).
+            limit: Max rows (default 200). 0 means NO rows; a negative value is
+                      an error (it used to mean "no limit").
         """
         with conn_factory() as conn:
             return query_audit(
@@ -508,18 +509,27 @@ def register_cli(sub, commands) -> None:
             print(f"  Blocked: {', '.join(status['blocked_items'])}")
 
     def _cmd_milestone_audit(args: argparse.Namespace) -> None:
+        from codebugs.cli import domain_errors
         from codebugs.db import connect
         conn = connect()
         try:
-            rows = query_audit(
-                conn,
-                milestone_id=args.milestone or None,
-                item_ref=args.item or None,
-                actor=args.actor or None,
-                # CB-124: `or 200` silently turned `--limit 0` into 200 rows.
-                # `argparse` gives None only when the flag is absent.
-                limit=args.limit if args.limit is not None else 200,
-            )
+            # `domain_errors` arrived with the row-limit guard below: before it,
+            # `query_audit` had no ValueError to raise on this path, and a
+            # handler that catches nothing breaks the CLI contract just as
+            # surely as one that catches in the wrong order (CB-19). It also
+            # keeps the json.JSONDecodeError arm ahead of the ValueError arm,
+            # which is the ordering that separates a corrupt stored row from
+            # bad user input.
+            with domain_errors():
+                rows = query_audit(
+                    conn,
+                    milestone_id=args.milestone or None,
+                    item_ref=args.item or None,
+                    actor=args.actor or None,
+                    # CB-124: `or 200` silently turned `--limit 0` into 200 rows.
+                    # `argparse` gives None only when the flag is absent.
+                    limit=args.limit if args.limit is not None else 200,
+                )
         finally:
             conn.close()
         if not rows:
@@ -554,7 +564,9 @@ def register_cli(sub, commands) -> None:
     p.add_argument("--milestone", help="Filter by milestone slug")
     p.add_argument("--item", help="Filter by item ref")
     p.add_argument("--actor", help="Filter by actor")
-    p.add_argument("--limit", type=int, help="Row limit (default 200)")
+    p.add_argument(
+        "--limit", type=int, help="Row limit (default 200; 0 for none, negative is an error)"
+    )
 
     def _cmd_triage_inbox(args: argparse.Namespace) -> None:
         from codebugs.db import connect

@@ -34,7 +34,7 @@ from typing import Any
 
 from codebugs import db
 from codebugs.fmt import format_table
-from codebugs.types import utc_now
+from codebugs.types import require_row_limit, utc_now
 
 USAGE_SCHEMA = """\
 CREATE TABLE IF NOT EXISTS tool_calls (
@@ -111,6 +111,8 @@ def usage_summary(
     counted): every call in range still contributes to the aggregates, only
     the returned tool list is truncated.
     """
+    limit = require_row_limit("limit", limit)
+
     query = (
         "SELECT tool_name, "
         "COUNT(*) AS calls, "
@@ -145,14 +147,25 @@ def register_cli(sub, commands):
         "--since",
         help="Only count calls at or after this UTC timestamp (YYYY-MM-DDTHH:MM:SSZ)",
     )
-    p.add_argument("--limit", type=int, help="Show at most this many tools")
+    p.add_argument(
+        "--limit",
+        type=int,
+        help="Show at most this many tools (0 for none, negative is an error)",
+    )
     commands["usage"] = _cmd_usage
 
 
 def _cmd_usage(args) -> None:
+    from codebugs.cli import domain_errors
+
     conn = db.connect()
     try:
-        result = usage_summary(conn, since=args.since, limit=args.limit)
+        # `domain_errors` arrived with the row-limit guard in `usage_summary`:
+        # before it this path had no ValueError to raise, and a handler that
+        # catches nothing breaks the CLI contract just as surely as one that
+        # catches in the wrong order (CB-19).
+        with domain_errors():
+            result = usage_summary(conn, since=args.since, limit=args.limit)
     finally:
         conn.close()
 

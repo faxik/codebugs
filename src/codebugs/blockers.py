@@ -10,7 +10,12 @@ from pydantic import Field
 
 from codebugs import db
 from codebugs.entities import EntityRef, entity_kind
-from codebugs.types import TRIGGER_TYPES, is_vocabulary_filter_active, utc_now
+from codebugs.types import (
+    TRIGGER_TYPES,
+    is_vocabulary_filter_active,
+    require_row_limit,
+    utc_now,
+)
 
 
 BLOCKERS_SCHEMA = """\
@@ -518,6 +523,8 @@ def query_deferred_entities(
     here**, and if it is ever deleted, move those ordering assertions rather than
     dropping them.
     """
+    limit = require_row_limit("limit", limit)
+
     evaluated = _get_active_blockers_by_type(conn, entity_type)
     active_counts = _active_counts(evaluated)
 

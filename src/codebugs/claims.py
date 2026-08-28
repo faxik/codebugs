@@ -464,6 +464,8 @@ def list_claims(
 ) -> dict[str, Any]:
     """Live claims, filtered. Released rows are never returned — history querying
     is deferred; the rows are retained, only the surface is absent."""
+    limit = t.require_row_limit("limit", limit)
+
     rows = conn.execute(
         f"SELECT {_ROW_COLS} FROM entity_claims "  # noqa: S608 (constant column list)
         "WHERE (:kind IS NULL OR kind = :kind) "
@@ -599,7 +601,16 @@ def register_tools(mcp, conn_factory) -> None:
         holder_kind: str | None = None,
         limit: int = 200,
     ) -> dict[str, Any]:
-        """List live claims, optionally filtered by kind, holder or holder kind."""
+        """List live claims, optionally filtered by kind, holder or holder kind.
+
+        Args:
+
+        - kind: Entity kind filter (e.g. "finding"), or omit for every kind.
+        - holder: Holder name filter, or omit for every holder.
+        - holder_kind: Holder kind filter (e.g. "branch"), or omit for every kind.
+        - limit: Max rows (default 200). 0 means NO rows; a negative value is an
+          error (it used to mean "no limit").
+        """
         with conn_factory() as conn:
             return list_claims(conn, kind=kind, holder=holder, holder_kind=holder_kind, limit=limit)
 

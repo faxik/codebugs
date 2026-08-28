@@ -1895,7 +1895,12 @@ def register_cli(sub, commands) -> None:
             "BT-7 refuses ambient cwd for the ANCHOR, so omitting it reports "
             "no_root rather than guessing a tree",
         )
-        p.add_argument("--limit", type=int, default=10000)
+        p.add_argument(
+            "--limit",
+            type=int,
+            default=10000,
+            help="max findings examined (default 10000; 0 for none, negative is an error)",
+        )
         p.add_argument("--json", action="store_true", dest="as_json")
     p_rec.add_argument(
         "--apply", action="store_true", help="write the rebuilt anchors (default: dry run)"
@@ -2073,7 +2078,9 @@ def register_tools(mcp, conn_factory) -> None:
                 reports `no_root` rather than reading whatever tree the server
                 process happens to stand in — a long-lived server's cwd has
                 nothing to do with the tracker a call is about
-            limit: Maximum findings examined (default 10000)
+            limit: Maximum findings examined (default 10000). 0 means NO
+                findings are examined; a negative value is an error (it used to
+                mean "no limit").
         """
         with conn_factory() as conn:
             return resolve_findings(
@@ -2137,7 +2144,9 @@ def register_tools(mcp, conn_factory) -> None:
             include_unanchored: Also take rows carrying no `loc` key at all (the
                 backfill population). Leaves tombstones alone; still a dry run
                 unless `apply` is set
-            limit: Maximum findings examined (default 10000)
+            limit: Maximum findings examined (default 10000). 0 means NO
+                findings are examined; a negative value is an error (it used to
+                mean "no limit").
         """
         with conn_factory() as conn:
             return recapture_findings(
