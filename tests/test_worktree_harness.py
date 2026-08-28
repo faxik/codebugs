@@ -5622,13 +5622,26 @@ class TestPostMergeAlarmIsNotAGate:
         # signal traps exist and sit between the journal's arming and the
         # alarm's — the placement CB-237 depends on and the one an edit could
         # silently undo.
+        # THE LIST GREW A THIRD TIME, BY THE SAME SHAPE OF CHANGE (CB-249), and
+        # it is recorded here for the reason the two notes above give. CB-237
+        # closed SIGINT and SIGTERM and DECLARED the remaining gap in the
+        # script's own comment: SIGHUP and SIGPIPE reached the EXIT trap too and
+        # were still recorded as `rc=0`, i.e. as LANDINGS. What held the line at
+        # two was scope, not evidence, and CB-249 is the widening that comment
+        # predicted — one line per signal, and nothing else about the mechanism
+        # moves. The expected list is extended rather than loosened, for the
+        # same reason as last time: narrowing this to EXIT armings, or to a
+        # count, would keep it green and stop it seeing a hostile `trap evil
+        # TERM` in the same stroke.
         armings = [ln.strip() for ln in src.splitlines() if ln.strip().startswith("trap ")]
         assert armings == [
             "trap _journal_record EXIT",
             "trap 'exit 130' INT",
             "trap 'exit 143' TERM",
+            "trap 'exit 129' HUP",
+            "trap 'exit 141' PIPE",
             "trap _alarm_speak EXIT",
-        ], f"the armed traps must be exactly these four, in this order: {armings}"
+        ], f"the armed traps must be exactly these six, in this order: {armings}"
         # The journal's half of the ordering: armed before the FIRST guard, or
         # every pre-merge refusal goes unrecorded — silently, and in the
         # flattering direction. Anchored on the guard-invocation idiom rather
@@ -6096,6 +6109,33 @@ class TestLandingAttemptJournal:
         disposition, which is also what an operator's terminal gives it.
         """
         self._assert_stopped_run_is_recorded(armed, signal.SIGINT, "130")
+
+    def test_a_run_stopped_by_sighup_records_its_own_code(self, armed: dict) -> None:
+        """CB-249 — a closed session is the SANCTIONED stop, not an exotic one.
+
+        The prescribed order of work here is to start the finish, see the
+        /simplify-traced reminder the PreToolUse gate inserts, and stop it by
+        hand; a terminal or an agent session closing at that same moment
+        delivers SIGHUP instead of SIGINT. CB-237 measured this signal, wrote
+        down that the same one-line form would fix it, and left it out on
+        SCOPE — so the row a dropped session leaves kept reading `0`, which the
+        journal's documented reader counts as a LANDING.
+
+        Not folded into the SIGTERM case for the reason the SIGINT test gives:
+        the three reach a shell by different routes, and only running each one
+        shows which of them the trap list actually covers.
+        """
+        self._assert_stopped_run_is_recorded(armed, signal.SIGHUP, "129")
+
+    def test_a_run_stopped_by_sigpipe_records_its_own_code(self, armed: dict) -> None:
+        """CB-249 — the fourth of the four, and the one with a vocabulary already.
+
+        141 is not invented here: `cli.run` has meant "the reader of my output
+        is gone" by that code since CB-78, so the journal and the package's own
+        CLI now answer a dead reader with one number. Untrapped this recorded
+        `0` exactly like the other three.
+        """
+        self._assert_stopped_run_is_recorded(armed, signal.SIGPIPE, "141")
 
 
 class TestUnknownSlugRefusal:

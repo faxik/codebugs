@@ -92,16 +92,18 @@ set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"
 # rediscovered, because an undeclared gap costs more than a declared one:
 #   * anything failing ABOVE this point: sourcing tools/_guards.sh, resolving
 #     REPO_ROOT, or the argument loop itself. The trap does not exist yet.
-#   * SIGKILL, which no trap can catch. (SIGINT and SIGTERM DO reach this trap
-#     — measured on bash 5.3.9 — so an operator's Ctrl-C is recorded. Until
-#     CB-237 it was recorded as `rc=0`, i.e. as a LANDING; the two signal
-#     traps armed below are what make that line carry 130 or 143 instead.)
-#   * SIGHUP and SIGPIPE reach this trap too and are still recorded as
-#     `rc=0`, so a closed session and a dead reader on stdout both still
-#     read as a landing. Deliberately, and the note beside those traps says
-#     why. SIGQUIT is a different case and was measured rather than assumed
-#     alongside them: bash IGNORES it, so what dies is the FOREGROUND child,
-#     and the line then carries that child's own 131 through `set -e`.
+#   * SIGKILL, which no trap can catch. (SIGINT, SIGTERM, SIGHUP and SIGPIPE
+#     all DO reach this trap — measured on bash 5.3.9 — so an operator's
+#     Ctrl-C, a supervisor's kill, a dropped session and a dead reader on
+#     stdout are each recorded. Until CB-237 every one of them was recorded as
+#     `rc=0`, i.e. as a LANDING; CB-237 closed the first two and CB-249 the
+#     other two, and the four signal traps armed below are what make those
+#     lines carry 130, 143, 129 and 141 instead.)
+#   * SIGQUIT, which needs no trap and would not be helped by one — measured
+#     rather than assumed alongside the four above: bash IGNORES it, so what
+#     dies is the FOREGROUND child, and the line then carries that child's own
+#     131 through `set -e`. It is in this list because it is a signal the
+#     traps below do not name, not because it falsifies a line.
 #   * an `exit` inside a `( … )` subshell: bash resets traps there. No such
 #     exit exists in this script today; the two subshells are `uv run` gates
 #     whose status is read by `if !`, and they return rather than exit.
@@ -145,13 +147,13 @@ _journal_record() {
 }
 trap _journal_record EXIT
 
-# THE TWO SIGNAL TRAPS, AND WHY EACH IS A BARE `exit` (CB-237). They are armed
-# HERE, beside the EXIT trap and not one line earlier, because their only job
-# is to give that trap a status worth reading.
+# THE FOUR SIGNAL TRAPS, AND WHY EACH IS A BARE `exit` (CB-237, CB-249). They
+# are armed HERE, beside the EXIT trap and not one line earlier, because their
+# only job is to give that trap a status worth reading.
 #
 # THE DEFECT THEY CLOSE. An EXIT trap fired by an asynchronous signal reads the
 # `$?` of the last command that COMPLETED, not the status the shell is about to
-# leave with. So a finish stopped by SIGINT or SIGTERM wrote `rc=0` — which the
+# leave with. So a finish stopped by any of these four wrote `rc=0` — which the
 # reader above counts as A LANDING. Measured on bash 5.3.9: with no signal trap
 # the process really does end at 143 while its line says `0`. The error is in
 # the FLATTERING direction — landings overcounted, attempts-per-landing
@@ -170,7 +172,7 @@ trap _journal_record EXIT
 #
 # AN ALARM, NOT A GATE. Nothing is refused, no guard is added, and the status a
 # CALLER sees does not move: a shell reports 128+N for a child killed by signal
-# N, which is the same 130 or 143 the shell now exits with.
+# N, which is the same 130, 143, 129 or 141 the shell now exits with.
 #
 # ONE COST, MEASURED, BECAUSE IT IS REAL. The process now EXITS with that status
 # instead of being KILLED by the signal, and a parent that inspects WIFSIGNALED
@@ -185,8 +187,8 @@ trap _journal_record EXIT
 # erase the first (measured here, not quoted from that comment) — so the answer
 # differs by phase, and all three were measured:
 #   * BEFORE the merge — every guard, the whole [6/7] suite, and the wait on the
-#     integration lock: the line now carries 130 or 143 instead of 0. This is
-#     the phase a stop actually happens in.
+#     integration lock: the line now carries the signal's own code instead of
+#     0. This is the phase a stop actually happens in.
 #   * AFTER the merge while the alarm's verdict is still `unreadable`: the alarm
 #     speaks and records 15 by explicit argument, unchanged by these traps and
 #     already documented as a landing whose premise is unconfirmed.
@@ -203,28 +205,37 @@ trap _journal_record EXIT
 # GROUP. Ctrl-C and an ordinary supervisor `kill` both signal the group, which
 # is why this is a note rather than a defect.
 #
-# SIGHUP IS DELIBERATELY LEFT ALONE, AND SIGQUIT TURNED OUT TO BE A DIFFERENT
-# ANIMAL — which is why both were measured instead of being lumped together in
-# one sentence, as the first draft of this comment did. SIGHUP behaves exactly
-# like the two above: untrapped it writes `rc=0`, and the same one-line form
-# would fix it (measured, `trap 'exit 129' HUP` records 129). SIGPIPE is a third
-# of the same kind, also measured at `rc=0`. Neither is trapped here, and the
-# honest version of that decision names the argument AGAINST it rather than only
-# the one for it: a dropped session really is a plausible way for a long finish
-# to die, and an instrument that only records the failures somebody already
-# thought of is worth less than one that records them all. What holds the line
-# at two is scope, not evidence — this change was authorised for SIGINT and
-# SIGTERM, the widening is one line per signal, and it belongs to whoever owns
-# that decision rather than riding in unremarked on a fix for something else.
+# SIGHUP AND SIGPIPE WERE LEFT OUT OF CB-237 AND ARE CLOSED HERE (CB-249). The
+# paragraph this replaces said they were "deliberately left alone", and named
+# the reason honestly: what held the line at two was SCOPE, not evidence — that
+# change was authorised for SIGINT and SIGTERM. So the widening is exactly the
+# one line per signal that paragraph predicted, and nothing else about the
+# mechanism moves. Re-measured here rather than inherited: untrapped, both
+# record `rc=0` while the process really is killed by the signal; with the bare
+# form each records its own code, in ONE row.
 #
-# SIGQUIT needs no trap and would not be helped by one: bash IGNORES it, so it
-# kills the FOREGROUND child, and `set -e` carries that child's own 131 into the
-# line — measured, twice. Where the child's failure is already handled, by an
-# `if !` gate, the run does not stop at all; that is a different defect and not
-# this one. SIGKILL cannot be trapped, and it loses the line rather than
-# falsifying it: measured, zero rows, which is an undercount of ATTEMPTS.
+# WHY THEY WERE WORTH THE TWO LINES. A dropped session is a plausible way for a
+# long finish to die, and it lands on the same instant as the sanctioned stop:
+# the prescribed order of work is to start the finish, see the /simplify-traced
+# reminder, and stop it by hand — a closed terminal delivers SIGHUP at that very
+# point. A dead reader on stdout gives SIGPIPE the same way, and this package's
+# own CLI already treats 141 as "the reader of my output is gone" (CB-78), so
+# the vocabulary was chosen elsewhere in this repository before it was used
+# here. An instrument that only records the failures somebody already thought of
+# is worth less than one that records them all.
+#
+# SIGQUIT NEEDS NO TRAP and would not be helped by one — a different animal, and
+# measured rather than lumped in with the four: bash IGNORES it, so it kills the
+# FOREGROUND child, and `set -e` carries that child's own 131 into the line.
+# Where the child's failure is already handled, by an `if !` gate, the run does
+# not stop at all; that is a different defect and not this one. SIGKILL cannot
+# be trapped, and it loses the line rather than falsifying it: measured, zero
+# rows, which is an UNDERCOUNT of attempts — the safe direction, opposite to the
+# one being fixed.
 trap 'exit 130' INT
 trap 'exit 143' TERM
+trap 'exit 129' HUP
+trap 'exit 141' PIPE
 
 # The worktrees an operator could have meant, for the two refusals that offer a
 # list. SHARED because it was DUPLICATED, and the duplicate is how CB-231 stayed
