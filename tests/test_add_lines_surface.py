@@ -529,10 +529,14 @@ class TestTheNamedInputMustDecideTheAnchor:
 
     HOW THE QUESTION TRAVELS, because it is not the obvious route and the obvious
     route is refused: the surface does NOT read the grammar. `findings` may not
-    import the extension — the dependency runs the other way, so a module-level
-    import is a measured `ImportError` and a deferred one is refused by
-    `tests/test_loc_read_paths.py::TestThereIsExactlyOneResolver`. The extension
-    declares itself able to answer, and `db.named_input_conflict` asks it.
+    import the extension — the dependency runs the other way (`loc` imports
+    `provenance`, which imports `findings`), so a module-level import is a
+    measured `ImportError`, and that is what makes it impossible for every
+    spelling. `tests/test_loc_read_paths.py::TestThereIsExactlyOneResolver`
+    states the boundary and did catch the deferred `from codebugs import loc`
+    this fix first tried, but it is a substring test and its coverage is narrower
+    than its rule — see the note at the seam in `db.py`. The extension declares
+    itself able to answer, and `db.named_input_conflict` asks it.
 
     MUTANTS RUN, AND WHICH PIN CAUGHT EACH (measured 2026-08-29 over this file,
     `tests/test_loc.py` and `tests/test_loc_read_paths.py`; 291 green unmutated).
@@ -558,19 +562,19 @@ class TestTheNamedInputMustDecideTheAnchor:
     * **the refusal text stops naming the deciding key** — again exactly ONE,
       `..._names_both_places_and_the_key_that_wins`.
 
-    Two tests here stay green on every mutant and are PRESERVATION pins rather
-    than broken ones, which this file says out loud because a reader cannot
-    otherwise tell the difference: `..._anchors_when_it_is_the_only_thing_naming_
-    a_place` is the baseline the whole rule is stated against, and
-    `..._keeps_the_grammars_own_priority` holds the SCOPE — a row with no named
-    input must not be touched.
+    One test here stays green on every mutant and is a PRESERVATION pin rather
+    than a broken one, which this file says out loud because a reader cannot
+    otherwise tell the difference: `..._keeps_the_grammars_own_priority` holds
+    the SCOPE — a row with no named input must not be touched by any of this.
+
+    The baseline the whole rule is stated against — a named input alone anchors
+    where it says — is NOT repeated here. `TestTheParameterReachesTheAnchor::
+    test_a_named_line_anchors_the_card` already holds it, and more fully (path,
+    end, text and commit, not just the line).
     """
 
     def _anchor(self, tools, **over):
         return (_add(tools, **over)["meta"] or {}).get("loc") or {}
-
-    def test_the_named_input_anchors_when_it_is_the_only_thing_naming_a_place(self, tools):
-        assert self._anchor(tools, lines="10").get("line") == 10
 
     def test_a_sibling_singular_key_naming_another_place_is_refused(self, tools):
         """The defect itself. Before the fix this returned a card anchored at 3."""

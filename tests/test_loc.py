@@ -197,9 +197,6 @@ class TestWhatTheGrammarWillAnswerAboutItself:
         """ANTI-DRIFT, structural: two loops over one priority table is the exact
         defect this module's own comment warns about, and behaviour cannot see
         the difference while they happen to agree."""
-        import ast
-        import inspect
-
         body = ast.parse(inspect.getsource(loc.parse_sites).lstrip())
         assert not [n for n in ast.walk(body) if isinstance(n, (ast.For, ast.While))], (
             "`parse_sites` grew a loop of its own: it must delegate to "

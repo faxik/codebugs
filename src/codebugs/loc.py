@@ -465,6 +465,18 @@ def _named_input_conflict(key: str, value: Any, meta: dict[str, Any]) -> dict[st
         return None
     named_sites = _parse_value(value)
     deciding, final_sites = parse_sites_with_key(meta)
+    # THE COMPARISON IS CRUDE ON PURPOSE, AND THIS IS WHERE ITS LICENCE IS
+    # RECORDED, because this is the line a false refusal has to be fixed at.
+    # Places are compared as they parse, with no attempt to decide whether
+    # `f.py:10` and a bare `10` under a `file` column of `f.py` mean one place.
+    # Measured over both trackers (3732 findings, 2026-08-28): the four
+    # reducible shapes — bare number against a range containing it, with a path
+    # against without, subset, overlapping ranges — have ZERO instances, so
+    # normalizing before comparing would be a mechanism with no input. The
+    # licence is a sample of two rows, so it is not a guarantee about the
+    # future: if this ever refuses something legitimate, the answer is a
+    # normalizer HERE, and the refusal text names both sides so that costs one
+    # edit rather than an investigation.
     if named_sites == final_sites:
         return None
     return {

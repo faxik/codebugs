@@ -371,14 +371,20 @@ def resolver_updatable_meta_keys() -> frozenset[str]:
 # lost — CB-129's success-shaped discard, reached through a sibling spelling.
 #
 # WHY A REGISTRY AND NOT AN IMPORT, because the obvious alternative was tried and
-# refused. `findings` cannot ask the extension directly: the dependency runs the
-# other way (`loc` imports `provenance`, which imports `findings`), so a
-# module-level import is a measured `ImportError`, and a deferred one is refused
-# by `tests/test_loc_read_paths.py::TestThereIsExactlyOneResolver` — the domain
-# module must learn nothing about which extension reads its meta. This is the
-# same answer the same problem already got once: an extension's UPDATABLE keys
-# are declared at registration and read back through `resolver_updatable_meta_keys`
-# rather than spelled inside `findings`.
+# refused. `findings` cannot ask the extension directly: THE DEPENDENCY RUNS THE
+# OTHER WAY — `loc` imports `provenance`, which imports `findings` — so a
+# module-level import is a measured `ImportError` on a partially initialized
+# `provenance`. That is the load-bearing reason and it holds for every spelling.
+# `tests/test_loc_read_paths.py::TestThereIsExactlyOneResolver` states the same
+# rule as a boundary the domain module must not cross, and it caught the deferred
+# `from codebugs import loc` this fix first reached for. Its coverage is narrower
+# than its rule, though, and saying so is cheaper than rediscovering it: it is a
+# SUBSTRING test over the source, so `import codebugs.loc as x` matches neither
+# of its two strings (measured). Do not read it as the thing that makes the
+# import impossible — the cycle is. This is the same answer the same problem
+# already got once: an extension's UPDATABLE keys are declared at registration
+# and read back through `resolver_updatable_meta_keys` rather than spelled
+# inside `findings`.
 #
 # The check returns FACTS, never a sentence. Each surface phrases its own refusal
 # in its own vocabulary (`--lines`/`--meta` for a shell, bare parameter names for
