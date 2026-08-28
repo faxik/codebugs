@@ -7,12 +7,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
-- **Adding a requirement (`reqs_add`) now always returns exactly what you just wrote
-  (CB-117).** It used to write the row, then read it back from the database in a
-  separate step; in the rare case another request changed or removed that same
-  requirement in between, you could get back someone else's version instead of your
-  own, with nothing in the response to warn you. It now returns the written row
-  directly, so what you see is always your own write.
+- **`reqs_embed` and `reqs_batch_embed` now refuse a vector that would break search,
+  and `reqs_search_similar` no longer fails outright when it meets one (CB-174).**
+  Nothing used to check the vectors you store, so a single vector of the wrong size
+  — one call with a different embedding model is enough — left similarity search
+  unable to work at all until somebody found and removed that vector by hand.
+
+  **What is refused now**, on both the single and the batch tool: a vector that is
+  empty, that contains something other than a number, that contains NaN or infinity,
+  or that has a different number of components than the vectors already stored in
+  this tracker. A batch must also be consistent with itself, which matters in an
+  empty tracker where there is nothing else to compare against. Each refusal names
+  both sizes, so you can see what the tracker expects.
+
+  NaN was the quietest of these and the most worth knowing about: it stored without
+  complaint, and the requirement then dropped out of every search result with no
+  error anywhere. A NaN in the vector you *search* with removed every result, so
+  "nothing is similar" looked exactly like an empty tracker. Search now refuses that
+  query instead of answering it with silence.
+
+  **`reqs_search_similar` skips requirements whose stored vector is a different size
+  from your query** rather than failing the whole search on the first one it meets.
+  Those requirements are simply not in the results, so **`reqs_embedding_stats` now
+  reports which vector sizes the tracker actually holds** (`dimensions`) and whether
+  there is more than one (`mixed`) — that is where to look if a search returns fewer
+  results than you expect.
+
+  **One limit, stated plainly: there is still no way to change embedding model.**
+  This package has no operation that clears and re-computes existing vectors, so once
+  a tracker holds vectors of one size, vectors of another size are refused and there
+  is no sanctioned path around that. The refusal message says so. If you need this,
+  say so — it was deliberately not built ahead of somebody asking for it.
+
+  **Also documented, and now enforced by a test rather than merely promised:** the
+  embedding tools never receive your requirement's text, and no part of codebugs
+  sends anything anywhere — you compute the vector yourself and codebugs keeps it in
+  its own local database. The tool descriptions say this, and a check refuses any
+  network capability being imported into the package.
 - **The mutation-testing scripts under `tests/manual/` (`mutate_cb69.py`, `mutate_cb31.py`)
   now refuse to run on a dirty tree instead of silently overwriting uncommitted work
   (CB-173).** Each script writes a broken version of a source file to disk, runs the
