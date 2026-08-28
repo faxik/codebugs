@@ -14,7 +14,7 @@ import threading
 import pytest
 
 from codebugs import db, reqs
-from codebugs.types import utc_now
+from codebugs.types import DEFAULT_ROW_LIMIT, utc_now
 
 
 class RecordingConnection(sqlite3.Connection):
@@ -1310,9 +1310,14 @@ class TestQueryRequirementsRowLimit:
             reqs.query_requirements(conn, limit=-1)
 
     def test_a_negative_limit_is_refused_even_when_ids_are_given(self, conn):
-        """Same composition trap as on findings: the `ids` branch widens the
-        limit to `len(ids)`, so a validator below it would be a gate that cannot
-        fire for exactly the calls carrying an id list."""
+        """Twin of the findings case, including why its REASON changed (CB-158).
+
+        This used to pin a composition trap: the `ids` branch widened the limit
+        to `len(ids)`, so a validator below it was a gate that could not fire for
+        exactly the calls carrying an id list. That widening is gone, so the
+        ordering now buys the plainer property CB-82 asks for — the argument is
+        refused before any work is done — and the assertion is unchanged.
+        """
         self._three(conn)
         with pytest.raises(ValueError, match="must not be negative"):
             reqs.query_requirements(conn, ids=["FR-0"], limit=-1)
@@ -1327,13 +1332,29 @@ class TestQueryRequirementsRowLimit:
         self._three(conn)
         assert len(reqs.query_requirements(conn, limit=2)["requirements"]) == 2
 
-    def test_zero_does_NOT_mean_zero_when_ids_are_given(self, conn):
-        """PIN of the same surprise as on findings, and of the surface sentence
-        that now carries it: the `ids` widening raises `limit=0` to `len(ids)`."""
+    def test_zero_means_zero_rows_even_when_ids_are_given(self, conn):
+        """CB-158, twin of the findings pin, and it REPLACES its own opposite.
+
+        Its predecessor asserted `len(requirements) == 2` for `limit=0` and was
+        named `..._does_NOT_mean_zero_...`: a pin of a surprise, written to keep
+        the help text and the code in agreement without asking whether the
+        behaviour was right. It was not — the caller named a page size and got
+        more rows than it asked for.
+        """
         self._three(conn)
         result = reqs.query_requirements(conn, ids=["FR-0", "FR-1"], limit=0)
+        assert result["requirements"] == []
+        assert result["limit"] == 0
+        one = reqs.query_requirements(conn, ids=["FR-0", "FR-1"], limit=1)
+        assert len(one["requirements"]) == 1
+
+    def test_an_unnamed_limit_still_widens_to_fit_the_id_list(self, conn):
+        """The half of the widening worth keeping — twin of the findings pin."""
+        self._three(conn)
+        result = reqs.query_requirements(conn, ids=["FR-0", "FR-1"])
         assert len(result["requirements"]) == 2
-        assert result["limit"] == 2
+        assert reqs.query_requirements(conn)["limit"] == DEFAULT_ROW_LIMIT
+
 
     def test_the_deferred_shortcircuit_refuses_a_negative_limit_too(self, conn):
         """Twin of the findings case: the `deferred` branch returns before
@@ -1379,3 +1400,46 @@ class TestQueryRequirementsRowLimit:
         assert "Traceback" not in out.err
         assert len(out.err.strip().splitlines()) == 1
         assert "must not be negative" in out.err
+
+
+class TestTheThreeBranchesOfTheLimitContract:
+    """Twin of the findings class of the same name — CB-158's contract is the
+    COMPOSITION of three branches, pinned on a population LARGER than the
+    default page, which is the only fixture that can tell them apart.
+
+    On the three-row fixture every other test here uses, "the default page is a
+    hundred" and "there is no page at all" are indistinguishable. The regression
+    this refuses is `None` quietly coming to mean UNBOUNDED, which would be
+    worse than the defect CB-158 fixed: it hands the whole table to a caller who
+    asked for nothing in particular.
+    """
+
+    _POPULATION = DEFAULT_ROW_LIMIT + 5
+
+    @staticmethod
+    def _many(conn) -> list[str]:
+        ids = []
+        for i in range(TestTheThreeBranchesOfTheLimitContract._POPULATION):
+            req_id = f"FR-{i:04d}"
+            reqs.add_requirement(conn, req_id=req_id, description=f"requirement {i}")
+            ids.append(req_id)
+        return ids
+
+    def test_branch_1_no_limit_and_no_ids_takes_the_default_page(self, conn):
+        self._many(conn)
+        result = reqs.query_requirements(conn)
+        assert result["total"] == self._POPULATION
+        assert len(result["requirements"]) == DEFAULT_ROW_LIMIT
+        assert len(result["requirements"]) < self._POPULATION, "unbounded would fail here"
+
+    def test_branch_2_no_limit_with_an_id_list_widens_past_the_default(self, conn):
+        ids = self._many(conn)
+        assert len(ids) > DEFAULT_ROW_LIMIT, "premise: the list must exceed the default"
+        result = reqs.query_requirements(conn, ids=ids)
+        assert len(result["requirements"]) == self._POPULATION
+        assert result["limit"] == self._POPULATION
+
+    def test_branch_3_a_named_limit_wins_over_both(self, conn):
+        ids = self._many(conn)
+        assert len(reqs.query_requirements(conn, ids=ids, limit=5)["requirements"]) == 5
+        assert reqs.query_requirements(conn, ids=ids, limit=0)["requirements"] == []

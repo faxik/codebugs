@@ -15,6 +15,7 @@ from codebugs.types import (
     require_row_limit,
     resolve_priority,
     resolve_requirement_status,
+    resolve_row_limit,
     utc_now,
     validate_batch_payload,
 )
@@ -328,17 +329,25 @@ def query_requirements(
     source: str | None = None,
     tag: str | None = None,
     group_by: str | None = None,
-    limit: int = 100,
+    limit: int | None = None,
     offset: int = 0,
 ) -> dict[str, Any]:
     """Query requirements with filters.
 
     `id` / `ids` are AND-combined with other filters; missing IDs are silently absent.
+
+    `limit` is the caller's page size and an EXPLICIT one always wins — see the
+    twin paragraph on `findings.query_findings` for the whole argument (CB-158).
+    `None` means no page size was named, and only then is one derived.
     """
-    # CB-196, and ABOVE the `ids` widening below for the reason spelled out on
-    # `findings.query_findings`: that widening rewrites a negative limit to
-    # `len(ids)` and would hide the refusal from every call carrying an id list.
+    # CB-196, and still ABOVE everything for the plain reason: validate the
+    # ARGUMENT before anything is derived from it or written (CB-82), so a
+    # refusal costs no partial work.
     limit = require_row_limit("limit", limit)
+    # CB-158, the twin of the findings site — and it is the SAME function
+    # rather than the same two lines, so the two entities cannot drift apart on
+    # what "no page size was named" means.
+    limit = resolve_row_limit(limit, ids)
 
     conditions: list[str] = []
     params: list[Any] = []
@@ -349,8 +358,6 @@ def query_requirements(
     if ids:
         conditions.append(f"id IN ({','.join('?' for _ in ids)})")
         params.extend(ids)
-        if limit < len(ids):
-            limit = len(ids)
     # Both resolved, matching the write paths (CB-19 sibling sweep). Left raw, these
     # filters compared the caller's spelling against a canonical column while
     # `add_requirement` and `update_requirement` had ALWAYS normalized through
@@ -833,7 +840,7 @@ def register_tools(mcp, conn_factory):
         source: str | None = None,
         tag: str | None = None,
         group_by: str | None = None,
-        limit: int = 100,
+        limit: int | None = None,
         offset: int = 0,
     ) -> dict[str, Any]:
         """Search and filter requirements.
@@ -853,10 +860,13 @@ def register_tools(mcp, conn_factory):
             source: Filter by source (substring match)
             tag: Filter by tag
             group_by: Group by: section, status, priority, source
-            limit: Max results (default 100). 0 means NO results, EXCEPT when
-                    `id`/`ids` is given, where the id list sets a floor and a
-                    smaller limit is raised to fit it. A negative value is an
-                    error (it used to mean "no limit").
+            limit: Max results. A limit you PASS is always honoured: 0 means NO
+                    results, and it means that with `id`/`ids` too (CB-158 — an
+                    id list used to raise any smaller limit to fit itself, so
+                    `limit=0` came back full). A negative value is an error (it
+                    used to mean "no limit"). Omit it and the page size is 100,
+                    widened to fit an `ids` list so a batch lookup returns every
+                    id it asked for.
             offset: Pagination offset
         """
         from codebugs import blockers
@@ -878,8 +888,14 @@ def register_tools(mcp, conn_factory):
                 )
                 if not deferred_ids:
                     # MUST NOT fall through as `ids=[]` — that reads as "no filter".
+                    # The EFFECTIVE limit is echoed, not the raw argument, for the
+                    # reason spelled out on the findings twin (CB-158): `None` here
+                    # means the caller named no page size, and this arm returns
+                    # without reaching `query_requirements`, so the argument would
+                    # report `null` where every other path reports what applied.
                     return {
-                        "grouped": False, "total": 0, "limit": limit,
+                        "grouped": False, "total": 0,
+                        "limit": resolve_row_limit(limit, None),
                         "offset": offset, "requirements": [],
                     }
                 id, ids, status = None, deferred_ids, None
@@ -1033,8 +1049,10 @@ def register_cli(sub, commands) -> None:
                     group_by=args.group_by,
                     # CB-124: `or 100` silently turned `--limit 0` into 100
                     # rows. `argparse` gives None only when the flag is
-                    # absent.
-                    limit=args.limit if args.limit is not None else 100,
+                    # absent — and since CB-158 that None is FORWARDED, so the
+                    # domain (which alone knows the id list) picks the default.
+                    # See the findings twin for the whole argument.
+                    limit=args.limit,
                 )
         finally:
             conn.close()
@@ -1254,7 +1272,7 @@ def register_cli(sub, commands) -> None:
     p.add_argument(
         "--limit",
         type=int,
-        help="Max results (0 for none unless --id/--ids is given; negative is an error)",
+        help="Max results (default 100; 0 for none, even with --id; negative is an error)",
     )
 
     p = sub.add_parser("reqs-get", help="Fetch a single requirement by ID")

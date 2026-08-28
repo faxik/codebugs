@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import operator
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
@@ -357,9 +357,85 @@ def validate_batch_payload(value: object, *, label: str) -> list[Any]:
 
 # --- Row limits (CB-161) ---
 
+#: The page size a query uses when the caller named none (CB-158).
+#:
+#: It lives here, beside ``require_row_limit``, because it is the OTHER half of
+#: one rule about the same argument: that function says which values are legal,
+#: this constant says what "not supplied" means. Both query surfaces and both
+#: query domains read it, so the four places that used to spell ``100`` as a
+#: signature default cannot drift apart from each other — the same reason
+#: ``is_sql_identifier`` is the only copy of its pattern.
+#:
+#: It is deliberately NOT the default of ``query_findings``/``query_requirements``
+#: any more. Those take ``None``, because "the caller named no page size" has to
+#: be DISTINGUISHABLE from "the caller asked for a hundred" — that distinction is
+#: exactly what CB-158 was missing, and a plain integer default cannot carry it.
+DEFAULT_ROW_LIMIT = 100
+
+
+def resolve_row_limit(limit: int | None, ids: Sequence[str] | None) -> int:
+    """The page size a query should use: the caller's, or a derived one (CB-158).
+
+    ONE SENTENCE, AND IT IS THE WHOLE RULE: a limit the caller NAMED is returned
+    untouched, and a limit is derived only when none was named. `None` is the
+    only spelling of "named none" — which is why `query_findings` and
+    `query_requirements` take `int | None` rather than defaulting to a number,
+    since `limit=100` and "no opinion" have to be different values for this
+    function to be able to tell them apart.
+
+    THE DERIVED SIZE WIDENS TO FIT AN ID LIST, and that is the half of the old
+    behaviour worth keeping: a batch lookup that names ids and no page size must
+    return every id it asked for. What CB-158 removed is the *other* half, where
+    the id list also outranked a limit the caller had typed — so
+    `query(ids=[a, b], limit=1)` returned two rows and `limit=0` returned two
+    rather than none, a success-shaped answer to a request nobody performed.
+
+    IT LIVES HERE FOR THE REASON `require_row_limit` DOES, and the two are a
+    pair: that one says which values are legal, this one says what an absent
+    value means, and both are called in that order at every site. Written twice
+    — once in `findings.py`, once in `reqs.py` — it would be one edit away from
+    the two entities answering the same question differently, which is this
+    package's most-repeated defect (`is_sql_identifier`, `severity_rank` and
+    `rank_case_sql` are all the only copy of their rule for the same reason).
+
+    `ids` is read only for its LENGTH and an empty list is not an id filter,
+    matching the convention every query here follows.
+    """
+    if limit is not None:
+        return limit
+    return max(DEFAULT_ROW_LIMIT, len(ids)) if ids else DEFAULT_ROW_LIMIT
+
 
 def require_row_limit(label: str, value: object) -> int | None:
-    """Accept ``None`` (no limit) or a NON-NEGATIVE integer row limit, else ``ValueError``.
+    """Accept ``None`` or a NON-NEGATIVE integer row limit, else ``ValueError``.
+
+    **WHAT ``None`` MEANS IS THE CALLER'S TO DECIDE, AND THREE CALLERS DECIDE IT
+    DIFFERENTLY.** This line used to read "``None`` (no limit)" without
+    qualification, and that reading was already only one of the three in the
+    tree — CB-158 made it the minority, which is why the parenthesis is gone
+    rather than merely amended. This function refuses a value; it does not say
+    what an absent one means, and a reader who took the old parenthesis as the
+    package-wide contract would have been wrong at more sites than right:
+
+    * **UNBOUNDED** — ``findings.similarity_candidates``,
+      ``grouping_candidates`` and ``anchor_candidates`` omit the ``LIMIT``
+      clause entirely, so ``None`` really is the whole population. These are
+      candidate POOLS, assembled in full or not at all.
+    * **A DEFAULT, DERIVED** — ``findings.query_findings`` and
+      ``reqs.query_requirements``, via ``resolve_row_limit`` above: ``None``
+      means *no page size was named*, and one is derived (CB-158). These are
+      paged query SURFACES, and ``None`` is emphatically NOT how you ask for
+      everything there; read ``total`` and pass it, as the CSV export does.
+    * **SOMEBODY ELSE'S DEFAULT** — ``sweep.next_batch`` falls back to that
+      sweep's own stored ``default_batch_size``.
+
+    All three are right for their own callers, and unifying them would mean
+    renegotiating three contracts rather than documenting one divergence. The
+    danger is the SYMMETRY a reader assumes, not any single site: the three
+    spellings are identical (``limit: int | None = None`` routed through this
+    validator), so nothing but this paragraph tells them apart. The failure it
+    prevents is the one this package pays for most often — a caller who asks for
+    everything, silently receives a hundred rows, and gets no signal at all.
 
     CB-161 found three callers — ``bench.query``, ``bench.list_runs`` and
     ``sweep.list_items`` — each interpolating the caller's value into SQL text
