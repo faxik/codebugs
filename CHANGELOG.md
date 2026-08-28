@@ -24,6 +24,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `(limit was 0, so no rows were requested — N finding(s) match)`. Same for `reqs-query` and
   `sweep-next`. A genuinely empty result is unchanged, to the byte (CB-210).
 
+### Fixed
+- **The record of how integrations go no longer counts an interrupted run as a successful one.**
+  `tools/worktree-finish.sh` writes one line per integration attempt into
+  `.worktrees/landing-attempts.log`, and the figure people read off that file — how many attempts
+  one successful integration costs — was flattering us. A run that was stopped, by Ctrl-C or by a
+  `kill`, rather than ending on its own, was written down with exit code `0`, and `0` is the code
+  that means *this one went through*. Every interrupted run was therefore counted as a success:
+  too many successes, too few attempts behind each one. The instrument was at its most wrong
+  exactly when people were most careful, because the prescribed way to run the pre-integration
+  review is to start an integration and stop it by hand. A stopped run now records the code it
+  really ended with — `130` for Ctrl-C, `143` for a `kill` — so the summary command printed inside
+  that script counts it as the failed attempt it was.
+  **Lines already in the file are left exactly as they were.** It is a record of what happened, and
+  rewriting it afterwards would destroy the only evidence that the fault existed at all, so any
+  figure computed over the existing lines still carries the old error and has to be read with that
+  in mind. Two further limits, both measured rather than assumed: a run ended by `kill -9`, by a
+  closed terminal, or by the machine going away is still recorded as a success or not recorded at
+  all, because only the two signals that stops have actually been seen to arrive by are handled;
+  and in the narrow window after the merge has already gone through, while the run is only tidying
+  up, a stop is now recorded as a failure although the work did land — an error in the opposite,
+  safer direction from the one being fixed.
+
 ## [0.2.2] — 2026-08-27
 
 This release is about the tracker telling you the truth about itself, and about a card keeping
