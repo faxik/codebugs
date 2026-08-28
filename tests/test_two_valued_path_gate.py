@@ -103,8 +103,13 @@ capability did the AST get" is a measurement, not a principle, and this unit's
 brief says so explicitly: state what the gate sees and what it does not, rather
 than widen the promise past what was actually built. FORTY distinct evasions
 were swept for this unit and RUN against this predicate rather than judged;
-it catches FIFTEEN. What follows is the twenty-five it does not, by name,
-because an unannounced miss costs more than an announced one.
+it catches FIFTEEN. What follows is what it does NOT catch, named one by one,
+because an unannounced miss costs more than an announced one. How MANY that is
+is a question for the list below rather than for this sentence: a count written
+here rots at the next edit of the list it describes, which is precisely what
+happened to the one that used to stand in this paragraph (CB-238). It is removed
+rather than corrected, for the same reason the two counts this docstring used to
+carry were removed rather than corrected.
 
 * THE SEMANTIC SENTRY, and it is the one standing in `db.py` today. A function
   can answer three-valued perfectly -- `except OSError: return None` -- while
@@ -150,8 +155,8 @@ because an unannounced miss costs more than an announced one.
   query) and is correctly out of scope: `_access_probe` already returns
   `bool | None` via its own `except (OSError, ValueError): return None`, which
   is the three-valued shape already, not a violation of it. Pinned below, so
-  the exclusion is a decision rather than an oversight. Counted among the
-  twenty-five for honesty, though it is a boundary rather than a miss.
+  the exclusion is a decision rather than an oversight. Listed here for
+  honesty, though it is a boundary rather than a miss.
 * THIS GATE'S OWN FILE RESOLUTION, which is not an AST question at all: the
   file is found through `codebugs.db.__file__`, so a probe run against a COPY
   of the tree without entering it silently measures the ORIGINAL checkout.
