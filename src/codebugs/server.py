@@ -110,12 +110,12 @@ def markdown_sections(doc: str) -> str:
 
     WHAT IT EMITS. The header, a blank line, then one `- name: description` per
     argument. A bullet list is the right shape because — unlike an indented code
-    block — a list CAN interrupt a paragraph, which three of this surface's own
-    descriptions already rely on (`reqs_verify`, `staleness_check`,
-    `batch_add` write column-0 bullets under a lead-in line and render fine). The
-    blank line is belt and braces for a renderer stricter than CommonMark about
-    that. Continuation lines are joined into their item rather than emitted as
-    their own lines, so an argument stays ONE bullet under `breaks: true` too.
+    block — a list CAN interrupt a paragraph, which this surface's own
+    descriptions already rely on (`reqs_verify` and `staleness_check` write
+    column-0 bullets under a lead-in line and render fine). The blank line is
+    belt and braces for a renderer stricter than CommonMark about that.
+    Continuation lines are joined into their item rather than emitted as their
+    own lines, so an argument stays ONE bullet under `breaks: true` too.
 
     ONLY MARKUP CHANGES. No word of any description is added, removed or
     reordered, and a section is left byte-identical whenever it is not an item
@@ -413,13 +413,24 @@ def _record(
     holds the lock for 0.84-8.58ms (median 0.84ms on an empty tracker, 6.50ms
     median / 7.49ms p95 / 8.58ms max on a 3000-row one) — so 50ms is roughly a
     sixfold margin over the observed p95. Ordinary concurrency is therefore
-    absorbed without losing a row; only pathological contention (a wedged
-    writer, an abnormally long foreign transaction) trades the lost row for a
-    bounded ~54ms ceiling instead of the old 5-second one. Today's behaviour
-    under that same pathological case is worse on both axes: the client waits
-    the full 5 seconds AND the row is still lost when the wait times out — so
-    this is not a trade against a working case, it is a strict improvement on
-    the one case that was already failing.
+    absorbed without losing a row.
+
+    THIS IS A TRADE, NAMED HERE RATHER THAN ARGUED AWAY (CB-243). Anywhere a
+    foreign writer holds the lock LONGER than the observed p95 — measured,
+    reproducibly, across a band running from roughly 50ms to the old
+    5-second ceiling — this telemetry row is now LOST where it used to be
+    recorded: the old 5000ms budget waited the foreign hold out and wrote
+    the row, and the current 50ms budget gives up first.
+    `tests/manual/probe_cb243_busy_timeout_band.py` reproduces this on a
+    real sqlite file at three points inside that band (200ms, 700ms, 2000ms
+    of foreign hold) and prints a table of which budget lands the row and
+    which loses it; run it to see the trade rather than take this
+    docstring's word for it. It is accepted on purpose, for the sake of a
+    response-time ceiling: an MCP client must not wait seconds for telemetry
+    about the very call it is waiting on, and a bounded ~54ms cost for a
+    dropped row is judged cheaper than an unbounded wait for a kept one.
+    The budget stays 50ms — this paragraph only says out loud what that
+    choice costs.
 
     Rule 2 (no silent swallow, below) is what keeps a shortened timeout
     honest: a row dropped by the 50ms budget still prints to stderr exactly
