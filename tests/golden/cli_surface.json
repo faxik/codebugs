@@ -5492,7 +5492,7 @@
         "default": false,
         "deprecated": false,
         "dest": "archived_only",
-        "help": "Show only archived entries",
+        "help": "Show only archived entries (cannot be combined with --all)",
         "metavar": null,
         "nargs": 0,
         "option_strings": [

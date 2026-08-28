@@ -8,6 +8,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Asking a sweep listing for archived entries two different ways at once is now an error instead
+  of quietly meaning one of them.** `codebugs sweep-list-items <sweep> --all --archived-only` — and
+  the MCP call `codesweep_list_items(include_archived=True, archived_only=True)` behind it — used to
+  return only the archived entries and report success. The two flags ask for opposite things:
+  `--all` means *archived entries in addition to the live ones*, `--archived-only` means *archived
+  entries instead of them*. Given both, the code never even looked at `--all`, so the combination
+  returned **fewer** entries than `--all` on its own would have given, with nothing anywhere saying
+  a flag had been dropped. On a sweep with two live entries and one archived, `--all` gave three
+  rows, `--archived-only` gave one, and the two together gave one — which reads like a filter doing
+  its job.
+  It now refuses, at exit 1, with a message that names both flags, says what each of them asks for,
+  and tells you which one to remove for each of the two things you might have meant. The refusal
+  happens before anything is read, so nothing is listed and nothing is changed.
+  **This will break a caller that relied on the old behaviour, and that is a deliberate trade.**
+  The MCP tool description used to state the suppression outright — "`archived_only`: Show only
+  archived entries (overrides `include_archived`)" — so a client could reasonably have written the
+  pair on purpose. That sentence was an honest record of a defect rather than a contract worth
+  keeping a silently-dropped argument for, and it has been removed along with the behaviour it
+  described. If you were passing both, pass the one you actually wanted. The command-line help
+  never mentioned the suppression at all, and now says the two cannot be combined (CB-217).
+
 - A negative `--limit` is now an error on **every** verb that has one, not just on the three that
   learned it last release. `recent`, `milestone-audit`, `usage`, `anchor-resolve` and
   `anchor-recapture` used to accept `--limit -1` and hand you the whole table at exit 0 — SQLite

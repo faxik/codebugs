@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import sqlite3
 import threading
@@ -989,6 +990,128 @@ class TestListItems:
         sweep.archive_items(conn, sw["sweep_id"], items=["a.py"])
         result = sweep.list_items(conn, sw["sweep_id"], archived_only=True)
         assert {i["item"] for i in result["items"]} == {"a.py"}
+
+
+class TestListItemsArchivedFlagsAreExclusive:
+    """CB-217, the fourth case of the CB-28 family.
+
+    ``if archived_only: ... elif not include_archived: ...`` never reaches the
+    name ``include_archived`` when ``archived_only`` is true, so the pair used
+    to return the archived entries ALONE — strictly FEWER rows than
+    ``include_archived`` alone would have given — behind a success payload.
+
+    The class pins the whole four-row table in ONE test rather than a test per
+    combination, because this repository's own rule is that a check validating
+    elements cannot validate their composition: the defect is precisely that
+    three individually-correct rows sat beside a fourth that contradicted them.
+    """
+
+    @pytest.fixture
+    def populated(self, conn):
+        sw = sweep.create_sweep(conn)
+        ref = sw["sweep_id"]
+        sweep.add_items(conn, ref, ["live1", "live2", "arch1"])
+        sweep.archive_items(conn, ref, items=["arch1"], reason="fixture")
+        return ref
+
+    def test_the_three_legal_combinations_are_unchanged(self, conn, populated):
+        """The counts are the measurement CB-217 was filed on: 2 / 3 / 1.
+
+        Asserted as COUNTS as well as membership, because "the archived entry
+        appeared" cannot tell ``include_archived=True`` (live plus archived)
+        from the old ``archived_only`` collapse (archived alone).
+        """
+        def names(**kw):
+            return [i["item"] for i in sweep.list_items(conn, populated, **kw)["items"]]
+
+        assert names() == ["live1", "live2"]
+        assert names(include_archived=True) == ["live1", "live2", "arch1"]
+        assert names(archived_only=True) == ["arch1"]
+
+    def test_both_flags_true_is_refused(self, conn, populated):
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            sweep.list_items(conn, populated, include_archived=True, archived_only=True)
+
+    def test_both_flags_false_is_not_refused(self, conn, populated):
+        """The forwarding case, and it is the one a false refusal would break.
+
+        Both the MCP wrapper (``surfacegen.build_tool`` calls
+        ``apply_defaults()``) and ``_cmd_sweep_list_items`` pass the PAIR on
+        every single call, so the overwhelmingly common argument shape at the
+        refusal is ``False, False``. A guard keyed on supply rather than on
+        values would refuse every ordinary listing.
+        """
+        got = sweep.list_items(
+            conn, populated, include_archived=False, archived_only=False
+        )
+        assert [i["item"] for i in got["items"]] == ["live1", "live2"]
+
+    def test_the_refusal_happens_before_the_sweep_is_resolved(self, conn):
+        """Placement, pinned behaviourally rather than by reading the source.
+
+        ``_resolve_sweep`` is the first database read, and it raises its own
+        ``ValueError`` for an unknown reference. So a nonexistent sweep
+        discriminates the two placements: refusing on the contradiction means
+        the guard ran first, and "Sweep not found" means it ran second. Both
+        are ``ValueError``, which is why the assertion is on the MESSAGE.
+        """
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            sweep.list_items(
+                conn, "SW-does-not-exist", include_archived=True, archived_only=True
+            )
+
+    def test_the_contradiction_outranks_a_bad_limit(self, conn, populated):
+        """An ordering DECISION, pinned so a change to it has to be deliberate.
+
+        Both guards are pure argument validation and neither reads anything, so
+        either order is defensible; this one is live because the contradiction
+        is decidable from two booleans with no helper call, and because it is
+        the argument the caller most needs explained. A future edit that swaps
+        them turns this red rather than moving the diagnostic silently.
+        """
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            sweep.list_items(
+                conn, populated, include_archived=True, archived_only=True, limit=-1
+            )
+
+    def test_the_refusal_says_what_to_do_and_names_the_typeable_flags(
+        self, conn, populated
+    ):
+        """A refusal with no way out is a wall rather than a diagnostic.
+
+        The two flags can arrive from DIFFERENT layers — a caller's standing
+        setting turning archived entries on while a nearby filter asks for
+        archived ones only — so the person who gets this refusal may have
+        intended no contradiction at all and needs to be told which argument to
+        remove for each of the two possible intents.
+
+        Both CLI spellings are asserted because ``include_archived`` is typed
+        ``--all`` on the command line: a message naming only the domain spelling
+        sends a shell user looking for a ``--include-archived`` that does not
+        exist. ``drop`` is the marker of the escape clause — if it is reworded,
+        reword this assertion deliberately rather than deleting it.
+        """
+        with pytest.raises(ValueError) as excinfo:
+            sweep.list_items(conn, populated, include_archived=True, archived_only=True)
+        msg = str(excinfo.value)
+        for token in ("include_archived", "archived_only", "--all", "--archived-only"):
+            assert token in msg, f"the refusal never names {token!r}"
+        assert "drop" in msg.lower(), "the refusal names no way out"
+
+    def test_the_defaults_that_make_this_form_safe_are_still_false(self):
+        """The premise the whole FORM rests on, not a restatement of it.
+
+        CB-217 refuses on the VALUES rather than on the fact of supply, which is
+        only sound while "not supplied" and "supplied false" agree. If any
+        surface ever defaults one of these flags to true, every caller of the
+        other one starts receiving a refusal it never asked for — a false
+        refusal, which costs more than the defect being fixed. Measured on the
+        domain signature here; the MCP and argparse halves are pinned in
+        ``tests/test_sweep_surface.py``.
+        """
+        params = inspect.signature(sweep.list_items).parameters
+        assert params["include_archived"].default is False
+        assert params["archived_only"].default is False
 
 
 class PausingConnection(sqlite3.Connection):

@@ -825,6 +825,35 @@ def list_items(
     entries (useful for restore workflows). Always-considered-by-recurrence
     semantics are enforced by `add_items`, not here.
 
+    **`include_archived` and `archived_only` are MUTUALLY EXCLUSIVE, and both
+    being true raises `ValueError` (CB-217).** The two ask for opposite
+    listings — *archived IN ADDITION TO live* against *archived INSTEAD OF
+    live* — so no result satisfies both, and CB-28's rule is "forward when a
+    path exists, refuse only when none could". Before this, the routing below
+    reached `archived_only` first and never read `include_archived` at all: a
+    caller asking for archived entries on top of the live ones received the
+    archived ones ALONE — fewer rows than either flag alone would have given,
+    behind a success payload.
+
+    The refusal keys on the VALUES, not on the fact of supply, and that is what
+    makes `None` defaults unnecessary here (they were needed for CB-197's
+    refusal on `mark_items`). Both flags default to `False` on all three
+    surfaces — domain signature, MCP declaration, argparse `store_true` — so
+    two trues can only come from a caller that wrote them, even though
+    `surfacegen.build_tool`'s `apply_defaults()` and `_cmd_sweep_list_items`
+    both forward the pair on EVERY call. Measured on all three before this was
+    written; a surface that ever defaults one of them to true would turn this
+    into a false refusal and the form would have to change.
+
+    The message names both spellings of each flag, domain and CLI, because
+    `include_archived` is typed `--all` on the command line: a diagnostic that
+    tells a shell user to drop an argument they cannot find is a wall rather
+    than a way out.
+
+    The refusal is raised BEFORE anything is read — before `_resolve_sweep`
+    touches the database — because it is decidable from two booleans, and a
+    refusal must cost no work.
+
     `limit` is `None` for no limit, or a non-negative integer; `0` means zero
     entries, which is what it ALREADY meant here — this site was the one of
     CB-161's three that behaved correctly on zero, because its guard was already
@@ -832,6 +861,17 @@ def list_items(
     interpolated behind an `int()` cast, and a negative value is refused rather
     than silently read by SQLite as no limit at all.
     """
+    if include_archived and archived_only:
+        raise ValueError(
+            "include_archived and archived_only are mutually exclusive, and both "
+            "were given as true. include_archived (CLI: --all) asks for archived "
+            "entries IN ADDITION TO live ones; archived_only (CLI: --archived-only) "
+            "asks for archived entries INSTEAD OF live ones. No listing is both. "
+            "Drop archived_only/--archived-only to list live entries together with "
+            "archived ones; drop include_archived/--all to list archived entries "
+            "alone."
+        )
+
     limit = require_row_limit("limit", limit)
     sweep_id = _resolve_sweep(conn, sweep_ref)
 

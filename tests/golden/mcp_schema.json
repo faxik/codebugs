@@ -1396,7 +1396,7 @@
     "name": "codesweep_list"
   },
   {
-    "description": "List items in a sweep with optional filters.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- state: Filter to a specific state\n- tag: Filter to items having this tag\n- include_archived: Include archived entries alongside live ones\n- archived_only: Show only archived entries (overrides include_archived)\n- limit: Max number of entries to return. 0 means NO entries; omit it for no limit. A negative value is an error (it used to mean \"no limit\").\n",
+    "description": "List items in a sweep with optional filters.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- state: Filter to a specific state\n- tag: Filter to items having this tag\n- include_archived: Include archived entries alongside live ones\n- archived_only: Show only archived entries. Mutually exclusive with include_archived: passing both as true is an error (it used to mean archived-only, returning FEWER entries than include_archived alone).\n- limit: Max number of entries to return. 0 means NO entries; omit it for no limit. A negative value is an error (it used to mean \"no limit\").\n",
     "inputSchema": {
       "properties": {
         "archived_only": {
