@@ -8,6 +8,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **A row limit you actually type is now honoured when you also ask for findings or requirements by
+  id.** `codebugs query --id CB-150 --limit 0` used to print the card; `--id CB-150,CB-152 --limit 1`
+  printed both. The same held for `reqs-query`, and for the MCP tools `query` and `reqs_query`
+  behind them. The cause was a rule inside both query functions that raised any limit smaller than
+  the number of ids up to that number, so the id list silently outranked the caller. It was never
+  only about zero: **every** explicit limit below the id count was overridden, and the answer came
+  back shaped like a success for a request that had not been performed.
+  The convenience that rule existed for is kept, on the only case that needs it: **omit the limit
+  and a lookup by id still returns every id you named**, however many there are. What changed is
+  that naming a limit and naming an id list are no longer in competition — the number you typed
+  wins. Under the hood "no limit was named" is now a distinct state (`limit=None`) rather than being
+  indistinguishable from asking for a hundred, which is what made the old behaviour unfixable in
+  place; `limit` on both MCP tools therefore accepts `null` and defaults to it, and the help text on
+  both `--limit` flags no longer carries the "unless `--id` is given" exception.
+  **This changes results for a caller that relied on the old behaviour** — one passing a small limit
+  beside a long id list and expecting the whole list back. Such a caller should drop the limit
+  rather than raise it: the derived page size still widens to fit the ids.
+
 - **Asking a sweep listing for archived entries two different ways at once is now an error instead
   of quietly meaning one of them.** `codebugs sweep-list-items <sweep> --all --archived-only` — and
   the MCP call `codesweep_list_items(include_archived=True, archived_only=True)` behind it — used to
