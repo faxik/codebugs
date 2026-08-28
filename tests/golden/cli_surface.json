@@ -3144,7 +3144,7 @@
         "default": null,
         "deprecated": false,
         "dest": "limit",
-        "help": "Max results (0 for none unless --id/--ids is given; negative is an error)",
+        "help": "Max results (default 100; 0 for none, even with --id; negative is an error)",
         "metavar": null,
         "nargs": null,
         "option_strings": [
@@ -4196,7 +4196,7 @@
         "default": null,
         "deprecated": false,
         "dest": "limit",
-        "help": "Max results (0 for none unless --id/--ids is given; negative is an error)",
+        "help": "Max results (default 100; 0 for none, even with --id; negative is an error)",
         "metavar": null,
         "nargs": null,
         "option_strings": [

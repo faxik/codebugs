@@ -14,7 +14,7 @@ import threading
 import pytest
 
 from codebugs import db, reqs
-from codebugs.types import utc_now
+from codebugs.types import DEFAULT_ROW_LIMIT, utc_now
 
 
 class RecordingConnection(sqlite3.Connection):
@@ -1310,9 +1310,14 @@ class TestQueryRequirementsRowLimit:
             reqs.query_requirements(conn, limit=-1)
 
     def test_a_negative_limit_is_refused_even_when_ids_are_given(self, conn):
-        """Same composition trap as on findings: the `ids` branch widens the
-        limit to `len(ids)`, so a validator below it would be a gate that cannot
-        fire for exactly the calls carrying an id list."""
+        """Twin of the findings case, including why its REASON changed (CB-158).
+
+        This used to pin a composition trap: the `ids` branch widened the limit
+        to `len(ids)`, so a validator below it was a gate that could not fire for
+        exactly the calls carrying an id list. That widening is gone, so the
+        ordering now buys the plainer property CB-82 asks for — the argument is
+        refused before any work is done — and the assertion is unchanged.
+        """
         self._three(conn)
         with pytest.raises(ValueError, match="must not be negative"):
             reqs.query_requirements(conn, ids=["FR-0"], limit=-1)
@@ -1327,13 +1332,28 @@ class TestQueryRequirementsRowLimit:
         self._three(conn)
         assert len(reqs.query_requirements(conn, limit=2)["requirements"]) == 2
 
-    def test_zero_does_NOT_mean_zero_when_ids_are_given(self, conn):
-        """PIN of the same surprise as on findings, and of the surface sentence
-        that now carries it: the `ids` widening raises `limit=0` to `len(ids)`."""
+    def test_zero_means_zero_rows_even_when_ids_are_given(self, conn):
+        """CB-158, twin of the findings pin, and it REPLACES its own opposite.
+
+        Its predecessor asserted `len(requirements) == 2` for `limit=0` and was
+        named `..._does_NOT_mean_zero_...`: a pin of a surprise, written to keep
+        the help text and the code in agreement without asking whether the
+        behaviour was right. It was not — the caller named a page size and got
+        more rows than it asked for.
+        """
         self._three(conn)
         result = reqs.query_requirements(conn, ids=["FR-0", "FR-1"], limit=0)
+        assert result["requirements"] == []
+        assert result["limit"] == 0
+        one = reqs.query_requirements(conn, ids=["FR-0", "FR-1"], limit=1)
+        assert len(one["requirements"]) == 1
+
+    def test_an_unnamed_limit_still_widens_to_fit_the_id_list(self, conn):
+        """The half of the widening worth keeping — twin of the findings pin."""
+        self._three(conn)
+        result = reqs.query_requirements(conn, ids=["FR-0", "FR-1"])
         assert len(result["requirements"]) == 2
-        assert result["limit"] == 2
+        assert reqs.query_requirements(conn)["limit"] == DEFAULT_ROW_LIMIT
 
     def test_the_deferred_shortcircuit_refuses_a_negative_limit_too(self, conn):
         """Twin of the findings case: the `deferred` branch returns before

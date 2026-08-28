@@ -14,7 +14,7 @@ import threading
 
 import pytest
 
-from codebugs import db, findings
+from codebugs import db, findings, types
 from codebugs.types import (
     FINDING_STATUSES,
     FINDING_TERMINAL,
@@ -1036,12 +1036,27 @@ class TestQueryFindings:
         result = findings.query_findings(conn, id="")
         assert result["total"] == 4
 
-    def test_query_ids_batch_exceeding_default_limit_returns_all(self, conn):
-        # Default limit=100; with 4 IDs the bump is a no-op, but verify the contract.
+    def test_query_ids_batch_returns_every_id_when_no_limit_is_named(self, conn):
+        """CB-158 INVERTED THE HALF OF THIS TEST THAT USED AN EXPLICIT LIMIT.
+
+        It read `query_findings(ids=all_ids, limit=2)` and asserted FOUR rows
+        came back, under a comment saying "with 4 IDs the bump is a no-op" — which
+        was not what it exercised: passing 2 made the bump the whole point, and
+        the assertion was that an explicit limit LOSES to the id count. That is
+        the defect, so the explicit call now asserts the limit is honoured.
+
+        The property the test was NAMED for — a batch by id is not truncated —
+        is real and is kept, on the call that actually expresses it: one that
+        names no page size. That is the only branch on which a page size is
+        derived now, and it still widens to fit the id list.
+        """
         all_ids = [f"CB-{n}" for n in range(1, 5)]
-        result = findings.query_findings(conn, ids=all_ids, limit=2)
-        assert result["total"] == 4
-        assert len(result["findings"]) == 4
+        unnamed = findings.query_findings(conn, ids=all_ids)
+        assert unnamed["total"] == 4
+        assert len(unnamed["findings"]) == 4
+        named = findings.query_findings(conn, ids=all_ids, limit=2)
+        assert named["total"] == 4, "the count still reports the whole match"
+        assert len(named["findings"]) == 2, "and the page is the size that was asked for"
 
 
 class TestSeverityOrdering:
@@ -4136,15 +4151,21 @@ class TestQueryFindingsRowLimit:
             findings.query_findings(conn, limit=-1)
 
     def test_a_negative_limit_is_refused_even_when_ids_are_given(self, conn):
-        """THE COMPOSITION, and the reason the call sits at the top of the body.
+        """One argument, ONE verdict, whether or not an id list is present.
 
-        `query_findings` widens the limit to `len(ids)` inside `if ids:`, so a
-        validator placed after that widening would never see a negative value on
-        any call carrying an id list — one argument with two verdicts, decided by
-        an unrelated parameter. Measured before the fix: the MCP call
-        `query(ids=["CB-196"], limit=-1)` came back reporting `limit: 1`, because
-        the widening had already rewritten it. Moving the call below the widening
-        turns this test red while the bare test above stays green.
+        THE REASON THIS TEST EXISTS HAS CHANGED, and saying so matters more than
+        the assertion, which is unmoved. It used to pin a COMPOSITION: `if ids:`
+        widened the limit to `len(ids)`, so a validator placed below it could
+        never see a negative value on a call carrying ids — one argument with two
+        verdicts, decided by an unrelated parameter. Measured then: the MCP call
+        `query(ids=["CB-196"], limit=-1)` came back reporting `limit: 1`.
+
+        CB-158 removed that widening, so the ordering no longer decides whether
+        `-1` is SEEN. What it still decides is whether it is seen BEFORE work
+        begins (CB-82), and the assertion below is now a plain statement about
+        the argument rather than a probe of an interaction. It is kept because
+        the interaction it guarded is exactly the kind that comes back: a future
+        derivation placed above the guard would hand it a value nobody checked.
         """
         self._three(conn)
         got = findings.query_findings(conn, limit=100)["findings"]
@@ -4166,22 +4187,51 @@ class TestQueryFindingsRowLimit:
         self._three(conn)
         assert len(findings.query_findings(conn, limit=2)["findings"]) == 2
 
-    def test_zero_does_NOT_mean_zero_when_ids_are_given(self, conn):
-        """PIN of a SURPRISE, and of the sentence the surface now carries.
+    def test_zero_means_zero_rows_even_when_ids_are_given(self, conn):
+        """CB-158. This test REPLACES one that pinned the opposite, deliberately.
 
-        The `ids` widening raises the limit to `len(ids)`, so `limit=0` returns
-        the whole id list rather than nothing. Adversarial review caught this
-        against CB-196's FIRST draft of the help text, which promised a flat
-        "0 means NO results" — true on the bare path and false here, a promise
-        the change itself introduced. The text now carries the exception, and
-        this test is what keeps the two in agreement.
+        Its predecessor was called `test_zero_does_NOT_mean_zero_when_ids_are_given`
+        and it asserted `len(findings) == len(ids)` — a PIN OF A SURPRISE, written
+        when CB-196's help text was corrected to promise the exception rather than
+        the rule. That was the honest move at the time: the text and the code were
+        made to agree, and the disagreement was the only thing then on the table.
+
+        What was never asked is whether the behaviour itself was right, and it was
+        not. A caller that names a page size and receives more rows than it asked
+        for got a success-shaped answer to a request that was not performed —
+        CB-124's defect one layer further in, and reachable from both surfaces on
+        both entities. So the surprise is gone rather than documented, and this
+        test now pins the rule the text always wanted to state.
         """
         self._three(conn)
         got = findings.query_findings(conn, limit=100)["findings"]
         ids = [f["id"] for f in got]
+        assert len(ids) >= 2, "the fixture must supply enough ids to truncate"
         result = findings.query_findings(conn, ids=ids, limit=0)
+        assert result["findings"] == []
+        assert result["limit"] == 0
+        # The whole class, not only zero: ANY explicit limit below the id count
+        # used to be raised, so a one-row page came back full.
+        one = findings.query_findings(conn, ids=ids, limit=1)
+        assert len(one["findings"]) == 1
+        assert one["limit"] == 1
+
+    def test_an_unnamed_limit_still_widens_to_fit_the_id_list(self, conn):
+        """The half of the old widening that was worth keeping (CB-158).
+
+        A batch lookup by id that names NO page size must return every id it
+        asked for — that is what the widening was built for, and removing it
+        outright would have traded a silent over-return for a silent truncation.
+        `None` is what makes "named nothing" distinguishable from "named a
+        hundred"; before this it was not a legal value here at all and reached
+        SQLite as a bound NULL.
+        """
+        self._three(conn)
+        ids = [f["id"] for f in findings.query_findings(conn, limit=100)["findings"]]
+        result = findings.query_findings(conn, ids=ids)
         assert len(result["findings"]) == len(ids)
-        assert result["limit"] == len(ids)
+        # And with no ids to widen it to, the bare default still applies.
+        assert findings.query_findings(conn)["limit"] == types.DEFAULT_ROW_LIMIT
 
     def test_the_deferred_shortcircuit_refuses_a_negative_limit_too(self, conn):
         """The `deferred` pseudo-status RETURNS before `query_findings` is
