@@ -407,7 +407,35 @@ def resolve_row_limit(limit: int | None, ids: Sequence[str] | None) -> int:
 
 
 def require_row_limit(label: str, value: object) -> int | None:
-    """Accept ``None`` (no limit) or a NON-NEGATIVE integer row limit, else ``ValueError``.
+    """Accept ``None`` or a NON-NEGATIVE integer row limit, else ``ValueError``.
+
+    **WHAT ``None`` MEANS IS THE CALLER'S TO DECIDE, AND THREE CALLERS DECIDE IT
+    DIFFERENTLY.** This line used to read "``None`` (no limit)" without
+    qualification, and that reading was already only one of the three in the
+    tree — CB-158 made it the minority, which is why the parenthesis is gone
+    rather than merely amended. This function refuses a value; it does not say
+    what an absent one means, and a reader who took the old parenthesis as the
+    package-wide contract would have been wrong at more sites than right:
+
+    * **UNBOUNDED** — ``findings.similarity_candidates``,
+      ``grouping_candidates`` and ``anchor_candidates`` omit the ``LIMIT``
+      clause entirely, so ``None`` really is the whole population. These are
+      candidate POOLS, assembled in full or not at all.
+    * **A DEFAULT, DERIVED** — ``findings.query_findings`` and
+      ``reqs.query_requirements``, via ``resolve_row_limit`` above: ``None``
+      means *no page size was named*, and one is derived (CB-158). These are
+      paged query SURFACES, and ``None`` is emphatically NOT how you ask for
+      everything there; read ``total`` and pass it, as the CSV export does.
+    * **SOMEBODY ELSE'S DEFAULT** — ``sweep.next_batch`` falls back to that
+      sweep's own stored ``default_batch_size``.
+
+    All three are right for their own callers, and unifying them would mean
+    renegotiating three contracts rather than documenting one divergence. The
+    danger is the SYMMETRY a reader assumes, not any single site: the three
+    spellings are identical (``limit: int | None = None`` routed through this
+    validator), so nothing but this paragraph tells them apart. The failure it
+    prevents is the one this package pays for most often — a caller who asks for
+    everything, silently receives a hundred rows, and gets no signal at all.
 
     CB-161 found three callers — ``bench.query``, ``bench.list_runs`` and
     ``sweep.list_items`` — each interpolating the caller's value into SQL text

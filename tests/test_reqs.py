@@ -1355,6 +1355,7 @@ class TestQueryRequirementsRowLimit:
         assert len(result["requirements"]) == 2
         assert reqs.query_requirements(conn)["limit"] == DEFAULT_ROW_LIMIT
 
+
     def test_the_deferred_shortcircuit_refuses_a_negative_limit_too(self, conn):
         """Twin of the findings case: the `deferred` branch returns before
         `query_requirements` runs, so it needed the guard of its own."""
@@ -1399,3 +1400,46 @@ class TestQueryRequirementsRowLimit:
         assert "Traceback" not in out.err
         assert len(out.err.strip().splitlines()) == 1
         assert "must not be negative" in out.err
+
+
+class TestTheThreeBranchesOfTheLimitContract:
+    """Twin of the findings class of the same name — CB-158's contract is the
+    COMPOSITION of three branches, pinned on a population LARGER than the
+    default page, which is the only fixture that can tell them apart.
+
+    On the three-row fixture every other test here uses, "the default page is a
+    hundred" and "there is no page at all" are indistinguishable. The regression
+    this refuses is `None` quietly coming to mean UNBOUNDED, which would be
+    worse than the defect CB-158 fixed: it hands the whole table to a caller who
+    asked for nothing in particular.
+    """
+
+    _POPULATION = DEFAULT_ROW_LIMIT + 5
+
+    @staticmethod
+    def _many(conn) -> list[str]:
+        ids = []
+        for i in range(TestTheThreeBranchesOfTheLimitContract._POPULATION):
+            req_id = f"FR-{i:04d}"
+            reqs.add_requirement(conn, req_id=req_id, description=f"requirement {i}")
+            ids.append(req_id)
+        return ids
+
+    def test_branch_1_no_limit_and_no_ids_takes_the_default_page(self, conn):
+        self._many(conn)
+        result = reqs.query_requirements(conn)
+        assert result["total"] == self._POPULATION
+        assert len(result["requirements"]) == DEFAULT_ROW_LIMIT
+        assert len(result["requirements"]) < self._POPULATION, "unbounded would fail here"
+
+    def test_branch_2_no_limit_with_an_id_list_widens_past_the_default(self, conn):
+        ids = self._many(conn)
+        assert len(ids) > DEFAULT_ROW_LIMIT, "premise: the list must exceed the default"
+        result = reqs.query_requirements(conn, ids=ids)
+        assert len(result["requirements"]) == self._POPULATION
+        assert result["limit"] == self._POPULATION
+
+    def test_branch_3_a_named_limit_wins_over_both(self, conn):
+        ids = self._many(conn)
+        assert len(reqs.query_requirements(conn, ids=ids, limit=5)["requirements"]) == 5
+        assert reqs.query_requirements(conn, ids=ids, limit=0)["requirements"] == []

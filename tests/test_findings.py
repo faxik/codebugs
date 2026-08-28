@@ -4233,6 +4233,7 @@ class TestQueryFindingsRowLimit:
         # And with no ids to widen it to, the bare default still applies.
         assert findings.query_findings(conn)["limit"] == types.DEFAULT_ROW_LIMIT
 
+
     def test_the_deferred_shortcircuit_refuses_a_negative_limit_too(self, conn):
         """The `deferred` pseudo-status RETURNS before `query_findings` is
         called, so the domain guard cannot see that path: with no deferred rows
@@ -4282,3 +4283,76 @@ class TestQueryFindingsRowLimit:
         assert "Traceback" not in out.err
         assert len(out.err.strip().splitlines()) == 1
         assert "must not be negative" in out.err
+
+
+class TestTheThreeBranchesOfTheLimitContract:
+    """CB-158's contract is the COMPOSITION of three branches, so all three are
+    pinned here together — and on a population LARGER than the default, which is
+    the only shape that can tell them apart.
+
+    THE FIXTURE SIZE IS THE WHOLE POINT. Every other test of this rule in this
+    file runs on three rows, where "the default page is a hundred" and "there is
+    no page at all" produce identical output — three rows either way. A pin
+    written on that fixture cannot see the one regression this class exists to
+    refuse: `None` quietly coming to mean UNBOUNDED. `_POPULATION` is therefore
+    above `DEFAULT_ROW_LIMIT`, and the bare call must come back SHORT of it.
+
+    That regression is worth naming because it is the natural next mistake and
+    it is worse than the defect CB-158 fixed. CB-158 was about a caller getting
+    MORE rows than it asked for; an unbounded default would hand back the entire
+    tracker to a caller that asked for nothing in particular, and the cost lands
+    in the caller's memory rather than in the honesty of the answer. The three
+    branches, in one place, are the contract:
+
+      1. no limit named, no id list  -> the default page, and no more;
+      2. no limit named, an id list  -> widened to fit the list, however long;
+      3. a limit named               -> exactly that, whatever else is true.
+    """
+
+    _POPULATION = types.DEFAULT_ROW_LIMIT + 5
+
+    @staticmethod
+    def _many(conn) -> list[str]:
+        ids = []
+        for i in range(TestTheThreeBranchesOfTheLimitContract._POPULATION):
+            row = findings.add_finding(
+                conn,
+                severity="low",
+                category="paging",
+                file=f"src/mod_{i}.py",
+                description=f"finding number {i} with a body distinct enough to not deduplicate",
+                new_category=(i == 0),
+            )
+            ids.append(row["id"])
+        return ids
+
+    def test_branch_1_no_limit_and_no_ids_takes_the_default_page(self, conn):
+        """The anti-unbounded pin. Discriminating ONLY because the tracker holds
+        more rows than the default — on a three-row fixture this assertion is
+        satisfied by an unbounded query too."""
+        self._many(conn)
+        result = findings.query_findings(conn)
+        assert result["total"] == self._POPULATION, "the count reports the whole match"
+        assert len(result["findings"]) == types.DEFAULT_ROW_LIMIT
+        assert len(result["findings"]) < self._POPULATION, "an unbounded default would fail here"
+        assert result["limit"] == types.DEFAULT_ROW_LIMIT
+
+    def test_branch_2_no_limit_with_an_id_list_widens_past_the_default(self, conn):
+        """The half of the old widening CB-158 kept, on a list that actually
+        exceeds the default — below it the branch is indistinguishable from
+        branch 1."""
+        ids = self._many(conn)
+        assert len(ids) > types.DEFAULT_ROW_LIMIT, "premise: the list must exceed the default"
+        result = findings.query_findings(conn, ids=ids)
+        assert len(result["findings"]) == self._POPULATION
+        assert result["limit"] == self._POPULATION
+
+    def test_branch_3_a_named_limit_wins_over_both(self, conn):
+        """The defect itself, at three sizes: below the id count, at zero, and
+        above the default. The id list changes none of them."""
+        ids = self._many(conn)
+        assert len(findings.query_findings(conn, ids=ids, limit=5)["findings"]) == 5
+        assert findings.query_findings(conn, ids=ids, limit=0)["findings"] == []
+        wide = findings.query_findings(conn, ids=ids, limit=self._POPULATION + 50)
+        assert len(wide["findings"]) == self._POPULATION, "a limit above the population truncates nothing"
+        assert wide["limit"] == self._POPULATION + 50, "and the echo reports what was asked"
