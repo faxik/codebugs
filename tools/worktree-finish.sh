@@ -96,8 +96,12 @@ set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"
 #     — measured on bash 5.3.9 — so an operator's Ctrl-C is recorded. Until
 #     CB-237 it was recorded as `rc=0`, i.e. as a LANDING; the two signal
 #     traps armed below are what make that line carry 130 or 143 instead.)
-#   * SIGHUP and SIGQUIT reach this trap too, and are still recorded as
-#     `rc=0`. Deliberately, and the note beside those traps says why.
+#   * SIGHUP reaches this trap too and is still recorded as `rc=0`, so a
+#     closed session still reads as a landing. Deliberately, and the note
+#     beside those traps says why. SIGQUIT is a different case and was
+#     measured rather than assumed alongside it: bash IGNORES it, so what
+#     dies is the FOREGROUND child, and the line then carries that child's
+#     own 131 through `set -e`.
 #   * an `exit` inside a `( … )` subshell: bash resets traps there. No such
 #     exit exists in this script today; the two subshells are `uv run` gates
 #     whose status is read by `if !`, and they return rather than exit.
@@ -199,10 +203,19 @@ trap _journal_record EXIT
 # GROUP. Ctrl-C and an ordinary supervisor `kill` both signal the group, which
 # is why this is a note rather than a defect.
 #
-# SIGHUP AND SIGQUIT ARE DELIBERATELY NOT TRAPPED. The same one-line form works
-# on them — measured, `trap 'exit 129' HUP` records 129 — but no stop observed
-# in this clone has arrived that way, and trapping on evidence nobody has is how
-# a list grows past what anyone checked. SIGKILL cannot be trapped at all.
+# SIGHUP IS DELIBERATELY LEFT ALONE, AND SIGQUIT TURNED OUT TO BE A DIFFERENT
+# ANIMAL — which is why both were measured instead of being lumped together in
+# one sentence, as the first draft of this comment did. SIGHUP behaves exactly
+# like the two above: untrapped it writes `rc=0`, and the same one-line form
+# would fix it (measured, `trap 'exit 129' HUP` records 129). It is left out
+# because no stop observed in this clone has arrived that way, and trapping on
+# evidence nobody has is how a list grows past what anyone checked. SIGQUIT
+# needs no trap and would not be helped by one: bash IGNORES it, so the signal
+# kills the FOREGROUND child, and `set -e` carries that child's own 131 into the
+# line — measured, twice. Where the child's failure is already handled, by an
+# `if !` gate, the run does not stop at all; that is a different defect and not
+# this one. SIGKILL cannot be trapped, and it loses the line rather than
+# falsifying it: measured, zero rows, which is an undercount of ATTEMPTS.
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
