@@ -869,9 +869,22 @@ class TestArchivedFlagDefaultsStayFalseOnEverySurface:
     true default, every caller of the OTHER flag starts receiving a refusal it
     never asked for — a false refusal, which costs more than the defect did.
 
-    The domain signature is pinned beside the behaviour in
-    `tests/test_sweep.py::TestListItemsArchivedFlagsAreExclusive`; these are the
-    two surfaces that sit outside that file.
+    ONLY the MCP declaration is asserted here, and the other two surfaces are
+    NAMED rather than re-asserted, because they were already held before this
+    card: the domain signature by
+    `tests/test_sweep.py::TestListItemsArchivedFlagsAreExclusive`, and the CLI
+    by `TestGeneratedCliSurface.test_the_cli_contract_matches_the_built_parser`
+    above — whose literal `CLI_CONTRACT` table carries `False` in the default
+    column for both `all` and `archived_only`, read off the BUILT parser's
+    Action objects, which is exactly the "an argparse `default=` overrode
+    `store_true`" failure a new test here would have been claiming to cover.
+    A second assertion of a pinned fact is one more place to edit and, worse,
+    reads as closing a gap that is not open.
+
+    Nothing generic walks the `SURFACE` declaration table itself asserting
+    declared boolean defaults, which is why this half is a real addition rather
+    than a third copy: the wire golden is downstream of it, so a declaration
+    changed together with a regenerated golden would move both in step.
     """
 
     FLAGS = ("include_archived", "archived_only")
@@ -885,20 +898,6 @@ class TestArchivedFlagDefaultsStayFalseOnEverySurface:
         }
         for flag in self.FLAGS:
             assert declared[flag]["default"] is False, flag
-
-    def test_the_parsed_namespace_defaults_both_flags_to_false(self, tmp_path):
-        """Read off a PARSED namespace, not off the declaration table.
-
-        `--all` is the CLI spelling of `include_archived`, so asserting on the
-        declaration would check the same object twice and miss an argparse
-        `default=` that overrode `store_true`'s own.
-        """
-        from codebugs.cli import build_parser
-
-        parser, _sub, _commands = build_parser()
-        args = parser.parse_args(["sweep-list-items", "SW-1"])
-        assert args.all is False
-        assert args.archived_only is False
 
 
 class TestModeSweep:
