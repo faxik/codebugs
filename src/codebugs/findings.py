@@ -2789,6 +2789,8 @@ def similarity_candidates(
     an observation's own category, "" included) passes ``categories=("",)`` and
     gets an exact match instead of the whole table (Codex diff review).
     """
+    limit = require_row_limit("limit", limit)
+
     conditions: list[str] = []
     params: list[Any] = []
     if is_text_filter_active(category):
@@ -2842,6 +2844,8 @@ def grouping_candidates(
     FILTERS (blank means "no filter"), ``categories``/``statuses`` are explicit
     tuples for callers that know their population.
     """
+    limit = require_row_limit("limit", limit)
+
     conditions: list[str] = []
     params: list[Any] = []
     if is_text_filter_active(category):
@@ -2905,6 +2909,8 @@ def anchor_candidates(
     id: an accessor reports what is there, and the KeyError contract belongs to
     ``get_finding``.
     """
+    limit = require_row_limit("limit", limit)
+
     conditions: list[str] = []
     params: list[Any] = []
     if is_text_filter_active(finding_id):
@@ -3646,6 +3652,7 @@ def recent_findings(
     Raises ``ValueError`` on a ``since`` that is not a date, and on a ``status``
     outside the finding vocabulary. ``status=None``/``""`` means every status.
     """
+    limit = require_row_limit("limit", limit)
     since_value = _validate_since(since)
 
     conditions = ["updated_at >= ?"]
@@ -4982,7 +4989,10 @@ def register_tools(mcp, conn_factory) -> None:
                     wont_fix, stale). Aliases accepted. Omit for every status.
                     The `deferred` pseudo-status of `query` is NOT accepted here
                     and is refused rather than ignored — use `query` for it.
-            limit: Max results (default 100)
+            limit: Max results (default 100). 0 means NO results. A negative
+                      value is an error (it used to mean "no limit"). The
+                      neighbouring `query` tool answers the same argument the
+                      same way.
             offset: Pagination offset
         """
         with conn_factory() as conn:
@@ -5366,7 +5376,26 @@ def register_cli(sub, commands) -> None:
         else:
             findings = result["findings"]
             if not findings:
-                print("(no findings match)")
+                # CB-210: an empty page has TWO causes and one of them is the
+                # caller's own request. `(no findings match)` is a statement
+                # about the CORPUS, and over a full tracker asked for zero rows
+                # it is simply false — the MCP surface of this same verb has
+                # always answered honestly, because it returns `total`.
+                #
+                # The replacement is deliberately NARROW: it fires only when the
+                # caller asked for zero rows AND something actually matched, so
+                # a genuinely empty result keeps its byte-identical text. That
+                # second half is not decoration — with `--ids` naming rows that
+                # do not exist, `query_findings` raises the limit to fit the id
+                # list, so the emptiness is the corpus's doing and not the
+                # limit's, and `total` is 0 there.
+                if args.limit == 0 and result.get("total", 0) > 0:
+                    print(
+                        f"(limit was 0, so no rows were requested — "
+                        f"{result['total']} finding(s) match)"
+                    )
+                else:
+                    print("(no findings match)")
                 return
             data = [
                 {
@@ -6009,7 +6038,11 @@ def register_cli(sub, commands) -> None:
         help="Lower bound on updated_at, INCLUSIVE: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ",
     )
     p.add_argument("--status", help="Filter by status (aliases accepted); omit for every status")
-    p.add_argument("--limit", type=int, help="Max results (default 100)")
+    p.add_argument(
+        "--limit",
+        type=int,
+        help="Max results (default 100; 0 for none, negative is an error)",
+    )
 
     p = sub.add_parser("get", help="Fetch a single finding by ID")
     p.add_argument("id", help="Finding ID (e.g. CB-1383)")

@@ -9,7 +9,7 @@ from typing import Any
 
 from codebugs import db
 from codebugs.milestones import reconcile
-from codebugs.types import is_vocabulary_filter_active, utc_now
+from codebugs.types import is_vocabulary_filter_active, require_row_limit, utc_now
 
 from codebugs.milestones._schema import (
     ITEM_SIZES,
@@ -459,6 +459,8 @@ def query_audit(
     limit: int = 200,
 ) -> list[dict[str, Any]]:
     """Filtered audit log query."""
+    limit = require_row_limit("limit", limit)
+
     conditions: list[str] = []
     params: list[Any] = []
     if milestone_id:

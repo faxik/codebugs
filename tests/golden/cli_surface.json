@@ -306,7 +306,7 @@
         "default": 10000,
         "deprecated": false,
         "dest": "limit",
-        "help": null,
+        "help": "max findings examined (default 10000; 0 for none, negative is an error)",
         "metavar": null,
         "nargs": null,
         "option_strings": [
@@ -502,7 +502,7 @@
         "default": 10000,
         "deprecated": false,
         "dest": "limit",
-        "help": null,
+        "help": "max findings examined (default 10000; 0 for none, negative is an error)",
         "metavar": null,
         "nargs": null,
         "option_strings": [
@@ -2663,7 +2663,7 @@
         "default": null,
         "deprecated": false,
         "dest": "limit",
-        "help": "Row limit (default 200)",
+        "help": "Row limit (default 200; 0 for none, negative is an error)",
         "metavar": null,
         "nargs": null,
         "option_strings": [
@@ -3260,7 +3260,7 @@
         "default": null,
         "deprecated": false,
         "dest": "limit",
-        "help": "Max results (default 100)",
+        "help": "Max results (default 100; 0 for none, negative is an error)",
         "metavar": null,
         "nargs": null,
         "option_strings": [
@@ -5971,7 +5971,7 @@
         "default": null,
         "deprecated": false,
         "dest": "limit",
-        "help": "Show at most this many tools",
+        "help": "Show at most this many tools (0 for none, negative is an error)",
         "metavar": null,
         "nargs": null,
         "option_strings": [

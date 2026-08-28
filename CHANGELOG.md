@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- A negative `--limit` is now an error on **every** verb that has one, not just on the three that
+  learned it last release. `recent`, `milestone-audit`, `usage`, `anchor-resolve` and
+  `anchor-recapture` used to accept `--limit -1` and hand you the whole table at exit 0 — SQLite
+  reads a negative limit as *no limit* — so `codebugs query --limit -1` refused while
+  `codebugs recent --since … --limit -1` printed everything, two neighbouring verbs over one table
+  answering the same argument the opposite way. All of them now refuse with the same one-line
+  message and exit 1. Zero still means zero rows, and omitting the flag still takes each verb's own
+  default, so nothing that worked before stops working (CB-208).
+- Each of those verbs' `--help` and MCP tool description now states the contract it enforces,
+  rather than leaving the reader to discover the refusal by hitting it.
+- An empty page no longer claims the tracker is empty when you were the one who asked for nothing.
+  `codebugs query --limit 0` over a full tracker used to print `(no findings match)` — a statement
+  about the corpus, where the true statement was about the request — and now prints
+  `(limit was 0, so no rows were requested — N finding(s) match)`. Same for `reqs-query` and
+  `sweep-next`. A genuinely empty result is unchanged, to the byte (CB-210).
+
 ## [0.2.2] — 2026-08-27
 
 This release is about the tracker telling you the truth about itself, and about a card keeping

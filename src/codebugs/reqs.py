@@ -1045,7 +1045,17 @@ def register_cli(sub, commands) -> None:
         else:
             items = result["requirements"]
             if not items:
-                print("(no requirements match)")
+                # CB-210, same narrow rule as `findings._cmd_query`: say the
+                # true thing about the REQUEST only when the request is what
+                # emptied the page, and leave a genuinely empty result's text
+                # byte-identical.
+                if args.limit == 0 and result.get("total", 0) > 0:
+                    print(
+                        f"(limit was 0, so no rows were requested — "
+                        f"{result['total']} requirement(s) match)"
+                    )
+                else:
+                    print("(no requirements match)")
                 return
             data = [
                 {

@@ -999,7 +999,19 @@ def _cmd_sweep_next(args: argparse.Namespace) -> None:
         with domain_errors():
             result = next_batch(conn, args.sweep, limit=args.limit, tags=_parse_tags(args))
             if not result["items"]:
-                print("(no unprocessed items)")
+                # CB-210, same narrow rule as `findings._cmd_query`. Here the
+                # corpus number is `remaining` rather than `total`: it is what
+                # the non-empty branch already prints, and it is what makes
+                # "there is nothing left" distinguishable from "you asked for
+                # nothing". `args.limit` is passed to `next_batch` raw, so an
+                # absent flag is None and only an explicit 0 reaches this.
+                if args.limit == 0 and result.get("remaining", 0) > 0:
+                    print(
+                        f"(limit was 0, so no items were requested — "
+                        f"{result['remaining']} remaining)"
+                    )
+                else:
+                    print("(no unprocessed items)")
                 return
             data = [
                 {
