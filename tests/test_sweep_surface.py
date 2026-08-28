@@ -539,7 +539,7 @@ CLI_CONTRACT = {
                 0,
                 "_StoreTrueAction",
                 False,
-                "Show only archived entries",
+                "Show only archived entries (cannot be combined with --all)",
             ),
             ("limit", ["--limit"], None, "_StoreAction", None, "Max entries to return"),
         ],
@@ -808,6 +808,42 @@ class TestHandlerBodiesRunWithTheirNamesResolved:
         assert "mutually exclusive" in err
         assert "Traceback" not in err
 
+    def test_sweep_list_items_with_all_and_archived_only_refuses_at_exit_one(
+        self, monkeypatch, capsys, tmp_path
+    ):
+        """CB-217's twin of the test above, and the reasoning is the same one.
+
+        `--all` and `--archived-only` ask for opposite listings, so like
+        `sweep-mark`'s pair this is routed to the DOMAIN refusal rather than to
+        an argparse mutually-exclusive group: one rule in `list_items` decides
+        for the library, MCP and CLI callers alike, where a parser group would
+        refuse at exit 2 here and leave the other two surfaces ungoverned.
+
+        The message assertion names `--all`, which is the half a shell user
+        cannot derive: the domain spelling is `include_archived`, so a refusal
+        that named only that would send them looking for a flag that does not
+        exist.
+        """
+        db.init_project(str(tmp_path))
+        run = lambda argv: self._run(monkeypatch, capsys, tmp_path, argv)  # noqa: E731
+        run(["sweep-create", "--name", "x"])
+        run(["sweep-add", "x", "a", "b"])
+        run(["sweep-archive-items", "x", "b", "--reason", "stale"])
+
+        # The two flags alone still work, ON THIS SWEEP, so the refusal below
+        # cannot be a listing that was broken for some other reason.
+        assert "b" in run(["sweep-list-items", "x", "--all"])
+        assert "b" in run(["sweep-list-items", "x", "--archived-only"])
+
+        with pytest.raises(SystemExit) as excinfo:
+            self._run(monkeypatch, capsys, tmp_path,
+                      ["sweep-list-items", "x", "--all", "--archived-only"])
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "mutually exclusive" in err
+        assert "--all" in err and "--archived-only" in err
+        assert "Traceback" not in err
+
     def test_a_domain_refusal_still_exits_one_through_the_handler(
         self, monkeypatch, capsys, tmp_path
     ):
@@ -818,6 +854,51 @@ class TestHandlerBodiesRunWithTheirNamesResolved:
             self._run(monkeypatch, capsys, tmp_path, ["sweep-status", "NOPE"])
         assert excinfo.value.code == 1
         assert "NOPE" in capsys.readouterr().err
+
+
+class TestArchivedFlagDefaultsStayFalseOnEverySurface:
+    """The premise CB-217's refusal FORM rests on, held where it can break.
+
+    `list_items` refuses on the VALUES of its two archived flags rather than on
+    the fact that they were supplied — which is what let CB-217 be fixed without
+    the `None` defaults and `store_true` rewiring CB-197 needed on `mark_items`.
+    That is sound only while "not supplied" and "supplied false" agree, and both
+    surfaces forward the PAIR on every single call: `surfacegen.build_tool`
+    applies declared defaults, and `_cmd_sweep_list_items` passes `args.all` and
+    `args.archived_only` unconditionally. So the day either surface declares a
+    true default, every caller of the OTHER flag starts receiving a refusal it
+    never asked for — a false refusal, which costs more than the defect did.
+
+    The domain signature is pinned beside the behaviour in
+    `tests/test_sweep.py::TestListItemsArchivedFlagsAreExclusive`; these are the
+    two surfaces that sit outside that file.
+    """
+
+    FLAGS = ("include_archived", "archived_only")
+
+    def test_the_mcp_declaration_defaults_both_flags_to_false(self):
+        declared = {
+            p["name"]: p
+            for entry in SURFACE
+            if (m := entry.get("mcp")) and m["name"] == "codesweep_list_items"
+            for p in m["params"]
+        }
+        for flag in self.FLAGS:
+            assert declared[flag]["default"] is False, flag
+
+    def test_the_parsed_namespace_defaults_both_flags_to_false(self, tmp_path):
+        """Read off a PARSED namespace, not off the declaration table.
+
+        `--all` is the CLI spelling of `include_archived`, so asserting on the
+        declaration would check the same object twice and miss an argparse
+        `default=` that overrode `store_true`'s own.
+        """
+        from codebugs.cli import build_parser
+
+        parser, _sub, _commands = build_parser()
+        args = parser.parse_args(["sweep-list-items", "SW-1"])
+        assert args.all is False
+        assert args.archived_only is False
 
 
 class TestModeSweep:
