@@ -47,7 +47,7 @@ to the VERB'S OWN NAME in `codebugs --help` (`sub.add_parser("blockers-add",
 help="...")`) is not one of those actions: argparse stores it on a
 `_ChoicesPseudoAction` that lives on the PARENT parser's `sub._choices_actions`
 list, one per verb, keyed by `.dest` (measured equal to the verb name for
-every one of the 67 verbs here). Before this, removing or rewording a verb's
+every verb of this surface). Before this, removing or rewording a verb's
 own `help=` changed nothing this snapshot could see — CB-146's own motivating
 case, reopened as CB-152 because the snapshot it produced covered the
 argument level and missed this one.

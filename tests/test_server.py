@@ -885,9 +885,11 @@ class TestMarkdownSections:
     def test_prose_that_merely_ends_in_a_colon_is_not_a_section(self):
         """`reqs_import`, `reqs_verify` and `staleness_check` open blocks with a
         sentence ending in a colon. Those are prose lead-ins whose bodies sit at
-        column 0, and three of them are ALREADY followed by column-0 bullets —
-        which is independent evidence that a list is the right emission form,
-        since a list, unlike an indented code block, may interrupt a paragraph."""
+        column 0, but NOT ALL of them are already followed by column-0 bullets:
+        `reqs_verify` and `staleness_check` are, `reqs_import` is not. Where a
+        description already does it, that is independent evidence that a list
+        is the right emission form, since a list, unlike an indented code
+        block, may interrupt a paragraph."""
         doc = "T.\n\nRuns automated checks:\n- tests: do the files exist?\n"
         assert server.markdown_sections(doc) == doc
 
