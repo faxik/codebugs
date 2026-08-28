@@ -96,12 +96,12 @@ set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"
 #     — measured on bash 5.3.9 — so an operator's Ctrl-C is recorded. Until
 #     CB-237 it was recorded as `rc=0`, i.e. as a LANDING; the two signal
 #     traps armed below are what make that line carry 130 or 143 instead.)
-#   * SIGHUP reaches this trap too and is still recorded as `rc=0`, so a
-#     closed session still reads as a landing. Deliberately, and the note
-#     beside those traps says why. SIGQUIT is a different case and was
-#     measured rather than assumed alongside it: bash IGNORES it, so what
-#     dies is the FOREGROUND child, and the line then carries that child's
-#     own 131 through `set -e`.
+#   * SIGHUP and SIGPIPE reach this trap too and are still recorded as
+#     `rc=0`, so a closed session and a dead reader on stdout both still
+#     read as a landing. Deliberately, and the note beside those traps says
+#     why. SIGQUIT is a different case and was measured rather than assumed
+#     alongside them: bash IGNORES it, so what dies is the FOREGROUND child,
+#     and the line then carries that child's own 131 through `set -e`.
 #   * an `exit` inside a `( … )` subshell: bash resets traps there. No such
 #     exit exists in this script today; the two subshells are `uv run` gates
 #     whose status is read by `if !`, and they return rather than exit.
@@ -216,8 +216,8 @@ trap _journal_record EXIT
 # at two is scope, not evidence — this change was authorised for SIGINT and
 # SIGTERM, the widening is one line per signal, and it belongs to whoever owns
 # that decision rather than riding in unremarked on a fix for something else.
-# SIGQUIT
-# needs no trap and would not be helped by one: bash IGNORES it, so the signal
+#
+# SIGQUIT needs no trap and would not be helped by one: bash IGNORES it, so it
 # kills the FOREGROUND child, and `set -e` carries that child's own 131 into the
 # line — measured, twice. Where the child's failure is already handled, by an
 # `if !` gate, the run does not stop at all; that is a different defect and not
