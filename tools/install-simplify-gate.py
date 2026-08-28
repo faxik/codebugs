@@ -138,11 +138,31 @@ def _file_state(path):
     return STATE_ABSENT
 
 
+def _state_priority(state):
+    """Порядок, в котором ответ по одному файлу побеждает ответ по другому.
+
+    Он ЕСТЬ КОД, а не проза над функцией, и это сознательно: перечень
+    приоритетов, записанный словами и продублированный ручной бухгалтерией из
+    двух флагов, — ровно тот «второй самодельный порядок», который в этом
+    репозитории уже расходился с первым (`rank_case_sql` / `severity_rank`).
+    Пятое состояние, если оно когда-нибудь появится, добавляется здесь одной
+    строкой и нигде больше.
+    """
+    if state == STATE_PRESENT:
+        return 0
+    if state.startswith(STATE_UNREADABLE_PREFIX):
+        return 1
+    if state == STATE_ABSENT:
+        return 2
+    return 3  # STATE_NO_SETTINGS
+
+
 def gate_state(root):
     """ЕСТЬ / нет / нет настроек / не смог прочитать (причина).
 
     Складывает ответы по двум файлам (`settings.json` и `settings.local.json`),
-    и порядок сложения — решение, а не удобство:
+    беря наивысший по `_state_priority`, и этот порядок — решение, а не
+    удобство:
 
     * `ЕСТЬ` побеждает всё: вставка, лежащая в ЛЮБОМ из двух файлов, — это
       подключённая вставка, потому что оба читает сам Claude Code. Это
@@ -150,20 +170,12 @@ def gate_state(root):
     * «не смог прочитать» побеждает «нет» и «нет настроек»: отсутствие, которое
       не удалось установить, не имеет права выглядеть установленным.
     * «нет настроек» — только когда ОБА файла отсутствуют по ENOENT.
+
+    `min` возвращает ПЕРВЫЙ из равных, поэтому при двух нечитаемых файлах
+    причина называется по `settings.json` — тот же выбор, что делала прежняя
+    форма, и он важен только тем, что определён.
     """
-    seen_absent = False
-    unreadable = None
-    for p in _settings_paths(root):
-        st = _file_state(p)
-        if st == STATE_PRESENT:
-            return STATE_PRESENT
-        if st == STATE_ABSENT:
-            seen_absent = True
-        elif st.startswith(STATE_UNREADABLE_PREFIX) and unreadable is None:
-            unreadable = st
-    if unreadable is not None:
-        return unreadable
-    return STATE_ABSENT if seen_absent else STATE_NO_SETTINGS
+    return min((_file_state(p) for p in _settings_paths(root)), key=_state_priority)
 
 
 def audit():

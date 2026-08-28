@@ -60,30 +60,19 @@ def isg() -> types.ModuleType:
     return _load()
 
 
-class _Root:
-    """A project root under `tmp_path`, plus one helper that writes a settings file.
+def write_settings(project: pathlib.Path, name: str, data) -> pathlib.Path:
+    """Put one settings file into a project root; `data` is JSON, or raw text verbatim.
 
-    A wrapper rather than a `pathlib.Path` carrying an extra attribute:
-    `PurePath` uses `__slots__`, so attaching a helper to it raises. `__str__`
-    and `__truediv__` are what the tests actually use.
+    A free function rather than a method on the fixture: the fixture then hands
+    back a plain `pathlib.Path`, so `str(root)` and `root / "tools"` are the
+    real thing instead of two delegating wrappers a reader has to check.
     """
-
-    def __init__(self, path: pathlib.Path) -> None:
-        self.path = path
-
-    def __str__(self) -> str:
-        return str(self.path)
-
-    def __truediv__(self, other: str) -> pathlib.Path:
-        return self.path / other
-
-    def write(self, name: str, data) -> pathlib.Path:
-        target = self.path / ".claude" / name
-        target.write_text(
-            data if isinstance(data, str) else json.dumps(data, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        return target
+    target = project / ".claude" / name
+    target.write_text(
+        data if isinstance(data, str) else json.dumps(data, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return target
 
 
 @pytest.fixture
@@ -96,7 +85,7 @@ def root(tmp_path: pathlib.Path):
     """
     project = tmp_path / "project"
     (project / ".claude").mkdir(parents=True)
-    yield _Root(project)
+    yield project
     for p in sorted(project.rglob("*"), reverse=True):
         try:
             os.chmod(p, stat.S_IRWXU)
@@ -132,12 +121,13 @@ class TestGateStateRecognisesTheStructureInstallWrites:
     """
 
     def test_the_entry_install_writes_is_recognised(self, isg, root) -> None:
-        root.write("settings.json", {"hooks": {"PreToolUse": [_entry(isg)]}})
+        write_settings(root, "settings.json", {"hooks": {"PreToolUse": [_entry(isg)]}})
         assert isg.gate_state(str(root)) == isg.STATE_PRESENT
 
     def test_the_entry_is_recognised_beside_other_pretooluse_entries(self, isg, root) -> None:
         """A real settings file has other hooks; the search is a scan, not a peek at [0]."""
-        root.write(
+        write_settings(
+            root,
             "settings.json",
             {"hooks": {"PreToolUse": [_entry(isg, matcher="Write"), _entry(isg)]}},
         )
@@ -150,7 +140,7 @@ class TestGateStateRecognisesTheStructureInstallWrites:
         because it is the one that must keep answering `ЕСТЬ`: a structural
         check that refused it would have traded one wrong answer for another.
         """
-        root.write("settings.local.json", {"hooks": {"PreToolUse": [_entry(isg)]}})
+        write_settings(root, "settings.local.json", {"hooks": {"PreToolUse": [_entry(isg)]}})
         assert isg.gate_state(str(root)) == isg.STATE_PRESENT
 
     # --- the ways a file can MENTION the hook without connecting it -------
@@ -162,14 +152,16 @@ class TestGateStateRecognisesTheStructureInstallWrites:
         thing for a settings file to carry, and it says nothing about whether
         the PreToolUse insert is installed.
         """
-        root.write(
+        write_settings(
+            root,
             "settings.json",
             {"permissions": {"allow": [f"Bash({isg.HOOK}:*)"]}},
         )
         assert isg.gate_state(str(root)) == isg.STATE_ABSENT
 
     def test_a_mention_in_a_comment_string_is_not_a_connection(self, isg, root) -> None:
-        root.write(
+        write_settings(
+            root,
             "settings.json",
             {"_comment": "simplify-traced-gate — подключить, когда дойдут руки"},
         )
@@ -177,7 +169,9 @@ class TestGateStateRecognisesTheStructureInstallWrites:
 
     def test_a_pretooluse_entry_with_another_matcher_is_not_a_connection(self, isg, root) -> None:
         """The gate exists to intercept Bash; on `Write` it can never see a finish."""
-        root.write("settings.json", {"hooks": {"PreToolUse": [_entry(isg, matcher="Write")]}})
+        write_settings(
+            root, "settings.json", {"hooks": {"PreToolUse": [_entry(isg, matcher="Write")]}}
+        )
         assert isg.gate_state(str(root)) == isg.STATE_ABSENT
 
     def test_the_right_matcher_pointing_at_another_script_is_not_a_connection(
@@ -189,7 +183,8 @@ class TestGateStateRecognisesTheStructureInstallWrites:
         matcher is `Bash`, the entry is well formed, and the hook's name even
         appears in `statusMessage`. What runs is a different script.
         """
-        root.write(
+        write_settings(
+            root,
             "settings.json",
             {
                 "hooks": {
@@ -212,7 +207,7 @@ class TestGateStateRecognisesTheStructureInstallWrites:
 
     def test_the_entry_under_posttooluse_is_not_a_connection(self, isg, root) -> None:
         """A hook that runs AFTER the command cannot advise stopping before it."""
-        root.write("settings.json", {"hooks": {"PostToolUse": [_entry(isg)]}})
+        write_settings(root, "settings.json", {"hooks": {"PostToolUse": [_entry(isg)]}})
         assert isg.gate_state(str(root)) == isg.STATE_ABSENT
 
     @pytest.mark.parametrize(
@@ -236,7 +231,7 @@ class TestGateStateRecognisesTheStructureInstallWrites:
         `нет` and not the undetermined value: the file was read and parsed, so
         the question WAS answered — what is there simply is not the insert.
         """
-        root.write("settings.json", malformed)
+        write_settings(root, "settings.json", malformed)
         assert isg.gate_state(str(root)) == isg.STATE_ABSENT
 
 
@@ -256,13 +251,13 @@ class TestGateStateSeparatesCouldNotLookFromNotConnected:
         assert isg.gate_state(str(root)) == isg.STATE_NO_SETTINGS
 
     def test_a_file_that_is_not_json_is_undetermined(self, isg, root) -> None:
-        root.write("settings.json", "{ это не JSON")
+        write_settings(root, "settings.json", "{ это не JSON")
         state = isg.gate_state(str(root))
         assert state.startswith(isg.STATE_UNREADABLE_PREFIX), state
         assert "settings.json" in state, "the fourth value must name what it could not read"
 
     def test_an_unreadable_settings_file_is_undetermined(self, isg, root) -> None:
-        path = root.write("settings.json", {"hooks": {"PreToolUse": [_entry(isg)]}})
+        path = write_settings(root, "settings.json", {"hooks": {"PreToolUse": [_entry(isg)]}})
         os.chmod(path, 0o000)
         if os.access(path, os.R_OK):
             pytest.skip("running as a user that ignores the read bit")
@@ -275,7 +270,7 @@ class TestGateStateSeparatesCouldNotLookFromNotConnected:
         read as absent, and the project was reported as having no settings at
         all — a confident statement about a directory nobody could enter.
         """
-        root.write("settings.json", {"hooks": {"PreToolUse": [_entry(isg)]}})
+        write_settings(root, "settings.json", {"hooks": {"PreToolUse": [_entry(isg)]}})
         os.chmod(root / ".claude", 0o000)
         if os.access(root / ".claude", os.X_OK):
             pytest.skip("running as a user that ignores the execute bit")
@@ -294,8 +289,8 @@ class TestGateStateSeparatesCouldNotLookFromNotConnected:
         answers, which is the fail-closed half: an absence nobody could
         establish must not be reported as established.
         """
-        root.write("settings.json", "{ сломано")
-        root.write("settings.local.json", {"hooks": {"PreToolUse": [_entry(isg)]}})
+        write_settings(root, "settings.json", "{ сломано")
+        write_settings(root, "settings.local.json", {"hooks": {"PreToolUse": [_entry(isg)]}})
         assert isg.gate_state(str(root)) == isg.STATE_PRESENT
 
 
@@ -314,7 +309,7 @@ class TestAuditPromisesOnlyWhatItDoes:
         usage = next(ln for ln in isg.__doc__.splitlines() if "install-simplify-gate.py  " in ln)
         assert "всех проектов" not in usage, usage
         assert "харнес" in usage, usage
-        assert '~/w/*/tools/worktree-finish.sh' in source, (
+        assert "~/w/*/tools/worktree-finish.sh" in source, (
             "the promise was narrowed to a sweep this file no longer performs"
         )
 
@@ -327,7 +322,7 @@ class TestAuditPromisesOnlyWhatItDoes:
         the two lists: roots that are genuinely unconnected get the `--apply`
         line, roots nobody could look at get named and nothing else.
         """
-        root.write("settings.json", "{ сломано")
+        write_settings(root, "settings.json", "{ сломано")
         monkeypatch.setattr(isg.glob, "glob", lambda _pattern: [str(root / "tools" / "x.sh")])
         isg.audit()
         out = capsys.readouterr().out
@@ -361,9 +356,7 @@ class TestTheInstallerIsTheSourceOfItsOwnPredicate:
         `нет` would go red too — this is the cheap, legible one.
         """
         source = INSTALLER.read_text(encoding="utf-8")
-        code = "\n".join(
-            ln for ln in source.splitlines() if not ln.lstrip().startswith("#")
-        )
+        code = "\n".join(ln for ln in source.splitlines() if not ln.lstrip().startswith("#"))
         assert "json.dumps(json.load(" not in code, (
             "gate_state is serialising the whole settings file again"
         )
