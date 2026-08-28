@@ -159,7 +159,9 @@ Args:
     state: Filter to a specific state
     tag: Filter to items having this tag
     include_archived: Include archived entries alongside live ones
-    archived_only: Show only archived entries (overrides include_archived)
+    archived_only: Show only archived entries. Mutually exclusive with
+        include_archived: passing both as true is an error (it used to mean
+        archived-only, returning FEWER entries than include_archived alone).
     limit: Max number of entries to return. 0 means NO entries; omit it for
         no limit. A negative value is an error (it used to mean "no limit").
 """
@@ -383,7 +385,7 @@ SURFACE = [
                 dict(
                     flags=["--archived-only"],
                     action="store_true",
-                    help="Show only archived entries",
+                    help="Show only archived entries (cannot be combined with --all)",
                 ),
                 dict(flags=["--limit"], type=int, help="Max entries to return"),
             ],
