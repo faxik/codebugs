@@ -19,7 +19,6 @@ from pydantic import Field
 from codebugs import db, entities
 from codebugs.types import (
     is_sql_identifier,
-    DEFAULT_ROW_LIMIT,
     ENTITY_FINDING,
     FINDING_ID_PREFIX,
     SEVERITIES,
@@ -29,6 +28,7 @@ from codebugs.types import (
     rank_case_sql,
     require_row_limit,
     resolve_finding_status,
+    resolve_row_limit,
     resolve_severity,
     severity_rank,
     utc_now,
@@ -3402,13 +3402,13 @@ def query_findings(
     # it still decides whether it is seen BEFORE work begins, and the derivation
     # two lines down must never receive a value nobody validated.
     limit = require_row_limit("limit", limit)
-    # CB-158. `None` is the only spelling of "the caller named no page size",
-    # and it is the ONLY branch on which a page size is derived. An id list
-    # raises the derived default so a batch lookup returns every id it named;
-    # it can no longer raise an explicit limit, and `limit=0` therefore means
-    # zero rows here exactly as it does on the bare path.
-    if limit is None:
-        limit = max(DEFAULT_ROW_LIMIT, len(ids)) if ids else DEFAULT_ROW_LIMIT
+    # CB-158, and the rule itself lives in `types.resolve_row_limit` rather than
+    # here: `reqs.query_requirements` needs the identical derivation, and one
+    # rule written in two entities is one edit from the two answering
+    # differently — the pairing with `require_row_limit` above is deliberate,
+    # that one says which values are legal and this one says what an absent
+    # value means.
+    limit = resolve_row_limit(limit, ids)
 
     conditions: list[str] = []
     params: list[Any] = []
@@ -4948,11 +4948,12 @@ def register_tools(mcp, conn_factory) -> None:
                         # `limit` is now `None` when the caller named none, and
                         # this arm returns without reaching `query_findings`, so
                         # echoing the argument would report `null` where every
-                        # other path reports the page size that was applied. The
-                        # id list is empty on this branch by construction, so
-                        # the derivation the domain would run has nothing to
-                        # widen and lands on the plain default.
-                        "limit": DEFAULT_ROW_LIMIT if limit is None else limit,
+                        # other path reports the page size that was applied.
+                        # It runs the SAME derivation the domain would, called
+                        # with the empty id list this branch has by
+                        # construction — spelling the collapsed answer out by
+                        # hand would be a third copy of the rule.
+                        "limit": resolve_row_limit(limit, None),
                         "offset": offset,
                         "findings": [],
                     }

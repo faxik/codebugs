@@ -10,12 +10,12 @@ from typing import Any
 
 from codebugs import db, entities
 from codebugs.types import (
-    DEFAULT_ROW_LIMIT,
     ENTITY_REQUIREMENT,
     is_vocabulary_filter_active,
     require_row_limit,
     resolve_priority,
     resolve_requirement_status,
+    resolve_row_limit,
     utc_now,
     validate_batch_payload,
 )
@@ -344,9 +344,10 @@ def query_requirements(
     # ARGUMENT before anything is derived from it or written (CB-82), so a
     # refusal costs no partial work.
     limit = require_row_limit("limit", limit)
-    # CB-158, the twin of the findings site. `None` is the only "not supplied".
-    if limit is None:
-        limit = max(DEFAULT_ROW_LIMIT, len(ids)) if ids else DEFAULT_ROW_LIMIT
+    # CB-158, the twin of the findings site — and it is the SAME function
+    # rather than the same two lines, so the two entities cannot drift apart on
+    # what "no page size was named" means.
+    limit = resolve_row_limit(limit, ids)
 
     conditions: list[str] = []
     params: list[Any] = []
@@ -894,7 +895,7 @@ def register_tools(mcp, conn_factory):
                     # report `null` where every other path reports what applied.
                     return {
                         "grouped": False, "total": 0,
-                        "limit": DEFAULT_ROW_LIMIT if limit is None else limit,
+                        "limit": resolve_row_limit(limit, None),
                         "offset": offset, "requirements": [],
                     }
                 id, ids, status = None, deferred_ids, None

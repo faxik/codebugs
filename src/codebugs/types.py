@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import operator
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
@@ -371,6 +371,39 @@ def validate_batch_payload(value: object, *, label: str) -> list[Any]:
 #: be DISTINGUISHABLE from "the caller asked for a hundred" — that distinction is
 #: exactly what CB-158 was missing, and a plain integer default cannot carry it.
 DEFAULT_ROW_LIMIT = 100
+
+
+def resolve_row_limit(limit: int | None, ids: Sequence[str] | None) -> int:
+    """The page size a query should use: the caller's, or a derived one (CB-158).
+
+    ONE SENTENCE, AND IT IS THE WHOLE RULE: a limit the caller NAMED is returned
+    untouched, and a limit is derived only when none was named. `None` is the
+    only spelling of "named none" — which is why `query_findings` and
+    `query_requirements` take `int | None` rather than defaulting to a number,
+    since `limit=100` and "no opinion" have to be different values for this
+    function to be able to tell them apart.
+
+    THE DERIVED SIZE WIDENS TO FIT AN ID LIST, and that is the half of the old
+    behaviour worth keeping: a batch lookup that names ids and no page size must
+    return every id it asked for. What CB-158 removed is the *other* half, where
+    the id list also outranked a limit the caller had typed — so
+    `query(ids=[a, b], limit=1)` returned two rows and `limit=0` returned two
+    rather than none, a success-shaped answer to a request nobody performed.
+
+    IT LIVES HERE FOR THE REASON `require_row_limit` DOES, and the two are a
+    pair: that one says which values are legal, this one says what an absent
+    value means, and both are called in that order at every site. Written twice
+    — once in `findings.py`, once in `reqs.py` — it would be one edit away from
+    the two entities answering the same question differently, which is this
+    package's most-repeated defect (`is_sql_identifier`, `severity_rank` and
+    `rank_case_sql` are all the only copy of their rule for the same reason).
+
+    `ids` is read only for its LENGTH and an empty list is not an id filter,
+    matching the convention every query here follows.
+    """
+    if limit is not None:
+        return limit
+    return max(DEFAULT_ROW_LIMIT, len(ids)) if ids else DEFAULT_ROW_LIMIT
 
 
 def require_row_limit(label: str, value: object) -> int | None:
