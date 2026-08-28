@@ -93,7 +93,15 @@ set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"
 #   * anything failing ABOVE this point: sourcing tools/_guards.sh, resolving
 #     REPO_ROOT, or the argument loop itself. The trap does not exist yet.
 #   * SIGKILL, which no trap can catch. (SIGINT and SIGTERM DO reach this trap
-#     — measured on bash 5.3.9 — so an operator's Ctrl-C is recorded.)
+#     — measured on bash 5.3.9 — so an operator's Ctrl-C is recorded. Until
+#     CB-237 it was recorded as `rc=0`, i.e. as a LANDING; the two signal
+#     traps armed below are what make that line carry 130 or 143 instead.)
+#   * SIGHUP and SIGPIPE reach this trap too and are still recorded as
+#     `rc=0`, so a closed session and a dead reader on stdout both still
+#     read as a landing. Deliberately, and the note beside those traps says
+#     why. SIGQUIT is a different case and was measured rather than assumed
+#     alongside them: bash IGNORES it, so what dies is the FOREGROUND child,
+#     and the line then carries that child's own 131 through `set -e`.
 #   * an `exit` inside a `( … )` subshell: bash resets traps there. No such
 #     exit exists in this script today; the two subshells are `uv run` gates
 #     whose status is read by `if !`, and they return rather than exit.
@@ -136,6 +144,87 @@ _journal_record() {
     return 0
 }
 trap _journal_record EXIT
+
+# THE TWO SIGNAL TRAPS, AND WHY EACH IS A BARE `exit` (CB-237). They are armed
+# HERE, beside the EXIT trap and not one line earlier, because their only job
+# is to give that trap a status worth reading.
+#
+# THE DEFECT THEY CLOSE. An EXIT trap fired by an asynchronous signal reads the
+# `$?` of the last command that COMPLETED, not the status the shell is about to
+# leave with. So a finish stopped by SIGINT or SIGTERM wrote `rc=0` — which the
+# reader above counts as A LANDING. Measured on bash 5.3.9: with no signal trap
+# the process really does end at 143 while its line says `0`. The error is in
+# the FLATTERING direction — landings overcounted, attempts-per-landing
+# understated — and it grew out of our own discipline, because the sanctioned
+# way to run /simplify-traced before a finish is to start the finish and stop it
+# by hand. One such line is already in this clone's journal.
+#
+# `exit N` IS THE ENTIRE MECHANISM. `exit 143` inside the handler sets the
+# shell's exit status, and the EXIT trap then reads exactly that as its own
+# `$?`. Nothing is passed as an argument and `_journal_record` is not touched.
+#
+# A WRITE IN THE HANDLER WOULD BE WRONG, and that is measured rather than
+# feared: `trap '_journal_record 143; exit 143' TERM` beside a live EXIT trap
+# appends TWO lines, both `rc=143` — the handler writes, then the exit trap
+# writes again. That form trades overcounted landings for overcounted ATTEMPTS.
+#
+# AN ALARM, NOT A GATE. Nothing is refused, no guard is added, and the status a
+# CALLER sees does not move: a shell reports 128+N for a child killed by signal
+# N, which is the same 130 or 143 the shell now exits with.
+#
+# ONE COST, MEASURED, BECAUSE IT IS REAL. The process now EXITS with that status
+# instead of being KILLED by the signal, and a parent that inspects WIFSIGNALED
+# can tell those apart. Concretely: `for …; do tools/worktree-finish.sh …; done`
+# interrupted by a SIGINT to the group used to abort the whole loop and now runs
+# its remaining iterations (measured, both ways). No such loop exists here, and
+# an interactive Ctrl-C is unaffected because the operator's own shell is in the
+# signalled group and receives it directly.
+#
+# WHERE THIS REACHES, AND WHERE IT DOES NOT. The post-merge alarm below REPLACES
+# this EXIT trap with its own — bash has exactly one, and a second really does
+# erase the first (measured here, not quoted from that comment) — so the answer
+# differs by phase, and all three were measured:
+#   * BEFORE the merge — every guard, the whole [6/7] suite, and the wait on the
+#     integration lock: the line now carries 130 or 143 instead of 0. This is
+#     the phase a stop actually happens in.
+#   * AFTER the merge while the alarm's verdict is still `unreadable`: the alarm
+#     speaks and records 15 by explicit argument, unchanged by these traps and
+#     already documented as a landing whose premise is unconfirmed.
+#   * AFTER the merge once the verdict is clean: the alarm hands the journal its
+#     `$?`, so the line carries 143 for a run whose MERGE ALREADY LANDED, and
+#     the reader counts that as a failure. That is an UNDERCOUNT of landings —
+#     the opposite, safer direction from the defect being fixed, and the same
+#     allowance the `15` rows already need.
+#
+# DELIVERY IS PART OF THE CLAIM. bash defers a trap until the current FOREGROUND
+# command returns, so a signal sent to the shell ALONE while `flock -w 60 9` or
+# pytest is running is not acted on until that child finishes — measured at
+# 19.65s against a 20s sleep, versus 0.00s when the signal goes to the process
+# GROUP. Ctrl-C and an ordinary supervisor `kill` both signal the group, which
+# is why this is a note rather than a defect.
+#
+# SIGHUP IS DELIBERATELY LEFT ALONE, AND SIGQUIT TURNED OUT TO BE A DIFFERENT
+# ANIMAL — which is why both were measured instead of being lumped together in
+# one sentence, as the first draft of this comment did. SIGHUP behaves exactly
+# like the two above: untrapped it writes `rc=0`, and the same one-line form
+# would fix it (measured, `trap 'exit 129' HUP` records 129). SIGPIPE is a third
+# of the same kind, also measured at `rc=0`. Neither is trapped here, and the
+# honest version of that decision names the argument AGAINST it rather than only
+# the one for it: a dropped session really is a plausible way for a long finish
+# to die, and an instrument that only records the failures somebody already
+# thought of is worth less than one that records them all. What holds the line
+# at two is scope, not evidence — this change was authorised for SIGINT and
+# SIGTERM, the widening is one line per signal, and it belongs to whoever owns
+# that decision rather than riding in unremarked on a fix for something else.
+#
+# SIGQUIT needs no trap and would not be helped by one: bash IGNORES it, so it
+# kills the FOREGROUND child, and `set -e` carries that child's own 131 into the
+# line — measured, twice. Where the child's failure is already handled, by an
+# `if !` gate, the run does not stop at all; that is a different defect and not
+# this one. SIGKILL cannot be trapped, and it loses the line rather than
+# falsifying it: measured, zero rows, which is an undercount of ATTEMPTS.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # The worktrees an operator could have meant, for the two refusals that offer a
 # list. SHARED because it was DUPLICATED, and the duplicate is how CB-231 stayed

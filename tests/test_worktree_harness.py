@@ -13,10 +13,13 @@ guard that fired for the wrong reason.
 
 from __future__ import annotations
 
+import fcntl
 import os
 import re
 import shutil
+import signal
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -5603,10 +5606,29 @@ class TestPostMergeAlarmIsNotAGate:
         # AT ALL. That is precisely the state the count existed to refuse, and
         # it was green. An arming is a line that STARTS with `trap `, so that
         # is what is collected here.
+        # THE LIST GREW AGAIN, FOR THE SECOND TIME AND BY THE SAME SHAPE OF
+        # CHANGE (CB-237). It is written down here for the reason the CB-176
+        # note above gives: this is an edit to a guard, made by the very change
+        # that guard obstructed, so the case belongs on the page.
+        #
+        # CB-237 arms two SIGNAL traps beside the journal's EXIT trap, because
+        # an EXIT trap fired by an asynchronous signal reads the `$?` of the
+        # last completed command and therefore recorded a stopped finish as
+        # `rc=0` — a LANDING. This assertion collects every line that STARTS
+        # with `trap `, deliberately: narrowing it to EXIT armings would have
+        # been the cheap way to keep it green, and it would have stopped seeing
+        # a hostile `trap evil TERM` at the same time. So the expected list is
+        # extended instead, which makes this test ALSO the pin that the two
+        # signal traps exist and sit between the journal's arming and the
+        # alarm's — the placement CB-237 depends on and the one an edit could
+        # silently undo.
         armings = [ln.strip() for ln in src.splitlines() if ln.strip().startswith("trap ")]
-        assert armings == ["trap _journal_record EXIT", "trap _alarm_speak EXIT"], (
-            f"the EXIT traps must be exactly the journal's, then the alarm's: {armings}"
-        )
+        assert armings == [
+            "trap _journal_record EXIT",
+            "trap 'exit 130' INT",
+            "trap 'exit 143' TERM",
+            "trap _alarm_speak EXIT",
+        ], f"the armed traps must be exactly these four, in this order: {armings}"
         # The journal's half of the ordering: armed before the FIRST guard, or
         # every pre-merge refusal goes unrecorded — silently, and in the
         # flattering direction. Anchored on the guard-invocation idiom rather
@@ -5918,6 +5940,162 @@ class TestLandingAttemptJournal:
             log.chmod(0o644)
         assert log.read_text() == "", "the write was not actually refused"
 
+    # ---- CB-237: a run STOPPED by a signal -------------------------------
+
+    def _finish_stopped_by(self, armed: dict, signum: int) -> tuple[int, str]:
+        """Run the REAL script and stop it with a signal BEFORE the merge.
+
+        Two properties turn this from a race into a measurement, and both had to
+        be established before the test could be written at all.
+
+        THE WINDOW IS HELD OPEN BY THE INTEGRATION LOCK. This process holds
+        `.worktrees/.integrate.lock` for the whole call, so once the script has
+        announced `[7/7]` it cannot get past its own `flock -w 60 9`. Without
+        that, the test would be signalling a script that may already have
+        merged, and a green result would say nothing about the pre-merge phase
+        it is meant to be about. It does not hang if the signal fails to arrive
+        either: the lock wait expires after 60s and the script refuses with 1,
+        which is a different row from the one asserted below.
+
+        THE SIGNAL GOES TO THE PROCESS GROUP, NEVER TO THE SHELL ALONE. bash
+        defers a trap until the current FOREGROUND command returns, so
+        signalling the shell while it waits on `flock` is acted on only when
+        that wait ends — measured at 19.65s against a 20s sleep, against 0.00s
+        for the group. An operator's Ctrl-C and a supervisor's `kill` both
+        signal the group, so this is the faithful shape and not a convenience.
+        """
+        repo = armed["repo"]
+        wt_dir = repo / ".worktrees"
+        wt_dir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(wt_dir / ".integrate.lock", os.O_CREAT | os.O_WRONLY, 0o644)
+        proc: subprocess.Popen[str] | None = None
+        watchdog: threading.Timer | None = None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            proc = subprocess.Popen(
+                [
+                    str(repo / "tools" / "worktree-finish.sh"),
+                    self.SLUG,
+                    "--skip-checks",
+                    "--merge-msg",
+                    self.MERGE_MSG,
+                ],
+                cwd=str(repo),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                start_new_session=True,
+                env={**os.environ, "PATH": f"{armed['bin']}{os.pathsep}{os.environ['PATH']}"},
+            )
+            # THE TWO READS OF THE SCRIPT'S STDOUT BELOW ARE THE ONLY UNBOUNDED
+            # WAITS IN THIS HELPER, and this suite installs no global test
+            # timeout, so a script that wedged before printing `[7/7]` would
+            # hang the whole run rather than fail one test. The bound has to
+            # come from outside the reads, because it cannot come from inside
+            # them: killing the group closes the pipe, both reads return, and
+            # the branch below reports what was seen. 90s against a measured
+            # 0.2s, so it can only fire on a genuine wedge.
+            watchdog = threading.Timer(90.0, self._kill_group_quietly, args=(proc,))
+            watchdog.daemon = True
+            watchdog.start()
+            assert proc.stdout is not None
+            seen: list[str] = []
+            for line in proc.stdout:
+                seen.append(line)
+                if "[7/7]" in line:
+                    break
+            else:
+                # No `wait` here on purpose: the `finally` below already reaps
+                # or kills the child, and waiting first would turn the one
+                # failure this branch exists to explain — stdout ended without
+                # the marker — into an opaque TimeoutExpired with none of the
+                # captured output attached.
+                raise AssertionError(
+                    "the script never reached [7/7], so nothing was signalled "
+                    f"before the merge — this test proved nothing:\n{''.join(seen)}"
+                )
+            os.killpg(os.getpgid(proc.pid), signum)
+            seen.append(proc.stdout.read())
+            rc = proc.wait(timeout=60)
+        finally:
+            if watchdog is not None:
+                watchdog.cancel()
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=30)
+        return rc, "".join(seen)
+
+    @staticmethod
+    def _kill_group_quietly(proc: subprocess.Popen[str]) -> None:
+        """The watchdog's hand. It never raises, and that is the whole contract.
+
+        This runs on a timer thread, where an exception is reported nowhere and
+        would replace a legible test failure with silence. The group is already
+        gone in every ordinary run — the timer is cancelled first — so a lookup
+        failure here is the expected case, not an error.
+        """
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except OSError:
+            pass
+
+    def _assert_stopped_run_is_recorded(self, armed: dict, signum: int, code: str) -> None:
+        """One row, carrying the signal's own code — and that refuses BOTH forms.
+
+        Asserting the whole row list rather than "a {code} is somewhere in
+        there" is what lets one assertion tell the chosen form from the two
+        rejected ones:
+
+          * with the signal traps REMOVED the single row reads `0`, which the
+            journal's documented reader counts as A LANDING — the defect, and
+            the reason the instrument flattered us in the first place;
+          * with the handler WRITING rather than merely exiting
+            (`trap '_journal_record 143; exit 143' TERM`, measured: the handler
+            writes and then the still-armed EXIT trap writes again) there are
+            TWO rows, both correct in isolation. Landings would stop being
+            overcounted and ATTEMPTS would start being, which is the same
+            instrument lying through a different field.
+
+        The process status is asserted too, and second rather than first, so
+        that a run recording `0` reports the recorded CODE rather than a bare
+        status mismatch.
+        """
+        self._branch(armed)
+        rc, out = self._finish_stopped_by(armed, signum)
+        rows = self._rows(armed)
+        assert [row[1:] for row in rows] == [[self.SLUG, code]], (
+            f"a finish stopped by signal {signum} must leave exactly one row "
+            f"carrying {code}; the journal holds {rows}"
+        )
+        # The run must have ENDED at that status too, not merely written a line
+        # about it — a fixture that does not assert its own setup is how this
+        # file once shipped a test that could never fail.
+        assert rc == int(code), (rc, out[-3000:])
+
+    def test_a_run_stopped_by_sigterm_records_its_own_code(self, armed: dict) -> None:
+        """CB-237 — the row a stopped finish leaves must not read as a landing.
+
+        SIGTERM is how a supervisor, a timeout, or an agent harness ends a run,
+        and it is the signal behind the one wrong `0` this clone's own journal
+        carries. Before this, the EXIT trap read the `$?` of the last COMPLETED
+        command instead of the status the shell was about to leave with.
+        """
+        self._assert_stopped_run_is_recorded(armed, signal.SIGTERM, "143")
+
+    def test_a_run_stopped_by_sigint_records_its_own_code(self, armed: dict) -> None:
+        """The operator's Ctrl-C, which the comment above the trap always claimed.
+
+        Worth its own row rather than folded into the SIGTERM case: the two
+        signals reach a shell by different routes, and SIGINT has a trap of its
+        own to be inherited as IGNORED — a bash job started in the background by
+        a non-interactive shell cannot trap SIGINT at all, so a probe built that
+        way measures its own harness and reports that nothing happens. This test
+        spawns through `subprocess`, where the child keeps the default
+        disposition, which is also what an operator's terminal gives it.
+        """
+        self._assert_stopped_run_is_recorded(armed, signal.SIGINT, "130")
 
 
 class TestUnknownSlugRefusal:
