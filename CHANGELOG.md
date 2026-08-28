@@ -82,9 +82,12 @@ serving the previous text until it is restarted.
   gap. The only way back is a backup taken before the pass, restored by hand; if you have no such
   copy, treat the affected cards' "last changed" as no older than the day the pass ran, rather than
   as the truth about the card's earlier life. (This project's own trackers were repaired that way
-  from a copy dated 23 August 2026, which is why their dates read correctly again — that was a
-  separate act on the data, not something this release does for you.) Cards filed since are
-  unaffected, and from now on the date means what it says.
+  from a copy dated 23 August 2026, which is why most of their dates read correctly again — that
+  was a separate act on the data, not something this release does for you, and it did not recover
+  everything: measured on 28 August 2026, four of the 244 cards in codebugs' own tracker still
+  carried a stamp from inside the six-second window that pass produced, and nine carried a stamp
+  from that day at all. For those few, the advice above is the one that applies.) Cards filed since
+  are unaffected, and from now on the date means what it says.
 
 ### Changed
 - **Four places where a surface still promised more than the code delivers, and the reader was

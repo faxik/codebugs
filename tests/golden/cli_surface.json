@@ -1394,7 +1394,7 @@
         "default": null,
         "deprecated": false,
         "dest": "fold_map",
-        "help": "JSON {\"stored category name\": \"canonical_target_name\"} \u2014 the key may be ANY name the table holds, not just a spelling of the target, so this is how category names are merged; omit it to fold every stored spelling to its own normalized form. Check the printed from->to table against your map before --apply: a key matching no stored category is silently absent from it. Back up with export-csv first (restore-csv reloads findings verbatim into an empty tracker; milestone items and audit history are not in a CSV export)",
+        "help": "JSON {\"stored category name\": \"canonical_target_name\"} \u2014 the key may be ANY name the table holds, not just a spelling of the target, so this is how category names are merged; omit it to fold every stored spelling to its own normalized form. A key that matches no stored category renames nothing, and the report says so out loud: every such key gets its own block, spelled out exactly as you typed it, in the dry run and under --apply alike. Back up with export-csv first (restore-csv reloads findings verbatim into an empty tracker; milestone items and audit history are not in a CSV export)",
         "metavar": null,
         "nargs": null,
         "option_strings": [
