@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from codebugs import db, surfacegen
-from codebugs.fmt import format_table
+from codebugs.fmt import empty_page_line, format_table
 from codebugs.types import require_row_limit, utc_now
 
 
@@ -999,19 +999,18 @@ def _cmd_sweep_next(args: argparse.Namespace) -> None:
         with domain_errors():
             result = next_batch(conn, args.sweep, limit=args.limit, tags=_parse_tags(args))
             if not result["items"]:
-                # CB-210, same narrow rule as `findings._cmd_query`. Here the
-                # corpus number is `remaining` rather than `total`: it is what
-                # the non-empty branch already prints, and it is what makes
-                # "there is nothing left" distinguishable from "you asked for
-                # nothing". `args.limit` is passed to `next_batch` raw, so an
-                # absent flag is None and only an explicit 0 reaches this.
-                if args.limit == 0 and result.get("remaining", 0) > 0:
-                    print(
-                        f"(limit was 0, so no items were requested — "
-                        f"{result['remaining']} remaining)"
+                # CB-210 -- see `fmt.empty_page_line`. The corpus number here is
+                # `remaining` rather than `total`: it is what the non-empty
+                # branch already prints, and it is what separates "there is
+                # nothing left" from "you asked for nothing".
+                print(
+                    empty_page_line(
+                        args.limit,
+                        result.get("remaining", 0),
+                        empty="(no unprocessed items)",
+                        requested="(limit was 0, so no items were requested — {n} remaining)",
                     )
-                else:
-                    print("(no unprocessed items)")
+                )
                 return
             data = [
                 {

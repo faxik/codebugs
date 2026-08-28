@@ -5133,7 +5133,7 @@ def register_tools(mcp, conn_factory) -> None:
 def register_cli(sub, commands) -> None:
     """Register findings CLI subcommands."""
     import argparse
-    from codebugs.fmt import format_table
+    from codebugs.fmt import empty_page_line, format_table
     from codebugs.fsio import atomic_write, diagnostic_stream
 
     def _cmd_add(args: argparse.Namespace) -> None:
@@ -5376,26 +5376,17 @@ def register_cli(sub, commands) -> None:
         else:
             findings = result["findings"]
             if not findings:
-                # CB-210: an empty page has TWO causes and one of them is the
-                # caller's own request. `(no findings match)` is a statement
-                # about the CORPUS, and over a full tracker asked for zero rows
-                # it is simply false — the MCP surface of this same verb has
-                # always answered honestly, because it returns `total`.
-                #
-                # The replacement is deliberately NARROW: it fires only when the
-                # caller asked for zero rows AND something actually matched, so
-                # a genuinely empty result keeps its byte-identical text. That
-                # second half is not decoration — with `--ids` naming rows that
-                # do not exist, `query_findings` raises the limit to fit the id
-                # list, so the emptiness is the corpus's doing and not the
-                # limit's, and `total` is 0 there.
-                if args.limit == 0 and result.get("total", 0) > 0:
-                    print(
-                        f"(limit was 0, so no rows were requested — "
-                        f"{result['total']} finding(s) match)"
+                # CB-210. The predicate and its reasoning live in
+                # `fmt.empty_page_line`, once, rather than in three hand-written
+                # copies across three domain modules.
+                print(
+                    empty_page_line(
+                        args.limit,
+                        result.get("total", 0),
+                        empty="(no findings match)",
+                        requested="(limit was 0, so no rows were requested — {n} finding(s) match)",
                     )
-                else:
-                    print("(no findings match)")
+                )
                 return
             data = [
                 {

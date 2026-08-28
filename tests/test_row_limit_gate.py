@@ -30,12 +30,64 @@ applied as a Python SLICE (`rows[:limit]`), where a negative value silently
 trims the TAIL rather than removing the bound. Eight functions have that shape
 today. What a negative limit should MEAN to a slice — a refusal, or zero rows —
 is undecided, so folding them in here would smuggle an unratified behaviour
-change into a validation fix (CB-82). `test_the_slice_class_is_out_of_scope`
+change into a validation fix (CB-82). `TestTheSliceClassIsOutOfScope`
 pins that they are still unguarded, so the day somebody decides, this file
 tells them the decision has not been taken rather than implying it has.
+
+THE PROPERTY, STATED AT THE WIDTH IT IS ACTUALLY HELD. The gate holds one
+sentence: *inside `src/codebugs/`, a function whose OWN body contains a string
+literal spelling `LIMIT ?` or `LIMIT :name` either calls `require_row_limit` or
+is declared with a reason.* Everything below is a way out of that sentence, and
+every one of them was RUN against the predicate rather than reasoned about — a
+gate whose promise is wider than its check is the defect this file exists to
+close, one level up, so the misses are enumerated instead of implied. A miss
+that is announced costs less than a miss that is not.
+
+MEASURED ESCAPES — the gate does NOT see these, and each was reproduced:
+
+  1. THE SQL TEXT IS NOT A LITERAL IN THIS FUNCTION. A module-level constant
+     (`SQL = "... LIMIT ?"` executed by a helper), a string arriving as a
+     PARAMETER, or SQL assembled in a sibling module and merely executed here.
+     Verified absent from the tree today by a separate sweep of module-level
+     constants, but nothing stops the next one.
+  2. INTERPOLATION RATHER THAN BINDING — `f"LIMIT {n}"`, `"LIMIT %s" % n`.
+     That is CB-161's original class, not this one: those sites never bind, so
+     "binds a limit" is false of them and this predicate is the wrong tool. It
+     is named here so nobody reads this gate as covering all limit defects.
+  3. THE LIMIT REACHES SQL FROM SOMEWHERE OTHER THAN A PARAMETER — read off an
+     object attribute, a dict, or module state. The gate never looks at where
+     the bound VALUE came from; it only asks whether the function validated.
+
+A CLAIMED ESCAPE THAT TURNED OUT NOT TO BE ONE, kept because the correction is
+the point. This list first said an explicit `"... LIMIT" + " ?"` escaped,
+splitting the token across two `ast.Constant` nodes. Running it showed the
+opposite: the predicate joins every string constant in a body with a NEWLINE
+before matching, and `\\s+` spans that, so the two halves read as adjacent and
+the site IS caught. The prose was wrong in the GENEROUS direction — claiming
+less coverage than exists is harmless, but it is still a claim nobody had run.
+Note the same join is why an unrelated `"...LIMIT"` and a `"?"` sitting
+elsewhere in one body could FALSE-POSITIVE; that is the safe direction.
+
+KNOWN FALSE POSITIVES, which are the SAFE direction and are left unfixed
+deliberately: a guard reached through `getattr`, through a local helper, or
+written as an equivalent inline `if limit < 0: raise` is not recognised as a
+guard, so such a function is FLAGGED. That costs a loud, easily-answered test
+failure rather than a silent hole, and closing it would mean value tracking —
+the same boundary `test_no_network_capability.py` draws around `__import__`.
+
+WHAT IS COVERED, also measured rather than assumed: lower-case and mixed-case
+keywords (SQLite accepts `limit ?`, and a case-SENSITIVE predicate let that
+walk straight past — found by running the battery, not by reading the regex),
+`LIMIT :name` as well as `LIMIT ?`, a newline between keyword and placeholder,
+methods inside a class, `async def`, a nested function that binds on its own,
+and the three spellings of the guard call (`require_row_limit`,
+`t.require_row_limit`, `types.require_row_limit`) — resolved by ATTRIBUTE name
+so they are ONE capability rather than three strings to enumerate, which
+matters because `claims.py` really does use the middle one.
 """
 
 import ast
+import functools
 import re
 import subprocess
 import sys
@@ -74,7 +126,13 @@ def conn(tmp_project):
 # parked, which is the hole the gate exists to close, one level up.
 DECLARED_EXCEPTIONS: dict[tuple[str, str], str] = {}
 
-_BINDS_A_LIMIT = re.compile(r"LIMIT\s+[?:]")
+# CASE-INSENSITIVE, and that is a measured fix rather than a precaution: SQLite
+# accepts `select 1 limit ?` exactly as it accepts the shouted form, so a
+# case-sensitive predicate let a lower-case site walk straight past the gate.
+# Caught by running the evasion battery in this file's own mutation test rather
+# than by reading the regex. `\s+` spans a newline, so a query broken across
+# source lines between the keyword and its placeholder is still seen.
+_BINDS_A_LIMIT = re.compile(r"LIMIT\s+[?:]", re.IGNORECASE)
 
 
 def _own_nodes(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.AST]:
@@ -129,13 +187,28 @@ def _unguarded_binding_sites(source: str, module: str) -> list[tuple[str, str]]:
     return out
 
 
-def _all_unguarded() -> list[tuple[str, str]]:
-    found: list[tuple[str, str]] = []
+@functools.lru_cache(maxsize=1)
+def _package_sources() -> tuple[tuple[str, str], ...]:
+    """(module, source) for every package module, read once per session.
+
+    Eight tests in this file sweep the whole tree, and without this each one
+    re-read and re-parsed ~40 files. Cached at the SOURCE level rather than at
+    the result level, because the two sweeps here want different things from
+    the same bytes (the guard predicate, and the slice-class predicate) and one
+    of them feeds a mutated copy to the predicate.
+    """
+    out = []
     for path in sorted(SRC.rglob("*.py")):
         if "__pycache__" in path.parts:
             continue
-        module = str(path.relative_to(SRC))
-        found.extend(_unguarded_binding_sites(path.read_text(), module))
+        out.append((str(path.relative_to(SRC)), path.read_text()))
+    return tuple(out)
+
+
+def _all_unguarded() -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    for module, source in _package_sources():
+        found.extend(_unguarded_binding_sites(source, module))
     return found
 
 
@@ -175,10 +248,7 @@ class TestEveryBindingSiteIsGuarded:
         nothing" is indistinguishable from "looked at nothing" without this.
         """
         guarded = 0
-        for path in sorted(SRC.rglob("*.py")):
-            if "__pycache__" in path.parts:
-                continue
-            text = path.read_text()
+        for _module, text in _package_sources():
             if _BINDS_A_LIMIT.search(text) and "require_row_limit" in text:
                 guarded += 1
         assert guarded >= 5, f"only {guarded} files bind a limit AND validate it -- gate is blind"
@@ -213,6 +283,200 @@ class TestEveryBindingSiteIsGuarded:
             '    return conn.execute("SELECT * FROM t LIMIT :limit", {"limit": limit})\n'
         )
         assert _unguarded_binding_sites(named, "m.py") == [("m.py", "f")]
+
+
+# The eight this unit fixed. Used ONLY by the two-sided mutation test below,
+# which strips the guard calls out of the real tree IN MEMORY and asserts the
+# gate names exactly these. It is not a second inventory the gate consults --
+# the gate itself holds no list.
+_THE_EIGHT = {
+    ("blockers.py", "query_deferred_entities"),
+    ("claims.py", "list_claims"),
+    ("findings.py", "anchor_candidates"),
+    ("findings.py", "grouping_candidates"),
+    ("findings.py", "recent_findings"),
+    ("findings.py", "similarity_candidates"),
+    ("milestones/foundation.py", "query_audit"),
+    ("usage.py", "usage_summary"),
+}
+
+# The six that ALREADY routed through the guard before this unit -- three from
+# CB-161 (the interpolation class) and three from CB-196. Stripping the guard
+# out of the whole tree unguards these too, so the mutation below must expect
+# fourteen and not eight. Writing only the eight made the test fail the first
+# time it ran, which is the test working: the union is the real population of
+# "functions that bind a row limit", and the split between the two sets is the
+# history of how it came to be guarded.
+_ALREADY_GUARDED_BEFORE_THIS_UNIT = {
+    ("bench.py", "list_runs"),
+    ("bench.py", "query"),
+    ("findings.py", "query_findings"),
+    ("reqs.py", "query_requirements"),
+    ("sweep.py", "list_items"),
+    ("sweep.py", "next_batch"),
+}
+
+
+class TestTheGateIsTwoSidedOnTheRealTree:
+    """Silence on a healthy tree is not evidence; red on a mutated one is.
+
+    `test_no_undeclared_binding_site_skips_validation` passing means the gate
+    found nothing -- which is also exactly what a BLIND gate reports. The
+    premise test above rules out one way of being blind (it can read files at
+    all); this class rules out the other by MUTATING THE REAL SOURCE in memory:
+    strip every `require_row_limit(...)` call out of the tree, and the gate must
+    then name the eight functions this unit fixed, no more and no fewer. Both
+    directions are asserted here together, because a predicate that only ever
+    answers one way is evidence for neither answer.
+
+    Nothing is written to disk -- the mutation is textual and in memory.
+    """
+
+    @staticmethod
+    def _strip_guard(source: str) -> str:
+        """Remove the guard call while leaving the binding intact.
+
+        `limit = require_row_limit("limit", limit)` becomes `limit = limit`: a
+        no-op that keeps every following line valid, so the function still
+        parses and still binds its limit. A `t.` or `types.` prefix is matched
+        by an optional attribute head.
+        """
+        return re.sub(
+            r"(?:[A-Za-z_][A-Za-z0-9_]*\.)?require_row_limit\("
+            r"\s*[^,]+,\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)",
+            r"\1",
+            source,
+        )
+
+    def _unguarded_after_stripping(self) -> set[tuple[str, str]]:
+        found: set[tuple[str, str]] = set()
+        for module, source in _package_sources():
+            found.update(_unguarded_binding_sites(self._strip_guard(source), module))
+        return found
+
+    def test_premise_the_mutation_actually_removes_the_guard(self):
+        """If the stripper matched nothing, the red half below proves nothing."""
+        original = (SRC / "findings.py").read_text()
+        mutated = self._strip_guard(original)
+        assert "require_row_limit(" in original, "premise: findings.py calls the guard"
+        assert "require_row_limit(" not in mutated, "the stripper did not remove the call"
+        # Still valid Python, or the gate would be reacting to a SyntaxError
+        # rather than to the property under test.
+        ast.parse(mutated)
+
+    def test_stripping_every_guard_names_the_whole_binding_population(self):
+        assert self._unguarded_after_stripping() == (
+            _THE_EIGHT | _ALREADY_GUARDED_BEFORE_THIS_UNIT
+        )
+
+    def test_the_eight_this_unit_fixed_are_among_them(self):
+        """The half that speaks to THIS card, separated from the inherited six."""
+        assert _THE_EIGHT <= self._unguarded_after_stripping()
+        assert not (_THE_EIGHT & _ALREADY_GUARDED_BEFORE_THIS_UNIT), (
+            "the two sets must stay disjoint -- a function cannot be both"
+        )
+
+    def test_and_the_unmutated_tree_is_silent(self):
+        """The other side of the same claim, deliberately in the same class."""
+        assert set(_all_unguarded()) == set()
+
+
+class TestTheGateAgainstAnEvasionBattery:
+    """Every coverage claim in this module's docstring, as a running test.
+
+    A docstring listing what a gate catches is prose until something runs it.
+    The LOWER-CASE row is here because it was a genuine, unnoticed hole: SQLite
+    accepts `select 1 limit ?`, the first version of this gate was
+    case-sensitive, and only running the battery found it.
+    """
+
+    CAUGHT = {
+        "plain": 'def f(c, limit):\n    return c.execute("SELECT 1 LIMIT ?", [limit])\n',
+        "named placeholder": (
+            'def f(c, limit):\n    return c.execute("SELECT 1 LIMIT :limit", {"limit": limit})\n'
+        ),
+        "lower case": 'def f(c, limit):\n    return c.execute("select 1 limit ?", [limit])\n',
+        "mixed case": 'def f(c, limit):\n    return c.execute("SELECT 1 LiMiT ?", [limit])\n',
+        "newline between": 'def f(c, limit):\n    return c.execute("SELECT 1 LIMIT\\n?", [limit])\n',
+        "built with +=": (
+            'def f(c, limit):\n    s = "SELECT 1 "\n    s += "LIMIT ?"\n'
+            "    return c.execute(s, [limit])\n"
+        ),
+        "implicit concat": (
+            'def f(c, limit):\n    return c.execute("SELECT 1 "\n        "LIMIT ?", [limit])\n'
+        ),
+        "method in a class": (
+            'class K:\n    def f(self, c, limit):\n        return c.execute("SELECT 1 LIMIT ?", [limit])\n'
+        ),
+        "async def": 'async def f(c, limit):\n    return c.execute("SELECT 1 LIMIT ?", [limit])\n',
+        "explicit + across two constants": (
+            'def f(c, limit):\n    return c.execute("SELECT 1 LIMIT" + " ?", [limit])\n'
+        ),
+    }
+
+    ESCAPES = {
+        "module-level SQL constant": (
+            'SQL = "SELECT 1 LIMIT ?"\ndef f(c, limit):\n    return c.execute(SQL, [limit])\n'
+        ),
+        "interpolated, never bound": (
+            'def f(c, limit):\n    return c.execute(f"SELECT 1 LIMIT {limit}")\n'
+        ),
+        "percent formatting": (
+            'def f(c, limit):\n    return c.execute("SELECT 1 LIMIT %s" % limit)\n'
+        ),
+        "SQL arrives as a parameter": (
+            "def f(c, sql, limit):\n    return c.execute(sql, [limit])\n"
+        ),
+    }
+
+    QUIET = {
+        "guarded, bare name": (
+            'def f(c, limit):\n    limit = require_row_limit("limit", limit)\n'
+            '    return c.execute("SELECT 1 LIMIT ?", [limit])\n'
+        ),
+        "guarded, t. prefix": (
+            'def f(c, limit):\n    limit = t.require_row_limit("limit", limit)\n'
+            '    return c.execute("SELECT 1 LIMIT ?", [limit])\n'
+        ),
+        "guarded, types. prefix": (
+            'def f(c, limit):\n    limit = types.require_row_limit("limit", limit)\n'
+            '    return c.execute("SELECT 1 LIMIT ?", [limit])\n'
+        ),
+        "prose only": 'def f(c, limit):\n    """Discusses LIMIT ? in prose."""\n    return 1\n',
+    }
+
+    @pytest.mark.parametrize("name", sorted(CAUGHT))
+    def test_these_are_caught(self, name):
+        assert _unguarded_binding_sites(self.CAUGHT[name], "m.py") == [("m.py", "f")], (
+            f"{name} escaped the gate"
+        )
+
+    def test_a_nested_function_that_binds_is_caught_as_itself(self):
+        """Attributed to the INNER function -- the unit that binds is the unit judged."""
+        src = (
+            "def outer(c, limit):\n"
+            "    def inner():\n"
+            '        return c.execute("SELECT 1 LIMIT ?", [limit])\n'
+            "    return inner()\n"
+        )
+        assert _unguarded_binding_sites(src, "m.py") == [("m.py", "inner")]
+
+    @pytest.mark.parametrize("name", sorted(ESCAPES))
+    def test_these_escape_and_the_docstring_says_so(self, name):
+        """PIN OF A KNOWN GAP. A failure here means the gate got BETTER.
+
+        If one of these starts being caught, that is good news, and this test is
+        what tells you to update the docstring's escape list -- rather than
+        letting it rot into a claim that is quietly false in the generous
+        direction, which is the failure this whole file exists to prevent.
+        """
+        assert _unguarded_binding_sites(self.ESCAPES[name], "m.py") == [], (
+            f"{name} is now caught -- update the module docstring's escape list"
+        )
+
+    @pytest.mark.parametrize("name", sorted(QUIET))
+    def test_these_raise_no_alarm(self, name):
+        assert _unguarded_binding_sites(self.QUIET[name], "m.py") == []
 
 
 class TestTheEightSitesRefuseANegativeLimit:
@@ -366,11 +630,8 @@ class TestTheSliceClassIsOutOfScope:
 
     def _slice_sites(self) -> set[tuple[str, str]]:
         found: set[tuple[str, str]] = set()
-        for path in sorted(SRC.rglob("*.py")):
-            if "__pycache__" in path.parts:
-                continue
-            module = str(path.relative_to(SRC))
-            for fn in ast.walk(ast.parse(path.read_text())):
+        for module, source in _package_sources():
+            for fn in ast.walk(ast.parse(source)):
                 if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
                     continue
                 for n in _own_nodes(fn):
@@ -511,13 +772,23 @@ class TestTheSurfacesNameTheContractTheyEnforce:
     """
 
     def _cli_help(self, verb: str, dest: str) -> str:
-        """Read the help through the same `build_parser` the CLI and golden use."""
-        from codebugs import cli
+        """Read the help through the SANCTIONED collector, not a second walk of argparse.
 
-        _parser, sub, _commands = cli.build_parser()
-        for action in sub.choices[verb]._actions:
-            if action.dest == dest:
-                return action.help or ""
+        `tests/cli_surface.py::collect_cli_surface` already traverses
+        `build_parser()` -> `sub.choices` -> `subparser._actions`, and its own
+        docstring says why it exists: "one drift-proof source rather than two
+        copies that could disagree about what the surface is". A private walk
+        here would be exactly that second copy — it would keep working while the
+        collector was hardened around it, and the two would answer differently
+        about what the CLI surface is. The MCP half of this class already
+        imports `collect_tool_schemas` for the same reason.
+        """
+        from tests.cli_surface import collect_cli_surface
+
+        actions = collect_cli_surface()[verb]["actions"]
+        for action in actions:
+            if action.get("dest") == dest:
+                return action.get("help") or ""
         raise AssertionError(f"{verb} has no --{dest}")
 
     @pytest.mark.parametrize(

@@ -978,7 +978,7 @@ def register_cli(sub, commands) -> None:
     import argparse
     import sys
     from codebugs import db
-    from codebugs.fmt import format_table
+    from codebugs.fmt import empty_page_line, format_table
     from codebugs.fsio import atomic_write, diagnostic_stream
     from codebugs.types import REQUIREMENT_STATUSES, PRIORITIES
 
@@ -1045,17 +1045,19 @@ def register_cli(sub, commands) -> None:
         else:
             items = result["requirements"]
             if not items:
-                # CB-210, same narrow rule as `findings._cmd_query`: say the
-                # true thing about the REQUEST only when the request is what
-                # emptied the page, and leave a genuinely empty result's text
-                # byte-identical.
-                if args.limit == 0 and result.get("total", 0) > 0:
-                    print(
-                        f"(limit was 0, so no rows were requested — "
-                        f"{result['total']} requirement(s) match)"
+                # CB-210 -- see `fmt.empty_page_line` for the predicate and why
+                # both halves of its condition are load-bearing.
+                print(
+                    empty_page_line(
+                        args.limit,
+                        result.get("total", 0),
+                        empty="(no requirements match)",
+                        requested=(
+                            "(limit was 0, so no rows were requested — "
+                            "{n} requirement(s) match)"
+                        ),
                     )
-                else:
-                    print("(no requirements match)")
+                )
                 return
             data = [
                 {
