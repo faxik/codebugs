@@ -104,11 +104,11 @@ brief says so explicitly: state what the gate sees and what it does not, rather
 than widen the promise past what was actually built. FORTY distinct evasions
 were swept for this unit and RUN against this predicate rather than judged;
 it catches FIFTEEN. What follows is what it does NOT catch, named one by one,
-because an unannounced miss costs more than an announced one. How MANY that is
+because an unannounced miss costs more than an announced one. How MANY that is,
 is a question for the list below rather than for this sentence: a count written
 here rots at the next edit of the list it describes, which is precisely what
 happened to the one that used to stand in this paragraph (CB-238). It is removed
-rather than corrected, for the same reason the two counts this docstring used to
+rather than corrected, for the same reason the counts this docstring used to
 carry were removed rather than corrected.
 
 * THE SEMANTIC SENTRY, and it is the one standing in `db.py` today. A function
