@@ -357,6 +357,21 @@ def validate_batch_payload(value: object, *, label: str) -> list[Any]:
 
 # --- Row limits (CB-161) ---
 
+#: The page size a query uses when the caller named none (CB-158).
+#:
+#: It lives here, beside ``require_row_limit``, because it is the OTHER half of
+#: one rule about the same argument: that function says which values are legal,
+#: this constant says what "not supplied" means. Both query surfaces and both
+#: query domains read it, so the four places that used to spell ``100`` as a
+#: signature default cannot drift apart from each other — the same reason
+#: ``is_sql_identifier`` is the only copy of its pattern.
+#:
+#: It is deliberately NOT the default of ``query_findings``/``query_requirements``
+#: any more. Those take ``None``, because "the caller named no page size" has to
+#: be DISTINGUISHABLE from "the caller asked for a hundred" — that distinction is
+#: exactly what CB-158 was missing, and a plain integer default cannot carry it.
+DEFAULT_ROW_LIMIT = 100
+
 
 def require_row_limit(label: str, value: object) -> int | None:
     """Accept ``None`` (no limit) or a NON-NEGATIVE integer row limit, else ``ValueError``.

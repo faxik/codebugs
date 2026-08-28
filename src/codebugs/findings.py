@@ -19,6 +19,7 @@ from pydantic import Field
 from codebugs import db, entities
 from codebugs.types import (
     is_sql_identifier,
+    DEFAULT_ROW_LIMIT,
     ENTITY_FINDING,
     FINDING_ID_PREFIX,
     SEVERITIES,
@@ -3355,7 +3356,7 @@ def query_findings(
     ref: str | None = None,
     fingerprint: str | None = None,
     group_by: str | None = None,
-    limit: int = 100,
+    limit: int | None = None,
     offset: int = 0,
     resolve_anchors: bool = False,
     project_dir: str | None = None,
@@ -3363,6 +3364,20 @@ def query_findings(
     """Query findings with filters. Returns results or grouped counts.
 
     `id` / `ids` are AND-combined with other filters; missing IDs are silently absent.
+
+    AN EXPLICIT `limit` ALWAYS WINS; a DERIVED one applies only when the caller
+    named none at all, which is spelled `None` (CB-158). This used to be the
+    other way round: `ids` raised any smaller limit to `len(ids)`, so
+    `query(ids=[a, b], limit=1)` returned two rows and `limit=0` returned two
+    rather than none — a success-shaped answer to a request that was not
+    performed, which is CB-124's defect one layer further in. Note the defect was
+    NEVER only about zero: every explicit limit below the id count was overridden.
+    The derivation survives for the case it was actually built for — a batch
+    lookup by id that named no page size must return every id it asked for, not
+    the first `DEFAULT_ROW_LIMIT` of them — and `None` is what makes "named none"
+    distinguishable from "named a hundred". Before this, `None` was not a legal
+    value here at all: it reached SQL and raised `sqlite3.IntegrityError`, so
+    nothing is being redefined.
     `commit` matches the frozen first-report column OR any occurrence-ring entry
     (CB-128) — any observation, not the newest (that is `provenance._effective_commit`).
 
@@ -3377,15 +3392,23 @@ def query_findings(
     With the flag on, the page is resolved in ONE pass — the per-tree context is
     built once for the whole population, never per row.
     """
-    # CB-196. Validated HERE, at the top, and specifically ABOVE the `ids`
-    # widening below: that widening runs only inside `if ids:` and rewrites a
-    # caller's `-1` to `len(ids)`, so a check placed after it would be a gate
-    # that cannot fire for exactly the calls that carry an id list, while still
-    # firing for the bare call. One argument, two verdicts, decided by an
-    # unrelated parameter. Validating the ARGUMENT rather than the derived value
-    # is also this package's standing rule (CB-82): a refusal must cost no
-    # partial work.
+    # CB-196. Validated HERE, at the top, on the ARGUMENT rather than on
+    # anything derived from it — this package's standing rule (CB-82), because a
+    # refusal must cost no partial work. The reason this comment used to give
+    # was narrower and is now obsolete: the `ids` widening it guarded against
+    # rewrote a caller's `-1` to `len(ids)`, so a check below it could not fire
+    # for exactly the calls carrying an id list. CB-158 removed that widening,
+    # so the ordering no longer decides whether a negative limit is SEEN — but
+    # it still decides whether it is seen BEFORE work begins, and the derivation
+    # two lines down must never receive a value nobody validated.
     limit = require_row_limit("limit", limit)
+    # CB-158. `None` is the only spelling of "the caller named no page size",
+    # and it is the ONLY branch on which a page size is derived. An id list
+    # raises the derived default so a batch lookup returns every id it named;
+    # it can no longer raise an explicit limit, and `limit=0` therefore means
+    # zero rows here exactly as it does on the bare path.
+    if limit is None:
+        limit = max(DEFAULT_ROW_LIMIT, len(ids)) if ids else DEFAULT_ROW_LIMIT
 
     conditions: list[str] = []
     params: list[Any] = []
@@ -3409,8 +3432,6 @@ def query_findings(
     if ids:
         conditions.append(f"id IN ({','.join('?' for _ in ids)})")
         params.extend(ids)
-        if limit < len(ids):
-            limit = len(ids)
     if is_vocabulary_filter_active(status):
         conditions.append("status = ?")
         params.append(resolve_finding_status(status))

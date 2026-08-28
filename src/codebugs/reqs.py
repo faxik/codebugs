@@ -10,6 +10,7 @@ from typing import Any
 
 from codebugs import db, entities
 from codebugs.types import (
+    DEFAULT_ROW_LIMIT,
     ENTITY_REQUIREMENT,
     is_vocabulary_filter_active,
     require_row_limit,
@@ -328,17 +329,24 @@ def query_requirements(
     source: str | None = None,
     tag: str | None = None,
     group_by: str | None = None,
-    limit: int = 100,
+    limit: int | None = None,
     offset: int = 0,
 ) -> dict[str, Any]:
     """Query requirements with filters.
 
     `id` / `ids` are AND-combined with other filters; missing IDs are silently absent.
+
+    `limit` is the caller's page size and an EXPLICIT one always wins — see the
+    twin paragraph on `findings.query_findings` for the whole argument (CB-158).
+    `None` means no page size was named, and only then is one derived.
     """
-    # CB-196, and ABOVE the `ids` widening below for the reason spelled out on
-    # `findings.query_findings`: that widening rewrites a negative limit to
-    # `len(ids)` and would hide the refusal from every call carrying an id list.
+    # CB-196, and still ABOVE everything for the plain reason: validate the
+    # ARGUMENT before anything is derived from it or written (CB-82), so a
+    # refusal costs no partial work.
     limit = require_row_limit("limit", limit)
+    # CB-158, the twin of the findings site. `None` is the only "not supplied".
+    if limit is None:
+        limit = max(DEFAULT_ROW_LIMIT, len(ids)) if ids else DEFAULT_ROW_LIMIT
 
     conditions: list[str] = []
     params: list[Any] = []
@@ -349,8 +357,6 @@ def query_requirements(
     if ids:
         conditions.append(f"id IN ({','.join('?' for _ in ids)})")
         params.extend(ids)
-        if limit < len(ids):
-            limit = len(ids)
     # Both resolved, matching the write paths (CB-19 sibling sweep). Left raw, these
     # filters compared the caller's spelling against a canonical column while
     # `add_requirement` and `update_requirement` had ALWAYS normalized through
