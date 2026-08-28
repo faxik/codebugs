@@ -8,6 +8,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Naming a code location and then contradicting it in `meta` is now refused instead of quietly
+  anchoring somewhere else.** `codebugs add -l 10 --meta '{"line": 3}'` — and the MCP calls
+  `add(lines=10, meta={"line": 3})` and `batch_add` behind it — used to succeed, at exit 0, and
+  anchor the card at line **3**. The `10` you typed was accepted, stored beside it, and never
+  reached the anchor.
+  The cause was that the two inputs are spelled differently. The dedicated location input writes
+  `meta.lines`, and the guard in front of it compared that against the `lines` key of `meta` and
+  nothing else — while the capture grammar that actually decides an anchor prefers the *singular*
+  spellings, so a `meta.line` sitting beside it won without either side noticing. The same held for
+  `meta.site`. Nothing was dropped and nothing errored: both keys really were stored, so the stored
+  card looked correct while the anchor pointed at a place you had not asked for.
+  The guard now asks the grammar the question that actually matters — **would the place I named be
+  the place that results** — and refuses when the answer is no. The message names both places and
+  the key that would have won, so the fix is one edit rather than an investigation. It fires only
+  when you supply the dedicated input: a card carrying two `meta` keys and no `-l/--lines` is
+  untouched, and the grammar's own priority still decides there.
+  **Three things deliberately still pass**, because they are not contradictions: the two spellings
+  naming the *same* place; a neighbouring key the grammar reads no location out of at all (a `sites`
+  value holding function names is a real and common shape, and it never took the anchor anyway); and
+  any `meta` key that is not a location key in the first place.
+  **This will break a caller that relied on the old behaviour** — one passing both spellings and
+  expecting the `meta` key to win silently. Pass one of the two, or make them agree. Note the
+  comparison is exact: `-l "src/f.py:10"` beside `meta.line: 10` refuses, because one names a path
+  and the other does not, and no attempt is made to decide whether they mean the same line. Measured
+  across both trackers this repository can reach — 3732 findings — there is exactly one card in
+  which two location keys name two different places, and refusing it is the right answer; there are
+  **no** cards in which two keys name one place in two different ways. If that ever produces a
+  refusal you believe is wrong, the message carries both sides so it can be reported as such.
+
 - **A row limit you actually type is now honoured when you also ask for findings or requirements by
   id.** `codebugs query --id CB-150 --limit 0` used to print the card; `--id CB-150,CB-152 --limit 1`
   printed both. The same held for `reqs-query`, and for the MCP tools `query` and `reqs_query`

@@ -309,8 +309,18 @@ def _anchor_chars(lines: Sequence[str]) -> int:
 # construction (`line`: 0% multi-site; `site`: 15/15 in the gate corpus) and
 # plural ones are not (`sites`: 63% multi-file), so the singular spellings win.
 # `function` is NEVER a source — 28/28 of its values are prose. The table is not
-# here because conflicts are common (the whole corpus holds TWO genuinely
-# competing rows) but so that capture does not depend on dict iteration order.
+# here because conflicts are common but so that capture does not depend on dict
+# iteration order.
+#
+# HOW RARE, RE-MEASURED (CB-236, 2026-08-28, both trackers): of 3732 findings,
+# 826 carry at least one key from this table and only 2 carry two or more. This
+# comment used to say those 2 were "TWO genuinely competing rows", and that was
+# the count of rows rather than of conflicts: one of them carries `sites` full of
+# FUNCTION NAMES, which this grammar reads no place out of, so it competes with
+# nothing. **Exactly ONE row in the whole corpus has two keys naming two
+# different places.** The order below is unchanged and its argument is untouched
+# — only the number was wrong, and it was wrong in the direction that made the
+# table look better justified by conflict frequency than it is.
 _KEY_PRIORITY: tuple[str, ...] = ("line", "site", "lines", "sites", "location")
 
 # `a-b`, `a:b` and `a` — the span spellings B3/B4 use. `:` is accepted as a
@@ -370,22 +380,128 @@ def _parse_value(value: Any, *, path: str | None = None) -> list[_Site]:
     return []  # B6: prose, None, anything else — the row does not say where
 
 
-def parse_sites(meta: dict[str, Any] | None) -> list[_Site]:
-    """The sites one observation's meta names, by the measured key priority.
+def parse_sites_with_key(meta: dict[str, Any] | None) -> tuple[str | None, list[_Site]]:
+    """The sites one observation's meta names, AND the key they were read out of.
 
     The FIRST key in priority order that yields any site wins outright; later
     keys are not merged in. Merging would make the answer depend on how many
     spellings a producer happened to use, and the singular keys are exactly the
     ones measured to be unambiguous.
+
+    Two questions, ONE traversal, deliberately (CB-236). `parse_sites` answers
+    the first alone and every existing caller keeps asking it that way; the
+    deciding key exists because a refusal that says "these two disagree" without
+    naming WHICH key won leaves the caller to re-derive the priority table by
+    hand — which is the second copy this module exists to prevent. Answering
+    both from one loop is what stops the pair from ever disagreeing.
+
+    `None` as the key means no key yielded a site, and the list is then empty.
     """
     if not isinstance(meta, dict):
-        return []
+        return None, []
     for key in _KEY_PRIORITY:
         if key in meta:
             sites = _parse_value(meta[key])
             if sites:
-                return sites
-    return []
+                return key, sites
+    return None, []
+
+
+def parse_sites(meta: dict[str, Any] | None) -> list[_Site]:
+    """The sites one observation's meta names, by the measured key priority.
+
+    Delegates to `parse_sites_with_key` and drops the key. It is a wrapper rather
+    than a second loop for the reason that whole module keeps restating: two
+    copies of one traversal are one edit away from disagreeing.
+    """
+    return parse_sites_with_key(meta)[1]
+
+
+def is_location_key(key: str) -> bool:
+    """Does this grammar read a LOCATION out of a meta key spelled like this?
+
+    Kept as its own predicate rather than inlined, because it is what makes
+    `_named_input_conflict` answer `None` — rather than guess — about a named
+    input onto a key this grammar never reads (CB-236). The seam asks every
+    checker about every named input, so "not mine" has to be expressible.
+    """
+    return key in _KEY_PRIORITY
+
+
+def _named_input_conflict(key: str, value: Any, meta: dict[str, Any]) -> dict[str, str] | None:
+    """Would a surface's named location input be the place this row ends up at?
+
+    CB-236, and the shape of the question is the fix. The guard that came before
+    it compared a named input against the meta key of its OWN name, which is an
+    enumeration of one spelling: `-l 10` beside a `meta.line` of 3 satisfied it
+    and the anchor still landed on 3 — accepted, stored beside it, silently lost,
+    at exit 0. Measured end to end. So what is asked here is not *which keys are
+    present* but **would the place I named be the place that results**: the sites
+    the named input yields ALONE, against the sites this grammar yields over the
+    whole composed meta, priority included.
+
+    That cannot drift from `_KEY_PRIORITY`, because it IS `_KEY_PRIORITY` being
+    run rather than restated — the reason the answer lives here and not at the
+    surface that needs it.
+
+    Three boundaries, each deliberate and each measured on the corpus. A key this
+    grammar reads no place out of — `sites` holding FUNCTION NAMES — takes no
+    anchor and therefore conflicts with nothing. Two spellings naming ONE place
+    agree and pass. And a key that is not a location key at all is not this
+    checker's business, which is what the first line says.
+
+    A FOURTH boundary was decided by the CB-236 unit rather than inherited: a
+    named input this grammar reads NO place out of (`-l abc`, which is not empty,
+    so the empty-value refusal never reaches it) is compared like any other. With
+    no sibling naming a place it still passes and the card simply has no anchor,
+    as before; beside a sibling that DOES name one, the two disagree and it
+    reports `<no place at all>` for the named side. It needs no exception, and an
+    exception would be a rule written to make one typo quieter — while the typo
+    is exactly the case where the anchor silently goes to the sibling and the
+    typed input evaporates. The cost is real: a caller deliberately passing an
+    unparseable location beside a working `meta` key now gets a refusal.
+    """
+    if not is_location_key(key):
+        return None
+    named_sites = _parse_value(value)
+    deciding, final_sites = parse_sites_with_key(meta)
+    # THE COMPARISON IS CRUDE ON PURPOSE, AND THIS IS WHERE ITS LICENCE IS
+    # RECORDED, because this is the line a false refusal has to be fixed at.
+    # Places are compared as they parse, with no attempt to decide whether
+    # `f.py:10` and a bare `10` under a `file` column of `f.py` mean one place.
+    # Measured over both trackers (3732 findings, 2026-08-28): the four
+    # reducible shapes — bare number against a range containing it, with a path
+    # against without, subset, overlapping ranges — have ZERO instances, so
+    # normalizing before comparing would be a mechanism with no input. The
+    # licence is a sample of two rows, so it is not a guarantee about the
+    # future: if this ever refuses something legitimate, the answer is a
+    # normalizer HERE, and the refusal text names both sides so that costs one
+    # edit rather than an investigation.
+    if named_sites == final_sites:
+        return None
+    return {
+        "named": describe_sites(named_sites),
+        "resulting": describe_sites(final_sites),
+        "deciding": deciding or "",
+    }
+
+
+def describe_sites(sites: Sequence[_Site]) -> str:
+    """Sites as a human reads them, for a refusal message.
+
+    Lives here because `_Site` is this module's shape: a caller formatting the
+    tuple itself would be a second place that has to be corrected the day the
+    shape gains a field. `<none>` is a real answer — it is what a value the
+    grammar reads no place out of gives, and a refusal that printed an empty
+    string there would look like a missing message rather than a stated fact.
+    """
+    if not sites:
+        return "<no place at all>"
+    parts = []
+    for site in sites:
+        span = str(site.line) if site.end == site.line else f"{site.line}-{site.end}"
+        parts.append(f"{site.path}:{span}" if site.path else f"line {span}")
+    return ", ".join(parts)
 
 
 def _paths_agree(named: str, column: str) -> bool:
@@ -2189,6 +2305,11 @@ db.register_pre_add_resolver(
     meta_keys=("loc",),
     updatable_keys=("loc",),
 )
+
+# CB-236. The surfaces offer a named input onto `meta.lines`; only this module
+# knows whether that input is the one its precedence will actually read, so it
+# says so here rather than letting `findings` learn the grammar.
+db.register_named_input_check("loc.capture", _named_input_conflict)
 
 db.register_read_enricher(
     "loc.anchor", enrich_findings, key=SUMMARY_KEY, fallback=unavailable_summary

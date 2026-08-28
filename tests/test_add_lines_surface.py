@@ -349,6 +349,14 @@ BOTH_SURFACES: tuple[tuple[str, object, dict | None, bool], ...] = (
     ("named input beside an unrelated meta key", "10-20", {"module": "m"}, False),
     ("an explicitly empty named input", "", None, True),
     ("an explicitly empty named input, with meta", "", {"lines": "10-20"}, True),
+    # CB-236. A SIBLING key of another spelling, which the rows above cannot
+    # reach: every one of them varies the `lines` key alone, so none of them
+    # crosses the grammar's priority table. Each of these four must answer the
+    # same on both surfaces for the same reason the originals must.
+    ("a sibling singular key naming another place", "10", {"line": "3"}, True),
+    ("a sibling singular key naming the same place", "10", {"line": "10"}, False),
+    ("a sibling key the grammar reads no place from", "10", {"sites": ["fn_a", "fn_b"]}, False),
+    ("a named input that names no place, beside a sibling that does", "abc", {"line": "3"}, True),
 )
 
 
@@ -499,6 +507,208 @@ class TestOneRuleOnBothSurfaces:
         assert not stray, (
             f"`_ADD_META_FLAGS` is read outside `_compose_add_meta` at lines {stray}: "
             "that is a second copy of the rule."
+        )
+
+
+# ---------------------------------------------------------------------------
+# 4b. CB-236 — the named input must be the place that RESULTS, not merely a key
+#     nobody contradicted under its own name.
+# ---------------------------------------------------------------------------
+
+
+class TestTheNamedInputMustDecideTheAnchor:
+    """CB-236. The rule above this one compares the named input against the meta
+    key of its OWN name, and the capture grammar prefers the SINGULAR spellings —
+    so `lines=10` beside `meta.line=3` satisfied it and the anchor still landed on
+    3, at exit 0, with the named input stored beside it and lost.
+
+    WHY THIS CLASS AND NOT MORE ROWS IN `BOTH_SURFACES`: those rows read the
+    stored `meta` and the verdict, which is where the DEFECT hid — both keys were
+    stored, so meta looked right. The discriminator is the ANCHOR, so these tests
+    read `meta.loc` instead.
+
+    HOW THE QUESTION TRAVELS, because it is not the obvious route and the obvious
+    route is refused: the surface does NOT read the grammar. `findings` may not
+    import the extension — the dependency runs the other way (`loc` imports
+    `provenance`, which imports `findings`), so a module-level import is a
+    measured `ImportError`, and that is what makes it impossible for every
+    spelling. `tests/test_loc_read_paths.py::TestThereIsExactlyOneResolver`
+    states the boundary and did catch the deferred `from codebugs import loc`
+    this fix first tried, but it is a substring test and its coverage is narrower
+    than its rule — see the note at the seam in `db.py`. The extension declares
+    itself able to answer, and `db.named_input_conflict` asks it.
+
+    MUTANTS RUN, AND WHICH PIN CAUGHT EACH (measured 2026-08-29 over this file,
+    `tests/test_loc.py` and `tests/test_loc_read_paths.py`; 291 green unmutated).
+    The point of the table is that no single pin covers the class and none of
+    them is decoration:
+
+    * **the surface stops asking** (the defect restored) — `..._naming_another_
+      place_is_refused` and `..._names_both_places_and_the_key_that_wins`, plus
+      two `BOTH_SURFACES` rows. 4 red.
+    * **the extension stops answering** (`_named_input_conflict` returns `None`)
+      — the same 4, plus `..._the_seam_loads_the_extension_before_answering`. 5
+      red. Two halves, two ways to break it, and both are covered.
+    * **the TEMPTING WRONG FORM: refuse whenever any other priority key is
+      present** — the enumeration the brief forbids. Every pin above stays GREEN;
+      what goes red is `..._two_keys_naming_one_place_are_not_a_conflict` and
+      `..._a_silent_sibling_key_still_lets_the_named_input_anchor`, i.e. exactly
+      the two boundaries, plus both anti-drift pins — this repository's own
+      resolver-boundary pin among them, since that form has to import the
+      extension to be written at all. 7 red.
+    * **the seam stops loading the modules before answering** — a GATE THAT
+      CANNOT FIRE, silent on every CLI process. Exactly ONE pin sees it,
+      `..._the_seam_loads_the_extension_before_answering`, and it exists for that.
+    * **the refusal text stops naming the deciding key** — again exactly ONE,
+      `..._names_both_places_and_the_key_that_wins`.
+
+    One test here stays green on every mutant and is a PRESERVATION pin rather
+    than a broken one, which this file says out loud because a reader cannot
+    otherwise tell the difference: `..._keeps_the_grammars_own_priority` holds
+    the SCOPE — a row with no named input must not be touched by any of this.
+
+    The baseline the whole rule is stated against — a named input alone anchors
+    where it says — is NOT repeated here. `TestTheParameterReachesTheAnchor::
+    test_a_named_line_anchors_the_card` already holds it, and more fully (path,
+    end, text and commit, not just the line).
+    """
+
+    def _anchor(self, tools, **over):
+        return (_add(tools, **over)["meta"] or {}).get("loc") or {}
+
+    def test_a_sibling_singular_key_naming_another_place_is_refused(self, tools):
+        """The defect itself. Before the fix this returned a card anchored at 3."""
+        with pytest.raises(ValueError):
+            _add(tools, lines="10", meta={"line": "3"})
+
+    def test_two_keys_naming_one_place_are_not_a_conflict(self, tools):
+        """Agreement through a DIFFERENT spelling still passes, and still anchors
+        where both of them said. A rule keyed on 'is another priority key here'
+        cannot tell this from the test above it."""
+        assert self._anchor(tools, lines="10", meta={"line": "10"}).get("line") == 10
+
+    def test_a_silent_sibling_key_still_lets_the_named_input_anchor(self, tools):
+        """The measured `CB-80` class: a `sites` value carrying FUNCTION NAMES.
+        The grammar reads no place out of it, so it takes no anchor and there is
+        nothing to conflict with — the named input decides, as it should."""
+        anchor = self._anchor(tools, lines="10", meta={"sites": ["handle_a", "handle_b"]})
+        assert anchor.get("line") == 10
+
+    def test_a_row_with_no_named_input_keeps_the_grammars_own_priority(self, tools):
+        """SCOPE, stated as a test because a scope claimed only in prose is the
+        thing this repository keeps being wrong about. Two meta keys and NO named
+        input is untouched by this rule: nothing was named, so nothing can be
+        disappointed, and `line` still wins exactly as `_KEY_PRIORITY` says."""
+        assert self._anchor(tools, meta={"lines": "10", "line": "3"}).get("line") == 3
+
+    def test_the_refusal_names_both_places_and_the_key_that_wins(self, tools):
+        """§4.3. The measurement that licensed comparing places without first
+        normalizing them is a sample of two rows out of 3732, so a false refusal
+        must cost one edit rather than an investigation: the text has to carry
+        what each side gave AND which key won."""
+        with pytest.raises(ValueError) as exc:
+            _add(tools, lines="10", meta={"line": "3"})
+        message = str(exc.value)
+        assert "line 10" in message, "the named input's place is missing"
+        assert "line 3" in message, "the place meta would produce is missing"
+        assert "'line'" in message, "the winning key is not named"
+        assert "Traceback" not in message
+
+    def test_the_seam_loads_the_extension_before_answering(self):
+        """A GATE THAT CANNOT FIRE, reintroduced by the route the question takes.
+
+        `_compose_add_meta` runs at the SURFACE, before `connect()`, so in a fresh
+        CLI process nothing has imported the extension that owns the precedence
+        and the registry is genuinely EMPTY. Without the module load inside
+        `db.named_input_conflict` the answer would be "no conflict" — silent on
+        every CLI invocation and loud only under a server that had already
+        imported everything, which is the exact hazard
+        `db.resolver_reserved_meta_keys` records having hit once before.
+
+        Run in a SUBPROCESS because the fact being pinned is about a process that
+        has imported nothing else, and this one has imported the whole suite.
+        `PYTHONPATH` is set explicitly: from a worktree a bare interpreter would
+        resolve `codebugs` through the main checkout's editable install and
+        measure a tree this run did not touch.
+        """
+        import pathlib
+
+        src = pathlib.Path(findings.__file__).parents[1]
+        probe = (
+            "from codebugs import db\n"
+            "print('EMPTY' if not db._named_input_checks else 'PREloaded')\n"
+            "print(db.named_input_conflict('lines', 10, {'lines': 10, 'line': 3}) is not None)\n"
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={"PYTHONPATH": str(src), "PATH": "/usr/bin:/bin"},
+        )
+        before, answered = out.stdout.split()
+        # The first line is what makes the second one evidence rather than luck:
+        # if something had already imported the extension, the seam's own load
+        # would prove nothing.
+        assert before == "EMPTY", f"the registry was already populated: {out.stdout!r}"
+        assert answered == "True", (
+            "the seam answered 'no conflict' in a process that had not imported "
+            "the extension — the module load inside `named_input_conflict` is "
+            f"what stops that, and it is missing. Raw output: {out.stdout!r}"
+        )
+
+    def test_the_rule_asks_the_grammar_rather_than_copying_its_table(self):
+        """ANTI-DRIFT, and it is the whole reason the check is shaped as
+        'would my place result' rather than 'which keys are present'. A list of
+        priority keys inside `findings.py` would be a second copy of
+        `loc._KEY_PRIORITY`, and it would disagree with the first the day the
+        order changes — which is the failure the grammar's own comment describes.
+
+        READ BY AST, AND THAT IS NOT TIDINESS. The first draft of this test
+        searched the file's TEXT and went red on this fix's own prose, which
+        names `loc._KEY_PRIORITY` in a docstring precisely in order to explain
+        itself. Same shape as `CB-139`'s `fetch-depth` matcher: a text search
+        answers a different question from the one being asked, and it is wrong in
+        BOTH directions — it flags an explanation, and a real copy hidden behind
+        a `getattr` would sail past it. What is asked here is what the CODE does.
+        """
+        import ast
+        import pathlib
+
+        tree = ast.parse(pathlib.Path(findings.__file__).read_text())
+        docstrings = {
+            node.body[0].value
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)
+        }
+        names = {
+            node.attr if isinstance(node, ast.Attribute) else node.id
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Name, ast.Attribute))
+        }
+        assert "_KEY_PRIORITY" not in names, (
+            "`findings.py` READS the grammar's priority table: that is a second "
+            "copy of the rule. Ask `loc.is_location_key` instead."
+        )
+        # `lines` is excluded because the named input legitimately owns that key
+        # and `_ADD_META_FLAGS` declares it — that is the declaration, not a copy
+        # of the grammar's ordering.
+        forbidden = {k for k in loc._KEY_PRIORITY if k != "lines"}
+        spelled = {
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node not in docstrings
+        }
+        assert not (forbidden & spelled), (
+            f"`findings.py` spells the grammar's {sorted(forbidden & spelled)} key(s) "
+            "as a literal: the check must ask `loc.is_location_key` rather than "
+            "enumerate what the grammar reads."
         )
 
 

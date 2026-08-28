@@ -169,6 +169,58 @@ class TestGrammar:
         assert loc.select_site(loc.parse_sites({"sites": ["other.py:3"]}), "f.py") is None
 
 
+class TestWhatTheGrammarWillAnswerAboutItself:
+    """CB-236. `findings._compose_add_meta` has to ask three questions of this
+    module — which key decided, does this grammar even read a key of that name,
+    and how do I print a place to a human — and the whole reason they are asked
+    rather than answered locally is that any local answer is a second copy of
+    `_KEY_PRIORITY`, one edit from disagreeing with the first.
+    """
+
+    def test_the_deciding_key_travels_with_the_sites(self):
+        key, sites = loc.parse_sites_with_key({"sites": ["z.py:99"], "lines": [50], "line": 7})
+        assert (key, sites) == ("line", [(None, 7, 7)])
+
+    def test_a_key_that_yields_nothing_does_not_decide(self):
+        """The measured `CB-80` shape: a `sites` full of function names is skipped
+        and the next key that actually yields a place decides."""
+        assert loc.parse_sites_with_key({"sites": ["handle_a"], "lines": [50]}) == (
+            "lines",
+            [(None, 50, 50)],
+        )
+
+    def test_nothing_yielding_a_place_answers_none_rather_than_a_key(self):
+        assert loc.parse_sites_with_key({"location": "somewhere in the retry loop"}) == (None, [])
+        assert loc.parse_sites_with_key(None) == (None, [])
+
+    def test_parse_sites_is_the_same_traversal_and_not_a_second_one(self):
+        """ANTI-DRIFT, structural: two loops over one priority table is the exact
+        defect this module's own comment warns about, and behaviour cannot see
+        the difference while they happen to agree."""
+        body = ast.parse(inspect.getsource(loc.parse_sites).lstrip())
+        assert not [n for n in ast.walk(body) if isinstance(n, (ast.For, ast.While))], (
+            "`parse_sites` grew a loop of its own: it must delegate to "
+            "`parse_sites_with_key` so the two can never disagree."
+        )
+
+    def test_is_location_key_answers_for_the_whole_table_and_for_nothing_else(self):
+        for key in loc._KEY_PRIORITY:
+            assert loc.is_location_key(key), key
+        # `function` is the pointed negative: the grammar deliberately never
+        # reads a place out of it (28/28 of its corpus values are prose), so a
+        # named input onto it must not be dragged into the anchor rule.
+        for key in ("function", "module", "rule_code", ""):
+            assert not loc.is_location_key(key), key
+
+    def test_describe_sites_states_the_absence_rather_than_printing_nothing(self):
+        """An empty rendering inside a refusal reads as a broken message; the
+        absence of a place is a fact the refusal is entitled to state."""
+        assert loc.describe_sites([]) == "<no place at all>"
+        assert loc.describe_sites(loc.parse_sites({"line": 7})) == "line 7"
+        assert loc.describe_sites(loc.parse_sites({"lines": "10-12"})) == "line 10-12"
+        assert loc.describe_sites(loc.parse_sites({"site": "a.py:3"})) == "a.py:3"
+
+
 # --- the object (Р2) ------------------------------------------------------------------
 
 

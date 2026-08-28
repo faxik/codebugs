@@ -360,6 +360,90 @@ def resolver_updatable_meta_keys() -> frozenset[str]:
     return frozenset(keys)
 
 
+# --- Named-input arbitration seam (CB-236) ---
+#
+# A SURFACE may offer a dedicated named input that writes into `meta` — the CLI's
+# `-l/--lines`, the MCP `lines=` parameter. Whether that input is HONOURED is not
+# a question the surface can answer: the value lands in `meta` beside whatever
+# else the caller sent, and it is an EXTENSION reading those keys that decides
+# what the row ends up meaning. When the extension's own precedence hands the
+# decision to a different key, the named input is accepted, stored, and silently
+# lost — CB-129's success-shaped discard, reached through a sibling spelling.
+#
+# WHY A REGISTRY AND NOT AN IMPORT, because the obvious alternative was tried and
+# refused. `findings` cannot ask the extension directly: THE DEPENDENCY RUNS THE
+# OTHER WAY — `loc` imports `provenance`, which imports `findings` — so a
+# module-level import is a measured `ImportError` on a partially initialized
+# `provenance`. That is the load-bearing reason and it holds for every spelling.
+# `tests/test_loc_read_paths.py::TestThereIsExactlyOneResolver` states the same
+# rule as a boundary the domain module must not cross, and it caught the deferred
+# `from codebugs import loc` this fix first reached for. Its coverage is narrower
+# than its rule, though, and saying so is cheaper than rediscovering it: it is a
+# SUBSTRING test over the source, so `import codebugs.loc as x` matches neither
+# of its two strings (measured). Do not read it as the thing that makes the
+# import impossible — the cycle is. This is the same answer the same problem
+# already got once: an extension's UPDATABLE keys are declared at registration
+# and read back through `resolver_updatable_meta_keys` rather than spelled
+# inside `findings`.
+#
+# The check returns FACTS, never a sentence. Each surface phrases its own refusal
+# in its own vocabulary (`--lines`/`--meta` for a shell, bare parameter names for
+# a tool call), so a checker that composed the message would be telling a tool
+# caller to delete a command-line flag it never typed.
+NamedInputCheck = Callable[[str, Any, dict[str, Any]], dict[str, str] | None]
+
+_named_input_checks: dict[str, NamedInputCheck] = {}
+
+
+def register_named_input_check(name: str, fn: NamedInputCheck) -> None:
+    """Declare that this extension can say whether a named input is honoured.
+
+    Same discipline as the other registries: an identical re-registration is a
+    no-op so module re-import is safe, and a same-name registration with a
+    DIFFERENT function raises, because the new implementation would never run
+    while its caller believes it registered.
+
+    `fn(key, value, meta)` returns `None` when the named input DECIDES the
+    outcome — that covers agreement, and it covers a neighbouring key the
+    extension reads nothing out of — and otherwise a mapping of strings the
+    surface can drop into its own refusal. A checker is asked about every named
+    input, including keys it knows nothing about, and must answer `None` for
+    those rather than guess.
+    """
+    existing = _named_input_checks.get(name)
+    if existing is not None:
+        if existing is not fn:
+            raise ValueError(
+                f"named-input check {name!r} already registered with a different "
+                f"function; a silently ignored implementation would never run"
+            )
+        return
+    _named_input_checks[name] = fn
+
+
+def named_input_conflict(key: str, value: Any, meta: dict[str, Any]) -> dict[str, str] | None:
+    """What a registered extension says would be lost, or `None` if nothing is.
+
+    Loads the domain modules first, and that is the whole reason this is not a
+    bare dict read: the surfaces call it BEFORE `connect()`, so without the load
+    the answer would depend on which modules the process happened to import —
+    silent on a fresh CLI process and loud under the server. A gate that cannot
+    fire is worse than no gate, and this is exactly the hazard
+    `resolver_reserved_meta_keys` records having hit (CB-45 review).
+
+    The FIRST complaint wins. Checkers are asked in name order so the answer
+    cannot depend on registration order; today there is one, and a second one
+    complaining about the same key would mean two extensions read it, which the
+    resolver seam already refuses at its own level.
+    """
+    _ensure_modules_loaded()
+    for name in sorted(_named_input_checks):
+        detail = _named_input_checks[name](key, value, meta)
+        if detail is not None:
+            return detail
+    return None
+
+
 def _validate_resolver_outcome(
     outcome: dict[str, Any], resolver: PreAddResolver, forbidden: frozenset[str]
 ) -> None:

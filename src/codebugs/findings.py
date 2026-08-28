@@ -534,6 +534,29 @@ def _compose_add_meta(
       answer. Letting `meta` win silently discarded an explicitly passed argument;
       applying the named input last was rejected because it would silently invert
       the stored type for every caller already passing both.
+    * **A named input that would NOT decide the outcome is refused** (CB-236).
+      The two rules above compare a named input against the meta key of its OWN
+      name, and that is an enumeration of one spelling. The extension that reads
+      these keys has a precedence of its own and prefers other spellings, so
+      `-l 10` beside a `meta.line` of 3 satisfied both rules above and the anchor
+      still landed on 3 — the named input accepted, stored beside it, and silently
+      lost, at exit 0. Measured end to end before the fix.
+
+      So the question asked is not *which keys are present* but **would what I
+      named be what results** — and this module does not answer it. It cannot:
+      the precedence belongs to whichever extension reads those keys, and a copy
+      of it here would be a second rule, disagreeing with the first the day the
+      order changes. `db.named_input_conflict` puts the question to the extension
+      that declared itself able to answer, exactly as `resolver_updatable_meta_keys`
+      puts the neighbouring question about repairable keys. What comes back is
+      FACTS — what was named, what would result, which key decides — never a
+      sentence, because each surface must phrase its own refusal in its own
+      vocabulary. `None` means the named input decides, which covers agreement
+      and covers a neighbouring key the extension reads nothing out of.
+
+      **What this deliberately does NOT do**, since the scope is the point: it
+      never touches an outcome already stored, and a row carrying two meta keys
+      and NO named input is untouched, because nothing was named to disappoint.
 
     It RAISES `ValueError` and prints nothing, so each surface reports in its own
     vocabulary: the CLI converts it into a one-line stderr refusal and `sys.exit(1)`
@@ -593,6 +616,32 @@ def _compose_add_meta(
         return meta
     merged = dict(named)
     merged.update(supplied_meta)
+
+    # CB-236. Whether a named input is HONOURED is not a question this module can
+    # answer — the extension that reads these meta keys owns that precedence — so
+    # it is asked through the seam, which also loads the modules first so the
+    # answer cannot depend on what this process happened to import.
+    for param, key, cli_spelling in _ADD_META_FLAGS:
+        if key not in named:
+            continue
+        conflict = db.named_input_conflict(key, named[key], merged)
+        if conflict is None:
+            continue
+        said = spelling(param, cli_spelling)
+        # BOTH sides are named, and so is the key that wins. The measurement that
+        # licensed comparing places WITHOUT normalizing them first is a sample of
+        # two rows out of 3732, so the day it turns out to refuse something
+        # legitimate, this text has to make that a one-line fix rather than an
+        # investigation.
+        raise ValueError(
+            f"{prefix}: {said} and {meta_spelling} name DIFFERENT places, and only "
+            f"one of them can become the anchor.\n"
+            f"  {said} gives {conflict['named']}\n"
+            f"  {meta_spelling} gives {conflict['resulting']}, read from its "
+            f"{conflict['deciding']!r} key"
+            f"  <- this one would have won, silently discarding {said}.\n"
+            f"Pass only one of the two spellings, or make them name the same place."
+        )
     return merged
 
 
