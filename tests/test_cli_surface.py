@@ -50,9 +50,9 @@ def _drift_message(current: dict, expected: dict) -> str:
     detail = ""
     if drifted:
         # Name the first attribute that actually differs, per drifted verb,
-        # rather than dumping the whole nested structure — with 67 verbs and
-        # up to a dozen actions each, a bare `!=` gives a reader nothing to
-        # act on.
+        # rather than dumping the whole nested structure — with this many
+        # verbs and up to a dozen actions each, a bare `!=` gives a reader
+        # nothing to act on.
         #
         # Walk the UNION of the verb record's own keys (CB-169), never a
         # named subset. The record used to carry only `actions`, and this
