@@ -1362,11 +1362,31 @@ class TestFoldReportCliAndJson:
 
 
 class TestFoldReportDocumentsItsOwnKeys:
-    """The three surfaces used to promise the opposite of what the code now does
-    — "accepted in silence and appears nowhere in the report" was in the domain
-    docstring, the MCP tool description and the CHANGELOG at once. A contract
-    described in three places and fixed in one is this repository's most-repeated
-    defect, so the prose is pinned against the code."""
+    """Every surface that describes the unmatched-key report is pinned here, and
+    the class used to claim more coverage than it held (CB-247).
+
+    Three surfaces once promised the opposite of what the code does — "accepted
+    in silence and appears nowhere in the report" stood in the domain docstring,
+    the MCP tool description and the CHANGELOG at once. A contract described in
+    three places and fixed in one is this repository's most-repeated defect, so
+    the prose is pinned against the code. **This docstring said "three surfaces"
+    while the class asserted two of them**: the MCP tool description was named in
+    the sentence above and checked nowhere, which is the promise-wider-than-the-
+    check shape written into the very class that exists to close it.
+
+    A FOURTH surface was outside the sentence altogether — the ``help=`` on
+    ``--fold-map``, which is the one CB-242 was actually filed about. It was held
+    only by the wire golden, and a golden compares the string to a snapshot of
+    itself: it notices a change and can say nothing about whether the text is
+    TRUE. So that one is pinned against BEHAVIOUR rather than against another
+    string, and in TWO methods deliberately: one runs the report with two
+    unmatched keys and counts the printed blocks, the other reads the help off
+    the built parser. Together they are the claim; apart, a failure names which
+    half broke without a reader opening the body. The wording that made it
+    necessary was "every such key gets its own block", where the code prints ONE
+    block with a counted header and a line per key (measured, dry run and
+    ``--apply`` alike).
+    """
 
     def test_the_domain_docstring_names_both_new_keys(self):
         doc = findings.normalize_categories.__doc__ or ""
@@ -1374,6 +1394,93 @@ class TestFoldReportDocumentsItsOwnKeys:
         assert "merged_identities" in doc
         assert "appears NOWHERE in the report" not in doc
 
+    def test_the_mcp_tool_description_names_both_new_keys(self):
+        """The third surface the class docstring named and never checked.
+
+        Routed through ``tests/_mcp_schema.collect_tool_schemas``, which
+        registers via ``server._NormalizedDescriptions`` — NOT through a bare
+        ``MCPServer``. That distinction is not pedantry and the first draft of
+        this test got it wrong: a bare registration hands back the raw
+        ``__doc__``, and on this interpreter the two differ by 179 bytes
+        (measured, 3198 raw against 3019 on the wire, CB-73's dedent). Asserting
+        on the raw text while the docstring promised "what a client receives"
+        would be a promise wider than its check — inside the very class that
+        exists to close that shape.
+        """
+        from tests._mcp_schema import collect_tool_schemas
+
+        described = {
+            entry["name"]: entry.get("description", "")
+            for entry in collect_tool_schemas(providers=db.get_tool_providers(mode="findings"))
+        }
+        description = described["categories_normalize"]
+
+        assert "unmatched_fold_keys" in description
+        assert "merged_identities" in description
+        assert "appears nowhere in the report" not in description.lower()
+
     def test_the_changelog_no_longer_says_an_unmatched_key_is_invisible(self):
         text = (pathlib.Path(__file__).resolve().parent.parent / "CHANGELOG.md").read_text()
         assert "appears nowhere in the report" not in text
+
+    def test_two_unmatched_keys_produce_one_block_and_not_one_each(
+        self, conn, tmp_project, monkeypatch, capsys
+    ):
+        """The BEHAVIOUR half of the fourth surface: what the report prints.
+
+        Split from the wording assertion below deliberately — the two check
+        different things through different machinery, and a failure should name
+        which one broke without a reader opening the body.
+        """
+        _insert_raw(conn, fid="CB-1", category=MERGE_FROM)
+        _insert_raw(conn, fid="CB-2", category=MERGE_TO, description=DESC_B)
+        conn.commit()
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "codebugs", "--tracker-root", tmp_project, "categories-normalize",
+                "--fold-map", json.dumps({"nosuch_one": MERGE_TO, "nosuch_two": MERGE_TO}),
+            ],
+        )
+        from codebugs import cli
+
+        cli.main()
+        out = capsys.readouterr().out
+
+        assert out.count("fold_map keys matched NO stored category") == 1, (
+            "one block for all unmatched keys, never one block each"
+        )
+        assert "!! 2 fold_map keys matched NO stored category" in out
+        assert "'nosuch_one'" in out and "'nosuch_two'" in out
+
+    def test_the_fold_map_help_describes_that_block_rather_than_promising_one_each(self):
+        """The WORDING half, read off the built parser.
+
+        The claim that made this necessary was "every such key gets its own
+        block" (CB-242's own surface), which the test above measures to be
+        false. This half needs no tracker and no CLI run, which is why it is
+        its own method.
+        """
+        import argparse
+
+        parsers: dict[str, argparse.ArgumentParser] = {}
+
+        class _Sub:
+            def add_parser(self, name, **kw):
+                p = argparse.ArgumentParser(add_help=False)
+                parsers[name] = p
+                return p
+
+        findings.register_cli(_Sub(), {})
+        help_text = next(
+            a.help or ""
+            for a in parsers["categories-normalize"]._actions
+            if "--fold-map" in (a.option_strings or [])
+        )
+
+        assert "own block" not in help_text, (
+            "the report prints one block for all unmatched keys, never one each"
+        )
+        assert "one block" in help_text
