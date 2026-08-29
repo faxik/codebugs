@@ -1087,12 +1087,16 @@ def _match_fingerprint(
     OR MORE terminal rows. Measured over both live trackers on 2026-08-27, terminal
     vocabulary read from `_REOPEN_STATUSES + RECURRENCE_STATUSES`: codebugs,
     233 rows — **zero** such fingerprints; autosorter, 3449 rows — **one**,
-    `CB-3268` and `CB-3265`, both `wont_fix`. Re-measured 2026-08-28: still that
-    one pair, still both `wont_fix`, autosorter grown to 3452 rows — **and this
+    `CB-3268` and `CB-3265`, both `wont_fix`. Re-measured 2026-08-29: still that
+    one pair, still both `wont_fix`, autosorter then at 3481 rows — **and this
     sentence used to name a shared stamp for the pair, which was false**; the two
-    rows carry `2026-08-21T13:47:09Z` and `2026-08-21T12:48:51Z`, so the stamp is
-    DROPPED rather than corrected (CB-241), a timestamp on a live row being the
-    one half of this measurement that goes stale on the next write.
+    rows carry DIFFERENT stamps, and the values are DROPPED from this text rather
+    than corrected (CB-241), a timestamp on a live row being the one half of this
+    measurement that goes stale on the next write. **The first correction printed
+    both values while announcing the drop** (CB-247), which is this paragraph's own
+    warning committed inside its own fix: what the argument needs is that the pair
+    does not share a stamp, and naming the two values adds nothing to that while
+    putting an expiring assertion in the present tense.
     Both members of that pair are in the SAME status class, so `recurrence_of` is
     chosen whichever wins and the outcome is indistinguishable. There is no live
     tracker on which the degraded order can produce a wrong answer, and building a
@@ -6188,8 +6192,9 @@ def register_cli(sub, commands) -> None:
         "ANY name the table holds, not just a spelling of the target, so this is how "
         "category names are merged; omit it to fold every stored spelling to its own "
         "normalized form. A key that matches no stored category renames nothing, and the "
-        "report says so out loud: every such key gets its own block, spelled out exactly "
-        "as you typed it, in the dry run and under --apply alike. Back up with export-csv "
+        "report says so out loud: one block names how many there were and lists every one "
+        "of them, spelled out exactly as you typed it, in the dry run and under --apply "
+        "alike. Back up with export-csv "
         "first (restore-csv reloads "
         "findings verbatim into an empty tracker; milestone items and audit history are "
         "not in a CSV export)",

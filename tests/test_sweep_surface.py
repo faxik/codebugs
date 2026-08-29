@@ -856,8 +856,16 @@ class TestHandlerBodiesRunWithTheirNamesResolved:
         assert "NOPE" in capsys.readouterr().err
 
 
-class TestArchivedFlagDefaultsStayFalseOnEverySurface:
+class TestArchivedFlagDefaultsStayFalseInTheMcpDeclaration:
     """The premise CB-217's refusal FORM rests on, held where it can break.
+
+    **The name used to say `…OnEverySurface`, and the class asserts ONE of them
+    (CB-247).** The docstring below was always honest about that — it names the
+    other two surfaces and the tests that hold them — but a name is the first
+    thing read, and in a repository whose recurring defect is a promise wider
+    than its check, the name carries the promise too. It now says which surface
+    this is; the paragraph beginning "ONLY the MCP declaration" is the rest of
+    the answer and is unchanged.
 
     `list_items` refuses on the VALUES of its two archived flags rather than on
     the fact that they were supplied — which is what let CB-217 be fixed without

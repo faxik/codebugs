@@ -65,9 +65,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a flag had been dropped. On a sweep with two live entries and one archived, `--all` gave three
   rows, `--archived-only` gave one, and the two together gave one — which reads like a filter doing
   its job.
-  It now refuses, at exit 1, with a message that names both flags, says what each of them asks for,
-  and tells you which one to remove for each of the two things you might have meant. The refusal
-  happens before anything is read, so nothing is listed and nothing is changed.
+  The call now refuses on **both** surfaces, with a message that names both flags, says what each of
+  them asks for, and tells you which one to remove for each of the two things you might have meant.
+  On the command line that refusal is exit 1; an MCP client has no exit code to receive and gets a
+  tool error carrying the same message. The refusal happens before anything is read, so nothing is
+  listed and nothing is changed.
   **This will break a caller that relied on the old behaviour, and that is a deliberate trade.**
   The MCP tool description used to state the suppression outright — "`archived_only`: Show only
   archived entries (overrides `include_archived`)" — so a client could reasonably have written the

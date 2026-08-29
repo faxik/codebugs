@@ -1362,11 +1362,28 @@ class TestFoldReportCliAndJson:
 
 
 class TestFoldReportDocumentsItsOwnKeys:
-    """The three surfaces used to promise the opposite of what the code now does
-    — "accepted in silence and appears nowhere in the report" was in the domain
-    docstring, the MCP tool description and the CHANGELOG at once. A contract
-    described in three places and fixed in one is this repository's most-repeated
-    defect, so the prose is pinned against the code."""
+    """Every surface that describes the unmatched-key report is pinned here, and
+    the class used to claim more coverage than it held (CB-247).
+
+    Three surfaces once promised the opposite of what the code does — "accepted
+    in silence and appears nowhere in the report" stood in the domain docstring,
+    the MCP tool description and the CHANGELOG at once. A contract described in
+    three places and fixed in one is this repository's most-repeated defect, so
+    the prose is pinned against the code. **This docstring said "three surfaces"
+    while the class asserted two of them**: the MCP tool description was named in
+    the sentence above and checked nowhere, which is the promise-wider-than-the-
+    check shape written into the very class that exists to close it.
+
+    A FOURTH surface was outside the sentence altogether — the ``help=`` on
+    ``--fold-map``, which is the one CB-242 was actually filed about. It was held
+    only by the wire golden, and a golden compares the string to a snapshot of
+    itself: it notices a change and can say nothing about whether the text is
+    TRUE. So that one is pinned against BEHAVIOUR — the report is run with two
+    unmatched keys and the printed shape is counted — rather than against another
+    string. The claim that made it necessary was "every such key gets its own
+    block", where the code prints ONE block with a counted header and a line per
+    key (measured, dry run and ``--apply`` alike).
+    """
 
     def test_the_domain_docstring_names_both_new_keys(self):
         doc = findings.normalize_categories.__doc__ or ""
@@ -1374,6 +1391,84 @@ class TestFoldReportDocumentsItsOwnKeys:
         assert "merged_identities" in doc
         assert "appears NOWHERE in the report" not in doc
 
+    def test_the_mcp_tool_description_names_both_new_keys(self):
+        """The third surface the class docstring named and never checked.
+
+        Read off the REGISTERED tool, which is what a client receives, rather
+        than off a nested ``__doc__`` this module cannot reach.
+        """
+        import asyncio
+        from contextlib import contextmanager
+
+        from mcp.server.mcpserver import MCPServer
+
+        @contextmanager
+        def _never_called():
+            raise AssertionError("listing tools must not open a connection")
+            yield  # pragma: no cover
+
+        mcp = MCPServer("cb247-fold-description-pin")
+        findings.register_tools(mcp, _never_called)
+        tools = {t.name: t for t in asyncio.run(mcp.list_tools())}
+        description = tools["categories_normalize"].description or ""
+
+        assert "unmatched_fold_keys" in description
+        assert "merged_identities" in description
+        assert "appears nowhere in the report" not in description.lower()
+
     def test_the_changelog_no_longer_says_an_unmatched_key_is_invisible(self):
         text = (pathlib.Path(__file__).resolve().parent.parent / "CHANGELOG.md").read_text()
         assert "appears nowhere in the report" not in text
+
+    def test_the_fold_map_help_describes_the_block_the_code_actually_prints(
+        self, conn, tmp_project, monkeypatch, capsys
+    ):
+        """The fourth surface, checked against behaviour rather than a golden.
+
+        Two unmatched keys must produce ONE header block naming the count, with
+        a line per key underneath — so the help must not promise a block each.
+        """
+        import argparse
+
+        _insert_raw(conn, fid="CB-1", category=MERGE_FROM)
+        _insert_raw(conn, fid="CB-2", category=MERGE_TO, description=DESC_B)
+        conn.commit()
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "codebugs", "--tracker-root", tmp_project, "categories-normalize",
+                "--fold-map", json.dumps({"nosuch_one": MERGE_TO, "nosuch_two": MERGE_TO}),
+            ],
+        )
+        from codebugs import cli
+
+        cli.main()
+        out = capsys.readouterr().out
+
+        assert out.count("fold_map keys matched NO stored category") == 1, (
+            "one block, not one per key — the help text says so"
+        )
+        assert "!! 2 fold_map keys matched NO stored category" in out
+        assert "'nosuch_one'" in out and "'nosuch_two'" in out
+
+        parsers: dict[str, argparse.ArgumentParser] = {}
+
+        class _Sub:
+            def add_parser(self, name, **kw):
+                p = argparse.ArgumentParser(add_help=False)
+                parsers[name] = p
+                return p
+
+        findings.register_cli(_Sub(), {})
+        help_text = next(
+            a.help or ""
+            for a in parsers["categories-normalize"]._actions
+            if "--fold-map" in (a.option_strings or [])
+        )
+
+        assert "own block" not in help_text, (
+            "the report prints one block for all unmatched keys, never one each"
+        )
+        assert "one block" in help_text

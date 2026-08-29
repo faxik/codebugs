@@ -57,8 +57,20 @@ MEASURED ESCAPES — the gate does NOT see these, and each was reproduced:
   3. THE GUARD VALIDATED SOMEBODY ELSE'S ARGUMENT. The gate asks only WHETHER
      the guard was called, never WHAT it was given, so a function that validates
      `offset` and binds an unchecked `limit` walks past. This is not a contrived
-     shape: five of the fourteen binding sites in the tree carry an `offset`
-     beside their limit. Closing it means following the argument to the value
+     shape: FOUR of the fourteen binding sites in the tree carry an `offset`
+     beside their limit — `blockers.query_deferred_entities`,
+     `findings.recent_findings`, `findings.query_findings` and
+     `reqs.query_requirements`. **That number read `five` when this text landed,
+     and nobody in the chain that carried it had counted** (CB-254): it came from
+     one acceptor's remark and was relayed through three more hands verbatim,
+     which is this file's own subject happening to this file. Re-measured
+     2026-08-29 by walking the union of the two sets below, all fourteen
+     resolved; and the count does not turn on what "carries an offset" is taken
+     to mean, because the same four are the only sites declaring an `offset`
+     PARAMETER, the only ones naming `offset` anywhere in their body, and the
+     only ones whose SQL emits an `OFFSET` clause — and no site in the
+     population takes `**kwargs`, so there is no indirect route to argue about.
+     Closing it means following the argument to the value
      that is bound — data flow inside the function, the boundary this file draws
      elsewhere — and no site in the tree is wrong today, so it is DECLARED.
   4. THE GUARD SITS IN A BRANCH THAT CANNOT RUN. `if False:` around the call
