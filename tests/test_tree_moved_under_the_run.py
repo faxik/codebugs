@@ -449,8 +449,13 @@ class TestTheAlarmNamesADirectoryItCannotList:
             proc = _inner_pytest(tmp_path / "bt", plugin_dir=plugin_dir, cwd=copy)
         finally:
             # Restored, never removed: the whole copy is disposable, but pytest
-            # deletes old `--basetemp` trees itself, and a 0300 directory left
-            # behind makes that deletion fail long after this run is over.
+            # deletes old `--basetemp` trees itself and cannot delete an
+            # unreadable one. Measured on pytest 9.0.2 rather than assumed, and
+            # the measurement narrowed the claim: `rm_rf` does NOT raise, it
+            # emits `PytestWarning: (rm_rf) error removing ...` once per level
+            # and LEAVES the tree standing. So the cost of dropping this line
+            # is temporary trees accumulating for ever behind a warning nobody
+            # would ever connect back to this row.
             os.chmod(probe_dir, 0o700)
         out = _output(proc)
         assert proc.returncode == 0, out[-3000:]
