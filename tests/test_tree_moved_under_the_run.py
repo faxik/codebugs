@@ -35,7 +35,7 @@ The sentence above used to end "BY CONSTRUCTION", with no qualification, and it
 was wider than its measurement — the defect class this file is itself about. It
 holds for the run that OWNS the probe and fails for any OTHER reader of the same
 tree, which is an ordinary state here rather than an exotic one: this suite is
-re-run in the main checkout while branches land on it, and one row below copies
+re-run in the main checkout while branches land on it, and two rows below copy
 the live tree wholesale. A second reader overlapping a probe's window sees a
 path appear or disappear and prints this very alarm.
 
@@ -145,10 +145,10 @@ def _git(*args, cwd):
 
 # What a throwaway copy deliberately does not carry. This is NOT `_PRUNED_NAMES`
 # and is deliberately not derived from it: pruning says what the fingerprint must
-# not JUDGE, this says what a copy need not CARRY, and the two are one edit from
-# disagreeing about `.git` — pruned from the fingerprint, and required to be
-# ABSENT from the copy, because the row below asserts a tree with no git at all
-# still works.
+# not JUDGE, this says what a copy need not CARRY. The two tables already differ
+# and are meant to — `.ruff_cache` and `.mypy_cache` are pruned and are not
+# listed here, `.worktrees` is a pruned PATH rather than a name — so deriving
+# one from the other would move one question's answer whenever the other's moved.
 _NOT_COPIED = (".git", ".venv", ".worktrees", "__pycache__", ".pytest_cache", ".codebugs")
 
 
