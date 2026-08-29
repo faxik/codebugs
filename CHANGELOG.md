@@ -8,6 +8,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`resolve-trailers` can be re-run over a range it has already processed without annotating the
+  same cards twice.** Pointing the verb at a widened revision range is the natural thing to do —
+  "everything since the last release", then "since the one before" — and every widening re-covers
+  commits it has already handled. Until now each pass appended the *same* note to the card again and
+  moved its `updated_at`, so a card accumulated identical lines and its date stopped meaning "when
+  something last happened here" and started meaning "when I last swept a range that mentioned it".
+  A card that already carries this trailer's note verbatim is now left completely alone — nothing is
+  written, so neither the duplicate line nor the date change occurs — and it is reported under a new
+  `already_applied` bucket instead of silently, because a run that quietly does nothing is
+  indistinguishable from one that did the work. The command prints a line per such card and closes
+  with `N finding(s) updated, N skipped, N already applied.`; `--dry-run` predicts the same thing,
+  since the check is a read.
+  **What decides is the note's own text**, which is possible because every part of it comes from the
+  commit rather than from the run. So there is one case where a note still arrives twice, and it is
+  worth knowing about: if someone edits the stored line by hand, it is no longer recognisable and
+  the next run appends it again — exactly the old behaviour, in that one case and no other. The
+  first application of a trailer is unchanged, and a `Resolves:` on a card that is already closed
+  keeps reporting `skipped (already terminal)` as before.
+
 - **Naming a code location and then contradicting it in `meta` is now refused instead of quietly
   anchoring somewhere else.** `codebugs add -l 10 --meta '{"line": 3}'` — and the MCP calls
   `add(lines=10, meta={"line": 3})` and `batch_add` behind it — used to succeed, at exit 0, and

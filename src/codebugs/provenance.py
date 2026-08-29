@@ -837,6 +837,40 @@ class _Trailer(NamedTuple):
     subject: str
 
 
+def _note_is_already_stored(meta: Any, note: str) -> bool:
+    """Does *meta* already carry *note* as one of its whole note lines?
+
+    This is the idempotency key for ``resolve_trailers`` (CB-234), and the key
+    is the note TEXT itself. That works only because every part of the text is
+    decided by the COMMIT and nothing by the run: the label comes from the
+    ``_VERB_ACTIONS`` table, the SHA is the commit's, and the subject is the
+    commit's. Measured on a throwaway repository — three runs of one range
+    produced three byte-identical lines — and the one way a subject could carry
+    a line break is foreclosed by git folding it, which
+    ``test_premise_git_subject_is_one_line`` pins as a premise rather than an
+    assumption.
+
+    **Matching is by whole LINE, never by substring.** ``update_finding`` joins
+    notes with newlines, so a stored line is exactly one previously appended
+    note. A substring test would read a hand-written line that merely QUOTES
+    the machine note ("see: Tightened by commit …") as the machine note itself
+    and suppress a genuine first application — the same boundary-versus-
+    substring trap the plan-note naming gate documents in ``CLAUDE.md``.
+
+    **Undecidable input answers False**, and the direction is deliberate rather
+    than defensive: a ``meta`` that is not a dict, or a ``notes`` that is not a
+    string, cannot be shown to carry the note. The cost of a false "no" is one
+    duplicated note, which is exactly the behaviour this fix replaces; the cost
+    of a false "yes" is a note that never lands at all.
+    """
+    if not isinstance(meta, dict):
+        return False
+    notes = meta.get("notes")
+    if not isinstance(notes, str):
+        return False
+    return note in notes.split("\n")
+
+
 def _parse_trailers(rev_range: str, *, project_dir: str | None = None) -> list[_Trailer]:
     """Return the ``Resolves:`` / ``Tightens:`` trailers found in *rev_range*.
 
@@ -890,14 +924,49 @@ def resolve_trailers(
 
     Trailer syntax is case-insensitive and accepts comma-separated IDs
     (``Resolves: CB-1, CB-2``). Returns a report with ``resolved`` /
-    ``tightened`` / ``skipped`` / ``missing`` ID lists. A missing finding or git
-    error never aborts the batch — this runs after a successful integration and
-    must be non-fatal.
+    ``tightened`` / ``skipped`` / ``already_applied`` / ``missing`` ID lists. A
+    missing finding or git error never aborts the batch — this runs after a
+    successful integration and must be non-fatal.
+
+    **Re-running a range is a no-op on the cards it has already annotated
+    (CB-234).** A card that already carries this trailer's note verbatim is
+    reported under ``already_applied`` and NOTHING is written for it, which
+    fixes two harms with one movement: the note is not duplicated, and
+    ``updated_at`` does not move, so the column keeps meaning "when something
+    last happened to this card". Before this the run appended the same line
+    again and re-dated the card on every pass, and the shape of the verb
+    invites exactly that — a revision range is the natural thing to widen after
+    more commits land, and each widening re-covers commits already processed.
+
+    ``already_applied`` is present in EVERY report and an empty list means
+    "checked, nothing was a repeat" — never "this verb does not check". That is
+    the ``attention`` / ``stripped_meta_keys`` discipline: a silent "did
+    nothing" is indistinguishable from "did it", which is the class of lie this
+    tracker exists to refuse.
+
+    **The declared weakness, stated rather than discovered later.** The key is
+    the note text, so a person who edits the stored line breaks it and the note
+    arrives again on the next run. That is accepted, because when the key is
+    broken the behaviour degrades EXACTLY into the pre-CB-234 behaviour — the
+    note is appended a second time — so this is strictly better than nothing
+    everywhere and worse than nothing nowhere. A journal of applied trailers
+    would close it, and was refused: a new table and new state for one verb
+    whose harm has never yet occurred in any live corpus. It is pinned as a
+    test, because a weakness that is only believed is a weakness nobody
+    measured.
+
+    **And the check is a read followed by a write, not one atomic act.** Two
+    runs racing on one card can both see the note absent and both append; the
+    result is the duplicate this fix removes, i.e. the old behaviour again.
+    Closing that would mean pushing the comparison inside ``update_finding``'s
+    transaction, which is a change to a core contract for a verb that runs once
+    after an integration.
     """
     report: dict[str, list[str]] = {
         "resolved": [],
         "tightened": [],
         "skipped": [],
+        "already_applied": [],
         "missing": [],
     }
     seen: set[tuple[str, str]] = set()  # dedup report lists across repeated trailers
@@ -918,13 +987,21 @@ def resolve_trailers(
         if status_input is not None and current["status"] in types.FINDING_TERMINAL:
             report["skipped"].append(t.cb_id)
             continue
+        # CB-234. Built ONCE, then both compared and written — the check must
+        # judge the very string the write will append, never a second
+        # construction of it that could drift.
+        note = f"{label} by commit {t.sha[:12]} ({t.subject})."
+        # The terminal check above runs FIRST deliberately: a `Resolves:` on an
+        # already-closed card has reported `skipped` since long before this, and
+        # re-labelling that state would be a behaviour change nobody asked for.
+        # This branch therefore catches what that one cannot see — every
+        # `Tightens:` repeat, and a `Resolves:` repeat on a card that has since
+        # been reopened.
+        if _note_is_already_stored(current["meta"], note):
+            report["already_applied"].append(t.cb_id)
+            continue
         if not dry_run:
-            findings.update_finding(
-                conn,
-                t.cb_id,
-                status=status_input,
-                append_note=f"{label} by commit {t.sha[:12]} ({t.subject}).",
-            )
+            findings.update_finding(conn, t.cb_id, status=status_input, append_note=note)
         report[bucket].append(t.cb_id)
     return report
 
@@ -1007,10 +1084,19 @@ def register_cli(sub, commands) -> None:
             print(f"{prefix}{cb_id} tightened (note added)")
         for cb_id in report["skipped"]:
             print(f"{cb_id} skipped (already terminal)")
+        # CB-234. Named on its own line rather than folded into "skipped": the
+        # two mean different things (that card is closed / this note is already
+        # there), and a re-run that silently printed nothing would be
+        # indistinguishable from one that did the work.
+        for cb_id in report["already_applied"]:
+            print(f"{cb_id} already applied (note unchanged)")
         for cb_id in report["missing"]:
             print(f"warning: {cb_id} not found", file=sys.stderr)
         updated = len(report["resolved"]) + len(report["tightened"])
-        print(f"{updated} finding(s) updated, {len(report['skipped'])} skipped.")
+        print(
+            f"{updated} finding(s) updated, {len(report['skipped'])} skipped, "
+            f"{len(report['already_applied'])} already applied."
+        )
 
     p = sub.add_parser(
         "resolve-trailers",

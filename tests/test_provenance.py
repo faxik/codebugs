@@ -292,6 +292,280 @@ class TestResolveTrailers:
         assert set(report["resolved"]) == {a, b}
 
 
+class TestResolveTrailersIdempotence:
+    """CB-234: re-running a range must not re-annotate the cards it already did.
+
+    The class pins the COMPOSITION rather than the branches one at a time, in
+    the order the harm actually appears: a first run writes, a second run of the
+    same range writes NOTHING and says so, and the declared weakness — a
+    hand-edited note breaks the key — is held by a test of its own, because a
+    weakness that is only believed is a weakness nobody measured.
+
+    **On the `updated_at` assertions.** ``utc_now()`` is whole-second, so two
+    runs inside one test tick land on the same string and the column looks
+    unmoved even against the UNFIXED code. Every test here that asserts on the
+    date therefore back-dates it to a sentinel first, which stands in for "time
+    passed" and makes the assertion discriminate: an unwanted write replaces the
+    sentinel with today. Written down because a date test that silently could
+    not fail is exactly the shape this card exists to remove.
+    """
+
+    _PAST = "2000-01-01T00:00:00Z"
+
+    def _commit(self, project, message):
+        readme = os.path.join(project, "README.md")
+        with open(readme, "a") as f:
+            f.write(message + "\n")
+        subprocess.run(["git", "add", "."], cwd=project, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", message], cwd=project, check=True, capture_output=True
+        )
+
+    def _add(self, conn):
+        return findings.add_finding(
+            conn,
+            severity="high",
+            category="bug",
+            file="src/auth.py",
+            description="x",
+            new_category=True,
+        )["id"]
+
+    def _notes(self, conn, cb_id):
+        return findings.get_finding(conn, cb_id)["meta"].get("notes")
+
+    def _backdate(self, conn, cb_id):
+        """Stand in for 'a day went by' — see the class docstring."""
+        conn.execute("UPDATE findings SET updated_at = ? WHERE id = ?", (self._PAST, cb_id))
+        conn.commit()
+
+    def test_premise_git_subject_is_one_line(self, git_project):
+        """The note is single-line BECAUSE git folds a multi-line subject.
+
+        `_note_is_already_stored` splits the stored notes on newlines and looks
+        for the note among the resulting lines, which is only a complete
+        predicate while the note itself cannot contain one. That is a property
+        of git's `%s`, not of this package, so it is pinned as a premise: a git
+        that stopped folding would turn this red instead of quietly degrading
+        the check into "always append".
+        """
+        project, _ = git_project
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "first line\nsecond line still subject"],
+            cwd=project,
+            check=True,
+            capture_output=True,
+        )
+        subject = subprocess.check_output(
+            ["git", "log", "-1", "--pretty=format:%s"], cwd=project, text=True
+        )
+        assert "\n" not in subject
+        assert subject == "first line second line still subject"
+
+    def test_a_repeat_writes_nothing_and_says_so(self, git_project, conn):
+        """The whole card, end to end: run, re-run, and nothing moved.
+
+        Both harms are asserted together because one fix produces both — on the
+        second run no write happens at all, so there is neither a duplicated
+        line nor a re-dating. Splitting them into two tests would suggest two
+        mechanisms.
+        """
+        project, base = git_project
+        cb_id = self._add(conn)
+        self._commit(project, f"wip(auth): partial\n\nTightens: {cb_id}")
+
+        first = provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
+        assert first["tightened"] == [cb_id]
+        assert first["already_applied"] == []
+        after_first = self._notes(conn, cb_id)
+        assert after_first.count("\n") == 0  # exactly one line
+        self._backdate(conn, cb_id)
+
+        second = provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
+
+        assert second["already_applied"] == [cb_id]
+        assert second["tightened"] == []
+        assert self._notes(conn, cb_id) == after_first
+        assert findings.get_finding(conn, cb_id)["updated_at"] == self._PAST
+
+    def test_the_bucket_is_present_when_nothing_repeated(self, git_project, conn):
+        """`[]` means "checked, no repeats" — never "no such channel".
+
+        Same discipline as `attention` and `stripped_meta_keys`: a caller must
+        be able to tell from the report alone that the question was asked.
+        """
+        project, base = git_project
+        cb_id = self._add(conn)
+        self._commit(project, f"wip: x\n\nTightens: {cb_id}")
+
+        report = provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
+
+        assert "already_applied" in report
+        assert report["already_applied"] == []
+
+    def test_a_missing_card_still_reports_the_bucket(self, git_project, conn):
+        """The bucket is unconditional across every path out of the loop."""
+        project, base = git_project
+        self._commit(project, "fix: x\n\nResolves: CB-9999")
+
+        report = provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
+
+        assert report["missing"] == ["CB-9999"]
+        assert report["already_applied"] == []
+
+    def test_a_hand_edited_note_breaks_the_key_and_the_note_returns(self, git_project, conn):
+        """The DECLARED weakness, held by a mechanism instead of by belief.
+
+        The key is the note text, so a person who rewrites the stored line makes
+        it unrecognisable and the note is appended again. That is accepted, and
+        the reason it is accepted is what this test protects: the degraded
+        behaviour is EXACTLY the pre-CB-234 behaviour, so the fix is better
+        somewhere and worse nowhere. If this ever turns red the trade has
+        changed and the journal-of-applied-trailers option has to be reopened.
+        """
+        project, base = git_project
+        cb_id = self._add(conn)
+        self._commit(project, f"wip: x\n\nTightens: {cb_id}")
+        provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
+        original = self._notes(conn, cb_id)
+        findings.update_finding(conn, cb_id, notes=original + " — checked by hand, still open")
+
+        report = provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
+
+        assert report["tightened"] == [cb_id]
+        assert report["already_applied"] == []
+        assert self._notes(conn, cb_id).split("\n")[-1] == original
+
+    def test_a_line_that_merely_quotes_the_note_is_not_the_note(self, git_project, conn):
+        """Matching is by whole LINE, so a substring cannot suppress a write.
+
+        A hand-written line that cites the machine note contains it as a
+        substring. Under a substring test the genuine first application would be
+        silently dropped — a note that never lands, which is worse than the
+        duplicate this card removes. The line-boundary rule is what forecloses
+        it, and this is the case that discriminates the two predicates.
+        """
+        project, base = git_project
+        cb_id = self._add(conn)
+        self._commit(project, f"wip: x\n\nTightens: {cb_id}")
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=project, text=True
+        ).strip()[:12]
+        machine_note = f"Tightened by commit {sha} (wip: x)."
+        findings.update_finding(conn, cb_id, notes=f"see also: {machine_note} (per review)")
+
+        report = provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
+
+        assert report["tightened"] == [cb_id]
+        assert self._notes(conn, cb_id).split("\n")[-1] == machine_note
+
+    def test_a_resolves_repeat_on_a_reopened_card_is_already_applied(self, git_project, conn):
+        """The half of the defect the terminal check could never have covered.
+
+        A `Resolves:` repeat on a card still closed reports `skipped (already
+        terminal)` and has done so since long before this card — that path was
+        never the live harm and is deliberately unchanged. Reopen the card and
+        the terminal check stops firing, at which point only the note key stands
+        between a re-run and a duplicated line on a re-dated card.
+        """
+        project, base = git_project
+        cb_id = self._add(conn)
+        self._commit(project, f"fix: close it\n\nResolves: {cb_id}")
+        provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
+        assert findings.get_finding(conn, cb_id)["status"] == "fixed"
+        findings.update_finding(conn, cb_id, status="open")
+        after_first = self._notes(conn, cb_id)
+        self._backdate(conn, cb_id)
+
+        report = provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
+
+        assert report["already_applied"] == [cb_id]
+        assert report["resolved"] == []
+        assert self._notes(conn, cb_id) == after_first
+        # The status is NOT flipped either: the branch returns before the write,
+        # so a reopened card stays reopened rather than being silently re-closed
+        # by a commit that was already accounted for.
+        assert findings.get_finding(conn, cb_id)["status"] == "open"
+        assert findings.get_finding(conn, cb_id)["updated_at"] == self._PAST
+
+    def test_a_terminal_card_is_still_reported_as_skipped(self, git_project, conn):
+        """Nothing that reported `skipped` before reports something else now.
+
+        The terminal check runs FIRST, so the two buckets cannot start
+        competing for the same state. Without this ordering pin the repeat of a
+        closed `Resolves:` would quietly change bucket, which is a contract
+        change to every reader of the report.
+        """
+        project, base = git_project
+        cb_id = self._add(conn)
+        self._commit(project, f"fix: close it\n\nResolves: {cb_id}")
+        provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
+
+        report = provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
+
+        assert report["skipped"] == [cb_id]
+        assert report["already_applied"] == []
+
+    def test_dry_run_predicts_the_repeat(self, git_project, conn):
+        """A dry run answers the question a real run would, or it is not a preview.
+
+        The check is a read, so it costs a dry run nothing to be honest here;
+        placing it below the `dry_run` guard instead would have made
+        `--dry-run` promise a write that the real run would not perform.
+        """
+        project, base = git_project
+        cb_id = self._add(conn)
+        self._commit(project, f"wip: x\n\nTightens: {cb_id}")
+        provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
+
+        report = provenance.resolve_trailers(
+            conn, rev_range=f"{base}..HEAD", project_dir=project, dry_run=True
+        )
+
+        assert report["already_applied"] == [cb_id]
+        assert report["tightened"] == []
+
+    def test_unreadable_notes_append_rather_than_suppress(self, git_project, conn):
+        """When the key cannot be read, WRITE — the safe direction, stated.
+
+        A stored `notes` that is not a string cannot be shown to carry the note.
+        Answering "already applied" there would drop a genuine annotation; the
+        chosen direction costs at most the duplicate this card removes, which is
+        the same trade the hand-edit weakness makes.
+        """
+        project, base = git_project
+        cb_id = self._add(conn)
+        self._commit(project, f"wip: x\n\nTightens: {cb_id}")
+        findings.update_finding(conn, cb_id, meta_update={"notes": ["not", "a", "string"]})
+
+        report = provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
+
+        assert report["tightened"] == [cb_id]
+        assert report["already_applied"] == []
+
+    def test_the_cli_names_the_repeat_rather_than_printing_nothing(self, git_project, conn, capsys):
+        """A silent "did nothing" is indistinguishable from "did it".
+
+        The CLI is the only surface this verb has — there is no MCP tool — so if
+        the bucket is invisible here it is invisible everywhere, and the fix
+        would have replaced a visible duplicate with an invisible no-op.
+        """
+        project, base = git_project
+        cb_id = self._add(conn)
+        self._commit(project, f"wip: x\n\nTightens: {cb_id}")
+        provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
+        conn.close()
+
+        sys.argv = ["codebugs", "resolve-trailers", "--range", f"{base}..HEAD", "--repo", project]
+        from codebugs import cli
+
+        cli.main()
+
+        out = capsys.readouterr().out
+        assert f"{cb_id} already applied" in out
+        assert "1 already applied." in out
+
+
 class TestFalseyStatusDoesNotSilentlyDefaultToOpen:
     """CB-25 sibling, one layer above the query filters.
 
