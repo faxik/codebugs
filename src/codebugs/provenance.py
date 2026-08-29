@@ -850,18 +850,45 @@ def _note_is_already_stored(meta: Any, note: str) -> bool:
     ``test_premise_git_subject_is_one_line`` pins as a premise rather than an
     assumption.
 
-    **Matching is by whole LINE, never by substring.** ``update_finding`` joins
-    notes with newlines, so a stored line is exactly one previously appended
-    note. A substring test would read a hand-written line that merely QUOTES
-    the machine note ("see: Tightened by commit …") as the machine note itself
-    and suppress a genuine first application — the same boundary-versus-
-    substring trap the plan-note naming gate documents in ``CLAUDE.md``.
+    **Matching is by whole LINE, never by substring.** A substring test would
+    read a hand-written line that merely QUOTES the machine note ("see:
+    Tightened by commit …") as the machine note itself and suppress a genuine
+    first application — the same boundary-versus-substring trap the plan-note
+    naming gate documents in ``CLAUDE.md``.
+
+    **A LINE is one appended note only because ``findings.update_finding``
+    joins them with newlines, and this module does not own that rule.** The
+    convention lives at ``findings.update_finding``'s ``append_note``
+    composition; read here, written there, with no shared constant holding the
+    two together. So a change to the join format — a different separator, a
+    per-note timestamp, a structured list — would silently stop this predicate
+    matching and restore the duplicate appending, with no test naming the
+    cause. That coupling is named rather than closed: closing it means moving
+    the mechanism into ``update_finding`` behind an explicit opt-in, which is a
+    new parameter on a core contract (the update-parity gate reads that
+    signature) and therefore a wider change than the one ratified for CB-234.
+    It is carried as **CB-261** instead, which names the three shapes a fix
+    could take, their costs, and the threshold at which one becomes worth
+    taking — the format changing, or a second machine appender of notes
+    appearing beside this verb.
 
     **Undecidable input answers False**, and the direction is deliberate rather
     than defensive: a ``meta`` that is not a dict, or a ``notes`` that is not a
     string, cannot be shown to carry the note. The cost of a false "no" is one
     duplicated note, which is exactly the behaviour this fix replaces; the cost
     of a false "yes" is a note that never lands at all.
+
+    **Only ONE of those two arms is pinned, and it is said in that direction
+    because the mutant decides, not the intent.** The ``notes`` arm is live and
+    held by ``test_unreadable_notes_append_rather_than_suppress``; the ``meta``
+    arm is insurance that NO test discriminates — a mutant turning its
+    ``return False`` into ``return True`` leaves all 119 tests in this file
+    green. Measured rather than assumed: every sanctioned route to a non-dict
+    ``meta`` refuses before it can store one (``add_finding(meta=[1, 2])`` and
+    ``update_finding(meta_update=[1, 2])`` both raise), so the arm is reachable
+    only by writing the column directly. It stays as one line of insurance; a
+    fixture asserting a state no sanctioned call can produce would be the more
+    expensive of the two.
     """
     if not isinstance(meta, dict):
         return False

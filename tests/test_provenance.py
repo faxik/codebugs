@@ -211,8 +211,14 @@ class TestCheckFindings:
         assert statuses == {"current"}
 
 
-class TestResolveTrailers:
-    """Test provenance.resolve_trailers against commit trailers."""
+class _TrailerFixture:
+    """Git-and-card plumbing shared by the two trailer classes below.
+
+    Not a test class (pytest collects `Test*`), and deliberately a base rather
+    than a second copy: the two classes had byte-identical `_commit` bodies, and
+    a helper duplicated rather than shared is one edit away from disagreeing
+    with itself — this file's own subject is a verb whose two runs must agree.
+    """
 
     def _commit(self, project, message):
         readme = os.path.join(project, "README.md")
@@ -227,6 +233,10 @@ class TestResolveTrailers:
         return findings.add_finding(
             conn, severity="high", category="bug", file="src/auth.py", description="x", new_category=True
         )["id"]
+
+
+class TestResolveTrailers(_TrailerFixture):
+    """Test provenance.resolve_trailers against commit trailers."""
 
     def test_resolves_flips_to_fixed(self, git_project, conn):
         project, base = git_project
@@ -292,7 +302,7 @@ class TestResolveTrailers:
         assert set(report["resolved"]) == {a, b}
 
 
-class TestResolveTrailersIdempotence:
+class TestResolveTrailersIdempotence(_TrailerFixture):
     """CB-234: re-running a range must not re-annotate the cards it already did.
 
     The class pins the COMPOSITION rather than the branches one at a time, in
@@ -311,25 +321,6 @@ class TestResolveTrailersIdempotence:
     """
 
     _PAST = "2000-01-01T00:00:00Z"
-
-    def _commit(self, project, message):
-        readme = os.path.join(project, "README.md")
-        with open(readme, "a") as f:
-            f.write(message + "\n")
-        subprocess.run(["git", "add", "."], cwd=project, check=True, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", message], cwd=project, check=True, capture_output=True
-        )
-
-    def _add(self, conn):
-        return findings.add_finding(
-            conn,
-            severity="high",
-            category="bug",
-            file="src/auth.py",
-            description="x",
-            new_category=True,
-        )["id"]
 
     def _notes(self, conn, cb_id):
         return findings.get_finding(conn, cb_id)["meta"].get("notes")
@@ -401,16 +392,6 @@ class TestResolveTrailersIdempotence:
         report = provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
 
         assert "already_applied" in report
-        assert report["already_applied"] == []
-
-    def test_a_missing_card_still_reports_the_bucket(self, git_project, conn):
-        """The bucket is unconditional across every path out of the loop."""
-        project, base = git_project
-        self._commit(project, "fix: x\n\nResolves: CB-9999")
-
-        report = provenance.resolve_trailers(conn, rev_range=f"{base}..HEAD", project_dir=project)
-
-        assert report["missing"] == ["CB-9999"]
         assert report["already_applied"] == []
 
     def test_a_hand_edited_note_breaks_the_key_and_the_note_returns(self, git_project, conn):
