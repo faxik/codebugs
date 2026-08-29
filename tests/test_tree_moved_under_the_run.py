@@ -39,24 +39,36 @@ re-run in the main checkout while branches land on it, and two rows below copy
 the live tree wholesale. A second reader overlapping a probe's window sees a
 path appear or disappear and prints this very alarm.
 
-ONE PROBE WAS WORSE THAN THE REST IN KIND RATHER THAN IN DEGREE, and it is the
-one that has moved out. The CB-226 row needs a directory that CANNOT BE LISTED,
-and an unreadable directory does not merely move a second reader's fingerprint:
-it makes the second reader FAIL. Both halves were built and measured on a copy
-of this tree, with this file as it stood — `shutil.copytree` of the live tree
-died with `shutil.Error [Errno 13] Permission denied`, which is exactly what the
-neighbouring row does to read the tree; and a second pytest run overlapping the
-window reported `tests/_cb226_probe_blinddir — could not be listed (Permission
-denied)`, turning all three rows of "silent on a still tree" red. So that row
-now builds its own throwaway COPY of the tree and keeps the unreadable directory
-inside it, where nothing else will ever walk.
+ONE PROBE FAILED A SECOND READER IN A WAY THE OTHERS DO NOT, and it is the one
+that has moved out. It is the SAME race in all of them — this module writes into
+a tree it does not own — so the distinction is emphatically not that the rest are
+safe. It is that a readable file leaves the second reader RUNNING, with a false
+alarm in its log, while an unreadable directory leaves it no way to continue at
+all. Both halves were built and measured on a copy of this tree, with this file
+as it stood: `shutil.copytree` of the live tree died with `shutil.Error [Errno
+13] Permission denied` — which is exactly how the neighbouring row reads the tree
+— and a second pytest run overlapping the window reported
+`tests/_cb226_probe_blinddir — could not be listed (Permission denied)`, turning
+all three rows of "silent on a still tree" red. So that row now builds its own
+throwaway COPY of the tree and keeps the unreadable directory inside it, where
+nothing else will ever walk.
 
 WHAT IS STILL TRUE AND WHAT IS NOT, said rather than quietly widened. The other
-probes are ordinary FILES, readable by anyone, and a concurrent second reader
-still sees them appear and disappear; making this module safe for two concurrent
-readers is CB-255's subject and not a promise made here. What this file
-guarantees is narrower and checkable: it leaves nothing in the live tree that
-another reader cannot READ.
+probes are ordinary FILES and are NOT race-free: a concurrent second reader still
+sees them appear and disappear, and still prints this alarm over them. Making
+this module safe for two concurrent readers is CB-255's subject and is not a
+promise made here.
+
+And what IS said here is a statement about this file as it stands, never a gate.
+Checked mechanically rather than asserted: the two `os.chmod` calls left in the
+module both target a directory inside a throwaway copy, and every path it creates
+under the live tree is an ordinary file written with no explicit mode. Nothing
+ENFORCES that for a row somebody adds later, and a cheap enforcement was looked
+at and refused rather than forgotten — a check keyed on the name `os.chmod` is
+blind to `Path.chmod` or a shelled-out one, which is this repository's CB-227
+lesson (a gate that is itself an enumeration, of spellings) landing one level up.
+So the next row that wants an unreadable path in the live tree is caught by
+whoever reviews it, not by this file.
 """
 
 import os
@@ -166,8 +178,14 @@ def _throwaway_tree_copy(tmp_path, name):
     version of the very code under test and pass vacuously.
 
     Cost was measured before the live tree was given up, because "it is cheaper"
-    is the argument that would otherwise have kept the probe where it was: 466
-    files, 17 MB, 0.08s per copy against an inner pytest session of ~2.5s.
+    is the argument that would otherwise have kept the probe where it was. On
+    2026-08-29, on this tree: about 17 MB and well under a tenth of a second per
+    copy, against an inner pytest session of roughly two and a half seconds — a
+    few percent of a row already dominated by starting a second interpreter. The
+    file COUNT is deliberately not quoted: three measurements the same day gave
+    three different answers, since a worktree, the main checkout and a copy that
+    carries untracked caches do not hold the same files. That is precisely how a
+    number written into prose rots into a false statement.
     """
     copy = tmp_path / name
     shutil.copytree(REPO_ROOT, copy, ignore=shutil.ignore_patterns(*_NOT_COPIED))
