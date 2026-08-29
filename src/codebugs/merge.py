@@ -446,7 +446,7 @@ def merge(
         # sampled HERE, immediately before its only use. Sampling it early would be
         # conservative rather than unsafe (an early `now` makes a lease look live, so
         # we refuse rather than over-grant) but there is no reason to accept even that.
-        now = conn.execute(f"SELECT {_NOW_SQL} AS t").fetchone()["t"]  # noqa: S608
+        now = conn.execute(f"SELECT {_NOW_SQL} AS t").fetchone()["t"]
         if (lock["session_id"] is not None
                 and lock["expires_at"] and lock["expires_at"] > now):
             return {

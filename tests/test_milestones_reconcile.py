@@ -566,7 +566,7 @@ class TestLiveSourceClauseTableAvailability:
         c = sqlite3.connect(str(tmp_path / name))
         c.row_factory = sqlite3.Row
         for t in tables:
-            c.execute(f"CREATE TABLE {t} (id TEXT PRIMARY KEY, status TEXT NOT NULL)")  # noqa: S608
+            c.execute(f"CREATE TABLE {t} (id TEXT PRIMARY KEY, status TEXT NOT NULL)")
         c.execute(
             "CREATE TABLE milestone_items (id INTEGER PRIMARY KEY, "
             "item_kind TEXT, item_ref TEXT)"

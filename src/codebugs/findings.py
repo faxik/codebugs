@@ -2869,7 +2869,7 @@ def similarity_candidates(
     rows = conn.execute(
         f"SELECT id, category, file, status, severity, occurrence_count, created_at, "
         f"description, meta AS meta_json FROM findings {where} "
-        f"ORDER BY created_at {direction}, id {direction} {limit_sql}",  # noqa: S608
+        f"ORDER BY created_at {direction}, id {direction} {limit_sql}",
         params,
     ).fetchall()
     return [dict(r) for r in rows]
@@ -2923,7 +2923,7 @@ def grouping_candidates(
     rows = conn.execute(
         f"SELECT id, category, file, status, severity, occurrence_count, created_at, "
         f"description, tags AS tags_json, meta AS meta_json FROM findings {where} "
-        f"ORDER BY created_at ASC, id ASC {limit_sql}",  # noqa: S608
+        f"ORDER BY created_at ASC, id ASC {limit_sql}",
         params,
     ).fetchall()
     return [dict(r) for r in rows]
@@ -2988,7 +2988,7 @@ def anchor_candidates(
     rows = conn.execute(
         f"SELECT id, category, file, status, created_at, reported_at_commit, "
         f"meta AS meta_json FROM findings {where} "
-        f"ORDER BY created_at ASC, id ASC {limit_sql}",  # noqa: S608
+        f"ORDER BY created_at ASC, id ASC {limit_sql}",
         params,
     ).fetchall()
     return [dict(r) for r in rows]

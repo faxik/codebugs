@@ -346,7 +346,7 @@ def _schema_columns(module, table: str) -> set[str]:
     conn.row_factory = sqlite3.Row
     try:
         module.ensure_schema(conn)
-        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()  # noqa: S608
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
         cols = {row["name"] for row in rows}
     finally:
         conn.close()
