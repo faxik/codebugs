@@ -1,0 +1,813 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Дневной бриф · codebugs · 2026-08-29</title>
+<style>
+:root { --dark:#101827; --grey:#6B7280; --pink:#FA2F6B; --blue:#2463EB; --sky:#6AC2EA; --green:#16A34A; --amber:#D97706;
+  --bg-body:#F9FAFB; --bg-card:#FFFFFF; --bg-blue-muted:#C9D7F5; --bg-pink-muted:#F9CCDB; --bg-green-muted:#DCFCE7; --bg-amber-muted:#FEF3C7;
+  --shadow:0 4px 12px rgba(0,0,0,0.06); --radius:16px; }
+* { box-sizing:border-box; margin:0; padding:0; }
+body { font-family:'Roboto',system-ui,-apple-system,'Segoe UI',sans-serif; background:var(--bg-body); color:var(--grey); line-height:1.6; padding:24px; max-width:880px; margin:0 auto; font-size:15px; }
+.header { background:var(--bg-card); border-radius:var(--radius); padding:28px 32px; margin-bottom:20px; box-shadow:var(--shadow); border-top:6px solid var(--blue); }
+.header-pre { font-size:12px; font-weight:500; color:var(--blue); text-transform:uppercase; letter-spacing:1px; margin-bottom:10px; }
+.header-title { font-size:26px; font-weight:700; color:var(--dark); line-height:1.3; margin-bottom:10px; }
+.header-sub { color:var(--grey); font-size:15px; margin-bottom:16px; }
+.tags { display:flex; flex-wrap:wrap; gap:8px; }
+.tag { background:var(--bg-blue-muted); color:var(--blue); border-radius:20px; padding:4px 14px; font-size:13px; font-weight:500; }
+.tag.pink { background:var(--bg-pink-muted); color:var(--pink); }
+.tag.green { background:var(--bg-green-muted); color:var(--green); }
+.tag.amber { background:var(--bg-amber-muted); color:var(--amber); }
+.stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin:0 0 20px; }
+.stat-card { background:var(--bg-card); border-radius:12px; padding:16px 18px; box-shadow:var(--shadow); border-top:4px solid var(--blue); }
+.stat-card.pink { border-top-color:var(--pink); } .stat-card.green { border-top-color:var(--green); } .stat-card.amber { border-top-color:var(--amber); }
+.stat-val { font-size:26px; font-weight:700; color:var(--dark); line-height:1.1; }
+.stat-lbl { font-size:12px; color:var(--grey); margin-top:6px; }
+.section { background:var(--bg-card); border-radius:var(--radius); margin-bottom:16px; box-shadow:var(--shadow); overflow:hidden; }
+.section-header { display:flex; align-items:center; gap:14px; padding:18px 24px; cursor:pointer; user-select:none; }
+.section-header:hover { background:#f8faff; }
+.section-icon { font-size:22px; } .section-title { font-size:16px; font-weight:700; color:var(--dark); flex:1; }
+.section-toggle { color:var(--grey); transition:transform .3s; } .section.collapsed .section-toggle { transform:rotate(-90deg); }
+.section-content { padding:0 24px 22px; overflow:hidden; transition:max-height .35s ease; }
+.section.collapsed .section-content { max-height:0 !important; padding-bottom:0; }
+p { margin-bottom:12px; } p:last-child { margin-bottom:0; }
+strong { color:var(--dark); font-weight:500; }
+ul { padding-left:22px; margin-bottom:12px; } li { margin-bottom:7px; }
+code { font-family:ui-monospace,Menlo,monospace; font-size:13px; background:#f3f4f6; padding:1px 5px; border-radius:4px; color:var(--dark); }
+.box-pink { background:var(--bg-pink-muted); border-left:4px solid var(--pink); border-radius:10px; padding:14px 16px; margin:14px 0; }
+.box-pink h4 { color:var(--pink); font-size:14px; margin-bottom:6px; }
+.box-blue { background:var(--bg-blue-muted); border-left:4px solid var(--blue); border-radius:10px; padding:14px 16px; margin:14px 0; }
+.box-blue h4 { color:var(--blue); font-size:14px; margin-bottom:6px; }
+.box-amber { background:var(--bg-amber-muted); border-left:4px solid var(--amber); border-radius:10px; padding:14px 16px; margin:14px 0; }
+.box-amber h4 { color:var(--amber); font-size:14px; margin-bottom:6px; }
+.row { display:flex; align-items:flex-start; gap:12px; padding:10px 0; border-bottom:1px solid #f3f4f6; }
+.row:last-child { border-bottom:none; }
+.pill { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; border-radius:8px; padding:3px 9px; white-space:nowrap; flex-shrink:0; margin-top:3px; }
+.pill.done { background:var(--bg-green-muted); color:var(--green); } .pill.run { background:var(--bg-blue-muted); color:var(--blue); }
+.pill.wait { background:var(--bg-amber-muted); color:var(--amber); } .pill.hot { background:var(--bg-pink-muted); color:var(--pink); }
+.row-text { flex:1; } .row-text strong { display:block; margin-bottom:2px; } .row-text span { font-size:13px; }
+.dec { border-bottom:1px solid #f3f4f6; padding:18px 0; } .dec:last-child { border-bottom:none; padding-bottom:0; }
+.dec-head { display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; }
+.dec-num { width:28px; height:28px; border-radius:50%; background:var(--sky); color:#fff; font-weight:700; font-size:13px; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+.dec-q { font-size:14px; font-weight:500; color:var(--dark); }
+.dec-q small { display:block; font-weight:400; color:var(--grey); font-size:13px; margin-top:3px; }
+.verdict-row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.verdict-right { background:var(--bg-green-muted); border-left:4px solid var(--green); border-radius:10px; padding:12px 14px; }
+.verdict-alt { background:var(--bg-pink-muted); border-left:4px solid var(--pink); border-radius:10px; padding:12px 14px; }
+.verdict-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px; }
+.verdict-right .verdict-label { color:var(--green); } .verdict-alt .verdict-label { color:var(--pink); }
+.verdict-text { font-size:13px; color:var(--grey); } .verdict-text strong { color:var(--dark); }
+.checklist { background:var(--bg-card); border-radius:var(--radius); padding:26px; margin-bottom:20px; box-shadow:var(--shadow); border-top:6px solid var(--green); }
+.chk-title { font-size:18px; font-weight:700; color:var(--dark); margin-bottom:4px; } .chk-desc { font-size:14px; margin-bottom:14px; }
+.chk-group-title { font-size:11px; font-weight:700; color:var(--blue); text-transform:uppercase; letter-spacing:1px; margin:16px 0 8px; padding-bottom:6px; border-bottom:1px solid var(--bg-blue-muted); }
+.chk-item { display:flex; align-items:flex-start; gap:14px; padding:12px 0; border-bottom:1px solid #f3f4f6; } .chk-item:last-child { border-bottom:none; }
+.chk-text { flex:1; }
+.chk-text strong { display:block; margin-bottom:2px; } .chk-text span { font-size:13px; }
+.radio-group { display:flex; flex-direction:column; gap:6px; margin-top:10px; }
+.radio-opt { display:flex; align-items:center; gap:8px; font-size:13px; color:var(--dark); cursor:pointer; }
+.radio-opt input[type=radio] { accent-color:var(--blue); width:16px; height:16px; cursor:pointer; flex-shrink:0; }
+.radio-opt .opt-cost { color:var(--grey); font-weight:400; }
+.other-input, .clarify-input, .text-answer { display:block; width:100%; margin-top:8px; font-family:'Roboto',system-ui,-apple-system,'Segoe UI',sans-serif; font-size:13px; padding:8px 10px; border:1px solid var(--bg-blue-muted); border-radius:8px; color:var(--dark); background:#fff; }
+.clarify-input { background:#fafbff; }
+.src { font-size:12px; color:#9CA3AF; margin-top:8px; } .src code { font-size:11px; background:transparent; padding:0; color:#9CA3AF; }
+.footer { text-align:center; font-size:13px; color:var(--grey); padding:16px 0 8px; }
+.footer a { color:var(--blue); text-decoration:none; }
+.more-toggle { display:inline-block; margin-top:6px; font-size:12px; color:var(--blue); cursor:pointer; text-decoration:none; user-select:none; }
+.more { display:none; margin-top:8px; padding-top:8px; border-top:1px dashed #e5e7eb; font-size:13px; color:var(--grey); }
+.more.open { display:block; }
+.more p { margin-bottom:6px; } .more p:last-child { margin-bottom:0; }
+.more ul { margin-bottom:6px; }
+.prompt-panel { background:var(--bg-card); border-radius:var(--radius); padding:26px; margin-bottom:20px; box-shadow:var(--shadow); border-top:6px solid var(--blue); }
+.prompt-panel .chk-desc { margin-bottom:12px; }
+#prompt-out { display:block; width:100%; min-height:120px; font-family:ui-monospace,Menlo,monospace; font-size:13px; line-height:1.5; color:var(--dark); border:1px solid var(--bg-blue-muted); border-radius:10px; padding:12px 14px; resize:vertical; }
+.prompt-actions { display:flex; flex-wrap:wrap; gap:10px; margin-top:12px; }
+.prompt-actions button { font-family:'Roboto',system-ui,-apple-system,'Segoe UI',sans-serif; font-size:14px; font-weight:500; border:none; border-radius:10px; padding:10px 20px; cursor:pointer; }
+.prompt-actions .btn-copy { background:var(--blue); color:#fff; }
+.prompt-actions .btn-reset { background:var(--bg-blue-muted); color:var(--blue); }
+@media (max-width:600px) { body{padding:12px;} .header{padding:20px;} .header-title{font-size:20px;} .verdict-row{grid-template-columns:1fr;} .prompt-actions{flex-direction:column;} .prompt-actions button{width:100%;} }
+</style>
+</head>
+<body>
+
+<div id="app"></div>
+
+<script type="application/json" id="brief-data">
+{
+  "meta": {
+    "project": "codebugs",
+    "date_iso": "2026-08-29",
+    "title": "Суббота, 29 августа 2026",
+    "header_pre": "Дневной бриф куратора · codebugs",
+    "subtitle": "Сутки 28–29 августа: ретроспективный прогон закрыт по полной популяции, двенадцать юнитов приняты, и впервые измерен — числом, а не впечатлением — затор на посадке, из-за которого две ветки простояли ночь. Связь рвала агентов около дюжины раз; не потеряно ничего.",
+    "tags": [
+      {
+        "text": "#РетроПрогонЗакрыт",
+        "cls": "green"
+      },
+      {
+        "text": "#ЛивлокИзмерен",
+        "cls": "pink"
+      },
+      {
+        "text": "#РотацияКуратора",
+        "cls": "amber"
+      }
+    ],
+    "prepared": "2026-08-29 вечер · куратор каскада (Claude)",
+    "footer_links": [
+      {
+        "label": "Реестр болей: PAIN-REGISTRY-codebugs.md, записи от «СЕССИЯ КУРАТОРА 2026-08-28»",
+        "href": "#"
+      },
+      {
+        "label": "Передача куратора: HANDOFF-curator-2026-08-29.md",
+        "href": "#"
+      }
+    ]
+  },
+  "stats": [
+    {
+      "val": "12",
+      "lbl": "юнитов приземлено и принято за сутки",
+      "cls": "green"
+    },
+    {
+      "val": "19",
+      "lbl": "карт закрыто; открытых 52, критических и высоких — ноль",
+      "cls": "green"
+    },
+    {
+      "val": "44 / 44",
+      "lbl": "мержей ретроспективного прогона охвачено",
+      "cls": "green"
+    },
+    {
+      "val": "31 %",
+      "lbl": "шанс посадки без окна тишины — измеренный затор",
+      "cls": "pink"
+    },
+    {
+      "val": "0",
+      "lbl": "потерянных работ при ~12 обрывах связи",
+      "cls": "amber"
+    }
+  ],
+  "sections": [
+    {
+      "icon": "📊",
+      "title": "Статус: что случилось за сутки",
+      "cards": [
+        {
+          "pill": {
+            "cls": "done",
+            "label": "Готово"
+          },
+          "title": "Ретроспективный прогон закрыт по полной популяции — 44 мержа из 44",
+          "summary": "Ваша задача «прогнать проход упрощения по всем приземлённым мержам» исполнена целиком. Спецификация называла 38 мержей; перемер на её же коммите дал 52, из них 44 с картами — семь недостающих доохвачены обоими направлениями по решению куратора, а не закрыты молчанием.",
+          "details": {
+            "what": "Семь мержей, не названных ни одной пачкой, разделены по территориям: три ушли направлению идентичности, четыре — направлению доверия. Итог доохвата: два чистых, пять с находками, две новые карты, одна ложь исправлена самим проходом, одна уже была на карте.",
+            "why": "Прямой ответ на ваш вопрос «что мы теряли, пока проход не работал»: не аккуратность кода, а верность того, что о коде написано. Преобладающий класс находок — утверждение, ставшее ложным от соседней починки, либо более широкое, чем собственный замер. Ни один из девяти пунктов приёмки этот класс не ловит по построению. Сама ошибка охвата — «перечисление у́же популяции, поданное как полное» — ровно то, что прогон ищет.",
+            "evidence": [
+              ".claude/plans/PAIN-REGISTRY-codebugs.md — записи «РЕШЕНИЕ 1» и «РЕШЕНИЕ 1 ЗАКРЫТО — СВОДНАЯ СТРОКА» с числами обеих пачек",
+              ".claude/plans/RETRO-REPORT-DIR-1-batch-B-2026-08-27.md §4 — перемер популяции: 52 и 44 против заявленных 38 и 32"
+            ]
+          }
+        },
+        {
+          "pill": {
+            "cls": "done",
+            "label": "Готово"
+          },
+          "title": "Двенадцать юнитов приняты, девятнадцать карт закрыто",
+          "summary": "Самое заметное: предел выборки теперь означает одно и то же на каждой поверхности трекера; журнал попыток посадки перестал записывать остановленный финиш как удачный; повторный прогон разбора трейлеров больше не плодит дубли заметок; из нормативных текстов сняты три протухших утверждения.",
+          "details": {
+            "what": "Приняты Т-111…Т-121 и Т-123 (Т-122 в полёте). Закрыты среди прочего: CB-158/208/210 — семья «предел выборки», где явный ноль строк побеждает выведенный из списка, а «ничего не найдено» перестало притворяться свойством корпуса; CB-237/249 — журнал посадок; CB-234 — идемпотентность разбора трейлеров; CB-238/239/213 — ложные счета в CLAUDE.md и CHANGELOG; CB-236 — именованный вход места; CB-172, вариант 1 — шесть мёртвых маркеров подавления сняты, документ перестал объявлять несуществующий механизм линтера.",
+            "why": "Почти всё это — класс «текст обещает больше, чем механизм делает», то есть то, чем этот проект занимается по существу: трекер, которому можно верить.",
+            "evidence": [
+              ".claude/plans/PAIN-REGISTRY-codebugs.md — неизменяемые факты приёмок с SHA каждого мержа, каждый проверен куратором как предок отправленной истории"
+            ]
+          }
+        },
+        {
+          "pill": {
+            "cls": "hot",
+            "label": "Остро"
+          },
+          "title": "Затор на посадке измерен: 31 % на попытку, и ручное лекарство найдено",
+          "summary": "Посадке ветки нужно ~3,5 минуты неподвижной главной ветки, а журнальные заметки трёх сессий двигали её в среднем раз в 1,8–3,5 минуты. Две посадки малой важности стоили тринадцать попыток и ~40 минут прогонов. Окно тишины «по договорённости» сорвалось дважды; окно с безусловным запретом всем до события «сел» сработало четыре раза из четырёх с первой попытки.",
+          "details": {
+            "what": "Ночь дала все три двери затора: «главная ветка уехала под прогоном» (лечится тишиной), «главная ветка грязна незакоммиченной правкой» (лечится противоположным — немедленным коммитом), и «второй финиш той же ветки параллельно» (лечится остановкой перехватываемого). Канон немедленных коммитов — тот самый, что дюжину раз за сутки спасал работу от обрывов связи, — открывает первую дверь ровно тем, чем закрывает вторую.",
+            "why": "Решение «только измерять» принималось, когда числа не было. Теперь есть: шанс попытки, цена в минутах, четыре успешных окна. Оба направления независимо указали на одну и ту же форму механизма — неблокирующий замок на ветку поверх замка интеграции (карта CB-187). Это ваш выбор формы — см. блок решений.",
+            "evidence": [
+              ".claude/plans/PAIN-REGISTRY-codebugs.md — запись «ДВА ОКНА ТИШИНЫ И ЛИВЛОК Б-12, ЗАМЕРЫ ПЯТЫЙ–СЕДЬМОЙ» и последующие поправки цифр",
+              ".worktrees/landing-attempts.log — пятнадцать строк журнала на одну посадку Т-118 против двух строк у Т-120 под окном"
+            ]
+          }
+        },
+        {
+          "pill": {
+            "cls": "wait",
+            "label": "Улика"
+          },
+          "title": "Ночь ошибок координации — четыре новых канона, два против куратора",
+          "summary": "Куратор запустил вторую держательницу направления, сочтя первую мёртвой по списку агентов, — а она молча ждала своего исполнителя и проснулась с его возвратом; пять её закрывающих коммитов съели чужое окно посадки. Куратор же передал непроверенное число из чужого вердикта — оно прошло четыре руки и село в код ложным.",
+          "details": {
+            "what": "Каноны: К-27 — строка пакета решений обязана называть каждую половину, которую закроет ваше «да»; К-28 — один вердикт приёмки не считается полным (два независимых приёмщика одного юнита дали непересекающиеся остатки); К-29 — перехват работы у живого исполнителя начинается с его остановки; К-30 — правка артефакта в главном чекауте коммитится в ту же минуту либо не делается.",
+            "why": "Общий вывод суток, сформулированный держателем: «соглашение не может обеспечить соглашение» — то же самое, что «проза не может обеспечить прозу», уровнем выше. Ложное число, кстати, добили правильно: спорную цифру перемерили трое независимо и сошлись — класс починен формой, а не поправкой одной цифры.",
+            "evidence": [
+              ".claude/plans/PAIN-REGISTRY-codebugs.md — записи «В КАНОН (К-27…К-30)», «ДОПОЛНЕНИЕ К ПРИЁМКЕ Т-116», обе записи против куратора"
+            ]
+          }
+        },
+        {
+          "pill": {
+            "cls": "hot",
+            "label": "Остро"
+          },
+          "title": "Живой вред в соседнем autosorter — близнец только что починенной карты",
+          "summary": "Дефект «повторный прогон дописывает ту же заметку ещё раз» здесь закрыт (Т-123), и здесь он был латентен: ноль пострадавших карт. Но в autosorter живёт скрипт-близнец, и там вред уже случился: по замеру держательницы — пять карт с девятью дословными повторами и три карты, у которых заметки ПЕРЕЗАПИСАНЫ, то есть история расследования уничтожена.",
+          "details": {
+            "what": "Скрипт tools/auto-resolve-codebugs.py в репозитории autosorter пишет заметки той же формы, что наш разбор трейлеров, и не проверяет повтор. Каждая следующая автоматическая резолюция может затереть ещё одну заметку.",
+            "why": "Это чужой репозиторий: куратор codebugs не заводит карты в чужом трекере — граница роли. Пока факт живёт только в нашем реестре; чтобы он стал работой, нужна карта в трекере autosorter. Числа взяты из замера держательницы DIR-2 и куратором не перемерялись — передаю с этой пометкой, по свежему уроку о числах из чужих вердиктов.",
+            "evidence": [
+              ".claude/plans/PAIN-REGISTRY-codebugs.md — запись «ВЛАДЕЛЬЦУ, В БАТЧ, С ПОМЕТКОЙ ЖИВОЙ ВРЕД» с числами и оговоркой о том, чьи они"
+            ],
+            "on_yes": "По вашему «передать» я отправлю живой сессии autosorter одно сообщение с готовым текстом карты — числа, механизм, ссылка на нашу починку как образец формы."
+          }
+        },
+        {
+          "pill": {
+            "cls": "done",
+            "label": "Готово"
+          },
+          "title": "Брошенные деревья спасены; дюжина обрывов связи не стоила ни одной работы",
+          "summary": "Пять брошенных рабочих копий агентов разобраны и сняты; содержимое единственной грязной закреплено тегом в истории, ни одна строка не потеряна. Обрывы связи рвали держателей и исполнителей весь вечер и ночь — работа выживала, потому что журналы коммитятся после каждого шага, а упавшие возобновлялись сообщением со своей же стенограммы.",
+          "details": {
+            "what": "Тег salvage/agent-a20d255a5d5895ce8-2026-08-28 хранит 1260 строк черновика; разбор показал, что все живые строки уже есть в главной ветке в более сильной редакции. Правило, которое реально работало: коммитить в ветку часто и мелко — уцелевало ровно то, что закоммичено.",
+            "evidence": [
+              ".claude/plans/PAIN-REGISTRY-codebugs.md — закрывающая строка поручения о деревьях с построчным разбором в артефакте DIR-1"
+            ]
+          }
+        }
+      ],
+      "boxes": [
+        {
+          "style": "blue",
+          "title": "💎 Боли проекта, которые двигались",
+          "text": "«Честные границы» — предел выборки един на всех поверхностях, отказ вместо молчаливой подмены (закрыто три карты семьи). «Затор посадки» — впервые числа вместо впечатлений, форма механизма готова к вашему выбору. «Верность текстов» — девять протухших утверждений снято из нормативных файлов за сутки."
+        }
+      ]
+    },
+    {
+      "icon": "🗓",
+      "title": "Планы: что происходит дальше",
+      "list_items": [
+        "<strong>DIR-1 (смена 19)<\/strong> доводит юнит Т-122 — самонаведённый ложный красный: тест сам создаёт в живом дереве каталог-ловушку, о которую спотыкается параллельный читатель; затем очередь направления.",
+        "<strong>DIR-2<\/strong> ротировалась штатно после четырёх принятых юнитов за смену; преемник куратора запускает смену 18 по готовой передаче — стол чист, долгов нет.",
+        "<strong>Куратор ротируется<\/strong>: передача обновлена на сегодняшнее состояние, команда запуска преемника — в чек-листе ниже. Эту сессию стоит закрыть после ротации DIR-1: живые держатели умирают вместе с ней.",
+        "<strong>Правка норматива приёмщика<\/strong> — первое действие преемника: контракт предписывает мутационную пробу правкой файла, а обвязка трижды за сутки отключала приёмщику этот инструмент; решение принято — проба определяется эффектом, не инструментом."
+      ],
+      "boxes": [
+        {
+          "style": "amber",
+          "title": "⏳ Что сознательно НЕ делается",
+          "text": "Сквозной перечит нормативных текстов — не стартует без вашей ратификации (цена — две смены). Включение правила линтера S608 целиком (52 места в 17 файлах) — принятый долг, ждёт окна тишины, не очереди. Экспорт и импорт CSV — на дне очереди по решению «приоритизация по употреблению». Развилка о поставщике векторов внутри пакета (CB-62/CB-65) — спит до вашего слова, без срочности."
+        }
+      ]
+    },
+    {
+      "icon": "⚖️",
+      "title": "Важные решения — что рекомендую и что будет, если «да»",
+      "decisions": [
+        {
+          "id": "livelock-form",
+          "question": "Затор посадки: строить механизм или продолжать ручные окна тишины?",
+          "note": "Решение «только измерять» своё отмерило — числа собраны, и оба направления независимо назвали одну и ту же форму.",
+          "recommendation": {
+            "label": "Юнит по CB-187, форма (а)",
+            "text": "Неблокирующий замок на ветку поверх существующего замка интеграции: второй финиш той же ветки получает мгновенный отказ вместо параллельного прогона. Закрывает разом перехват у живого исполнителя, завышение счёта попыток и половину двери «главная ветка уехала». Цена: юнит уровня харнеса с адверсариальным ревью, примерно смена направления."
+          },
+          "alternatives": [
+            {
+              "label": "Окна тишины вручную",
+              "cost": "внимание куратора на каждую посадку",
+              "text": "Работает (четыре из четырёх с первой попытки), но держится на живом кураторе и его канале сообщений — ломается при его ротации и не переживает двух одновременных посадок."
+            },
+            {
+              "label": "Оставить как есть",
+              "cost": "~25 минут прогонов на пару малых карт",
+              "text": "Шанс посадки без окна — 31 % на попытку; цена будет расти с числом параллельных сессий."
+            }
+          ],
+          "default": "recommendation",
+          "sources": [
+            ".claude/plans/PAIN-REGISTRY-codebugs.md — записи о ливлоке Б-12 и четырёх окнах"
+          ],
+          "details": {
+            "what": "Ночь дала семь замеров затора: тринадцать попыток на две посадки без окна, одна-две — под окном.",
+            "why": "Каждая параллельная сессия усугубляет арифметику: журнальные коммиты необходимы (они спасали работу при обрывах), значит двигаться должна не дисциплина, а механизм.",
+            "evidence": [
+              ".worktrees/landing-attempts.log — построчная история попыток с кодами отказов"
+            ],
+            "on_yes": "Преемник куратора ставит юнит направлению DIR-1 тройкой (замысел, задание-гипотеза, критерий приёмки); до посадки юнита окна тишины продолжают работать вручную."
+          }
+        },
+        {
+          "id": "proofread-budget",
+          "question": "Сквозной перечит нормативных текстов против механизмов — ратифицировать бюджет?",
+          "note": "Кросс-модельные проходы ни разу не смотрели на композицию текстов; ретро-прогон показал, что теряется именно она.",
+          "recommendation": {
+            "label": "Да, две смены, четыре класса текстов",
+            "text": "CLAUDE.md, CHANGELOG, описания инструментов MCP и плановые артефакты каскада. По строгому предикату — 347 кандидатов «число рядом с утверждением о популяции», из них по выборке около двух третей настоящие; каждый проверяется прогоном механизма. Фан-аут дешёвыми исполнителями, дорогой судья на композицию."
+          },
+          "alternatives": [
+            {
+              "label": "Сузить до пользовательских текстов",
+              "cost": "ложь в CLAUDE.md и планах остаётся",
+              "text": "Вдвое дешевле, но самые дорогие тексты — те, что читает каждая сессия и что не проверяет ничто, — как раз CLAUDE.md и плановые артефакты (620 кандидатов из 1441)."
+            },
+            {
+              "label": "Отложить",
+              "cost": "девять снятых за сутки протухших утверждений намекают на темп роста",
+              "text": "Тексты продолжат расходиться с механизмами со скоростью правок."
+            }
+          ],
+          "sources": [
+            ".claude/plans/PAIN-REGISTRY-codebugs.md — «РЕШЕНИЕ 2» и «ПОПРАВКА К РЕШЕНИЮ 2» с замером цены"
+          ],
+          "details": {
+            "what": "Форма уточнена замером DIR-1: область задаётся предикатом, не списком файлов — из шести ложных утверждений его смены три лежали в плановых артефактах, которые исходное предложение не покрывало.",
+            "why": "Ложь в нормативном тексте множится на каждый будущий юнит, который его читает.",
+            "evidence": [
+              ".claude/plans/DIR-1-trust-coordination.md — «Уточнение к ожидающему ратификации Решению 2» с распределением кандидатов по классам"
+            ],
+            "on_yes": "Преемник куратора разворачивает в две задачи направлениям с кросс-модельным проходом по композиции; старт — после текущих очередей."
+          }
+        },
+        {
+          "id": "autosorter-twin",
+          "question": "Близнец починенного дефекта в autosorter: кто заводит карту?",
+          "note": "Вред живой и растёт с каждой автоматической резолюцией; в нашем трекере факт записан, в трекере autosorter — нет.",
+          "recommendation": {
+            "label": "Передать живой сессии autosorter",
+            "text": "Я отправляю одной из живых сессий autosorter сообщение с готовым текстом карты: механизм, числа замера (с пометкой, чьи они), ссылка на нашу починку Т-123 как образец формы. Одна команда с их стороны."
+          },
+          "alternatives": [
+            {
+              "label": "Заведёте сами",
+              "cost": "минута вашего времени",
+              "text": "Тот же текст карты я положу вам строкой для копирования."
+            }
+          ],
+          "default": "recommendation",
+          "sources": [
+            ".claude/plans/PAIN-REGISTRY-codebugs.md — запись «ЖИВОЙ ВРЕД В ЧУЖОМ РЕПОЗИТОРИИ»"
+          ],
+          "details": {
+            "what": "Скрипт автоматической резолюции карт в autosorter дописывает и перезаписывает заметки без проверки повтора.",
+            "why": "Перезаписанная заметка — уничтоженная история расследования; это уже случилось с тремя картами.",
+            "evidence": [
+              ".claude/plans/L3-BRIEF-DIR-2-cb234-resolve-trailers-idempotent.md — граница «чужая территория» названа в брифе починки"
+            ],
+            "on_yes": "Сообщение уходит сразу после вашего ответа; дальше вопрос живёт в трекере autosorter."
+          }
+        },
+        {
+          "id": "category-merge",
+          "question": "Карта слияния имён категорий (48 → 20) — применять?",
+          "note": "Ждёт с 26 августа; свёртка спроектирована, сухой прогон готов.",
+          "recommendation": {
+            "label": "Применить юнитом DIR-2",
+            "text": "28 слияний по готовой карте; исполнение — отдельным юнитом с сухим прогоном перед применением и отчётом «что слилось, что не совпало». Инструмент свёртки уже в пакете и отлажен на прошлой свёртке (17 строк, ноль коллизий)."
+          },
+          "alternatives": [
+            {
+              "label": "Отложить",
+              "cost": "сводки по категориям продолжают дробиться",
+              "text": "Каждая новая карта в варианте написания углубляет расхождение."
+            }
+          ],
+          "sources": [
+            ".claude/plans/CATEGORY-MERGE-CANDIDATES-2026-08-26.md — сама карта слияний"
+          ],
+          "details": {
+            "what": "48 имён категорий сворачиваются в 20 канонических; дубли вида «двух написаний одного слова» уходят.",
+            "why": "Категория — ось чтения трекера; дробление делает сводки слепыми.",
+            "evidence": [
+              ".claude/plans/CATEGORY-MERGE-CANDIDATES-2026-08-26.md — 28 пар с доводами"
+            ],
+            "on_yes": "Преемник куратора ставит юнит DIR-2 после текущей очереди; применение только после сухого прогона."
+          }
+        },
+        {
+          "id": "cb260-gate",
+          "question": "Обязательный проход перед посадкой обещает три фазы, а выполняет две — что делать?",
+          "note": "Найдено юнитом при честном исполнении предписания: третья фаза прохода (ретроспектива) в codebugs неисполнима — её файлов здесь нет, скилл написан для autosorter.",
+          "recommendation": {
+            "label": "Вариант (б): сузить текст и заставить говорить о пропуске громко",
+            "text": "Скилл объявляет третью фазу применимой только там, где её файлы существуют, и на пропуске печатает заметную строку с причиной. Дешевле всех и лечит измеренный вред — молчание: сегодня исполнитель узнаёт о неполноте, только заглянув в файлы скилла."
+          },
+          "alternatives": [
+            {
+              "label": "Вариант (а): завести инфраструктуру фазы",
+              "cost": "каталог правил и скрипт свёртки, которые пока некому читать",
+              "text": "Полноценная третья фаза в codebugs; осмысленно, когда появится потребитель её артефактов."
+            },
+            {
+              "label": "Вариант (в): оставить и писать неполноту в каждый бриф",
+              "cost": "вечная строка в каждом брифе",
+              "text": "Ничего не меняется в механизме; правда живёт дисциплиной, то есть прозой."
+            }
+          ],
+          "default": "recommendation",
+          "sources": [
+            "карта CB-260 в трекере — три варианта записаны без выбора за владельца"
+          ],
+          "details": {
+            "what": "Хук перед посадкой проверяет факт запуска прохода, а не его результат; две трети обещанного механизм отдаёт молча.",
+            "why": "Это «обещание шире проверки» внутри механизма, которым каскад страхуется от «обещания шире проверки», — и родня уже случившейся потери гейта при переносе (канон К-24).",
+            "evidence": [
+              "карта CB-260 — замер: отсутствуют все три файла фазы, скилл сам разрешает пропуск"
+            ],
+            "on_yes": "Правка текста скилла — малый юнит; преемник куратора решит, чьей очереди он принадлежит (скилл общий, живёт вне репозитория — возможно, это ваша правка, тогда я подготовлю дифф)."
+          }
+        }
+      ]
+    }
+  ],
+  "checklist": {
+    "title": "🚀 Ваши действия",
+    "desc": "Только то, чего каскад не может сделать без вас",
+    "groups": [
+      {
+        "title": "Решения (выберите вариант)",
+        "items": [
+          {
+            "type": "decision",
+            "decision_id": "livelock-form",
+            "prompt_prefix": "Затор посадки: решение —",
+            "title": "Форма против затора посадки",
+            "summary": "Без ответа посадки продолжают ходить через ручные окна тишины куратора."
+          },
+          {
+            "type": "decision",
+            "decision_id": "proofread-budget",
+            "prompt_prefix": "Сквозной перечит: решение —",
+            "title": "Бюджет сквозного перечита текстов",
+            "summary": "Две смены и заметная доля дневного лимита внешней модели; без слова не стартует."
+          },
+          {
+            "type": "decision",
+            "decision_id": "autosorter-twin",
+            "prompt_prefix": "Близнец в autosorter: решение —",
+            "title": "Карта о живом вреде в autosorter",
+            "summary": "Каждая автоматическая резолюция там может затереть ещё одну заметку."
+          },
+          {
+            "type": "decision",
+            "decision_id": "category-merge",
+            "prompt_prefix": "Слияние категорий: решение —",
+            "title": "Применение карты слияния категорий",
+            "summary": "48 имён в 20; сухой прогон перед применением обязателен."
+          },
+          {
+            "type": "decision",
+            "decision_id": "cb260-gate",
+            "prompt_prefix": "Неполный проход перед посадкой: решение —",
+            "title": "CB-260: три фазы обещаны, две выполняются",
+            "summary": "Механизм-страховка молчит о собственной неполноте."
+          }
+        ]
+      },
+      {
+        "title": "Действия руками",
+        "items": [
+          {
+            "type": "yesno",
+            "id": "six-projects-gate",
+            "prompt_prefix": "Вставку прохода шести проектам подключил —",
+            "title": "Подключение предупреждающей вставки шести проектам",
+            "summary": "По инструкции INSTRUCTION-simplify-gate-2026-08-27.md §1–2; файлы настроек чувствительны к правам, поэтому применяете вы."
+          },
+          {
+            "type": "yesno",
+            "id": "curator-successor",
+            "prompt_prefix": "Сессию преемника куратора открыл —",
+            "title": "Запуск преемника куратора",
+            "summary": "Команда: claude --model opus; первым сообщением — содержимое .claude/plans/PROMPT-curator-next-session.md целиком. Эту сессию закрыть после ротации DIR-1 — живые держатели умирают вместе с ней."
+          },
+          {
+            "type": "text",
+            "id": "brief-feedback",
+            "prompt_prefix": "Фидбек на дневной бриф:",
+            "title": "Фидбек на этот бриф",
+            "summary": "Что лишнее, чего не хватает, какой порядок."
+          }
+        ]
+      }
+    ]
+  }
+}
+</script>
+
+<script>
+// ---------------------------------------------------------------------------
+// Daily brief renderer — reads the JSON blob above, builds the whole page.
+// The content author (curator) never writes HTML; render.py only substitutes
+// the JSON. See ~/.claude/skills/daily-brief/reference/schema.md for the schema.
+// ---------------------------------------------------------------------------
+
+const BRIEF = JSON.parse(document.getElementById('brief-data').textContent);
+
+const CHEVRON_SVG = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
+
+// id -> decision object, populated while rendering sections; used by the checklist
+// to pull radio options (recommendation + alternatives) without repeating them in JSON.
+const decisionsById = {};
+// id -> checklist item object (decision_id or item.id), used by composePrompt() to
+// find prompt_prefix without re-walking the JSON.
+const checklistItemsById = {};
+
+function renderDetailChain(details) {
+  if (!details) return '';
+  const parts = [];
+  if (details.what) parts.push(`<p><strong>Что:</strong> ${details.what}</p>`);
+  if (details.why) parts.push(`<p><strong>Почему важно:</strong> ${details.why}</p>`);
+  if (details.evidence && details.evidence.length) {
+    parts.push(`<p><strong>Улики:</strong></p><ul>${details.evidence.map(e => `<li><code>${e}</code></li>`).join('')}</ul>`);
+  }
+  if (details.on_yes) parts.push(`<p><strong>Если «да»:</strong> ${details.on_yes}</p>`);
+  return parts.join('');
+}
+
+function hasAnyDetail(details) {
+  return !!(details && (details.what || details.why || (details.evidence && details.evidence.length) || details.on_yes));
+}
+
+function renderMoreToggle(details) {
+  if (!hasAnyDetail(details)) return '';
+  return `<span class="more-toggle" onclick="toggleMore(this)">Подробнее ▾</span><div class="more">${renderDetailChain(details)}</div>`;
+}
+
+function renderCard(c) {
+  const pillCls = (c.pill && c.pill.cls) || 'wait';
+  const pillLabel = (c.pill && c.pill.label) || '';
+  return `<div class="row">
+    <span class="pill ${pillCls}">${pillLabel}</span>
+    <div class="row-text">
+      <strong>${c.title || ''}</strong><span>${c.summary || ''}</span>
+      ${renderMoreToggle(c.details)}
+    </div>
+  </div>`;
+}
+
+function renderDecisionInfo(d, num) {
+  decisionsById[d.id] = d;
+  const altCount = (d.alternatives || []).length;
+  const altLabel = altCount > 1 ? 'Альтернативы и их цена' : 'Альтернатива и её цена';
+  const recHtml = `<div class="verdict-right"><div class="verdict-label">✅ Рекомендация</div>
+    <div class="verdict-text"><strong>${d.recommendation.label}</strong>${d.recommendation.text ? `: ${d.recommendation.text}` : ''}</div></div>`;
+  const altHtml = `<div class="verdict-alt"><div class="verdict-label">⚡ ${altLabel}</div>
+    <div class="verdict-text">${(d.alternatives || []).map(a =>
+      `<strong>${a.label}</strong>${a.cost ? ` — ${a.cost}` : ''}${a.text ? `: ${a.text}` : ''}`
+    ).join('<br><br>')}</div></div>`;
+  const sourcesHtml = (d.sources && d.sources.length)
+    ? `<div class="src">Источники: ${d.sources.map(s => `<code>${s}</code>`).join(', ')}</div>` : '';
+  return `<div class="dec">
+    <div class="dec-head"><div class="dec-num">${num}</div>
+      <div class="dec-q">${d.question || ''}${d.note ? `<small>${d.note}</small>` : ''}</div></div>
+    <div class="verdict-row">${recHtml}${altHtml}</div>
+    ${sourcesHtml}
+    ${renderMoreToggle(d.details)}
+  </div>`;
+}
+
+function renderSection(sec) {
+  let inner = '';
+  if (sec.cards) inner += sec.cards.map(renderCard).join('');
+  if (sec.list_items) inner += `<ul>${sec.list_items.map(li => `<li>${li}</li>`).join('')}</ul>`;
+  if (sec.decisions) inner += sec.decisions.map((d, i) => renderDecisionInfo(d, i + 1)).join('');
+  if (sec.boxes) inner += sec.boxes.map(b => `<div class="box-${b.style}"><h4>${b.title}</h4><p>${b.text}</p></div>`).join('');
+  return `<section class="section">
+    <div class="section-header" onclick="toggleSection(this)">
+      <div class="section-icon">${sec.icon || ''}</div>
+      <h2 class="section-title">${sec.title || ''}</h2>
+      <div class="section-toggle">${CHEVRON_SVG}</div>
+    </div>
+    <div class="section-content">${inner}</div>
+  </section>`;
+}
+
+// --- checklist: decision items render as radios (recommendation + alternatives + «другое»),
+// never as bracket placeholders. yesno items are the да/нет special case of the same pattern.
+// text items are free-text-only (e.g. open feedback) and carry no radio.
+
+function renderRadioOptions(name, options, defaultValue) {
+  return options.map((o, i) => {
+    const inputId = `opt-${name}-${i}`;
+    const checked = (defaultValue !== undefined && defaultValue !== null && defaultValue === o.value) ? 'checked' : '';
+    return `<label class="radio-opt" for="${inputId}">
+      <input type="radio" id="${inputId}" name="dec-${name}" value="${o.value}" ${checked} onchange="onDecisionChange('${name}')">
+      <span>${o.label}${o.cost ? ` <span class="opt-cost">— ${o.cost}</span>` : ''}</span>
+    </label>`;
+  }).join('');
+}
+
+function renderChecklistItem(item) {
+  if (item.type === 'decision') {
+    const d = decisionsById[item.decision_id];
+    if (!d) { console.warn('daily-brief: unknown decision_id in checklist:', item.decision_id); return ''; }
+    checklistItemsById[item.decision_id] = item;
+    const options = [{ value: d.recommendation.label, label: d.recommendation.label }];
+    (d.alternatives || []).forEach(a => options.push({ value: a.label, label: a.label, cost: a.cost }));
+    options.push({ value: '__other__', label: 'другое' });
+    const defaultValue = d.default === 'recommendation' ? d.recommendation.label : (d.default || null);
+    return `<div class="chk-item chk-decision" data-decision-id="${item.decision_id}">
+      <div class="chk-text">
+        <strong>${item.title || ''}</strong><span>${item.summary || ''}</span>
+        <div class="radio-group">${renderRadioOptions(item.decision_id, options, defaultValue)}</div>
+        <input type="text" class="other-input" id="other-${item.decision_id}" placeholder="свой вариант…" style="display:none" oninput="onDecisionChange('${item.decision_id}')">
+        <input type="text" class="clarify-input" id="clarify-${item.decision_id}" placeholder="уточнение (необязательно)" oninput="composePrompt()">
+      </div>
+    </div>`;
+  }
+  if (item.type === 'yesno') {
+    checklistItemsById[item.id] = item;
+    const options = [{ value: 'да', label: 'да' }, { value: 'нет', label: 'нет' }];
+    return `<div class="chk-item chk-decision" data-decision-id="${item.id}">
+      <div class="chk-text">
+        <strong>${item.title || ''}</strong><span>${item.summary || ''}</span>
+        <div class="radio-group">${renderRadioOptions(item.id, options, item.default || null)}</div>
+        <input type="text" class="clarify-input" id="clarify-${item.id}" placeholder="уточнение (необязательно)" oninput="composePrompt()">
+      </div>
+    </div>`;
+  }
+  if (item.type === 'text') {
+    checklistItemsById[item.id] = item;
+    return `<div class="chk-item chk-text-item" data-item-id="${item.id}">
+      <div class="chk-text">
+        <strong>${item.title || ''}</strong><span>${item.summary || ''}</span>
+        <input type="text" class="text-answer" id="text-${item.id}" placeholder="ваш ответ…" oninput="composePrompt()">
+      </div>
+    </div>`;
+  }
+  console.warn('daily-brief: unknown checklist item type:', item.type);
+  return '';
+}
+
+function renderChecklist(chk) {
+  if (!chk) return '';
+  const groups = (chk.groups || []).map(g => `
+    <div class="chk-group-title">${g.title}</div>
+    ${(g.items || []).map(renderChecklistItem).join('')}
+  `).join('');
+  return `<div class="checklist">
+    <div class="chk-title">${chk.title || ''}</div>
+    <div class="chk-desc">${chk.desc || ''}</div>
+    ${groups}
+  </div>
+  <div class="prompt-panel" id="prompt-panel" style="display:none;">
+    <div class="chk-title" style="font-size:16px;">📋 Промпт для ответа</div>
+    <div class="chk-desc">Готовая строка — скопируйте в чат как есть</div>
+    <textarea id="prompt-out" spellcheck="false" readonly></textarea>
+    <div class="prompt-actions">
+      <button type="button" class="btn-copy" onclick="copyPrompt(this)">Скопировать</button>
+      <button type="button" class="btn-reset" onclick="resetPrompt()">Сбросить</button>
+    </div>
+  </div>`;
+}
+
+function render() {
+  const m = BRIEF.meta || {};
+  const stats = (BRIEF.stats || []).map(s => `<div class="stat-card ${s.cls || ''}"><div class="stat-val">${s.val}</div><div class="stat-lbl">${s.lbl}</div></div>`).join('');
+  const sections = (BRIEF.sections || []).map(renderSection).join('');
+  const checklistHtml = renderChecklist(BRIEF.checklist);
+  const tags = (m.tags || []).map(t => `<span class="tag ${t.cls || ''}">${t.text}</span>`).join('');
+  const footerLinks = (m.footer_links || []).map(l => `<a href="${l.href || '#'}">${l.label}</a>`).join(' · ');
+
+  document.getElementById('app').innerHTML = `
+    <div class="header">
+      <div class="header-pre">${m.header_pre || 'Дневной бриф куратора'}</div>
+      <h1 class="header-title">${m.title || ''}</h1>
+      <p class="header-sub">${m.subtitle || ''}</p>
+      <div class="tags">${tags}</div>
+    </div>
+    <div class="stats">${stats}</div>
+    ${sections}
+    ${checklistHtml}
+    <div class="footer">Подготовлено ${m.prepared || ''}${footerLinks ? ' · ' + footerLinks : ''}</div>
+  `;
+
+  // decisions render before the checklist in DOM order, but JSON section order is
+  // author-controlled — populate the map from BRIEF directly to be order-independent.
+  (BRIEF.sections || []).forEach(sec => (sec.decisions || []).forEach(d => { decisionsById[d.id] = d; }));
+
+  // Expanded sections get NO fixed max-height: a fixed scrollHeight snapshot clipped every
+  // «Подробнее» opened later (owner feedback 2026-08-22). Collapse is handled by CSS.
+  document.querySelectorAll('.section-content').forEach(c => { c.style.maxHeight = 'none'; });
+  composePrompt();
+}
+
+function toggleSection(h) {
+  const s = h.parentElement, c = s.querySelector('.section-content');
+  s.classList.toggle('collapsed');
+  if (!s.classList.contains('collapsed')) {
+    c.style.maxHeight = c.scrollHeight + 'px';
+    setTimeout(() => { c.style.maxHeight = 'none'; }, 400);  // after the transition, grow freely
+  } else {
+    c.style.maxHeight = c.scrollHeight + 'px';  // give the transition a start value
+    requestAnimationFrame(() => { c.style.maxHeight = '0px'; });
+  }
+}
+
+function toggleMore(el) {
+  const m = el.nextElementSibling;
+  const open = m.classList.toggle('open');
+  el.textContent = open ? 'Свернуть ▴' : 'Подробнее ▾';
+  const sc = el.closest('.section-content'); if (sc) sc.style.maxHeight = 'none';
+}
+
+function onDecisionChange(name) {
+  const otherInput = document.getElementById('other-' + name);
+  if (otherInput) {
+    const selected = document.querySelector(`input[name="dec-${name}"]:checked`);
+    otherInput.style.display = (selected && selected.value === '__other__') ? 'block' : 'none';
+  }
+  composePrompt();
+}
+
+function composePrompt() {
+  const lines = [];
+
+  document.querySelectorAll('.chk-decision').forEach(el => {
+    const id = el.dataset.decisionId;
+    const selected = document.querySelector(`input[name="dec-${id}"]:checked`);
+    if (!selected) return;
+    let valueText = selected.value;
+    if (valueText === '__other__') {
+      const other = document.getElementById('other-' + id);
+      valueText = (other && other.value.trim()) ? other.value.trim() : '';
+      if (!valueText) return; // "другое" chosen but not filled in yet — not answered
+    }
+    const item = checklistItemsById[id];
+    if (!item) return;
+    let line = `- ${item.prompt_prefix} ${valueText}.`;
+    const clarify = document.getElementById('clarify-' + id);
+    if (clarify && clarify.value.trim()) line += ` Уточнение: ${clarify.value.trim()}.`;
+    lines.push(line);
+  });
+
+  document.querySelectorAll('.chk-text-item').forEach(el => {
+    const id = el.dataset.itemId;
+    const input = document.getElementById('text-' + id);
+    if (input && input.value.trim()) {
+      const item = checklistItemsById[id];
+      if (item) lines.push(`- ${item.prompt_prefix} ${input.value.trim()}`);
+    }
+  });
+
+  const panel = document.getElementById('prompt-panel');
+  const ta = document.getElementById('prompt-out');
+  if (!panel || !ta) return;
+  if (lines.length === 0) {
+    panel.style.display = 'none';
+    ta.value = '';
+    return;
+  }
+  const date = (BRIEF.meta && BRIEF.meta.date_iso) || '';
+  ta.value = [`Решения владельца по дневному брифу ${date}:`, ...lines].join('\n');
+  panel.style.display = 'block';
+}
+
+function copyPrompt(btn) {
+  const ta = document.getElementById('prompt-out');
+  const text = ta.value;
+  const orig = btn.textContent;
+  function done() {
+    btn.textContent = 'Скопировано ✓';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => {
+      ta.select();
+      document.execCommand('copy');
+      done();
+    });
+  } else {
+    ta.select();
+    document.execCommand('copy');
+    done();
+  }
+}
+
+function resetPrompt() {
+  document.querySelectorAll('.chk-decision input[type=radio]:checked').forEach(r => { r.checked = false; });
+  document.querySelectorAll('.other-input, .clarify-input, .text-answer').forEach(i => { i.value = ''; i.style.display = (i.classList.contains('other-input')) ? 'none' : i.style.display; });
+  composePrompt();
+}
+
+render();
+</script>
+</body>
+</html>
