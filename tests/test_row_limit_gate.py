@@ -60,19 +60,22 @@ MEASURED ESCAPES — the gate does NOT see these, and each was reproduced:
      shape: FOUR of the fourteen binding sites in the tree carry an `offset`
      beside their limit — `blockers.query_deferred_entities`,
      `findings.recent_findings`, `findings.query_findings` and
-     `reqs.query_requirements`. **That number read `five` when this text landed,
-     and nobody in the chain that carried it had counted** (CB-254): it came from
-     one acceptor's remark and was relayed through three more hands verbatim,
-     which is this file's own subject happening to this file. Re-measured
-     2026-08-29 by walking the union of the two sets below, all fourteen
-     resolved; and the count does not turn on what "carries an offset" is taken
-     to mean, because the same four are the only sites declaring an `offset`
-     PARAMETER, the only ones naming `offset` anywhere in their body, and the
-     only ones whose SQL emits an `OFFSET` clause — and no site in the
-     population takes `**kwargs`, so there is no indirect route to argue about.
-     Closing it means following the argument to the value
-     that is bound — data flow inside the function, the boundary this file draws
-     elsewhere — and no site in the tree is wrong today, so it is DECLARED.
+     `reqs.query_requirements`. **That number read `five` until 2026-08-29, and
+     nobody in the chain that carried it had counted**: it began as one
+     acceptor's remark and was relayed verbatim through three more hands into
+     this docstring — a number nothing checked, in the file whose whole subject
+     is a promise nothing checks. It is no longer prose:
+     `TestTheOffsetCountInEscapeThreeIsDerived` walks the union of the two sets
+     below and derives it, so a fifth site turns this file red instead of
+     waiting for someone to re-count. That test also holds the claim that the
+     count does not turn on what "carries an offset" is taken to mean — the same
+     four are the only sites declaring an `offset` PARAMETER, the only ones
+     naming `offset` anywhere in their body, and the only ones whose SQL emits
+     an `OFFSET` clause, and no site in the population takes `**kwargs`, so
+     there is no indirect route to argue about. The ESCAPE itself stays
+     DECLARED: closing it means following the argument to the value that is
+     bound — data flow inside the function, the boundary this file draws
+     elsewhere — and no site in the tree is wrong today.
   4. THE GUARD SITS IN A BRANCH THAT CANNOT RUN. `if False:` around the call
      vouches for the function, because the predicate walks the body rather than
      executing it. Same trade as (3): reachability analysis for a defect nobody
@@ -1048,4 +1051,100 @@ class TestTheSurfacesNameTheContractTheyEnforce:
         assert "negative" in entry["description"], (
             f"MCP tool `{tool}` now refuses a negative limit and its description "
             f"does not say so."
+        )
+
+
+# The four sites named in escape 3 of this module's docstring. Kept beside the
+# test that derives them rather than inside it, so a reader comparing the
+# docstring against the code has one place to look.
+_OFFSET_CARRYING_SITES = {
+    ("blockers.py", "query_deferred_entities"),
+    ("findings.py", "recent_findings"),
+    ("findings.py", "query_findings"),
+    ("reqs.py", "query_requirements"),
+}
+
+
+class TestTheOffsetCountInEscapeThreeIsDerived:
+    """Escape 3 says FOUR of the fourteen binding sites carry an `offset`, and
+    that number is DERIVED here rather than trusted to prose.
+
+    It read `five` until 2026-08-29, having been relayed verbatim through four
+    hands without anyone counting — in the file whose own subject is a promise
+    nothing checks. This repository's rule is that a number which decides
+    anything belongs in a test, and this one decides something: it is the whole
+    evidence that escape 3 is a reachable shape rather than a contrived one.
+
+    The escape itself stays DECLARED — closing it needs data flow inside the
+    function, which is the boundary this file draws elsewhere. What is enforced
+    here is only that the docstring's count and its list of names stay true.
+
+    Three readings of "carries an `offset`" are checked TOGETHER, because the
+    docstring claims they agree and a claim of agreement is exactly the kind
+    that rots silently: the parameter, a mention anywhere in the body, and an
+    `OFFSET` clause in the SQL the function emits. If a future site makes them
+    disagree, that is a real finding about the population and this test says so
+    instead of quietly picking one reading.
+    """
+
+    @staticmethod
+    def _resolve(module: str, func: str) -> ast.FunctionDef:
+        tree = ast.parse((SRC / module).read_text())
+        found = [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef) and n.name == func
+        ]
+        assert len(found) == 1, (
+            f"{module}::{func} resolved to {len(found)} definitions — the "
+            f"population in `_THE_EIGHT | _ALREADY_GUARDED_BEFORE_THIS_UNIT` "
+            f"has drifted from the tree, so no count over it means anything."
+        )
+        return found[0]
+
+    def test_the_whole_population_still_resolves(self):
+        """Fail closed: a moved name must not quietly shrink the count."""
+        population = _THE_EIGHT | _ALREADY_GUARDED_BEFORE_THIS_UNIT
+        assert len(population) == 14, "the two sets no longer make fourteen sites"
+        for module, func in sorted(population):
+            self._resolve(module, func)
+
+    def test_exactly_the_four_named_sites_declare_an_offset_parameter(self):
+        carrying = set()
+        for site in _THE_EIGHT | _ALREADY_GUARDED_BEFORE_THIS_UNIT:
+            node = self._resolve(*site)
+            args = node.args
+            names = {
+                a.arg for a in (args.posonlyargs + args.args + args.kwonlyargs)
+            }
+            if "offset" in names:
+                carrying.add(site)
+
+        assert carrying == _OFFSET_CARRYING_SITES
+        assert len(carrying) == 4, "escape 3 says FOUR — update it, or this"
+
+    def test_the_other_two_readings_of_carries_an_offset_agree(self):
+        """The docstring claims the count does not turn on what "carries"
+        means. That claim is checked, not asserted."""
+        by_body, by_sql, take_kwargs = set(), set(), set()
+        for site in _THE_EIGHT | _ALREADY_GUARDED_BEFORE_THIS_UNIT:
+            node = self._resolve(*site)
+            if any(isinstance(n, ast.Name) and n.id == "offset" for n in ast.walk(node)):
+                by_body.add(site)
+            if any(
+                isinstance(n, ast.Constant)
+                and isinstance(n.value, str)
+                and "OFFSET" in n.value.upper()
+                for n in ast.walk(node)
+            ):
+                by_sql.add(site)
+            if node.args.kwarg is not None:
+                take_kwargs.add(site)
+
+        assert by_body == _OFFSET_CARRYING_SITES
+        assert by_sql == _OFFSET_CARRYING_SITES
+        assert take_kwargs == set(), (
+            "a site taking **kwargs could receive `offset` indirectly, which "
+            "would make the three readings disagree and the docstring's "
+            "'no indirect route to argue about' false"
         )

@@ -1091,12 +1091,13 @@ def _match_fingerprint(
     one pair, still both `wont_fix`, autosorter then at 3481 rows — **and this
     sentence used to name a shared stamp for the pair, which was false**; the two
     rows carry DIFFERENT stamps, and the values are DROPPED from this text rather
-    than corrected (CB-241), a timestamp on a live row being the one half of this
-    measurement that goes stale on the next write. **The first correction printed
-    both values while announcing the drop** (CB-247), which is this paragraph's own
-    warning committed inside its own fix: what the argument needs is that the pair
-    does not share a stamp, and naming the two values adds nothing to that while
-    putting an expiring assertion in the present tense.
+    than corrected — the decision CB-241 made, on the ground that a timestamp on a
+    live row is the one half of this measurement that goes stale on the next write.
+    **The first attempt at that drop printed both values while announcing it**, and
+    CB-247 is what caught that: this paragraph's own warning committed inside its
+    own fix. What the argument needs is that the pair does NOT share a stamp;
+    naming the two values adds nothing to it and costs an assertion about a live
+    corpus written in the present tense.
     Both members of that pair are in the SAME status class, so `recurrence_of` is
     chosen whichever wins and the outcome is indistinguishable. There is no live
     tracker on which the degraded order can produce a wrong answer, and building a

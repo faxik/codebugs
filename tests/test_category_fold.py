@@ -1378,11 +1378,14 @@ class TestFoldReportDocumentsItsOwnKeys:
     ``--fold-map``, which is the one CB-242 was actually filed about. It was held
     only by the wire golden, and a golden compares the string to a snapshot of
     itself: it notices a change and can say nothing about whether the text is
-    TRUE. So that one is pinned against BEHAVIOUR — the report is run with two
-    unmatched keys and the printed shape is counted — rather than against another
-    string. The claim that made it necessary was "every such key gets its own
-    block", where the code prints ONE block with a counted header and a line per
-    key (measured, dry run and ``--apply`` alike).
+    TRUE. So that one is pinned against BEHAVIOUR rather than against another
+    string, and in TWO methods deliberately: one runs the report with two
+    unmatched keys and counts the printed blocks, the other reads the help off
+    the built parser. Together they are the claim; apart, a failure names which
+    half broke without a reader opening the body. The wording that made it
+    necessary was "every such key gets its own block", where the code prints ONE
+    block with a counted header and a line per key (measured, dry run and
+    ``--apply`` alike).
     """
 
     def test_the_domain_docstring_names_both_new_keys(self):
@@ -1394,23 +1397,23 @@ class TestFoldReportDocumentsItsOwnKeys:
     def test_the_mcp_tool_description_names_both_new_keys(self):
         """The third surface the class docstring named and never checked.
 
-        Read off the REGISTERED tool, which is what a client receives, rather
-        than off a nested ``__doc__`` this module cannot reach.
+        Routed through ``tests/_mcp_schema.collect_tool_schemas``, which
+        registers via ``server._NormalizedDescriptions`` — NOT through a bare
+        ``MCPServer``. That distinction is not pedantry and the first draft of
+        this test got it wrong: a bare registration hands back the raw
+        ``__doc__``, and on this interpreter the two differ by 179 bytes
+        (measured, 3198 raw against 3019 on the wire, CB-73's dedent). Asserting
+        on the raw text while the docstring promised "what a client receives"
+        would be a promise wider than its check — inside the very class that
+        exists to close that shape.
         """
-        import asyncio
-        from contextlib import contextmanager
+        from tests._mcp_schema import collect_tool_schemas
 
-        from mcp.server.mcpserver import MCPServer
-
-        @contextmanager
-        def _never_called():
-            raise AssertionError("listing tools must not open a connection")
-            yield  # pragma: no cover
-
-        mcp = MCPServer("cb247-fold-description-pin")
-        findings.register_tools(mcp, _never_called)
-        tools = {t.name: t for t in asyncio.run(mcp.list_tools())}
-        description = tools["categories_normalize"].description or ""
+        described = {
+            entry["name"]: entry.get("description", "")
+            for entry in collect_tool_schemas(providers=db.get_tool_providers(mode="findings"))
+        }
+        description = described["categories_normalize"]
 
         assert "unmatched_fold_keys" in description
         assert "merged_identities" in description
@@ -1420,16 +1423,15 @@ class TestFoldReportDocumentsItsOwnKeys:
         text = (pathlib.Path(__file__).resolve().parent.parent / "CHANGELOG.md").read_text()
         assert "appears nowhere in the report" not in text
 
-    def test_the_fold_map_help_describes_the_block_the_code_actually_prints(
+    def test_two_unmatched_keys_produce_one_block_and_not_one_each(
         self, conn, tmp_project, monkeypatch, capsys
     ):
-        """The fourth surface, checked against behaviour rather than a golden.
+        """The BEHAVIOUR half of the fourth surface: what the report prints.
 
-        Two unmatched keys must produce ONE header block naming the count, with
-        a line per key underneath — so the help must not promise a block each.
+        Split from the wording assertion below deliberately — the two check
+        different things through different machinery, and a failure should name
+        which one broke without a reader opening the body.
         """
-        import argparse
-
         _insert_raw(conn, fid="CB-1", category=MERGE_FROM)
         _insert_raw(conn, fid="CB-2", category=MERGE_TO, description=DESC_B)
         conn.commit()
@@ -1448,10 +1450,20 @@ class TestFoldReportDocumentsItsOwnKeys:
         out = capsys.readouterr().out
 
         assert out.count("fold_map keys matched NO stored category") == 1, (
-            "one block, not one per key — the help text says so"
+            "one block for all unmatched keys, never one block each"
         )
         assert "!! 2 fold_map keys matched NO stored category" in out
         assert "'nosuch_one'" in out and "'nosuch_two'" in out
+
+    def test_the_fold_map_help_describes_that_block_rather_than_promising_one_each(self):
+        """The WORDING half, read off the built parser.
+
+        The claim that made this necessary was "every such key gets its own
+        block" (CB-242's own surface), which the test above measures to be
+        false. This half needs no tracker and no CLI run, which is why it is
+        its own method.
+        """
+        import argparse
 
         parsers: dict[str, argparse.ArgumentParser] = {}
 
