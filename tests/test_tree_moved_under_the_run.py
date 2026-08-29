@@ -23,12 +23,52 @@ three observable primitives: a path APPEARS, a path DISAPPEARS, or a path's
 (size, mtime) CHANGES. All three are covered end to end below, against the real
 `tests/conftest.py` loaded by a real pytest session.
 
-TESTS THAT TOUCH THE REAL TREE ARE NET-ZERO BY CONSTRUCTION. Each one creates
-its own probe file, lets the inner run move it, and removes it in `finally`, so
-nothing this module does is visible to the OUTER run's own fingerprint. That is
-not tidiness: mutating a tracked file's mtime here would make the full suite set
-off this very alarm on every run, and an alarm that always fires is one nobody
-reads by the second week.
+TESTS THAT TOUCH THE REAL TREE ARE NET-ZERO FOR ONE PROCESS AT A TIME, and that
+qualification is the whole of CB-258. Each such row creates its own probe in the
+live tree, lets the inner run move it, and removes it in `finally`, so by the
+time the OUTER run takes its second sample nothing this module did is left to
+see. That is not tidiness: mutating a tracked file's mtime here would make the
+full suite set off this very alarm on every run, and an alarm that always fires
+is one nobody reads by the second week.
+
+The sentence above used to end "BY CONSTRUCTION", with no qualification, and it
+was wider than its measurement — the defect class this file is itself about. It
+holds for the run that OWNS the probe and fails for any OTHER reader of the same
+tree, which is an ordinary state here rather than an exotic one: this suite is
+re-run in the main checkout while branches land on it, and two rows below copy
+the live tree wholesale. A second reader overlapping a probe's window sees a
+path appear or disappear and prints this very alarm.
+
+ONE PROBE FAILED A SECOND READER IN A WAY THE OTHERS DO NOT, and it is the one
+that has moved out. It is the SAME race in all of them — this module writes into
+a tree it does not own — so the distinction is emphatically not that the rest are
+safe. It is that a readable file leaves the second reader RUNNING, with a false
+alarm in its log, while an unreadable directory leaves it no way to continue at
+all. Both halves were built and measured on a copy of this tree, with this file
+as it stood: `shutil.copytree` of the live tree died with `shutil.Error [Errno
+13] Permission denied` — which is exactly how the neighbouring row reads the tree
+— and a second pytest run overlapping the window reported
+`tests/_cb226_probe_blinddir — could not be listed (Permission denied)`, turning
+all three rows of "silent on a still tree" red. So that row now builds its own
+throwaway COPY of the tree and keeps the unreadable directory inside it, where
+nothing else will ever walk.
+
+WHAT IS STILL TRUE AND WHAT IS NOT, said rather than quietly widened. The other
+probes are ordinary FILES and are NOT race-free: a concurrent second reader still
+sees them appear and disappear, and still prints this alarm over them. Making
+this module safe for two concurrent readers is CB-255's subject and is not a
+promise made here.
+
+And what IS said here is a statement about this file as it stands, never a gate.
+Checked mechanically rather than asserted: the two `os.chmod` calls left in the
+module both target a directory inside a throwaway copy, and every path it creates
+under the live tree is an ordinary file written with no explicit mode. Nothing
+ENFORCES that for a row somebody adds later, and a cheap enforcement was looked
+at and refused rather than forgotten — a check keyed on the name `os.chmod` is
+blind to `Path.chmod` or a shelled-out one, which is this repository's CB-227
+lesson (a gate that is itself an enumeration, of spellings) landing one level up.
+So the next row that wants an unreadable path in the live tree is caught by
+whoever reviews it, not by this file.
 """
 
 import os
@@ -113,6 +153,43 @@ def _git(*args, cwd):
         check=True,
         capture_output=True,
     )
+
+
+# What a throwaway copy deliberately does not carry. This is NOT `_PRUNED_NAMES`
+# and is deliberately not derived from it: pruning says what the fingerprint must
+# not JUDGE, this says what a copy need not CARRY. The two tables already differ
+# and are meant to — `.ruff_cache` and `.mypy_cache` are pruned and are not
+# listed here, `.worktrees` is a pruned PATH rather than a name — so deriving
+# one from the other would move one question's answer whenever the other's moved.
+_NOT_COPIED = (".git", ".venv", ".worktrees", "__pycache__", ".pytest_cache", ".codebugs")
+
+
+def _throwaway_tree_copy(tmp_path, name):
+    """A disposable copy of the live tree — the only place a probe may be left.
+
+    Two rows need a real tree carrying this repository's real `conftest.py`, and
+    both leave a probe lying in that tree while an inner pytest session runs. See
+    the module docstring for what a probe left in the LIVE tree does to a second
+    reader, and why an unreadable one is worse in kind than the rest.
+
+    The copy is made from the WORKING tree rather than with `git archive`,
+    deliberately: an archive is made from `HEAD`, so on a branch whose
+    `conftest.py` is not yet committed these rows would exercise the previous
+    version of the very code under test and pass vacuously.
+
+    Cost was measured before the live tree was given up, because "it is cheaper"
+    is the argument that would otherwise have kept the probe where it was. On
+    2026-08-29, on this tree: about 17 MB and well under a tenth of a second per
+    copy, against an inner pytest session of roughly two and a half seconds — a
+    few percent of a row already dominated by starting a second interpreter. The
+    file COUNT is deliberately not quoted: three measurements the same day gave
+    three different answers, since a worktree, the main checkout and a copy that
+    carries untracked caches do not hold the same files. That is precisely how a
+    number written into prose rots into a false statement.
+    """
+    copy = tmp_path / name
+    shutil.copytree(REPO_ROOT, copy, ignore=shutil.ignore_patterns(*_NOT_COPIED))
+    return copy
 
 
 class TestTheAlarmSpeaksWhenTheTreeMoves:
@@ -226,19 +303,13 @@ class TestTheDiscriminatorIsTheFilesAndNotTheCommitName:
     def test_a_tree_with_no_git_at_all_still_works_and_prints_no_signature(self, tmp_path):
         """The git-less copy: no exception, no false alarm, and the fingerprint still bites.
 
-        The copy is made from the WORKING tree rather than with `git archive`,
-        deliberately: an archive is made from `HEAD`, so on a branch whose
-        `conftest.py` is not yet committed this row would exercise the previous
-        version of the very code under test and pass vacuously.
+        This row is ALSO the one CB-258 was reported through: it reads the live
+        tree with `shutil.copytree`, so any other run leaving an unreadable
+        directory there killed it outright with `Permission denied`. Its own
+        probe stays inside the copy, which is why it was the victim and never
+        the cause.
         """
-        copy = tmp_path / "nogit"
-        shutil.copytree(
-            REPO_ROOT,
-            copy,
-            ignore=shutil.ignore_patterns(
-                ".git", ".venv", ".worktrees", "__pycache__", ".pytest_cache", ".codebugs"
-            ),
-        )
+        copy = _throwaway_tree_copy(tmp_path, "nogit")
         assert not (copy / ".git").exists()
         assert _head_signature(copy) is None
 
@@ -368,24 +439,42 @@ class TestTheAlarmNamesADirectoryItCannotList:
     that directory, while it stayed unlistable throughout, produced NOTHING in
     the terminal summary: this is the row that used to pass silently over a
     tree that had, in fact, changed under it in a way the run could not see.
+
+    THE UNREADABLE DIRECTORY LIVES IN A THROWAWAY COPY, NEVER IN THE LIVE TREE
+    (CB-258). What this row needs is a real tree with a real `conftest.py` in
+    it, and a copy is one; what it must not do is leave a directory nobody else
+    can list in the tree every other reader is walking. The module docstring
+    carries the two measurements that decided it.
     """
 
     def test_an_unlistable_directory_is_named_and_the_run_is_not_reported_clean(self, tmp_path):
-        probe_dir = REPO_ROOT / "tests" / "_cb226_probe_blinddir"
+        copy = _throwaway_tree_copy(tmp_path, "blinddir")
+        probe_dir = copy / "tests" / "_cb226_probe_blinddir"
+        # CB-258, asserted rather than trusted to the line above: a mutant that
+        # puts the probe back in the live tree turns this row red HERE, before
+        # it can break anybody else's run.
+        assert not probe_dir.resolve().is_relative_to(REPO_ROOT), probe_dir
         probe_file = probe_dir / "f.py"
         probe_dir.mkdir()
         probe_file.write_text("original\n")
+        plugin_dir = _mutator(
+            tmp_path,
+            f"open({str(probe_file)!r}, 'w').write("
+            "'a considerably longer replacement body than before\\n')",
+        )
         os.chmod(probe_dir, 0o300)
         try:
-            plugin_dir = _mutator(
-                tmp_path,
-                f"open({str(probe_file)!r}, 'w').write("
-                "'a considerably longer replacement body than before\\n')",
-            )
-            proc = _inner_pytest(tmp_path / "bt", plugin_dir=plugin_dir)
+            proc = _inner_pytest(tmp_path / "bt", plugin_dir=plugin_dir, cwd=copy)
         finally:
+            # Restored, never removed: the whole copy is disposable, but pytest
+            # deletes old `--basetemp` trees itself and cannot delete an
+            # unreadable one. Measured on pytest 9.0.2 rather than assumed, and
+            # the measurement narrowed the claim: `rm_rf` does NOT raise, it
+            # emits `PytestWarning: (rm_rf) error removing ...` once per level
+            # and LEAVES the tree standing. So the cost of dropping this line
+            # is temporary trees accumulating for ever behind a warning nobody
+            # would ever connect back to this row.
             os.chmod(probe_dir, 0o700)
-            shutil.rmtree(probe_dir)
         out = _output(proc)
         assert proc.returncode == 0, out[-3000:]
         assert _TREE_MOVED_ANCHOR in out, out[-3000:]
