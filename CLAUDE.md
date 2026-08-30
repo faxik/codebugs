@@ -982,10 +982,13 @@ with a reason. The vector's own route is a third, separate claim, and it stays a
 caller's argument into this tracker's SQLite file and nowhere else. A claim wider than its
 measurement is the defect class this direction exists to close; stating it precisely matters more
 than stating it loudly. **The bound is about naming, not about the process, and that is measured
-rather than hedged**: importing the one declared MCP name already puts `mcp.server.sse`,
-`mcp.client.sse` and 113 other `mcp.*` modules into `sys.modules`, so what the ratchet buys is that
-the source cannot NAME a second one without a row somebody reads — never that the transport is
-absent.
+rather than hedged**: importing the one declared MCP name already puts BOTH SSE transports —
+`mcp.server.sse` and `mcp.client.sse` — into `sys.modules` along with most of the SDK, so what the
+ratchet buys is that the source cannot NAME a second one without a row somebody reads, never that
+the transport is absent. No module count is quoted here on purpose: the first draft quoted one,
+and it was wrong because the measuring predicate matched the prefix `mcp` without the dot and swept
+in `mcp_types`, a separate distribution — the exact confusion the gate's own table is written to
+prevent.
 
 **Those claims are held by a gate, because a safety assertion with no gate behind it is a "gate that
 cannot fire" written as prose** — the literal subject of CB-159/CB-160.
@@ -1021,10 +1024,14 @@ parked, which is the hole these mechanisms exist to close, one level up.
 **One property is new and is declared rather than counted as covered.** Before CB-190 the verdict
 was a pure function of the source text; the ratchet classifies the standard library by
 `sys.stdlib_module_names`, so it is now a function of the source text AND the interpreter version.
-On this tree nothing diverges — the four foreign top-level names (`codebugs` aside: `mcp`,
-`mcp_types`, `pydantic`) are foreign on every admitted version — but the CI matrix runs only
-`test_cli_signals.py` and `test_fsio.py` across 3.11–3.14, so this file is executed on the pinned
-interpreter alone and nothing would notice if that stopped being true. Relatedly, `telnetlib`,
+On this tree nothing diverges — the **three** foreign top-level names (`mcp`, `mcp_types`,
+`pydantic`) are foreign on every admitted version, measured on 3.11 as well as on the pinned
+interpreter — but the CI matrix runs only `test_cli_signals.py` and `test_fsio.py` across
+3.11–3.14, so this file is executed on the pinned interpreter alone and nothing would notice if
+that stopped being true. `codebugs` is the fourth top-level name the tree imports and is
+deliberately absent from that list: it is excluded by DERIVATION rather than by foreignness, and
+conflating the two is what an earlier draft of this sentence did — it said "four" and then listed
+three. Relatedly, `telnetlib`,
 `nntplib`, `asyncore`, `asynchat` and `smtpd` are kept in the enumeration precisely because the two
 mechanisms disagree about them by version: measured, all five are in `sys.stdlib_module_names` on
 3.11 (3.12 keeps the first two), and none is on 3.13 or 3.14 — so the ratchet refuses them by

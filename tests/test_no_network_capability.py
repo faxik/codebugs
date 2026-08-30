@@ -52,13 +52,32 @@ named rather than discovered later:
   says so — an HTTP mode exists; this project runs over stdio). A dependency's
   capabilities are not this package's imports. Measured, so this is concrete
   rather than cautious: importing the single declared
-  ``mcp.server.mcpserver.MCPServer`` already puts ``mcp.server.sse``,
-  ``mcp.client.sse`` and 113 other ``mcp.*`` modules into ``sys.modules``. The
-  ratchet keeps the SOURCE from naming a second one without a row somebody
-  reads; it does not and cannot empty the process.
+  ``mcp.server.mcpserver.MCPServer`` already puts BOTH SSE transports —
+  ``mcp.server.sse`` and ``mcp.client.sse`` — into ``sys.modules``, along with
+  most of the SDK. The ratchet keeps the SOURCE from naming a second one
+  without a row somebody reads; it does not and cannot empty the process.
+  (No count is given, and the omission is deliberate: the first draft carried
+  one, wrote it down twice as two DIFFERENT numbers, and both were wrong
+  because the measuring predicate matched the prefix ``mcp`` without the dot
+  and so swept in ``mcp_types`` — the separate distribution the table below
+  goes out of its way to distinguish. A number that decides something belongs
+  in a test; this sentence is decided by the two module names.)
 * ``subprocess`` is used legitimately here, for git, and a subprocess can of
   course run ``curl``. Refusing ``subprocess`` would refuse the package's
   working code, and keying on argv would be a guess.
+* THE CHEAPEST BYPASS INSIDE THE STANDARD LIBRARY IS THE PRIVATE TWIN, and it
+  is named here because this file's discipline is to name its own misses.
+  Measured: ``import _socket``, ``from _socket import socket`` and
+  ``import _ssl`` are green against BOTH mechanisms. ``_socket`` is in
+  ``sys.stdlib_module_names``, so the ratchet reads it as stdlib by
+  construction, and the set upstairs does not list it — yet ``_socket.socket``
+  is the real socket class, with ``connect`` on it, one import line away. It
+  is cheaper than the three misses listed below it (no wrapper class, no
+  second call) and it is the one that was not written down. NOT closed here:
+  adding the two strings is a two-line change, and this unit was scoped to
+  refuse list-growing as the FIX — which is right, since a private twin is a
+  class rather than a pair, and the next one would arrive the same way.
+  Not a regression either; the gate before CB-190 passed the same thing.
 * ``sys.stdlib_module_names`` is a set of NAMES, not an oracle of origin: it
   is flat and identical on every platform, so five of its names (``winsound``,
   ``msvcrt``, ``winreg``, ``nt``, ``idlelib``) are unclaimed on Linux and a
@@ -74,10 +93,14 @@ ONE PROPERTY IS NEW AND IS DECLARED RATHER THAN COUNTED AS COVERED. Before
 CB-190 the verdict was a pure function of the source text; the ratchet makes
 it a function of the source text AND the interpreter version, because
 ``sys.stdlib_module_names`` changes between releases. On this tree there is no
-divergence — the four top-level names it imports (``codebugs``, ``mcp``,
+divergence — the THREE foreign top-level names it imports (``mcp``,
 ``mcp_types``, ``pydantic``) are foreign on every version ``requires-python``
-admits — but CI runs this file on the pinned interpreter only, so nothing
-would notice if that stopped being true.
+admits, measured on 3.11 as well as on the pinned interpreter — but CI runs
+this file on the pinned interpreter only, so nothing would notice if that
+stopped being true. (``codebugs`` is the fourth top-level name in the tree and
+is deliberately NOT in that list: it is excluded by derivation, not by
+foreignness, which is the distinction
+``test_the_package_names_itself_by_derivation`` exists to keep.)
 
 KEY ON THE CAPABILITY, NOT ON THE MODULE NAME — and that is not a refinement,
 it is the difference between a working gate and one that refuses the package's
@@ -160,11 +183,22 @@ NETWORK_MODULES: frozenset[str] = frozenset(
         # reason. That is the table doing its job -- a genuine capability import
         # becoming a moment somebody reads -- rather than a false refusal.
         "asyncio",
-        # third-party clients this package could plausibly grow. Deliberately
+        # Third-party clients this package could plausibly grow. Deliberately
         # NOT a list of ML libraries: ``torch``/``transformers`` are model code,
         # and enumerating what a provider MIGHT be built on is the enumeration
         # failure this repository keeps relearning. A provider will import one
         # of the clients below to reach an API, and that is what is keyed on.
+        #
+        # DO NOT DELETE THESE TEN AS REDUNDANT, and the argument that they are
+        # is a good one, which is why it is answered here rather than left to
+        # be re-derived. Every one of them is foreign, so since CB-190 the
+        # ratchet already refuses them by default and this set is never their
+        # only catcher — unlike the five removed-from-stdlib names above, whose
+        # comment says exactly that. What these ten still buy is a SECOND
+        # declaration in a SECOND table: a ``DECLARED_THIRD_PARTY`` row alone
+        # does not admit ``httpx.AsyncClient``, because the capability set then
+        # demands a ``DECLARED_EXCEPTIONS`` row too. Two tables, two readers,
+        # for the imports most likely to be a network provider arriving.
         "requests",
         "httpx",
         "aiohttp",
@@ -416,7 +450,8 @@ class TestNoNetworkCapability:
         assert not undeclared, (
             "network-capable import(s) in src/codebugs/: "
             f"{undeclared}. The embedding tool descriptions and CLAUDE.md tell "
-            "callers this package sends nothing anywhere. Either remove the "
+            "callers this package's source names no socket-opening module from "
+            "the set above. Either remove the "
             "import, or -- if the name genuinely grants no network access -- add "
             "it to DECLARED_EXCEPTIONS in this file with a reason. If it DOES "
             "grant network access, the CLAUDE.md rule on a provider inside the "
@@ -505,10 +540,11 @@ class TestTheRatchetItself:
 
         That is a statement about what this package's source names, and NOT
         about what its process holds. Measured: importing the single declared
-        ``mcp.server.mcpserver.MCPServer`` already pulls ``mcp.server.sse``,
-        ``mcp.client.sse`` and 115 other ``mcp.*`` modules into
-        ``sys.modules``. A dependency's own imports are not this package's,
-        which is the same bound the capability gate above declares.
+        ``mcp.server.mcpserver.MCPServer`` already pulls BOTH of the SSE
+        transports this test refuses to let the source name —
+        ``mcp.server.sse`` and ``mcp.client.sse`` — into ``sys.modules``. A
+        dependency's own imports are not this package's, which is the same
+        bound the capability gate above declares.
         """
         found = _foreign_imports("victim.py", mutant)
         assert found, f"the ratchet does not see {mutant!r}"
