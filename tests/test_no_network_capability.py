@@ -208,27 +208,38 @@ def _network_prefix(dotted: str) -> str | None:
     return None
 
 
-def _capability_imports(rel: str, source: str) -> list[tuple[str, str]]:
-    """Every (module, dotted name) in this file that grants network capability."""
-    hits: list[tuple[str, str]] = []
+def _dotted_imports(rel: str, source: str) -> list[tuple[str, str]]:
+    """Every (module, dotted name) this file imports, judged by neither rule.
+
+    ONE WALK, TWO PREDICATES. Both mechanisms in this file ask a different
+    question about the SAME list of names, so the traversal is written once and
+    each mechanism filters it. Two copies of this loop would be two rules one
+    edit apart — and the thing they would disagree about is the dotted name
+    itself, which is the input to both.
+
+    What the name is: ``import a.b`` yields ``a.b``, because a plain import
+    binds the MODULE and there is no narrower name to judge; ``from a.b import
+    c`` yields ``a.b.c``. ``from urllib import request`` therefore yields
+    ``urllib.request``, a module rather than a name inside one, which is what
+    lets the capability set judge it as the submodule it is.
+    """
+    names: list[tuple[str, str]] = []
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                # A plain import binds the MODULE. There is no narrower name to
-                # judge, so the capability is the whole module's.
-                if _network_prefix(alias.name):
-                    hits.append((rel, alias.name))
+                names.append((rel, alias.name))
         elif isinstance(node, ast.ImportFrom):
             if node.level:  # a relative import cannot leave the package
                 continue
             module = node.module or ""
             for alias in node.names:
-                dotted = f"{module}.{alias.name}" if module else alias.name
-                # ``from urllib import request`` binds a module too, so it is
-                # judged as the submodule rather than as a name inside one.
-                if _network_prefix(dotted):
-                    hits.append((rel, dotted))
-    return hits
+                names.append((rel, f"{module}.{alias.name}" if module else alias.name))
+    return names
+
+
+def _capability_imports(rel: str, source: str) -> list[tuple[str, str]]:
+    """Every (module, dotted name) in this file that grants network capability."""
+    return [(r, d) for r, d in _dotted_imports(rel, source) if _network_prefix(d)]
 
 
 #: Ways to reach code by NAME at run time. Everything above reads import
@@ -365,27 +376,12 @@ def _leaves_the_package(dotted: str) -> bool:
 def _foreign_imports(rel: str, source: str) -> list[tuple[str, str]]:
     """Every (module, dotted name) in this file that leaves the package.
 
-    The dotted name is what the SOURCE NAMES: ``import a.b`` is ``a.b`` and
-    ``from a.b import c`` is ``a.b.c``. That is the whole grain of the rule --
+    The grain of the rule is the EXACT dotted name ``_dotted_imports`` built:
     a second name under an already-declared distribution is a second row, so
-    ``import mcp.server.sse`` beside the declared ``mcp.server.mcpserver``
-    is refused rather than inherited.
+    ``import mcp.server.sse`` beside the declared ``mcp.server.mcpserver`` is
+    refused rather than inherited.
     """
-    found: list[tuple[str, str]] = []
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if _leaves_the_package(alias.name):
-                    found.append((rel, alias.name))
-        elif isinstance(node, ast.ImportFrom):
-            if node.level:  # a relative import cannot leave the package
-                continue
-            module = node.module or ""
-            for alias in node.names:
-                dotted = f"{module}.{alias.name}" if module else alias.name
-                if _leaves_the_package(dotted):
-                    found.append((rel, dotted))
-    return found
+    return [(r, d) for r, d in _dotted_imports(rel, source) if _leaves_the_package(d)]
 
 
 class TestNoNetworkCapability:
@@ -638,15 +634,33 @@ class TestTheGateItself:
     def test_a_module_removed_from_the_stdlib_is_still_caught(self, removed):
         """These five must be caught on EVERY version ``requires-python`` admits.
 
-        Which mechanism catches them depends on the interpreter, which is the
-        point of keeping them in the set. Measured: on 3.11 all five are in
-        ``sys.stdlib_module_names`` (3.12 keeps ``nntplib``/``telnetlib``
-        only), so the ratchet reads them as stdlib and this set is the sole
-        catcher; on 3.13 and 3.14 none of them is, so the ratchet refuses them
-        as foreign on its own. This test asserts the half that holds
-        everywhere, so it passes on whichever interpreter runs it.
+        WHICH mechanism catches them depends on the interpreter, and that is
+        the whole reason for keeping them in the set. Measured: on 3.11 all
+        five are in ``sys.stdlib_module_names`` (3.12 keeps
+        ``nntplib``/``telnetlib`` only), so the ratchet reads them as stdlib
+        and this set is the sole catcher; on 3.13 and 3.14 none of them is, so
+        the ratchet refuses them as foreign on its own.
+
+        BOTH HALVES ARE ASSERTED, and the second half is why this test is not
+        a tautology over five strings added two screens above. An earlier
+        version stated the divergence in prose and then called only
+        ``_capability_imports``, so deleting the entire ratchet left it green
+        — measured by a reviewer who did exactly that. The second assertion
+        ties the ratchet's verdict to stdlib membership on whatever
+        interpreter is running, which is a statement that holds on all four
+        versions while still being false if either mechanism moves.
         """
-        assert _capability_imports("victim.py", f"import {removed}")
+        assert _capability_imports("victim.py", f"import {removed}"), (
+            f"{removed!r} must stay in NETWORK_MODULES: on 3.11 it is a live "
+            "socket-opening stdlib module and this set is its only catcher"
+        )
+        seen_by_ratchet = bool(_foreign_imports("victim.py", f"import {removed}"))
+        assert seen_by_ratchet is (removed not in sys.stdlib_module_names), (
+            f"the ratchet's verdict on {removed!r} disagrees with this "
+            "interpreter's own stdlib listing, so the two mechanisms no "
+            "longer partition the name the way the comment beside "
+            "NETWORK_MODULES claims"
+        )
 
     def test_the_gate_actually_reads_files(self):
         modules = _package_modules()
