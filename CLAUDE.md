@@ -969,30 +969,79 @@ We are migrating toward a plugin architecture in phases. Query with `reqs_query 
 follows from.** The CALLER computes the vector, in its own process, and passes finished numbers as
 `embedding: list[float]`; the tools never receive the requirement's TEXT at all. Measured before
 this section was written: the only declared runtime dependency is `mcp`, no module of the package
-imports anything that could open a socket, and the vector arrives as an argument.
+imports one of the socket-opening names the gate below enumerates, and the vector arrives as an
+argument. **That sentence used to end "imports anything that could open a socket", which is a claim
+about every socket-opener and not about a list** — measured against the gate's own function,
+`from logging.handlers import SocketHandler`, the same module's `HTTPHandler` and
+`from multiprocessing.connection import Client` all return an empty result, so the wider spelling
+was false in the paragraph that calls itself a measurement (CB-190).
 
 **The safety claim is bounded to this package's own code and to the vector's route, and the bound
 is load-bearing rather than modest.** Do not write "codebugs cannot reach the network": the `mcp`
 dependency carries a network transport of its own — `server.py` says so, an HTTP mode exists and
 this project runs over stdio — and `subprocess` is used legitimately for git, which can of course
-run `curl`. What is true and checkable is that **no module under `src/codebugs/` imports a network
-capability**, and that the vector goes from the caller's argument into this tracker's SQLite file
-and nowhere else. A claim wider than its measurement is the defect class this direction exists to
-close; stating it precisely matters more than stating it loudly.
+run `curl`. What is true and checkable is **two narrower statements about this package's SOURCE
+TEXT, not one about its capability**: no module under `src/codebugs/` imports one of the
+socket-opening modules the gate ENUMERATES, and — since CB-190 — no module imports anything at all
+from outside the package and the standard library that is not DECLARED there by exact dotted name
+with a reason. The vector's own route is a third, separate claim, and it stays as it was: from the
+caller's argument into this tracker's SQLite file and nowhere else. A claim wider than its
+measurement is the defect class this direction exists to close; stating it precisely matters more
+than stating it loudly. **The bound is about naming, not about the process, and that is measured
+rather than hedged**: importing the one declared MCP name already puts BOTH SSE transports —
+`mcp.server.sse` and `mcp.client.sse` — into `sys.modules` along with most of the SDK, so what the
+ratchet buys is that the source cannot NAME a second one without a row somebody reads, never that
+the transport is absent. No module count is quoted here on purpose: the first draft quoted one,
+and it was wrong because the measuring predicate matched the prefix `mcp` without the dot and swept
+in `mcp_types`, a separate distribution — the exact confusion the gate's own table is written to
+prevent.
 
-**That claim is held by a gate, because a safety assertion with no gate behind it is a "gate that
+**Those claims are held by a gate, because a safety assertion with no gate behind it is a "gate that
 cannot fire" written as prose** — the literal subject of CB-159/CB-160.
-`tests/test_no_network_capability.py` walks every package module by AST and refuses a network
-import, plus `__import__`/`importlib.import_module`, which no gate reading names could see.
-**It keys on the CAPABILITY, not on the module name, and the naive form was measured dead on
-arrival**: `src/codebugs/db.py:28` carries `from urllib.request import pathname2url`, so a
-name-keyed check would refuse the package in its present, entirely healthy state. `pathname2url` is
-a pure string function that opens nothing; `import urllib.request` binds the module and hands you
-`urlopen`. So a FROM-import of a network module is judged name by name against a
-`DECLARED_EXCEPTIONS` table carrying a reason per row, and a plain import of one is refused
-outright. The table is **self-deleting** — a row naming an import that is no longer there fails —
-because otherwise it becomes the place real network imports are parked, which is the hole the gate
-exists to close, one level up.
+`tests/test_no_network_capability.py` walks every package module by AST and holds **two mechanisms
+that answer different questions, so neither may be deleted in favour of the other** (CB-190), plus
+a refusal of `__import__`/`importlib.import_module`/`exec`/`eval`, which no check reading import
+statements could see.
+
+The first is an **enumeration of socket-opening module names**, and it keys on the CAPABILITY
+rather than on the module name — the naive form was measured dead on arrival: `src/codebugs/db.py`
+carries `from urllib.request import pathname2url`, so a name-keyed check would refuse the package
+in its present, entirely healthy state. `pathname2url` is a pure string function that opens
+nothing; `import urllib.request` binds the module and hands you `urlopen`. So a FROM-import of a
+network module is judged name by name against a `DECLARED_EXCEPTIONS` table carrying a reason per
+row, and a plain import of one is refused outright. **Being an enumeration is its defining limit,
+and it is the whole of CB-190**: a client nobody listed walks straight past it, measured —
+`cohere`, `ollama` and `httplib2` were green against it, and a planted module carrying all three
+left the file reporting 25 passed.
+
+The second is a **third-party import ratchet**, which is not an enumeration of what to refuse: it
+refuses by default and enumerates what is ALLOWED. Every import whose dotted name leaves both this
+package and the standard library must be named in `DECLARED_THIRD_PARTY` with a reason — five rows
+today. **The key is the EXACT DOTTED NAME, never the top-level one**, and that is load-bearing
+twice over: a top-level `mcp` row would have licensed `mcp.server.sse` and `mcp.client.sse`, so the
+first row of a table meant to stop network imports being parked would itself have been a parked
+network capability; and it would have made the table unable to go stale, since some `mcp` import
+always exists. **The package's own name is DERIVED from `codebugs.__name__` and may not be written
+as a row** — a row naming this package would lie about what the table declares, and, being live
+forever, would defeat self-deletion. Both tables are **self-deleting** — a row naming an import
+that is no longer there fails — because otherwise a table becomes the place real imports are
+parked, which is the hole these mechanisms exist to close, one level up.
+
+**One property is new and is declared rather than counted as covered.** Before CB-190 the verdict
+was a pure function of the source text; the ratchet classifies the standard library by
+`sys.stdlib_module_names`, so it is now a function of the source text AND the interpreter version.
+On this tree nothing diverges — the **three** foreign top-level names (`mcp`, `mcp_types`,
+`pydantic`) are foreign on every admitted version, measured on 3.11 as well as on the pinned
+interpreter — but the CI matrix runs only `test_cli_signals.py` and `test_fsio.py` across
+3.11–3.14, so this file is executed on the pinned interpreter alone and nothing would notice if
+that stopped being true. `codebugs` is the fourth top-level name the tree imports and is
+deliberately absent from that list: it is excluded by DERIVATION rather than by foreignness, and
+conflating the two is what an earlier draft of this sentence did — it said "four" and then listed
+three. Relatedly, `telnetlib`,
+`nntplib`, `asyncore`, `asynchat` and `smtpd` are kept in the enumeration precisely because the two
+mechanisms disagree about them by version: measured, all five are in `sys.stdlib_module_names` on
+3.11 (3.12 keeps the first two), and none is on 3.13 or 3.14 — so the ratchet refuses them by
+itself on the newer half while the enumeration is the sole catcher on the older half.
 
 **RULE, ratified 2026-08-25 with the owner's task: if an embedding provider ever lands INSIDE this
 package, it is configurable from its first day, its default is a local option, and its binding is
@@ -1000,9 +1049,13 @@ VISIBLE** — an existing way to ask the running system which provider it is cur
 the model of `codebugs where` and the MCP startup preflight ("a binding you cannot see is a binding
 you cannot debug", CB-11). Not a preference, and not something to be added afterwards: a provider
 that ships hardcoded acquires callers before it acquires a switch. **The rule and the gate are two
-halves of one thing — the day the gate above needs a new `DECLARED_EXCEPTIONS` row is the day this
-rule starts applying**, which is why they are written together rather than left to find each other
-later.
+halves of one thing — the day either table above needs a new row is the day this rule starts
+applying**, which is why they are written together rather than left to find each other later.
+**This used to name `DECLARED_EXCEPTIONS` alone, and that trigger was broken** (CB-190): a provider
+built on a client the enumeration never listed would have needed no row at all, so the rule would
+have sat there un-armed while the provider landed. The ratchet is what repairs it, and for a reason
+that does not depend on anyone predicting the client — **a provider arrives as a DEPENDENCY
+whatever network shape it has**, so it needs a `DECLARED_THIRD_PARTY` row by construction.
 
 **The write validates the vector, on BOTH paths, and the two kinds of check sit in different places
 on purpose (CB-174).** `store_embedding` **and** `batch_store_embeddings` — a rule expressed as one
