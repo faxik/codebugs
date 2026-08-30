@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+import sys
 
 import pytest
 
@@ -74,6 +75,19 @@ NETWORK_MODULES: frozenset[str] = frozenset(
         "smtplib",
         "poplib",
         "imaplib",
+        # Removed from the standard library in 3.12 (asyncore, asynchat,
+        # smtpd) and in 3.13 (nntplib, telnetlib) -- and KEPT here for a
+        # measured reason, not out of tidiness. ``requires-python`` admits
+        # 3.11, where all five still exist and still open sockets. They are
+        # also the one place the two mechanisms in this file disagree by
+        # interpreter version: the ratchet below classifies a name by
+        # ``sys.stdlib_module_names``, so on 3.13/3.14 these five are FOREIGN
+        # and the ratchet refuses them on its own, while on 3.11 they are
+        # stdlib and only this set catches them. Five strings cost nothing and
+        # make the verdict on these names the same on every admitted version.
+        "asyncore",
+        "asynchat",
+        "smtpd",
         "nntplib",
         "telnetlib",
         "xmlrpc",
@@ -209,6 +223,102 @@ def _reaches_code_by_name(rel: str, source: str) -> list[str]:
     return found
 
 
+#: The package's own top-level name, DERIVED rather than written down. A row
+#: in the table below naming this package would lie about what that table
+#: declares -- it is a list of imports that leave the package -- and it would
+#: make the self-deletion test vacuous for the 165 in-package imports that
+#: keep it "live" forever. ``test_the_package_names_itself_by_derivation``
+#: refuses such a row.
+_OWN_TOP_LEVEL = codebugs.__name__
+
+#: Every import in ``src/codebugs/`` that leaves both this package and the
+#: standard library, keyed by its EXACT DOTTED NAME with a reason per row.
+#: An import not named here is refused.
+#:
+#: KEYED BY THE DOTTED NAME ALONE, and the neighbouring table is keyed by
+#: ``(module, dotted name)`` -- the difference is deliberate. There, a row
+#: answers "does this NAME grant a socket, in this file"; here it answers "is
+#: this DEPENDENCY declared", which is a property of the dependency and not of
+#: the file that reached for it. Measured: ``pydantic.Field`` is imported in
+#: nine files, so the pair key would put nine rows carrying one identical
+#: reason into a five-row table, and a table that is mostly duplication is one
+#: people stop reading.
+DECLARED_THIRD_PARTY: dict[str, str] = {
+    "mcp.server.mcpserver.MCPServer": (
+        "CB-190: the MCP server class this package's own server is built on. "
+        "The `mcp` 2.x SDK is the package's single declared runtime "
+        "dependency (pyproject.toml), and server.py exists to run against it."
+    ),
+    "mcp.shared.exceptions.MCPError": (
+        "CB-190: the SDK's protocol-error type, raised by server.py's strict "
+        "argument middleware so a bad `tools/call` fails as a protocol error "
+        "rather than as a tool exception."
+    ),
+    "mcp_types.CallToolResult": (
+        "CB-190: the SDK's result type for a tool call, read by server.py's "
+        "middleware to tell a tool's own failure from a protocol failure."
+    ),
+    "mcp_types.INVALID_PARAMS": (
+        "CB-190: the SDK's JSON-RPC error code for a malformed argument set, "
+        "which server.py's strict-argument middleware returns."
+    ),
+    "pydantic.Field": (
+        "CB-190: parameter metadata for MCP tool signatures. The SDK builds "
+        "each tool's argument model with pydantic, so `Field` is how a tool "
+        "declares a description or a default for one of its arguments."
+    ),
+}
+
+
+def _leaves_the_package(dotted: str) -> bool:
+    """Does this dotted import name reach outside this package and the stdlib?
+
+    Three-part split, and the first two parts are answered WITHOUT a table:
+    the package's own name is derived, and the standard library is
+    ``sys.stdlib_module_names``. Everything else is foreign and needs a row.
+
+    ``sys.stdlib_module_names`` is a set of NAMES, not an origin oracle, and
+    the residuals that follow from that are named in this module's docstring.
+    An origin-based test (``importlib.util.find_spec`` plus a
+    ``sysconfig`` path comparison) was considered and rejected: it answers
+    ``None`` for a package that is merely not installed -- which is exactly
+    the shape of the mutant this gate must catch -- it executes a parent
+    package's ``__init__`` to locate a submodule, and it would make the
+    verdict depend on what happens to be installed in the environment rather
+    than on the source text alone.
+    """
+    top = dotted.split(".", 1)[0]
+    if top == _OWN_TOP_LEVEL:
+        return False
+    return top not in sys.stdlib_module_names
+
+
+def _foreign_imports(rel: str, source: str) -> list[tuple[str, str]]:
+    """Every (module, dotted name) in this file that leaves the package.
+
+    The dotted name is what the SOURCE NAMES: ``import a.b`` is ``a.b`` and
+    ``from a.b import c`` is ``a.b.c``. That is the whole grain of the rule --
+    a second name under an already-declared distribution is a second row, so
+    ``import mcp.server.sse`` beside the declared ``mcp.server.mcpserver``
+    is refused rather than inherited.
+    """
+    found: list[tuple[str, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if _leaves_the_package(alias.name):
+                    found.append((rel, alias.name))
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:  # a relative import cannot leave the package
+                continue
+            module = node.module or ""
+            for alias in node.names:
+                dotted = f"{module}.{alias.name}" if module else alias.name
+                if _leaves_the_package(dotted):
+                    found.append((rel, dotted))
+    return found
+
+
 class TestNoNetworkCapability:
     def test_no_package_module_imports_a_network_capability(self):
         undeclared = []
@@ -237,6 +347,171 @@ class TestNoNetworkCapability:
             "reads import STATEMENTS, and none of these is one, so any of them "
             "would let the package acquire a network capability while this gate "
             "still reported clean."
+        )
+
+
+class TestThirdPartyImportRatchet:
+    def test_every_import_that_leaves_the_package_is_declared(self):
+        undeclared = []
+        for rel, path in _package_modules():
+            source = path.read_text(encoding="utf-8")
+            for rel_name, dotted in _foreign_imports(rel, source):
+                if dotted not in DECLARED_THIRD_PARTY:
+                    undeclared.append((rel_name, dotted))
+        assert not undeclared, (
+            "undeclared import(s) leaving src/codebugs/ and the standard "
+            f"library: {undeclared}. Add each to DECLARED_THIRD_PARTY in this "
+            "file with a reason, or remove the import. If the new dependency "
+            "is an embedding provider, the CLAUDE.md rule now applies: "
+            "configurable from day one, local default, visible binding."
+        )
+
+
+class TestTheRatchetItself:
+    """The ratchet is worth its lines only if it fails, and only fails rightly."""
+
+    @pytest.mark.parametrize(
+        "mutant",
+        [
+            "import cohere",
+            "import ollama",
+            "import httplib2",
+            "from cohere import Client",
+            "import langchain.llms",
+        ],
+    )
+    def test_the_measured_gap_is_caught(self, mutant):
+        """CB-190's whole subject: these are green against the capability set.
+
+        The set upstairs is an enumeration of names somebody thought of, so a
+        client it does not name walks straight past it. Measured before this
+        ratchet existed: all five of these produced an empty list from
+        ``_capability_imports``. They are caught here because they are
+        foreign, not because anyone predicted them.
+        """
+        assert not _capability_imports("victim.py", mutant), (
+            f"{mutant!r} was expected to be invisible to the capability set -- "
+            "if it is now named there, this test no longer measures the gap"
+        )
+        found = _foreign_imports("victim.py", mutant)
+        assert found, f"the ratchet does not see {mutant!r}"
+        assert all(dotted not in DECLARED_THIRD_PARTY for _, dotted in found)
+
+    @pytest.mark.parametrize(
+        "mutant",
+        [
+            "import mcp.server.sse",
+            "from mcp.client.sse import sse_client",
+            "import mcp",
+            "from mcp import types",
+            "import pydantic",
+            "from pydantic import BaseModel",
+            "import mcp_types",
+        ],
+    )
+    def test_a_second_name_under_a_declared_distribution_needs_its_own_row(self, mutant):
+        """No wholesale grant of a namespace -- AT THE WIDTH THAT IS TRUE.
+
+        A row keyed by the top-level name would have licensed every one of
+        these, including the two SSE transports. Keyed by the exact dotted
+        name, each needs a row of its own and has none, so the SOURCE cannot
+        name them without a moment somebody reads.
+
+        That is a statement about what this package's source names, and NOT
+        about what its process holds. Measured: importing the single declared
+        ``mcp.server.mcpserver.MCPServer`` already pulls ``mcp.server.sse``,
+        ``mcp.client.sse`` and 115 other ``mcp.*`` modules into
+        ``sys.modules``. A dependency's own imports are not this package's,
+        which is the same bound the capability gate above declares.
+        """
+        found = _foreign_imports("victim.py", mutant)
+        assert found, f"the ratchet does not see {mutant!r}"
+        undeclared = [dotted for _, dotted in found if dotted not in DECLARED_THIRD_PARTY]
+        assert undeclared == [dotted for _, dotted in found], (
+            f"{mutant!r} was waved through by a row written for another name"
+        )
+
+    @pytest.mark.parametrize(
+        "innocent",
+        [
+            "from codebugs import db",
+            "import codebugs",
+            "import codebugs.milestones.capacity",
+            "from codebugs.types import utc_now",
+            "from . import types",
+            "from .. import db",
+            "from __future__ import annotations",
+            "import sqlite3, json, struct",
+            "from urllib.request import pathname2url",
+            "from urllib.parse import quote",
+        ],
+    )
+    def test_the_package_and_the_stdlib_are_not_foreign(self, innocent):
+        """The false refusal this ratchet must never produce.
+
+        A first draft of the design licensed the shape with "the package makes
+        exactly three third-party imports", a count that had silently dropped
+        ``codebugs`` itself -- while the rule it was licensing ("a top-level
+        name absent from ``sys.stdlib_module_names``") plainly contains it. A
+        table of three rows would have refused all 165 in-package imports and
+        turned the whole suite red on a tree with no defect in it.
+        """
+        assert not _foreign_imports("victim.py", innocent)
+
+    def test_the_package_names_itself_by_derivation(self):
+        """The own-package name is derived and may not be parked in the table."""
+        assert _OWN_TOP_LEVEL == codebugs.__name__
+        parked = [
+            dotted
+            for dotted in DECLARED_THIRD_PARTY
+            if dotted.split(".", 1)[0] == _OWN_TOP_LEVEL
+        ]
+        assert not parked, (
+            f"DECLARED_THIRD_PARTY names this package: {parked}. The table "
+            "declares imports that LEAVE the package, so such a row lies "
+            "about what it declares -- and, being live forever, it can never "
+            "go stale, which is the one thing that keeps the table shrinking."
+        )
+
+    def test_the_ratchet_actually_reads_the_package(self):
+        rels = {rel for rel, _ in _package_modules()}
+        assert "server.py" in rels and "db.py" in rels, (
+            f"the module sweep did not find the package's own files: {sorted(rels)[:5]}"
+        )
+
+    def test_the_two_mechanisms_answer_different_questions(self):
+        """Neither subsumes the other, so neither may be deleted for the other.
+
+        ``import socket`` is stdlib, so the ratchet waves it through and only
+        the capability set catches it. ``import cohere`` is foreign and
+        unnamed upstairs, so only the ratchet catches it.
+        """
+        assert _capability_imports("victim.py", "import socket")
+        assert not _foreign_imports("victim.py", "import socket")
+        assert not _capability_imports("victim.py", "import cohere")
+        assert _foreign_imports("victim.py", "import cohere")
+
+
+class TestDeclaredThirdPartyCannotRot:
+    """The same discipline as the table above it, for the same reason."""
+
+    def test_every_row_carries_a_reason(self):
+        empty = [key for key, reason in DECLARED_THIRD_PARTY.items() if not reason.strip()]
+        assert not empty, (
+            f"DECLARED_THIRD_PARTY row(s) with no reason: {empty} -- a table "
+            "that can grow silently is the hole this ratchet exists to close"
+        )
+
+    def test_no_row_is_stale(self):
+        live = set()
+        for rel, path in _package_modules():
+            live.update(
+                dotted for _, dotted in _foreign_imports(rel, path.read_text(encoding="utf-8"))
+            )
+        stale = [key for key in DECLARED_THIRD_PARTY if key not in live]
+        assert not stale, (
+            f"stale DECLARED_THIRD_PARTY row(s): {stale} -- the import is gone, "
+            "so delete the row rather than leaving a standing permission behind"
         )
 
 
