@@ -192,6 +192,27 @@ DECLARED_EXCEPTIONS: dict[tuple[str, str], str] = {
 
 
 def _package_modules() -> list[tuple[str, pathlib.Path]]:
+    """The package's source files, re-globbed on every call, DELIBERATELY.
+
+    NOT MEMOIZED, and the reason is a property of this repository rather than
+    an oversight. Measured with ``--durations``: the five traversals in this
+    file re-read and re-parse the same ~33 sources, ~0.5s of the file's ~0.6s,
+    and an ``lru_cache`` here would remove nearly all of it. It is refused
+    because these are SAFETY gates and the tree moves under a running suite:
+    ``tests/conftest.py`` carries an alarm (CB-215) for exactly that — an
+    acceptor re-runs this suite in the main checkout while other directions
+    land branches into it, and main's median gap between commits is shorter
+    than one suite run. A cached read would let a gate report clean about a
+    snapshot rather than about the tree, which is the "guard reporting clean
+    because it could not look" shape these files exist to refuse. Re-reading
+    costs half a second out of a three-minute suite; being right about which
+    bytes were judged is what the gate is for.
+
+    Known and accepted: each future table added under this convention brings
+    one more O(package) traversal. If that ever matters, the answer is to read
+    the tree ONCE PER TEST at a fixed moment and share it within that test —
+    not to cache across tests.
+    """
     root = pathlib.Path(codebugs.__file__).parent
     found = sorted(root.rglob("*.py"))
     assert found, f"no package sources found under {root} -- this gate cannot look"
