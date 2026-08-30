@@ -7,8 +7,9 @@
 # `core.hooksPath` all move or publish main without passing any of it.
 #
 # WHAT THIS CATCHES: a commit on main's FIRST-PARENT line that is NOT a merge
-# and touches anything outside `.claude/plans/*.md` — i.e. authored directly on
-# main, or flattened onto it by rebase / cherry-pick / revert / am / a plain
+# and touches anything outside `.claude/plans/*.md` or
+# `.claude/plans/briefs/*.html` (CB-266) — i.e. authored directly on main, or
+# flattened onto it by rebase / cherry-pick / revert / am / a plain
 # `git commit --amend`. None of those runs a hook on the resulting main.
 #
 # ---------------------------------------------------------------------------
@@ -142,8 +143,23 @@ jobs:
               --name-only "${sha}" | sed '/^$/d')
             # An empty commit touches nothing and cannot violate the rule.
             [ -z "${files}" ] && continue
+            # CB-266: the letter used to be `.claude/plans/*.md` only, narrower
+            # than the ratified intent ("a plan artefact the owner reads"). The
+            # level-(1) curator's daily brief has landed directly on main at
+            # `.claude/plans/briefs/DAILY-<date>.html` since 2026-08-29 — a
+            # second path level, an .html extension — and every honest commit
+            # of that shape was reading as a violation here, which is exactly
+            # what makes this alarm useless: a real future violation lands in
+            # an already-red check that nobody can tell apart from the noise.
+            # The allowance widens by exactly that one shape and no wider.
+            #
+            # THIS REGEX IS DUPLICATED, BYTE-FOR-BYTE, IN THREE PLACES — see
+            # tools/pre-commit-hook.sh's comment at the matching `grep` call for
+            # why a shared file is not achievable (this step runs on a
+            # different machine than either git hook) and which test asserts
+            # the three copies equal.
             offending=$(printf '%s\n' "${files}" \
-              | grep -vE '^\.claude/plans/[^/]+\.md$' || true)
+              | grep -vE '^\.claude/plans/([^/]+\.md|briefs/[^/]+\.html)$' || true)
             if [ -n "${offending}" ]; then
               violations=$((violations + 1))
               echo "::error::direct commit on main: ${sha} $(git log -1 --format=%s "${sha}")"
@@ -169,7 +185,8 @@ jobs:
             echo "${violations} commit(s) reached main without going through a merge."
             echo "CLAUDE.md: every code edit happens on a short-lived branch, in a"
             echo "worktree. The only thing that may land on main directly is a"
-            echo ".claude/plans/*.md note."
+            echo ".claude/plans/*.md note, or a .claude/plans/briefs/*.html"
+            echo "daily brief."
             exit 1
           fi
           echo "clean: examined ${examined} commit(s) since ${BASELINE:0:12}; all arrived by merge."
