@@ -14,6 +14,7 @@ guard that fired for the wrong reason.
 from __future__ import annotations
 
 import fcntl
+import functools
 import os
 import re
 import shutil
@@ -2805,7 +2806,11 @@ class TestMainInvariantsAuditScript:
     WORKFLOW = REPO_ROOT / ".github" / "workflows" / "main-invariants.yml"
 
     @classmethod
+    @functools.lru_cache(maxsize=1)
     def _extract_script(cls) -> str:
+        """The step's own `run: |` block, dedented. Cached: the file is static
+        for the life of the process, and this is re-derived once per test
+        method otherwise (four times here) for no reason — /simplify (2026-08-30)."""
         text = cls.WORKFLOW.read_text()
         marker = "\n        run: |\n"
         idx = text.index(marker)
@@ -2832,45 +2837,66 @@ class TestMainInvariantsAuditScript:
 
     @staticmethod
     def _commit_all(repo: Path, message: str) -> None:
-        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
-        subprocess.run(["git", "-C", str(repo), "commit", "-m", message], check=True)
+        git(repo, "add", "-A")
+        git(repo, "commit", "-m", message)
 
-    def test_a_brief_shaped_commit_is_accepted(self, repo: Path) -> None:
+    @pytest.mark.parametrize(
+        "rel_dir,filename,content,commit_msg,expect_ok",
+        [
+            pytest.param(
+                "briefs",
+                "DAILY-2026-08-30.html",
+                "<html>brief</html>\n",
+                "docs(curator): DAILY-2026-08-30.html",
+                True,
+                id="a brief-shaped commit is accepted",
+            ),
+            pytest.param(
+                "briefs/sub",
+                "x.html",
+                "<html>x</html>\n",
+                "docs: nested brief path",
+                False,
+                id="oracle mutant #1 (depth): nested under briefs/ is refused",
+            ),
+            pytest.param(
+                "briefs",
+                "evil.py",
+                "import os\n",
+                "docs: not actually a brief",
+                False,
+                id="oracle mutant #2 (extension): wrong extension under briefs/ is refused",
+            ),
+            pytest.param(
+                "other",
+                "x.md",
+                "# x\n",
+                "docs: two levels, still not briefs/",
+                False,
+                id="oracle mutant #3 (scope): two levels outside briefs/ is refused",
+            ),
+        ],
+    )
+    def test_commit_shape_is_judged_correctly(
+        self,
+        repo: Path,
+        rel_dir: str,
+        filename: str,
+        content: str,
+        commit_msg: str,
+        expect_ok: bool,
+    ) -> None:
         baseline = git(repo, "rev-parse", "HEAD")
-        briefs = repo / ".claude" / "plans" / "briefs"
-        briefs.mkdir(parents=True)
-        (briefs / "DAILY-2026-08-30.html").write_text("<html>brief</html>\n")
-        self._commit_all(repo, "docs(curator): DAILY-2026-08-30.html")
+        d = repo / ".claude" / "plans" / rel_dir
+        d.mkdir(parents=True)
+        (d / filename).write_text(content)
+        self._commit_all(repo, commit_msg)
         r = self._run(repo, baseline)
-        assert r.returncode == 0, r.stdout + r.stderr
-        assert "clean" in r.stdout, r.stdout
-
-    def test_a_mutant_depth_commit_is_refused(self, repo: Path) -> None:
-        baseline = git(repo, "rev-parse", "HEAD")
-        deep = repo / ".claude" / "plans" / "briefs" / "sub"
-        deep.mkdir(parents=True)
-        (deep / "x.html").write_text("<html>x</html>\n")
-        self._commit_all(repo, "docs: nested brief path")
-        r = self._run(repo, baseline)
-        assert r.returncode != 0
-
-    def test_a_mutant_extension_commit_is_refused(self, repo: Path) -> None:
-        baseline = git(repo, "rev-parse", "HEAD")
-        briefs = repo / ".claude" / "plans" / "briefs"
-        briefs.mkdir(parents=True)
-        (briefs / "evil.py").write_text("import os\n")
-        self._commit_all(repo, "docs: not actually a brief")
-        r = self._run(repo, baseline)
-        assert r.returncode != 0
-
-    def test_a_mutant_outside_briefs_commit_is_refused(self, repo: Path) -> None:
-        baseline = git(repo, "rev-parse", "HEAD")
-        other = repo / ".claude" / "plans" / "other"
-        other.mkdir(parents=True)
-        (other / "x.md").write_text("# x\n")
-        self._commit_all(repo, "docs: two levels, still not briefs/")
-        r = self._run(repo, baseline)
-        assert r.returncode != 0
+        if expect_ok:
+            assert r.returncode == 0, r.stdout + r.stderr
+            assert "clean" in r.stdout, r.stdout
+        else:
+            assert r.returncode != 0, r.stdout + r.stderr
 
 
 CASCADE_REGISTRY_REL = ".claude/plans/CASCADE-IDS.md"
@@ -4269,19 +4295,14 @@ class TestCommitMsgNamingGate:
             (hooks / "pre-commit").chmod(0o755)
 
     @staticmethod
-    def _plan(repo: Path, name: str, body: str = "note\n") -> str:
-        d = repo / ".claude" / "plans"
+    def _plan(repo: Path, name: str, body: str = "note\n", *, subdir: str = "") -> str:
+        """A plan note under `.claude/plans/`, or (CB-266) a daily brief under
+        `.claude/plans/briefs/` when `subdir="briefs"`."""
+        d = repo / ".claude" / "plans" / subdir if subdir else repo / ".claude" / "plans"
         d.mkdir(parents=True, exist_ok=True)
         (d / name).write_text(body, encoding="utf-8")
-        return f".claude/plans/{name}"
-
-    @staticmethod
-    def _brief(repo: Path, name: str, body: str = "<html>brief</html>\n") -> str:
-        """CB-266: the curator's daily brief, one level under `.claude/plans/briefs/`."""
-        d = repo / ".claude" / "plans" / "briefs"
-        d.mkdir(parents=True, exist_ok=True)
-        (d / name).write_text(body, encoding="utf-8")
-        return f".claude/plans/briefs/{name}"
+        rel = f"{subdir}/{name}" if subdir else name
+        return f".claude/plans/{rel}"
 
     @staticmethod
     def _commit(
@@ -4342,14 +4363,14 @@ class TestCommitMsgNamingGate:
         kind of untracked file this hook exists to make someone name.
         """
         self._install(repo)
-        p = self._brief(repo, "DAILY-2026-08-30.html")
+        p = self._plan(repo, "DAILY-2026-08-30.html", subdir="briefs")
         r = self._add_and_commit(repo, "docs(curator): DAILY-2026-08-30.html", p)
         assert r.returncode == 0, r.stderr
 
     def test_an_unnamed_daily_brief_is_refused(self, repo: Path) -> None:
         """CB-266's own oracle mutant #4: a brief the message does not name."""
         self._install(repo)
-        p = self._brief(repo, "DAILY-2026-08-30.html")
+        p = self._plan(repo, "DAILY-2026-08-30.html", subdir="briefs")
         r = self._add_and_commit(repo, "docs(curator): daily brief", p)
         assert r.returncode != 0
         assert "DAILY-2026-08-30.html" in r.stderr
