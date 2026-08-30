@@ -8,6 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The safety note on the embedding tools now says only what is actually checked, and a new check
+  makes the narrower statement worth more than the old wide one (CB-190).** A previous release
+  promised that "a check refuses any network capability being imported into the package". The check
+  was real, but it worked from a list of module names somebody had written down, so a network
+  client nobody had listed — `cohere`, `ollama`, `httplib2` were the ones measured — passed it
+  without a murmur. The `reqs_embed` description no longer makes the wide promise. What replaces it
+  is two narrower statements, both mechanically enforced: codebugs' own source imports none of the
+  socket-opening modules that check lists, **and** it imports nothing at all from outside the
+  package and the standard library unless that exact import is declared, by name, with a written
+  reason. The second half is the one that holds up against a client nobody anticipated, because it
+  refuses by default instead of recognising. **What has not changed is the promise that actually
+  matters to you:** you compute the embedding vector yourself, the tools never receive your
+  requirement's text, and the vector goes into this tracker's own local database and nowhere else.
+  That was true before and is untouched — only the claim about the package's *capability* was too
+  wide, and it has been brought back to what can be demonstrated.
 - **`resolve-trailers` can be re-run over a range it has already processed without annotating the
   same cards twice.** Pointing the verb at a widened revision range is the natural thing to do —
   "everything since the last release", then "since the one before" — and every widening re-covers

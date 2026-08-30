@@ -248,10 +248,11 @@ _CODE_BY_NAME = frozenset({"__import__", "import_module", "exec", "eval"})
 def _reaches_code_by_name(rel: str, source: str) -> list[str]:
     """``__import__`` / ``importlib.import_module`` / ``exec`` / ``eval``.
 
-    The check above reads import STATEMENTS. Each of these acquires a module
-    from a string instead, so one of them would walk straight past it while
-    this file kept reporting that the package imports no network capability —
-    a guard reporting clean because it could not look.
+    Both checks above read import STATEMENTS. Each of these acquires a module
+    from a string instead, so one of them would walk straight past both while
+    this file kept reporting that the package's source names neither a listed
+    socket-opening module nor an undeclared foreign one — a guard reporting
+    clean because it could not look.
 
     Measured on the tree this landed on: **zero** occurrences of any of the
     four in ``src/codebugs/``, which is what makes refusing them free rather
