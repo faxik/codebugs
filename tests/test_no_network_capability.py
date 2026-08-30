@@ -1,28 +1,83 @@
-"""No module of ``codebugs`` imports a network capability (CB-174).
+"""What ``src/codebugs/`` may import: a capability set and a ratchet (CB-174, CB-190).
 
-WHY THIS FILE EXISTS. The embedding tools now tell their caller, in the tool
+WHY THIS FILE EXISTS. The embedding tools tell their caller, in the tool
 description a client actually reads, that the requirement text goes nowhere and
 that the vector it hands us is stored locally and never sent. A SAFETY CLAIM
 WITH NO GATE BEHIND IT IS A "GATE THAT CANNOT FIRE" WRITTEN AS PROSE — the
 literal subject of CB-159/CB-160 — so the claim is held by a mechanical check
 rather than by a promise that ages.
 
-WHAT IS CHECKED, STATED AT THE WIDTH IT IS TRUE. This asserts a property of
-THIS PACKAGE'S OWN SOURCE: no module under ``src/codebugs/`` imports a name
-through which a socket can be opened, and none of them loads code from a string
-at run time (``__import__``, ``importlib.import_module``, ``exec``, ``eval``) —
-because the first check reads import STATEMENTS, and none of those four is one.
-It deliberately does NOT claim "codebugs cannot reach the network". Three
-limits, each named rather than discovered later:
+TWO MECHANISMS, AND NEITHER SUBSUMES THE OTHER. Read them separately, because
+they are true at different widths and CB-190 was filed because six texts in
+three files described the first one as if it were the second.
+
+1. THE CAPABILITY SET (``NETWORK_MODULES``, CB-174) — an ENUMERATION of module
+   names through which a socket can be opened, refused wherever they appear.
+   Being an enumeration is its defining limit, not a detail: a socket-opening
+   name nobody listed walks straight past it. Measured on this very function:
+   ``from logging.handlers import SocketHandler``, the same module's
+   ``HTTPHandler``, and ``from multiprocessing.connection import Client`` all
+   return an empty list today. So this set supports a claim about THE NAMES IT
+   LISTS, and about nothing else.
+
+2. THE THIRD-PARTY RATCHET (``DECLARED_THIRD_PARTY``, CB-190) — every import
+   whose dotted name leaves BOTH this package and the standard library must be
+   declared here, by exact dotted name, with a reason. This one is not an
+   enumeration of what to refuse; it refuses by default and enumerates what is
+   ALLOWED, so a client nobody thought of is caught for being foreign rather
+   than for being recognised. Measured: ``import cohere``, ``import ollama``
+   and ``import httplib2`` are green against (1) and red against (2).
+
+Why both, rather than the better one: (1) is the only thing that reaches INTO
+the standard library, where the ratchet by construction cannot help, since
+those names are stdlib and that is exactly what it waves through; (2) is the
+only thing that covers everything outside it, where a list is only as good as
+whoever wrote it. ``import socket`` is caught by (1) alone and ``import
+cohere`` by (2) alone — pinned, so neither is deleted in favour of the other.
+
+A third check stands beside them: no module loads code from a string at run
+time (``__import__``, ``importlib.import_module``, ``exec``, ``eval``),
+because both mechanisms above read import STATEMENTS and none of those four
+is one.
+
+WHAT IS CLAIMED, AND WHAT IS NOT. Together these assert a property of THIS
+PACKAGE'S OWN SOURCE TEXT: it names no socket-opening module from the set
+below, and it names nothing outside the package and the standard library that
+is not declared below with a reason. That is a statement about what the source
+NAMES. It is deliberately NOT "codebugs cannot reach the network", and it is
+not a statement about what the process ends up holding. Four limits, each
+named rather than discovered later:
 
 * The ``mcp`` dependency carries a network transport of its own (``server.py``
   says so — an HTTP mode exists; this project runs over stdio). A dependency's
-  capabilities are not this package's imports.
+  capabilities are not this package's imports. Measured, so this is concrete
+  rather than cautious: importing the single declared
+  ``mcp.server.mcpserver.MCPServer`` already puts ``mcp.server.sse``,
+  ``mcp.client.sse`` and 113 other ``mcp.*`` modules into ``sys.modules``. The
+  ratchet keeps the SOURCE from naming a second one without a row somebody
+  reads; it does not and cannot empty the process.
 * ``subprocess`` is used legitimately here, for git, and a subprocess can of
   course run ``curl``. Refusing ``subprocess`` would refuse the package's
   working code, and keying on argv would be a guess.
+* ``sys.stdlib_module_names`` is a set of NAMES, not an oracle of origin: it
+  is flat and identical on every platform, so five of its names (``winsound``,
+  ``msvcrt``, ``winreg``, ``nt``, ``idlelib``) are unclaimed on Linux and a
+  planted ``winsound.py`` opening a socket would classify as stdlib. Shadowing
+  through the search path is the second door, and this repository uses that
+  mechanism itself (``pythonpath = ["src"]``). Not a regression — the gate
+  before CB-190 passed the same thing — and closing it needs an origin oracle,
+  which ``_leaves_the_package`` explains why it is not.
 * Only ``src/codebugs/`` is read. ``tests/`` and ``tools/`` are not part of
   what ships to a caller.
+
+ONE PROPERTY IS NEW AND IS DECLARED RATHER THAN COUNTED AS COVERED. Before
+CB-190 the verdict was a pure function of the source text; the ratchet makes
+it a function of the source text AND the interpreter version, because
+``sys.stdlib_module_names`` changes between releases. On this tree there is no
+divergence — the four top-level names it imports (``codebugs``, ``mcp``,
+``mcp_types``, ``pydantic``) are foreign on every version ``requires-python``
+admits — but CI runs this file on the pinned interpreter only, so nothing
+would notice if that stopped being true.
 
 KEY ON THE CAPABILITY, NOT ON THE MODULE NAME — and that is not a refinement,
 it is the difference between a working gate and one that refuses the package's
@@ -34,18 +89,24 @@ module and hands you ``urlopen``. So a FROM-import of a network module is
 judged NAME BY NAME, and a plain import of one is refused outright, because
 what it binds is the module itself.
 
-DECLARED EXCEPTIONS are keyed by ``(module, dotted name)`` and each carries a
-reason. The table is SELF-DELETING: a row naming an import that is no longer
-there fails this file's own tests, so it can only shrink. Without that, the
-table becomes the place real network imports are quietly parked — the same hole
-the gate exists to close, one level up. The pattern is
-``tests/test_strict_bool_gates.py::DECLARED_EXCEPTIONS``.
+BOTH TABLES CARRY A REASON PER ROW AND BOTH ARE SELF-DELETING: a row naming an
+import that is no longer in the tree fails this file's own tests, so each can
+only shrink. Without that, a table becomes the place real imports are quietly
+parked — the same hole these mechanisms exist to close, one level up. The
+pattern is ``tests/test_strict_bool_gates.py::DECLARED_EXCEPTIONS``. They are
+keyed differently on purpose, and each key is argued where it is defined:
+``DECLARED_EXCEPTIONS`` by ``(module, dotted name)``, because it answers
+whether a NAME grants a socket in a given file; ``DECLARED_THIRD_PARTY`` by
+the dotted name alone, because it answers whether a DEPENDENCY is declared.
 
-AND THE DAY THIS TABLE NEEDS A NEW ROW IS THE DAY THE RULE IN ``CLAUDE.md``
+AND THE DAY EITHER TABLE NEEDS A NEW ROW IS THE DAY THE RULE IN ``CLAUDE.md``
 STARTS APPLYING: an embedding provider inside the package must be configurable
 from its first day, default to a local option, and expose a visible binding.
-The rule and this gate are two halves of one thing; see the "Embeddings" entry
-in the root ``CLAUDE.md``.
+CB-190's practical complaint was that the trigger did not fire — a provider
+built on a client the capability set never listed would have needed no row at
+all — and the ratchet is what repairs it, because a provider arrives as a
+DEPENDENCY whatever network shape it has. The rule and these mechanisms are
+two halves of one thing; see the "Embeddings" entry in the root ``CLAUDE.md``.
 """
 
 from __future__ import annotations
@@ -256,16 +317,23 @@ DECLARED_THIRD_PARTY: dict[str, str] = {
     ),
     "mcp_types.CallToolResult": (
         "CB-190: the SDK's result type for a tool call, read by server.py's "
-        "middleware to tell a tool's own failure from a protocol failure."
+        "middleware to tell a tool's own failure from a protocol failure. "
+        "UNDECLARED DISTRIBUTION -- `mcp_types` is shipped by `mcp-types`, "
+        "which reaches this tree only as a transitive dependency of `mcp`; "
+        "pyproject.toml names `mcp` and nothing else."
     ),
     "mcp_types.INVALID_PARAMS": (
         "CB-190: the SDK's JSON-RPC error code for a malformed argument set, "
-        "which server.py's strict-argument middleware returns."
+        "which server.py's strict-argument middleware returns. Same "
+        "undeclared distribution as the row above."
     ),
     "pydantic.Field": (
         "CB-190: parameter metadata for MCP tool signatures. The SDK builds "
         "each tool's argument model with pydantic, so `Field` is how a tool "
-        "declares a description or a default for one of its arguments."
+        "declares a description or a default for one of its arguments. "
+        "UNDECLARED DISTRIBUTION -- `pydantic` is a transitive dependency of "
+        "`mcp`, imported directly in nine of this package's modules while "
+        "pyproject.toml constrains only `mcp`."
     ),
 }
 
