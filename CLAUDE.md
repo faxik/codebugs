@@ -22,7 +22,7 @@ Prose cannot enforce prose. That is CB-50, and the harness below is its fix.
 | Rule | Mechanism | Refuses with |
 |---|---|---|
 | Branch carries `fix/`\|`feature/`\|`refactor/`\|`docs/` | `_guard_branch_type` (7) + pre-commit hook (1) | exit 7 / 1 |
-| Nothing but `.claude/plans/*.md` is committed on main | pre-commit hook | exit 1 |
+| Nothing but `.claude/plans/*.md` or `.claude/plans/briefs/*.html` is committed on main | pre-commit hook | exit 1 |
 | A plan note committed on main is NAMED in the commit message | commit-msg hook | exit 1 |
 | A cascade id added to `.claude/plans/CASCADE-IDS.md` on main is the one `tools/cascade-mint.sh` would have computed (`max+1` per family, annulled lines and mentions included) | pre-commit hook | exit 1 |
 | A merge onto main comes from a typed local branch, or from main's own upstream `main` | pre-merge-commit hook (clean merge) + pre-commit hook (conflicted merge) | exit 1 |
@@ -295,10 +295,14 @@ slugs, and non-ASCII names are untouched because a non-ASCII byte is a NAME byte
 is one this document keeps restating: a check that validates elements cannot validate their
 composition, and here the composition is *the matcher plus the set of names it is asked to match*.
 
-**Scope, and what it deliberately does not touch.** Only `main`, and only `.claude/plans/*.md` —
-on a branch there are no foreign untracked notes to sweep, so the rule there would be pure friction
-on every `wip` commit, and everything else on main is pre-commit's to refuse (duplicating that
-judgement would give one state two refusals that could drift). **Deletions are in scope**, because
+**Scope, and what it deliberately does not touch.** Only `main`, and only `.claude/plans/*.md` or
+`.claude/plans/briefs/*.html` (the second widened by CB-266 to match pre-commit-hook.sh's own
+widening, on the same reasoning: `git add .claude/plans/` recursively sweeps `briefs/`, so once a
+brief can land at all, this hook's reason for existing — an untracked stranger's file losing its
+provenance — reaches it too) — on a branch there are no foreign untracked notes to sweep, so the
+rule there would be pure friction on every `wip` commit, and everything else on main is pre-commit's
+to refuse (duplicating that judgement would give one state two refusals that could drift).
+**Deletions are in scope**, because
 `git add <dir>` stages a removal too and deleting a stranger's note damages the same provenance.
 **A merge is exempt**, and the discriminator differs from `pre-merge-commit`'s in a way that would
 have inverted the rule if assumed: this section records that a clean merge writes no `MERGE_HEAD` —
@@ -715,8 +719,10 @@ rather than guess what one of those resolves to the guard refuses and says so.
 - **Session end:** `git status` clean in main *and* in every worktree, then `git worktree remove
   <path>`. Never `--force`: a removal that refuses is telling you work is uncommitted there.
 - **The only thing that may land on main directly** is a `.claude/plans/*.md` note — one level, not
-  a subtree, and the pre-commit hook holds that line. **Name the note in the commit message, and add
-  it to the index by name**: `git add -- .claude/plans/<note>.md`, never `git add .claude/plans/`.
+  a subtree — or, since CB-266, a `.claude/plans/briefs/*.html` daily brief — one level under
+  `briefs/`, not a subtree of it either, and no other extension. The pre-commit hook holds that
+  line. **Name the note in the commit message, and add it to the index by name**:
+  `git add -- .claude/plans/<note>.md`, never `git add .claude/plans/`.
   The commit-msg hook refuses a plan note the message does not name, which is the mechanised form of
   that rule (see the Workflow paragraphs above for why naming is the discriminator). `git commit
   --no-verify` remains the escape hatch for both hooks: they exist to stop the accident, and an
