@@ -563,6 +563,22 @@ class TestTheGateItself:
         assert module_import == [("db.py", "urllib.request")]
         assert module_import[0] not in DECLARED_EXCEPTIONS
 
+    @pytest.mark.parametrize(
+        "removed", ["asyncore", "asynchat", "smtpd", "nntplib", "telnetlib"]
+    )
+    def test_a_module_removed_from_the_stdlib_is_still_caught(self, removed):
+        """These five must be caught on EVERY version ``requires-python`` admits.
+
+        Which mechanism catches them depends on the interpreter, which is the
+        point of keeping them in the set. Measured: on 3.11 all five are in
+        ``sys.stdlib_module_names`` (3.12 keeps ``nntplib``/``telnetlib``
+        only), so the ratchet reads them as stdlib and this set is the sole
+        catcher; on 3.13 and 3.14 none of them is, so the ratchet refuses them
+        as foreign on its own. This test asserts the half that holds
+        everywhere, so it passes on whichever interpreter runs it.
+        """
+        assert _capability_imports("victim.py", f"import {removed}")
+
     def test_the_gate_actually_reads_files(self):
         modules = _package_modules()
         names = {rel for rel, _ in modules}
