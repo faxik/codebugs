@@ -559,12 +559,6 @@ class TestTheRatchetItself:
             "go stale, which is the one thing that keeps the table shrinking."
         )
 
-    def test_the_ratchet_actually_reads_the_package(self):
-        rels = {rel for rel, _ in _package_modules()}
-        assert "server.py" in rels and "db.py" in rels, (
-            f"the module sweep did not find the package's own files: {sorted(rels)[:5]}"
-        )
-
     def test_the_two_mechanisms_answer_different_questions(self):
         """Neither subsumes the other, so neither may be deleted for the other.
 
@@ -684,9 +678,15 @@ class TestTheGateItself:
         )
 
     def test_the_gate_actually_reads_files(self):
-        modules = _package_modules()
-        names = {rel for rel, _ in modules}
-        assert "db.py" in names and "embeddings.py" in names, (
+        """One premise test for both mechanisms -- they share the sweep.
+
+        ``server.py`` is named alongside the original two because it is where
+        every row of ``DECLARED_THIRD_PARTY`` but one lives: if the sweep
+        stopped reaching it, those rows would go stale rather than the gate
+        going quiet, which is a confusing way to learn the sweep is broken.
+        """
+        names = {rel for rel, _ in _package_modules()}
+        assert {"db.py", "embeddings.py", "server.py"} <= names, (
             f"the module sweep did not find the package's own files: {sorted(names)[:5]}"
         )
 
