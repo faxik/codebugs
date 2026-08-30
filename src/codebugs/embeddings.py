@@ -8,13 +8,20 @@ vector, in its own process, and passes the finished numbers as the
 sends them nowhere. The tools here never receive the requirement's TEXT at all
 — ``reqs_embed``/``reqs_batch_embed`` take an id and a list of floats.
 
-The claim is bounded to THIS PACKAGE'S OWN CODE and to the vector's route, and
-that bound is deliberate rather than modest: the ``mcp`` dependency does carry
-a network transport (``server.py`` says so — an HTTP mode exists, and this
-project runs over stdio). What is checkable, and what is checked, is that no
-module of ``codebugs`` imports a network capability at all;
-``tests/test_no_network_capability.py`` is the gate, because a safety claim
-with no gate behind it is a "gate that cannot fire" written as prose.
+The claim is bounded to THIS PACKAGE'S OWN SOURCE and to the vector's route,
+and that bound is deliberate rather than modest: the ``mcp`` dependency does
+carry a network transport (``server.py`` says so — an HTTP mode exists, and
+this project runs over stdio), and importing the one MCP name this package
+declares already loads that transport into the process. What is checkable, and
+what is checked by ``tests/test_no_network_capability.py``, is narrower and is
+two things rather than one: this package's source names none of the
+socket-opening modules that gate ENUMERATES, and it names nothing outside the
+package and the standard library that is not declared there by exact dotted
+name with a reason. The second half is what makes the promise survive a client
+nobody thought of — ``cohere``, ``ollama``, ``httplib2`` were all invisible to
+the first half (CB-190). Neither half claims "codebugs cannot reach the
+network"; both exist because a safety claim with no gate behind it is a "gate
+that cannot fire" written as prose.
 
 WHAT THIS MODULE REFUSES, AND WHY IT HAS TO. Nothing here knows the "right"
 dimensionality, so before CB-174 a vector of any width landed beside vectors of
@@ -484,11 +491,16 @@ def register_tools(mcp, conn_factory):
 
         YOU compute the embedding, in your own process, and pass the finished
         numbers here. This tool never receives the requirement's text. codebugs
-        stores the vector in its own local SQLite file and sends it nowhere —
-        no module of this package imports a network capability at all, which is
-        enforced by a test rather than merely asserted here. (Scope, stated
-        precisely: that is a claim about this package's own code and about the
-        route your vector takes. The MCP transport itself is a separate layer.)
+        stores the vector in its own local SQLite file and sends it nowhere.
+        (Scope, stated precisely rather than loudly, because a promise wider
+        than its check is worse than no promise. The route above is the claim.
+        A test enforces two narrower things beside it: this package's own
+        source imports none of the socket-opening modules that test lists, and
+        it imports nothing at all from outside the package and the standard
+        library without a declared, reasoned entry — so a network client
+        nobody anticipated is still refused. Neither says "codebugs cannot
+        reach the network": the MCP transport your client is talking over is a
+        separate layer, and it is not covered.)
 
         Because there is no embedding provider inside codebugs, nothing here
         knows the "right" dimensionality — it is whatever the first stored
