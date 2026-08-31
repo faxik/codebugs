@@ -75,8 +75,8 @@ CEILINGS: dict[str, tuple[int, str]] = {
         "matters most",
     ),
     "src/codebugs/CLAUDE.md": (
-        115_018,
-        "achieved 111,018 plus one SLACK. Far above the benchmark's ~6 KB average "
+        114_923,
+        "achieved 110,923 plus one SLACK. Far above the benchmark's ~6 KB average "
         "nested file, and deliberately so: this package is 25 modules in ONE flat "
         "directory, so there is a single hook point for the whole domain. It is "
         "paid only by a session that reads a file in src/codebugs/, never at "

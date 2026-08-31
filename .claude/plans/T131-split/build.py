@@ -98,12 +98,24 @@ root_text = re.sub(r"\n{3,}", "\n\n", "\n".join(keep)).strip("\n") + "\n"
 
 # ------------------------------------------------------------- nested
 def build_nested(dest, title, intro):
+    # A section whose ORIGINAL heading travelled here must not also get a
+    # generated one: the end-to-end read found "## Known architectural debt"
+    # standing directly above "### Known architectural debt".
+    own_heading = set()
+    for uid in sorted(chunks):
+        u = chunks[uid]
+        if not "".join(u["chunks"]).lstrip().startswith("#"):
+            continue
+        if any(assign[(uid, i)] == dest for i in range(len(u["chunks"]))):
+            own_heading.add(u["subsection"] or u["section"])
+
     parts = [f"# {title}", "", intro, ""]
     cur = None
     for u, body in collect(lambda uid, d, _dest=dest: d == _dest):
         sec = u["subsection"] or u["section"]
         if sec != cur:
-            parts += [f"## {sec}", ""]
+            if sec not in own_heading:
+                parts += [f"## {sec}", ""]
             cur = sec
         parts += [body, ""]
     return "\n".join(parts).rstrip("\n") + "\n"
