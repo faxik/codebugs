@@ -198,14 +198,15 @@ runs in the primary, where the gate does fire.
 gates on whether the path has **history** on main — which deleting the file cannot undo, so a
 missing source reports as "cannot verify the hook identity" instead of vanishing, whereas gating on
 "does the file exist" makes one `rm` a permanent, flagless disarm, landable on a perfectly typed
-branch. That history is read with `--all` — a clone with no *local* main (`git clone
---single-branch --branch fix/…` is enough, and `origin/main` being present does not help) would
-otherwise collapse it — **and it distinguishes an ERROR from an empty result**, failing closed on
-the error: `2>/dev/null || true` makes those identical, and `git log --all -- <path>` exits 128 in a
-`--filter=tree:0` clone whose promisor remote has gone away. **Two later paragraphs need this
-condition and neither restates it** — the T-23 one below, and the bootstrap wall at the end of this
-section — because a four-review-round condition in two places is two rules one edit apart, which is
-this section's own argument about `_hook_source_known` applied to the prose that describes it.
+branch. That history is read with `--all` — a clone with no *local* main
+(`git clone --single-branch --branch fix/…` is enough, and `origin/main` being present does not
+help) would otherwise collapse it — **and it distinguishes an ERROR from an empty result**, failing
+closed on the error: `2>/dev/null || true` makes those identical, and `git log --all -- <path>`
+exits 128 in a `--filter=tree:0` clone whose promisor remote has gone away. **Two later paragraphs
+need this condition and neither restates it** — the T-23 one below, and the bootstrap wall at the
+end of this section — because a four-review-round condition in two places is two rules one edit
+apart, which is this section's own argument about `_hook_source_known` applied to the prose that
+describes it.
 
 **Every reader of the staged set passes `-c core.quotePath=false`.** `git diff --cached --name-only`
 C-quotes a non-ASCII path by default, which makes the allowlist regex miss it and refuses the commit;
@@ -422,8 +423,9 @@ mechanism this section documents.
 **The pin is `3.14.4`, full patch, and the FULL-PATCH half of that was chosen rather than
 defaulted.** A bare `3.14` (i.e. `MAJOR.MINOR`) leaves a divergent state representable — uv resolves
 it to whatever 3.14.x a machine happens to have, so two machines legitimately differ — and this
-guard's whole subject is making that state unrepresentable. **The cost is the ordinary cost of a pin:** it must be bumped by a deliberate,
-reviewable edit, and a machine without that exact build downloads one. Note `uv python list` shows
+guard's whole subject is making that state unrepresentable. **The cost is the ordinary cost of a
+pin:** it must be bumped by a deliberate, reviewable edit, and a machine without that exact build
+downloads one. Note `uv python list` shows
 only the newest patch per minor, so checking downloadability needs `--all-versions`.
 
 **`uv` rebuilds a mismatched environment by itself**, so the pin does most of the work and the guard
