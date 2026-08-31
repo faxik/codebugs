@@ -2801,3 +2801,12 @@ scratchpad сессии куратора умирает с ней; команд�
 Срабатываний «инструмент отключён у приёмщика» за двое суток — четыре. Ротация куратора — по
 слову владельца, штатно: handoff `HANDOFF-curator-2026-09-01.md`, преемник стартует с ведения
 выпуска 0.3.0 и посадки Т-131.
+
+**Поправка пути (запись «СЛОВО ВЛАДЕЛЬЦА: ВЫПУСК…» выше): `workspace-private/codebugs` оказался
+симлинком на сам репозиторий** — «переживающее место» легло бы неотслеживаемой папкой в корень
+чекаута. Правленый норматив приёмщика перенесён в
+`/home/faxik/workspace-private/pending-codebugs/{acceptor.md,SKILL.md}` (вне репозитория
+codebugs); команда применения владельцем:
+`cp /home/faxik/workspace-private/pending-codebugs/acceptor.md ~/.claude/agents/acceptor.md && cp /home/faxik/workspace-private/pending-codebugs/SKILL.md ~/.claude/skills/acceptance-check/SKILL.md`.
+Корень чекаута чист. Попутно: DIR-1 ротировал смену 22 под заморозку штатно (`cd796c4`,
+handoff вытесняет прошлый) — преемник куратора запускает DIR-1 смену 23 из его промпта.
