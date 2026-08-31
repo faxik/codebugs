@@ -3850,10 +3850,12 @@ class TestGroupingAxes:
         path is bound rather than a stylistic preference: interpolated, the key
         `found'by` closes the literal and yields
         `sqlite3.OperationalError: near "by": syntax error` — a quoting break,
-        which is the doorway an injection walks through. Note the apostrophe is
-        deliberately NOT in `_META_PATH_METACHARS`: it is not path GRAMMAR, it is
-        SQL grammar, and binding is what makes it harmless, so the key is
-        accepted and answered rather than refused.
+        which is the doorway an injection walks through. The apostrophe was
+        deliberately never in the old path-metacharacter refusal list (deleted by
+        CB-167, which is why this docstring no longer names it): it is not path
+        GRAMMAR, it is SQL grammar, and BINDING is what makes it harmless — so
+        the key is accepted and answered rather than refused. CB-167 widened that
+        argument from the path to the key NAME itself, which is now bound too.
 
         The space is kept as a second case, now honestly labelled: it proves the
         key survives a character that needs no quoting, not that the path is bound.
