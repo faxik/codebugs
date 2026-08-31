@@ -113,3 +113,72 @@ that is false.
 many migration helpers there are, and how many execute sites they hold — and both were stale by the
 time anyone re-ran them, in the paragraph whose own closing sentence says that a number deciding
 anything belongs in a test. A third correct count would rot exactly as the first two did.
+
+---
+
+### CB-43 — the findings identity function {#cb-43-функция-тождества-находок}
+
+**Justifies the rule** "Findings have an identity function (CB-43): `add` is an upsert, not an
+insert", items (1)–(13), `CLAUDE.md` → `## Code rules` → `### Database`.
+
+**Item (3), the measurement behind "vary your default description".** 158 of 173 test call sites
+create fixtures from identical tuples, which is why a fixture helper that wants N distinct entities
+gets one row unless it varies something the fingerprint reads.
+
+**Item (4), why the description is stripped of its own meta values.** Measured collapse on the
+motivating corpus family was **0/115** without meta-stripping and **71/115** with it.
+
+**Item (6), the deferral that was later honoured.** This clause once deferred re-keying to a
+"future card"; CB-61 negotiated exactly one such operation, and the relaxation was declared in the
+ONE function that received it rather than generalized.
+
+**Item (7), what the old import guard got wrong, in both directions.** The rule used to read "CSV
+import skips rows whose exported id already exists".
+
+*Too weak*: it is bare-id EXISTENCE, not identity, so a foreign row whose id merely did not collide
+walked past it and REOPENED a local `fixed` card by fingerprint — measured, a peer's `CB-9001`
+flipped a local `CB-1` from `fixed` to `open`.
+
+*Too strong*: every tracker numbers CB-1, CB-2, …, so a foreign export lost every row whose NUMBER
+was taken locally (measured: 3 peer rows into a 3-row tracker, 0 landed, reported as "3 already
+present"). And because `export-csv` orders by SEVERITY rather than id, ids MINTED BY THE IMPORT
+ITSELF collided with later rows of the same file, so restoring a backup into an EMPTY tracker
+silently dropped rows (measured: 3 out, 2 back, exit 0).
+
+That the id half could not simply be deleted was proved by review rather than assumed.
+
+**Item (8), the incident that made severity monotonic.** Dedup froze *every* column at first report
+while the newest data lived only in the ring: a card filed `low` and re-observed `critical` stayed
+`low` and was invisible to `query(severity="critical")`, the primary read path.
+
+**Item (8), the parameter-ordering hazard as it actually arose.** `meta = ?` used to be spliced
+outside the built `sets` clause with its parameter appended after the builder finished, which was
+harmless only while `status = 'open'` — a literal consuming no parameter — was the sole extension.
+CB-52 added the first parameter-consuming one, so `meta` moved INTO the builder. The measurement
+that settled the argument is that one extra column had needed four separate prose warnings.
+
+**Item (8), why milestone routing was left alone.** `stream/security` has `total_items: 0` for the
+tracker's whole life, so the routing symptom has never once occurred.
+
+**Item (10), ratification and scope.** Ratified 2026-08-20; behaviour unchanged — the freeze was
+already the code, and T-11 only declared it on every reader.
+
+**Item (11), ratification and precedent.** Ratified 2026-08-20. The precedent for unconditional
+response keys is `claims._response`, together with the two response-only keys already beside it.
+
+**Item (12), ratification and the golden's movement.** Ratified 2026-08-24 (T-59). CSV import
+already handled the identical situation by stripping rather than refusing, which is what made
+stripping the right answer for `add` too. The wire golden moved to match the two tool descriptions
+— legitimate because a tool description is an INPUT to the schema, not the gated response shape.
+
+**Item (13), a defining clause that was wrong about its own member (CB-247).** The opening clause
+once read "one observation-time invariant", and was therefore wrong about the very member it was
+introducing: `escalate` and `promote_tags` do sit on the observation path, but `authored` sits on
+the UPDATE path — which the same item then said in its own words, both by calling it a SERVICE
+write and by contrasting it with its two siblings, so the paragraph contradicted itself without
+ever leaving its own bullet.
+
+**Item (13), why a grep over the goldens answers a different question.** Measured 2026-08-28:
+`tests/golden/mcp_schema.json` carries the word `authored` once as ordinary prose inside `query`'s
+description (the authored-versus-ring meta distinction), and that defeated the first draft of the
+sentence, which claimed zero occurrences in either golden.
