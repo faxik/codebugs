@@ -3929,6 +3929,16 @@ class TestGroupingAxes:
             assert reader() == ["LITERAL"], reader()
         hits = findings.query_findings(conn, meta_key="misassigned_to_1.81")
         assert [f["id"] for f in hits["findings"]] == ["CB-1"], hits
+        # BOTH filter branches, per the brief: the key alone (above) and the key
+        # WITH a value. The value is a STRING deliberately — `json_each.value`
+        # hands back a number for a numeric key and `360 = '360'` is false in
+        # SQLite, so a numeric fixture would redden for a type reason that has
+        # nothing to do with the path (CB-276 owns that, and it is not fixed here).
+        pair = findings.query_findings(conn, meta_key="misassigned_to_1.81", meta_value="LITERAL")
+        assert [f["id"] for f in pair["findings"]] == ["CB-1"], pair
+        assert findings.query_findings(
+            conn, meta_key="misassigned_to_1.81", meta_value="NESTED"
+        )["total"] == 0
 
     @pytest.mark.parametrize("key", ["a.b", "a[0]", 'q"k', "a]b", "back\\slash", "a\\", "\\"])
     def test_every_former_path_metacharacter_is_now_GROUPABLE(self, conn, key):
