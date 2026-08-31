@@ -64,9 +64,10 @@ DEFAULT_CEILING = 8_000
 # same commit that lands the split, and the nested files must be added here.
 CEILINGS: dict[str, tuple[int, str]] = {
     "CLAUDE.md": (
-        194_000,
-        "pre-split size (190,441 on 2026-08-31) plus one slack; re-derive when "
-        "the T-131 directive/depth split lands",
+        199_123,
+        "achieved size 195,123 (measured 2026-08-31 after T-127 landed) plus one "
+        "SLACK; this is still the PRE-SPLIT number and must be re-derived in the "
+        "same commit that lands the T-131 directive/depth split",
     ),
 }
 
