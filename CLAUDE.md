@@ -497,37 +497,32 @@ than guess what one of those resolves to the guard refuses and says so.
 - **Create:** `tools/worktree-setup.sh <type>/<slug> [base]`, which validates the name, refuses a
   card already carried by another branch, **claims every card the branch names through the claims
   ledger**, creates `.worktrees/<type>-<slug>`, and primes the worktree's own dev environment.
-  **The claim is a real claim now (CB-58), and this bullet used to say the opposite** — it read
-  "flips an `open` card to `in_progress` … a best-effort status write, not a claim", which was
-  accurate then and is the defect that was fixed. The status flip is not gone, it is *subsumed*:
-  it arrives as the claim's projection (`EntityKind.busy_status`), so the card still reads
-  `in_progress` while the branch holds it. What is new is that the write now carries a **holder
-  triple** (`--holder <branch> --holder-kind branch --repo <root>`), mutual exclusion is the
-  partial unique index rather than nobody, and there is a release path — including
-  `_auto_release_on_terminal`, so closing the card releases the claim in the same transaction.
+  The claim carries a **holder triple** (`--holder <branch> --holder-kind branch --repo <root>`),
+  mutual exclusion is the partial unique index, and there is a release path — including
+  `_auto_release_on_terminal`, so closing the card releases the claim in the same transaction. The
+  card still reads `in_progress` while the branch holds it, because the status flip arrives as the
+  claim's projection (`EntityKind.busy_status`).
   **Order is load-bearing: the claim happens BEFORE `git worktree add`,** for the same reason
   `_guard_branch_type` does — otherwise the losing side of a race owns a branch and a directory by
-  the time it is told no. **Exit codes are handled as the API they are**: `3` (held by someone
-  else) is FATAL and prints the incumbent's triple — this is the **setup gate**, the one tracker
-  call in the harness allowed to abort; `4` (already resolved) warns and proceeds, because a
-  follow-up branch on a closed card is legitimate; `5` (undetermined) is retried **once** with the
-  identical call, which converges rather than double-claiming because the primitive is an
-  idempotent upsert. An **EXIT trap** releases whatever the run took if setup aborts, armed after
-  the first successful claim and **disarmed on success** — leaving it armed would make every setup
-  that *worked* release its own claim on the way out. `CODEBUGS_SETUP_NO_CLAIM=1` still skips the
-  tracker entirely and is the documented escape hatch past a `3`; **`--allow-duplicate`
-  deliberately does not punch through it**, because it answers a different question (another
-  *branch* carries the id) and, since this repo never deletes merged branches, it is needed for
-  ordinary follow-up work — overloading it would make the claim gate routinely bypassed. The
-  *branch-name* collision check remains, and it is still the half that works with no tracker at
-  all, because it is pure git. **What this does NOT do, and the honest scope is the point: a branch
-  abandoned AFTER a successful setup still leaves a live claim.** Steal and expiry stay deferred by
-  design (Claims module, below). That is strictly better than the anonymous `in_progress` it
-  replaces — `codebugs who-holds` names the holder and repo, and any close releases it — but it is
-  not the claim disappearing. One concern per branch; a card-driven branch carries its id
-  (`fix/cb-48-tracker-root-init`). Work already started on main moves over with `git stash push
-  <files>` → setup → `git stash pop` in the worktree; the stash is shared across worktrees because
-  it lives in the common git dir.
+  the time it is told no. **Exit codes are handled as the API they are**: `3` (held by someone else)
+  is FATAL and prints the incumbent's triple — this is the **setup gate**, the one tracker call in
+  the harness allowed to abort; `4` (already resolved) warns and proceeds, because a follow-up branch
+  on a closed card is legitimate; `5` (undetermined) is retried **once** with the identical call,
+  which converges rather than double-claiming because the primitive is an idempotent upsert. An
+  **EXIT trap** releases whatever the run took if setup aborts, armed after the first successful
+  claim and **disarmed on success** — leaving it armed would make every setup that *worked* release
+  its own claim on the way out. `CODEBUGS_SETUP_NO_CLAIM=1` skips the tracker entirely and is the
+  documented escape hatch past a `3`; **`--allow-duplicate` deliberately does not punch through it**,
+  because it answers a different question (another *branch* carries the id) and, since this repo
+  never deletes merged branches, it is needed for ordinary follow-up work — overloading it would make
+  the claim gate routinely bypassed. The *branch-name* collision check remains, and it is still the
+  half that works with no tracker at all, because it is pure git. **What this does NOT do, and the
+  honest scope is the point: a branch abandoned AFTER a successful setup still leaves a live claim.**
+  Steal and expiry stay deferred by design (Claims module, below); `codebugs who-holds` names the
+  holder and repo, and any close releases it, but that is not the claim disappearing. One concern per
+  branch; a card-driven branch carries its id (`fix/cb-48-tracker-root-init`). Work already started
+  on main moves over with `git stash push <files>` → setup → `git stash pop` in the worktree; the
+  stash is shared across worktrees because it lives in the common git dir.
 - **Worktrees live in `.worktrees/`,** slug = branch with `/`→`-`, matching autosorter. Both that
   directory and the legacy `.claude/worktrees/` are gitignored; the legacy path still works and
   `worktree-finish.sh` resolves either, but new worktrees go in `.worktrees/`.
@@ -549,60 +544,44 @@ than guess what one of those resolves to the guard refuses and says so.
 - **Integrate with `tools/worktree-finish.sh <slug> ['commit msg'] [--merge-msg '…']`.** It commits
   any dirty state, runs the guards, forward-merges main *into the worktree* so conflicts surface in
   safe space, runs `ruff check` and the full suite there against the combined tree, then merges onto
-  main with `--no-ff` under the lock and removes the worktree. The merge
-  commit is what makes a card's whole iteration recoverable as one unit; a fast-forward scatters it.
-  **Never delete the branch** — no merged branch has ever been deleted here, and that is the record;
-  the script removes the worktree only.
+  main with `--no-ff` under the lock and removes the worktree. The merge commit is what makes a
+  card's whole iteration recoverable as one unit; a fast-forward scatters it. **Never delete the
+  branch** — no merged branch has ever been deleted here, and that is the record; the script removes
+  the worktree only.
 - **The integration message follows `Merge <branch>: <what changed> (CB-NN)`, and when it is not
   given it is derived from `main..<branch> --first-parent --no-merges --reverse` — the FIRST commit
-  on the branch's OWN line among the commits main does not have (CB-116). This bullet used to say
-  "the branch and last subject", which was the defect.** The old derivation read `git log -1
-  --no-merges` on the worktree tip, which the forward-merge two steps earlier had just filled with
-  main's commits: landing CB-111 produced a merge closing CB-111 whose subject was an unrelated plan
-  note naming CB-113/114/115. Reproduced end to end in a throwaway repo before the fix and gone after
-  it. **The defect was never topological** — `git log` orders by commit date, so it only bites when
-  main's commit is NEWER than the branch's last, which is the ordinary case and which is why a
-  fixture whose commits share one second is green against the bug. Three things follow.
-  **`--first-parent` is load-bearing, not decoration, and restricting the range alone is NOT enough**
-  — the first draft did exactly that and both adversarial reviewers reproduced the same regression
-  independently: a branch that merges a SIBLING branch absorbs its commits into the range, and if the
-  sibling is older (the ordinary case) date order puts it first, so the derived subject names the
-  sibling's card. On that shape the range-only fix is **worse** than the `log -1` code it replaced.
+  on the branch's OWN line among the commits main does not have (CB-116).**
+  **`--first-parent` is load-bearing, not decoration, and restricting the range alone is NOT
+  enough:** a branch that merges a SIBLING branch absorbs its commits into the range, and if the
+  sibling is older — the ordinary case — date order puts it first, so the derived subject names the
+  sibling's card; on that shape a range-only fix is **worse** than the `git log -1` it replaced.
   Following first parents skips every absorbed lineage, main's forward-merge included.
-  **The FIRST commit of that line wins, not the last**, measured over main's own first-parent line:
-  of the 47 integration merges whose branch carried ≥2 commits, the first commit's subject was judged
-  closer to the message a human wrote in 38 and the last in 7. That split is a **judgement and does
-  not partition the 47** — two are unclassified either way, and the 38/7 cannot be re-derived
-  mechanically; only the 47 and the five `wip(cb-NN): checkpoint before …` openers reproduce. Branches
-  here end on review fixups ("close the altitude findings"), which describe an iteration's tail rather
-  than its subject. Do **not** write that as `--reverse -1`: git applies the count BEFORE reversing,
-  so it returns the NEWEST commit and silently restores the behaviour this removed (measured).
+  **The FIRST commit of that line wins, not the last**, because branches here end on review fixups,
+  which describe an iteration's tail rather than its subject. Do **not** write that as
+  `--reverse -1`: git applies the count BEFORE reversing, so it returns the NEWEST commit and
+  silently restores the behaviour this removed (measured).
   **A branch with no commit of its own carrying a subject is REFUSED rather than guessed** —
   reachable when the content arrived through a merge commit, since `_guard_nonempty_diff` has already
   proved the content is real — and the derivation therefore runs at the `TESTED_MAIN`/`TESTED_HEAD`
-  sample rather than under the lock, so that refusal costs nothing instead of the whole ~70s gate run.
-  The refusal tests the POPULATION, not its first line: `git commit --allow-empty-message` puts a
-  blank line at the head, and reading that as an empty population produced a false refusal that also
-  asserted something untrue about the repository. It cannot drift from what lands: both inputs are the
+  sample rather than under the lock, so that refusal costs nothing instead of the whole gate run.
+  **The refusal tests the POPULATION, not its first line**: `git commit --allow-empty-message` puts a
+  blank line at the head, and reading that as an empty population is a false refusal that also
+  asserts something untrue about the repository. It cannot drift from what lands: both inputs are the
   pinned `TESTED_*` values and the in-lock re-checks refuse with exit 13 if either moved.
-  **Rejected: refusing to derive whenever main moved.** Level-(2) sessions commit plan notes to main
-  continuously, so "main moved" is the common case, and that form would have turned a default into a
-  mandatory argument on nearly every finish while the correct subject was sitting right there in the
-  range. **One limit stays open and is documented rather than guessed at:** `worktree-setup.sh
-  <branch> [base]` can cut a branch from a NON-MAIN base, whose commits sit on this branch's own
-  first-parent line, so the derivation names the base's first commit. No ordering flag reaches it
-  (measured: `--first-parent` and `--topo-order` both pick the base commit) because it is not a
-  traversal question — the commits really are this branch's ancestry and this merge really does land
-  them. Pass `--merge-msg` on a branch cut from a non-main base.
+  **One limit stays open and is documented rather than guessed at:** `worktree-setup.sh <branch>
+  [base]` can cut a branch from a NON-MAIN base, whose commits sit on this branch's own first-parent
+  line, so the derivation names the base's first commit. No ordering flag reaches it (measured:
+  `--first-parent` and `--topo-order` both pick the base commit) because it is not a traversal
+  question — the commits really are this branch's ancestry and this merge really does land them.
+  **Pass `--merge-msg` on a branch cut from a non-main base.**
 - **Every re-run hint echoes back the `--merge-msg` the aborted run was given**, and that half is
-  orthogonal to the derivation — it would be needed even if the derivation were perfect. The exit-13
-  refusal fires precisely BECAUSE main moved, and it used to print the bare short form, so the
-  refusal routed the operator into the derivation that main's move had broken. That is how the
-  observed CB-111 subject was produced. One `_retry_hint` builds the line for all four refusal paths
-  (forward-merge conflict, main moved, branch moved, merge failed) and a test refuses the exact
-  literal `echo "      tools/worktree-finish.sh ${SLUG}"` — the spelling that regressed — while the
-  helper-call count is what holds the other three sites. It echoes the `--merge-msg` and nothing
-  else, deliberately: `--skip-checks` and `--allow-stale-base` are relaxations, so dropping them
+  orthogonal to the derivation — it would be needed even if the derivation were perfect, because the
+  exit-13 refusal fires precisely BECAUSE main moved, so printing the bare short form routes the
+  operator into the derivation that main's move had broken. One `_retry_hint` builds the line for all
+  four refusal paths (forward-merge conflict, main moved, branch moved, merge failed); a test refuses
+  the exact literal `echo "      tools/worktree-finish.sh ${SLUG}"` — the spelling that regressed —
+  while the helper-call count holds the other three sites. **It echoes the `--merge-msg` and nothing
+  else, deliberately:** `--skip-checks` and `--allow-stale-base` are relaxations, so dropping them
   makes a retry stricter, and the positional commit message applies only to a still-dirty worktree.
 - **`ruff check` is the lint gate; `ruff format` is deliberately not**, because a large part of the
   existing tree is non-conformant to it and gating on it would refuse every finish. Pin ruff 0.15.7:
@@ -615,105 +594,81 @@ than guess what one of those resolves to the guard refuses and says so.
   line. **Name the note in the commit message, and add it to the index by name**:
   `git add -- .claude/plans/<note>.md`, never `git add .claude/plans/`.
   The commit-msg hook refuses a plan note the message does not name, which is the mechanised form of
-  that rule (see the Workflow paragraphs above for why naming is the discriminator). `git commit
-  --no-verify` remains the escape hatch for both hooks: they exist to stop the accident, and an
-  operator typing the flag has stated an intent.
+  that rule. `git commit --no-verify` remains the escape hatch for both hooks: they exist to stop the
+  accident, and an operator typing the flag has stated an intent.
+
+→ почему именно так: `docs/claude-md-rationale/workflow.md#cb-58-и-cb-116-порядок-работы`
 
 **How the harness itself is tested, and where that stops.**
 `tests/test_worktree_harness.py` covers every guard on both sides — the state it must refuse and the
-state it must allow — **and separately asserts that `worktree-finish.sh` actually calls each one**.
-That second class exists because it had to: two adversarial reviews deleted guard *invocations* from
-the script, including the branch-type guard that exists for the 2026-08-16 incident, and the whole
-suite stayed green, because nothing executed the script. Every guard was unit-tested and the
-composition was not — this repo's own rule (*a check that validates elements cannot validate their
-composition*) turned on its own harness. Do not read the per-guard tests as covering the wiring.
+state it must allow — **and separately asserts that `worktree-finish.sh` actually calls each one.**
+That second class exists because two adversarial reviews deleted guard *invocations* from the script,
+including the branch-type guard that exists for the 2026-08-16 incident, and the whole suite stayed
+green, because nothing executed the script: every guard was unit-tested and the composition was not.
+**Do not read the per-guard tests as covering the wiring.**
 
-**A test can be worse than absent: it can be vacuous AND leave litter.** `TestKnownLimits` — the pin
-for the one limit this design chose to document — passed `"--git-path hooks"` to `git rev-parse` as a
-single argv token. `rev-parse` echoes an unrecognised option-looking argument back and exits 0, so the
-"hooks directory" resolved to a *relative path with that literal name*, the hook was copied into a
-directory called `--git-path hooks` in the repo root, the test repo got no hook at all, and asserting
-`rc == 0` could never fail. It stayed green even with the entire merge hook reverted. Worse, the suite
-**committed** that 11 KB directory to the branch, and `git status` stayed clean because every run
-regenerated it byte-identically. Found by round-3 review, not by the suite. Two lessons worth keeping:
-a test that sets up its own fixture must **assert the fixture exists**, and `git rev-parse` is not a
-safe place to be sloppy with argv.
+**Two lessons a vacuous test taught, both worth keeping:** a test that sets up its own fixture must
+**assert the fixture exists**, and `git rev-parse` is not a safe place to be sloppy with argv — it
+echoes an unrecognised option-looking argument back at you and exits 0.
 
-Executing the whole script in a test is impractical (it merges onto main and runs the full suite),
-so the wiring tests are structural: they read the script and assert each guard is invoked with
-`|| exit $?`, in the right phase. Said plainly rather than left to look behavioural. **That
-"impractical" is narrower than it reads, and CB-116 is the proof**: `TestMergeSubjectDerivation` runs
-`worktree-finish.sh` end to end in a throwaway repo under `--skip-checks`, which disables ruff and
-pytest and *not* the safety guards, and the merge it lands is onto that repo's main. So a property of
-the SCRIPT'S OUTPUT — the subject it writes — can be tested behaviourally, and had to be: the CB-116
-defect was invisible to every structural test here, because the defective code called `git log`,
-which is exactly what a structural test would look for. It also caught what structural reading could
-not — the sibling-branch regression above was found by review, but it is the behavioural fixture that
-holds the line. What stays impractical is the gate run itself, not the script. Three more
-structural tests landed with CB-57, all of the same kind: the integration merge must **not** carry
-`--no-verify`, the installer must arm the merge hook and point it at main's checkout, and the CI
-workflow must carry a baseline SHA that is a real commit in this repository. Each pins a property
-whose failure mode is silent — a gate present in the tree and absent in effect.
+The wiring tests are **structural**: they read the script and assert each guard is invoked with
+`|| exit $?`, in the right phase. **But "executing the whole script is impractical" is narrower than
+it reads, and CB-116 is the proof:** `TestMergeSubjectDerivation` runs `worktree-finish.sh` end to
+end in a throwaway repo under `--skip-checks`, which disables ruff and pytest and *not* the safety
+guards, and the merge it lands is onto that repo's main. So a property of the SCRIPT'S OUTPUT can be
+tested behaviourally, and had to be: the CB-116 defect was invisible to every structural test, because
+the defective code called `git log`, which is exactly what a structural test would look for. **What
+stays impractical is the gate run itself, not the script.** Three more structural tests came with
+CB-57, each pinning a property whose failure mode is silent — a gate present in the tree and absent
+in effect: the integration merge must **not** carry `--no-verify`, the installer must arm the merge
+hook and point it at main's checkout, and the CI workflow must carry a baseline SHA that is a real
+commit in this repository.
 
 **The branch predicate is constructed FOUR times across THREE files** — `_guards.sh` once,
 `pre-commit-hook.sh` twice (its own branch check, plus the copy inside the shared merge-gate block),
-`pre-merge-commit-hook.sh` once — because neither hook may source the library (each runs from
-`.git/hooks/` as a symlink and must work when `tools/` is missing from the checked-out tree). This
-sentence used to say "three copies", which was the *file* count; the test it credited counted per
-file too, and round-3 review showed the consequence: degrading `pre-commit-hook.sh`'s own regex to a
-prefix test left that test **green**, because the shared block's copy still matched the grep. It now
-counts constructions per site. Same types is *not* the same predicate — a prefix test accepts
-`fix/a/b`, which `_guard_branch_type` refuses — so a divergence would let a branch clear the finish
-guard and then be refused by the merge hook, after the whole suite had already run.
+`pre-merge-commit-hook.sh` once — because neither hook may source the library: each runs from
+`.git/hooks/` as a symlink and must work when `tools/` is missing from the checked-out tree. **The
+test counts constructions per SITE, not per file**, because a per-file count let a degraded regex in
+`pre-commit-hook.sh` stay green on the shared block's copy. **Same types is *not* the same
+predicate** — a prefix test accepts `fix/a/b`, which `_guard_branch_type` refuses — so a divergence
+would let a branch clear the finish guard and then be refused by the merge hook, after the whole
+suite had already run.
 
-**Byte-identical is not the same claim as "the two hooks agree", and that cost a round.** The shared
-predicate used to take a second argument — what the caller typed, from `GITHEAD_` — and judge that
-ref alone when it resolved. Identical code, two different rules, because only `pre-merge-commit`
-*has* that argument: review reproduced `git branch fix/tmp <untyped-sha>; git merge fix/tmp --no-ff`
-landing on the clean path while the identical state was refused on the conflicted one, and the
-byte-identity test structurally could not see it because the divergence lived in the arguments. The
-predicate now takes only the merge head, so both callers pass identical information. **The general
-form, which this repo keeps relearning: sharing an implementation does not share a decision if the
-callers supply different inputs.**
+**Byte-identical is not the same claim as "the two hooks agree".** The shared predicate once took a
+second argument — what the caller typed, from `GITHEAD_` — and judged that ref alone when it
+resolved: identical code, two different rules, because only `pre-merge-commit` HAS that argument, and
+the byte-identity test structurally could not see it because the divergence lived in the arguments.
+The predicate now takes only the merge head, so both callers pass identical information. **The
+general form, which this repo keeps relearning: sharing an implementation does not share a decision
+if the callers supply different inputs.**
 
-**Cherry-pick and revert lost their exemption — and the honest scope is narrower than "they are now
-refused".** The merge-in-progress exemption used to fire on mere existence of `MERGE_HEAD`,
-`CHERRY_PICK_HEAD` *or* `REVERT_HEAD`. Only the first was hardened, and review reproduced the rest:
-`: > .git/CHERRY_PICK_HEAD` then `git commit` landed arbitrary staged content on main **and** skipped
-the branch-type check, so one empty file turned off both of this hook's rules — reachable the same way
-empty `MERGE_HEAD` was, since a conflicted cherry-pick leaves the file until `--continue`/`--abort`.
-The fix was to stop exempting them.
+→ почему именно так: `docs/claude-md-rationale/workflow.md#как-проверяется-сам-харнес`
 
-**But a CLEAN `git cherry-pick` or `git revert` onto main never reaches `pre-commit` at all** — git's
-sequencer commits directly — so it still lands, verified by running both. An earlier draft of the row
-above read "cherry-pick / revert get **no** exemption on main … exit 1", which described a gate that
-cannot fire: the identical category error this section corrects for `main-invariants.yml`, committed
-in the same table two rows apart. What the change actually buys is that a *marker file* no longer
-launders a commit. Clean cherry-pick and revert onto main are caught only by the CI alarm (they leave
-a single-parent commit on the first-parent line), and that is the honest statement.
+**Cherry-pick and revert have no marker-file exemption, and the honest scope is narrower than "they
+are now refused".** The merge-in-progress exemption used to fire on mere existence of `MERGE_HEAD`,
+`CHERRY_PICK_HEAD` *or* `REVERT_HEAD`, so one empty file turned off both of this hook's rules —
+reachable the same way an empty `MERGE_HEAD` was, since a conflicted cherry-pick leaves the file
+until `--continue`/`--abort`. **But a CLEAN `git cherry-pick` or `git revert` onto main never reaches
+`pre-commit` at all** — git's sequencer commits directly — so it still lands, verified by running
+both. What the change buys is that a *marker file* no longer launders a commit; clean cherry-pick and
+revert onto main are caught only by the CI alarm, since they leave a single-parent commit on the
+first-parent line. **That is the honest statement.**
 
 **The same fail-closed validation is NOT scoped to main**, because the exemption it guards is not:
-while it was, `: > .git/MERGE_HEAD` on an untyped branch still skipped the branch-type check. Only the
-head-*acceptability* rules — typed branch, or upstream `main` — are about main.
+while it was, `: > .git/MERGE_HEAD` on an untyped branch still skipped the branch-type check. Only
+the head-*acceptability* rules — typed branch, or upstream `main` — are about main.
 
-**The bootstrap is a real constraint, not an oversight.** `worktree-finish.sh` cannot land the
-commit that first creates `tools/` — `_guard_enforcement_armed` refuses, because main has no
-`tools/pre-commit-hook.sh` for the hook to point at. CB-50 was therefore merged by hand once, with
-`git merge --no-ff`, after the harness had run its whole pipeline on the branch and refused at the
-lock. **CB-57 hit the same wall in miniature and was designed around it rather than merged by hand** —
-`_guard_enforcement_armed` runs *before* the merge that first puts `tools/pre-merge-commit-hook.sh` on
-main, so an unconditional check would have made the commit introducing the hook unlandable by the
-harness it extends. **The condition must be MONOTONIC, and the obvious version was a live defect:**
-gating on "does the file exist" meant one `rm tools/pre-merge-commit-hook.sh` both dangled the
-installed hook (git skips a dangling hook silently) *and* made the guard skip its check and return 0
-— a permanent, flagless disarm, landable on a perfectly typed branch, reproduced end to end by both
-reviewers. The gate is now whether **the path has history on main**, which deleting the file cannot
-undo: after CB-57 the check is genuinely unconditional, and a missing source reports as "cannot verify
-the hook identity" instead of vanishing. So **run `tools/install-hooks.sh` right after that merge** or
-the next finish refuses — correctly, since a clone armed before CB-57 really is missing part of its
-enforcement.
-Every landing after that goes through the harness. If `tools/` is ever rewritten the same way,
-expect the same one-time manual merge.
+**The bootstrap is a real constraint, not an oversight.** `worktree-finish.sh` cannot land the commit
+that first creates `tools/`, because `_guard_enforcement_armed` refuses when main has no
+`tools/pre-commit-hook.sh` for the hook to point at. **The condition must be MONOTONIC:** the gate is
+whether **the path has history on main**, which deleting the file cannot undo, so a missing source
+reports as "cannot verify the hook identity" instead of vanishing. Gating on "does the file exist"
+instead makes one `rm` a permanent, flagless disarm, landable on a perfectly typed branch. So **run
+`tools/install-hooks.sh` right after such a merge** or the next finish refuses — correctly, since a
+clone armed before the new hook really is missing part of its enforcement. If `tools/` is ever
+rewritten the same way, expect the same one-time manual merge.
+
+→ почему именно так: `docs/claude-md-rationale/workflow.md#исключения-маркеров-и-бутстрап`
 
 ## Releasing
 

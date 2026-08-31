@@ -233,3 +233,97 @@ answered with main's interpreter **and** imported `codebugs` from main's `src/`.
 echo announcing it, and the first version of the structural test stayed green.
 
 **The in-lock second assertion was also found by cross-model review.**
+
+---
+
+### How the harness itself is tested {#как-проверяется-сам-харнес}
+
+**Justifies the rules** "How the harness itself is tested, and where that stops", "The branch
+predicate is constructed FOUR times across THREE files" and "Byte-identical is not the same claim" —
+`CLAUDE.md` → `## Workflow`.
+
+**A test can be worse than absent: it can be vacuous AND leave litter.** `TestKnownLimits` — the pin
+for the one limit this design chose to document — passed `"--git-path hooks"` to `git rev-parse` as a
+single argv token. `rev-parse` echoes an unrecognised option-looking argument back and exits 0, so
+the "hooks directory" resolved to a *relative path with that literal name*, the hook was copied into
+a directory called `--git-path hooks` in the repo root, the test repo got no hook at all, and
+asserting `rc == 0` could never fail. It stayed green even with the entire merge hook reverted.
+Worse, the suite **committed** that 11 KB directory to the branch, and `git status` stayed clean
+because every run regenerated it byte-identically. Found by round-3 review, not by the suite.
+
+**Why the predicate count moved from files to sites.** The sentence used to say "three copies", which
+was the *file* count, and the test it credited counted per file too. Round-3 review showed the
+consequence: degrading `pre-commit-hook.sh`'s own regex to a prefix test left that test **green**,
+because the shared block's copy still matched the grep.
+
+**What the arguments-divergence round cost.** Review reproduced `git branch fix/tmp <untyped-sha>;
+git merge fix/tmp --no-ff` landing on the clean path while the identical state was refused on the
+conflicted one.
+
+**What the behavioural fixture caught that structural reading could not.** The sibling-branch
+regression in the merge-subject derivation was found by review, but it is the behavioural fixture
+that holds the line.
+
+---
+
+### Marker-file exemptions and the bootstrap wall {#исключения-маркеров-и-бутстрап}
+
+**Justifies the rules** "Cherry-pick and revert have no marker-file exemption", "The same fail-closed
+validation is NOT scoped to main" and "The bootstrap is a real constraint" — `CLAUDE.md` →
+`## Workflow`.
+
+**What review reproduced.** Only `MERGE_HEAD` had been hardened. `: > .git/CHERRY_PICK_HEAD` then
+`git commit` landed arbitrary staged content on main **and** skipped the branch-type check.
+
+**The row that described a gate that cannot fire.** An earlier draft read "cherry-pick / revert get
+**no** exemption on main … exit 1" — the identical category error this section corrects for
+`main-invariants.yml`, committed in the same table two rows apart.
+
+**CB-50 was merged by hand once**, with `git merge --no-ff`, after the harness had run its whole
+pipeline on the branch and refused at the lock — the first bootstrap wall.
+
+**CB-57 hit the same wall in miniature and was designed around it rather than merged by hand.**
+`_guard_enforcement_armed` runs *before* the merge that first puts `tools/pre-merge-commit-hook.sh`
+on main, so an unconditional check would have made the commit introducing the hook unlandable by the
+harness it extends. The obvious version of the monotonic condition was a live defect: gating on the
+file existing meant one `rm` both dangled the installed hook (git skips a dangling hook silently) and
+made the guard skip its check and return 0 — reproduced end to end by both reviewers.
+
+---
+
+### CB-58 and CB-116 — the working procedure {#cb-58-и-cb-116-порядок-работы}
+
+**Justifies the rules** "Create", "The integration message follows …" and "Every re-run hint echoes
+back the `--merge-msg`" — `CLAUDE.md` → `## Workflow`.
+
+**CB-58: the claim used to be no claim at all.** The Create bullet read "flips an `open` card to
+`in_progress` … a best-effort status write, not a claim", which was accurate then and is the defect
+that was fixed. The status flip is not gone, it is *subsumed* — it now arrives as the claim's
+projection — while mutual exclusion moved from nobody to the partial unique index.
+
+**CB-116: the incident.** The old derivation read `git log -1 --no-merges` on the worktree tip, which
+the forward-merge two steps earlier had just filled with main's commits: landing CB-111 produced a
+merge closing CB-111 whose subject was an unrelated plan note naming CB-113/114/115. Reproduced end
+to end in a throwaway repo before the fix and gone after it.
+
+**The defect was never topological.** `git log` orders by commit date, so it only bites when main's
+commit is NEWER than the branch's last — the ordinary case, and the reason a fixture whose commits
+share one second is green against the bug.
+
+**Both adversarial reviewers reproduced the sibling-branch regression independently** against the
+first draft, which restricted the range without following first parents.
+
+**Why the FIRST commit wins, measured over main's own first-parent line.** Of the 47 integration
+merges whose branch carried ≥2 commits, the first commit's subject was judged closer to the message a
+human wrote in 38 cases and the last in 7. That split is a **judgement and does not partition the
+47** — two are unclassified either way, and the 38/7 cannot be re-derived mechanically; only the 47
+and the five `wip(cb-NN): checkpoint before …` openers reproduce.
+
+**Rejected: refusing to derive whenever main moved.** Level-(2) sessions commit plan notes to main
+continuously, so "main moved" is the common case, and that form would have turned a default into a
+mandatory argument on nearly every finish while the correct subject was sitting right there in the
+range.
+
+**How the observed CB-111 subject was actually produced.** The exit-13 refusal used to print the bare
+short form of the re-run command, so the refusal routed the operator into the derivation that main's
+move had just broken.
