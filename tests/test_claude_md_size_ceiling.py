@@ -29,16 +29,24 @@ percentile 2,805. SLACK = 4,000 therefore admits one unusually large addition
 plus an ordinary one before it refuses, while eight median paragraphs of
 accumulation cannot pass. It reddens on REGROWTH, not on a paragraph.
 
-FAIL-CLOSED ON DISCOVERY. Files are found by walking the tree, never by reading
-a list, because a rule expressed as an enumeration is only ever enforced at the
-sites someone enumerated. A CLAUDE.md that nobody declared does not thereby
-escape: it gets DEFAULT_CEILING. And a declared entry whose file is gone fails,
-so this table cannot rot into a place where inconvenient files are parked.
+DISCOVERY ASKS GIT, AND THAT REPLACED A HAND-MAINTAINED PRUNE LIST. An earlier
+draft walked the tree and skipped a declared set of directories (`.venv`,
+`.worktrees`, `dist`, `node_modules`, ...). `tests/test_exception_table_discipline.py`
+refused it, correctly: that table had no self-deletion gate and could not have
+one, because most of its rows name directories that legitimately do not exist in
+a given checkout — so it was a list that could only ever grow, which is the place
+inconvenient paths get parked. Asking git for TRACKED files answers the same
+question with no table at all: a build artifact, a virtual environment and a
+sibling worktree are all untracked here, and a doctrine file that is not
+committed governs nobody but its author. Measured on the benchmark project, the
+difference between the two is not cosmetic — a raw walk finds 1,206 files and
+6.2 MB, of which 1,105 are duplicate copies inside `.worktrees`; git reports the
+honest 76.
 """
 
 from __future__ import annotations
 
-import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -46,18 +54,6 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 SLACK = 4_000
-
-# Directories that are not a source of injected doctrine. Each carries its
-# reason, because a bare list becomes the place inconvenient paths are hidden.
-PRUNED = {
-    ".git": "git's own storage, not a checkout",
-    ".venv": "installed third-party packages carry their own CLAUDE.md files",
-    ".worktrees": "sibling branches' full checkouts; their files belong to them",
-    ".claude/worktrees": "the legacy worktree location, same reason",
-    "node_modules": "vendored packages",
-    "__pycache__": "build artifacts",
-    "dist": "build artifacts — copies of a source file are not extra doctrine",
-}
 
 DEFAULT_CEILING = 8_000
 
@@ -76,20 +72,25 @@ CEILINGS: dict[str, tuple[int, str]] = {
 
 
 def _discovered() -> dict[str, int]:
-    """Every CLAUDE.md that would be injected, by path relative to the repo root."""
+    """Every TRACKED CLAUDE.md, by path relative to the repo root, with its size.
+
+    Fails closed: if git cannot answer, this raises rather than returning an
+    empty mapping, because an empty mapping would make every ceiling below pass
+    vacuously.
+    """
+    out = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "-z", "--", "*CLAUDE.md"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
     found: dict[str, int] = {}
-    for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
-        rel_dir = os.path.relpath(dirpath, REPO_ROOT)
-        rel_dir = "" if rel_dir == "." else rel_dir
-        dirnames[:] = [
-            d
-            for d in dirnames
-            if d not in PRUNED and os.path.join(rel_dir, d).replace(os.sep, "/") not in PRUNED
-        ]
-        if "CLAUDE.md" in filenames:
-            rel = os.path.join(rel_dir, "CLAUDE.md").replace(os.sep, "/")
-            rel = rel.lstrip("/")
-            found[rel] = (Path(dirpath) / "CLAUDE.md").stat().st_size
+    for rel in out.split("\0"):
+        if not rel or Path(rel).name != "CLAUDE.md":
+            continue
+        path = REPO_ROOT / rel
+        if path.is_file():
+            found[rel] = path.stat().st_size
     return found
 
 
@@ -97,11 +98,11 @@ def test_discovery_is_not_vacuous() -> None:
     """A gate that found nothing would pass everything.
 
     The root file is the one path this repository is certain to have, so its
-    absence from the walk means the walk itself is broken — the failure mode
-    this whole module would otherwise hide.
+    absence means discovery itself is broken — the failure mode this whole
+    module would otherwise hide.
     """
     found = _discovered()
-    assert found, "no CLAUDE.md discovered at all — the walk is broken"
+    assert found, "no tracked CLAUDE.md discovered at all — discovery is broken"
     assert "CLAUDE.md" in found, f"the ROOT CLAUDE.md was not discovered; found {sorted(found)}"
 
 
@@ -118,29 +119,34 @@ def test_file_is_within_its_ceiling(rel: str) -> None:
     )
 
 
-@pytest.mark.parametrize("rel", sorted(CEILINGS))
-def test_declared_ceiling_is_not_stale(rel: str) -> None:
+def test_no_declared_ceiling_is_stale() -> None:
     """A ceiling far above reality is a gate that cannot fire."""
     found = _discovered()
-    actual = found[rel]  # existence is asserted by the test below
-    ceiling, _reason = CEILINGS[rel]
-    assert ceiling - actual <= SLACK, (
-        f"{rel} is {actual} bytes but its declared ceiling is {ceiling} — "
-        f"{ceiling - actual} bytes of slack, over the {SLACK} allowed.\n"
-        "Re-derive the ceiling from the size actually achieved, so the number "
-        "keeps meaning something."
+    hollow = []
+    for rel, (ceiling, _reason) in CEILINGS.items():
+        actual = found.get(rel)
+        if actual is not None and ceiling - actual > SLACK:
+            hollow.append(f"{rel}: {actual} bytes under a ceiling of {ceiling}")
+    assert not hollow, (
+        f"these ceilings sit more than {SLACK} bytes above the file they govern: "
+        f"{hollow}.\nRe-derive each from the size actually achieved, so the "
+        "number keeps meaning something."
     )
 
 
-@pytest.mark.parametrize("rel", sorted(CEILINGS))
-def test_declared_ceiling_names_a_file_that_exists(rel: str) -> None:
+def test_no_declared_ceiling_names_a_missing_file() -> None:
     """Self-deleting: the table cannot outlive the files it governs."""
-    assert rel in _discovered(), (
-        f"{rel} has a declared ceiling but no such file was discovered. "
+    found = _discovered()
+    stale = [rel for rel in CEILINGS if rel not in found]
+    assert not stale, (
+        f"these paths have a declared ceiling but are not tracked files: {stale}. "
         "Remove the entry, or restore the file."
     )
 
 
 def test_every_declared_ceiling_carries_a_reason() -> None:
+    blank = []
     for rel, (_ceiling, reason) in CEILINGS.items():
-        assert reason.strip(), f"{rel} declares a ceiling with no reason"
+        if not isinstance(reason, str) or not reason.strip():
+            blank.append(rel)
+    assert not blank, f"these ceilings are declared with no reason: {blank}"
