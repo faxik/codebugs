@@ -3105,9 +3105,11 @@ GROUP_AXES_HELP = f"{', '.join(GROUP_COLUMNS)}, {GROUP_TAG}, {GROUP_META_PREFIX}
 _JSON5 = 6
 
 
-# A META KEY NAME IS A BOUND VALUE, NEVER PART OF A PATH (CB-167). This is the
-# one place a caller's key name becomes SQL, and both surfaces — the two
-# `query_findings` filters and the `meta:<key>` grouping axis — go through it.
+# A META KEY NAME IS A BOUND VALUE, NEVER PART OF A PATH (CB-167). This constant
+# and `_meta_key_rows` below are together the one place a caller's key name
+# becomes SQL; every reader of a caller-supplied key goes through both — the two
+# `query_findings` filters, the `meta:<key>` grouping axis, and the container
+# tally that reports what the axis could not rank.
 #
 # WHAT WAS WRONG. The package used to build `"$." + key` and hand that to
 # `json_extract`. In JSON-path grammar a dot means DESCEND, so the path a caller
@@ -3152,25 +3154,50 @@ _META_OBJECT_GUARD = f"json_valid(meta, {_JSON5}) AND json_type(meta) = 'object'
 # `reconcile.live_source_clause` is built on. Written against `json_each`'s `type`
 # column rather than `json_type(meta, <path>)`, so the axis and the filters read
 # the key the same way and cannot drift apart.
-_META_SCALAR_TYPES = "('text','integer','real','true','false')"
-_META_SCALAR_TEST = f"je.type IN {_META_SCALAR_TYPES}"
+_META_SCALAR_TEST = "je.type IN ('text','integer','real','true','false')"
+# The complement this axis reports separately rather than groups: a key whose
+# value is a container carries nothing rankable. Its sibling above is the reason
+# it is a named constant and not a literal — two type tests one edit apart.
+_META_CONTAINER_TEST = "je.type IN ('object','array')"
+
+
+def _meta_key_rows(select_expr: str, *, extra: str = "", first_only: bool = False) -> str:
+    """ONE skeleton for *the rows of `findings.meta` whose top-level key is the
+    bound name* — the single place that shape is written (CB-167).
+
+    Every meta-key read in this file goes through it: both `query_findings`
+    filters, the grouping axis's value pick and its liveness test, and
+    `_axis_counts`' container tally. They were four hand-built copies of one
+    `FROM json_each(findings.meta) je WHERE je.key = ?`, which is four rules one
+    edit apart — the shape this repository's own rule about enumerations warns
+    about, and the reason `_meta_key_condition` was introduced in the first place.
+
+    The key's placeholder is ALWAYS first and `extra` may add exactly one more
+    after it, so a caller appends parameters in that textual order — this file's
+    standing rule for built clauses.
+
+    `findings.meta` is qualified deliberately: `json_each` exposes columns named
+    `id`, `key`, `value` and `type`, so leaving the correlation unqualified works
+    only by accident of `json_each` having no `meta` column of its own.
+    """
+    sql = f"SELECT {select_expr} FROM json_each(findings.meta) je WHERE je.key = ?"
+    if extra:
+        sql += f" AND {extra}"
+    if first_only:
+        sql += " LIMIT 1"
+    return sql
 
 
 def _meta_key_condition(*, with_value: bool) -> str:
     """The `query_findings` filter for a top-level meta key, by NAME (CB-167).
 
-    Returns a condition with ONE bound placeholder for the key, plus a second for
-    the value when `with_value` is set — the caller appends the parameters in that
-    textual order, which is this file's standing rule for built `WHERE` clauses.
-
-    `findings.meta` is qualified deliberately: `json_each` exposes columns named
-    `id`, `key`, `value` and `type`, and leaving the correlation unqualified works
-    only by accident of `json_each` having no `meta` column of its own.
+    Note what is NOT constrained here: the filter asks only that the key EXISTS,
+    so unlike the grouping axis it admits a container and a JSON `null` value
+    alike. The two surfaces answer different questions and both tool descriptions
+    now say so.
     """
-    inner = "SELECT 1 FROM json_each(findings.meta) WHERE key = ?"
-    if with_value:
-        inner += " AND value = ?"
-    return f"({_META_OBJECT_GUARD} AND EXISTS ({inner}))"
+    rows = _meta_key_rows("1", extra="je.value = ?" if with_value else "")
+    return f"({_META_OBJECT_GUARD} AND EXISTS ({rows}))"
 
 
 class _GroupAxis(NamedTuple):
@@ -3334,20 +3361,26 @@ def _membership_sql(
     # would merge `true` into the number 1 — a likelier neighbour than the string
     # "true", which is what it collides with instead.
     #
-    # PARAMETER ORDER IS TEXTUAL, as everywhere else in this file: two path
-    # placeholders in the SELECT, then the caller's WHERE values, then one more
-    # for the scalar test. Prepending or appending as a block would bind the
-    # path to a filter's placeholder and corrupt exactly the FILTERED queries.
+    # PARAMETER ORDER IS TEXTUAL, as everywhere else in this file: ONE key
+    # placeholder in the SELECT (the `pick` subquery), then the caller's WHERE
+    # values, then one more key for the `EXISTS` arm. Prepending or appending as
+    # a block would bind the key to a filter's placeholder and corrupt exactly
+    # the FILTERED queries.
+    #
+    # This comment used to say "two PATH placeholders … bind the PATH", which
+    # was the counting AND the vocabulary of the code CB-167 replaced. It is
+    # corrected rather than deleted because the hazard it describes is real and
+    # unchanged; only the number and the word were wrong, and path-shaped
+    # wording surviving inside the function that stopped building paths is
+    # precisely how the old thinking would creep back.
     key = axis.meta_key
-    pick = (
-        "SELECT CASE je.type WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' "
-        "ELSE CAST(je.value AS TEXT) END FROM json_each(findings.meta) je "
-        f"WHERE je.key = ? AND {_META_SCALAR_TEST} LIMIT 1"
+    pick = _meta_key_rows(
+        "CASE je.type WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' "
+        "ELSE CAST(je.value AS TEXT) END",
+        extra=_META_SCALAR_TEST,
+        first_only=True,
     )
-    live = (
-        "SELECT 1 FROM json_each(findings.meta) je "
-        f"WHERE je.key = ? AND {_META_SCALAR_TEST}"
-    )
+    live = _meta_key_rows("1", extra=_META_SCALAR_TEST)
     return (
         f"SELECT id, severity, occurrence_count, ({pick}) AS group_key "
         f"FROM findings {where} {more} {_META_OBJECT_GUARD} AND EXISTS ({live})",
@@ -3414,10 +3447,7 @@ def _axis_counts(
         # counter asks about the SAME key on the SAME rows, so reading it through
         # a path while the groups came from `json_each` would let the reported
         # "carried a container" number describe a different key than the groups.
-        container = (
-            "SELECT 1 FROM json_each(findings.meta) je "
-            "WHERE je.key = ? AND je.type IN ('object','array')"
-        )
+        container = _meta_key_rows("1", extra=_META_CONTAINER_TEST)
         counts["nonscalar_value_rows"] = conn.execute(
             f"SELECT COALESCE(SUM(CASE WHEN {_META_OBJECT_GUARD} "
             f"AND EXISTS ({container}) THEN 1 ELSE 0 END), 0) AS c "
@@ -3604,8 +3634,12 @@ def query_findings(
         # declares meta_key required; this enforces it instead of discarding the value.
         raise ValueError("meta_value requires meta_key")
     # CB-167: the key is a NAME compared as a bound value, not a path fragment.
-    # `_meta_key_condition` is the single definition; the grouping axis resolves
-    # the same name through the same guard, so the two surfaces cannot drift.
+    # `_meta_key_condition` is the single definition for this surface, and it and
+    # the grouping axis build their lookup from the SAME `_meta_key_rows`
+    # skeleton behind the SAME `_META_OBJECT_GUARD`, so the two cannot drift on
+    # what "a top-level key of this name" means. What they deliberately do NOT
+    # share is the question asked of the value: this filter wants EXISTENCE, the
+    # axis wants a rankable scalar.
     # The `meta_value` comparison is deliberately unchanged in MEANING — it still
     # compares against a TEXT parameter, so a NUMERIC stored value still does not
     # match (CB-276 owns that, and this unit must not fix it while it is here).
