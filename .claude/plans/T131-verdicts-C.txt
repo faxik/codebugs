@@ -1,0 +1,66 @@
+35|D|none|1.0|0.0|Module map heading
+36|D|none|1.0|0.0|Domain module map
+37|D|none|1.0|0.05|types.py orientation
+38|D|none|1.0|0.15|server.py location and SDK pin
+39|D|none|0.75|0.4|cli.py map entry
+40|D|none|1.0|0.15|fmt.py placement rule
+41|D|none|1.0|0.1|fsio single sanctioned write path
+42|D|none|1.0|0.0|Storage location
+43|S|src|0.4|0.0|Debt list heading
+44|S|src|0.4|0.35|provenance seam
+45|S|src|0.3|0.2|ensure_modules_loaded trigger
+46|S|src|0.1|0.8|Resolved debt entry
+47|S|src|0.15|0.55|Findings naming exception
+48|S|src|0.15|0.5|Milestones naming exception
+49|S|src|0.1|0.35|Post-add hook
+50|S|src|0.05|0.45|Pre-add resolver seam
+51|S|src|0.1|0.15|Status-change hook
+52|S|src|0.05|0.55|Derived queue reconciliation
+53|S|src|0.05|0.5|live_source_clause seam
+54|S|src|0.0|0.9|Rejected VIEW alternative
+55|D|none|1.0|0.0|Code rules heading
+56|S|src|0.3|0.0|Module structure heading
+57|S|src|0.25|0.05|Schema ownership
+58|S|src|0.25|0.05|db.py import restriction
+59|S|src|0.25|0.1|Cross-module import rule
+60|S|src|0.3|0.0|Naming and style heading
+61|D|none|0.85|0.05|Python version and type hints
+62|D|none|0.9|0.05|Linter and line length
+63|S|src|0.2|0.05|Keyword-only signature convention
+64|S|src|0.15|0.25|MCP tool prefixing
+65|S|src|0.15|0.25|CLI handler naming
+101|S|src|0.3|0.0|Error handling heading
+102|S|src|0.25|0.0|Domain exception contract
+103|S|src|0.2|0.0|MCP exception policy
+104|S|src|0.2|0.0|CLI exception policy
+105|S|src|0.05|0.45|domain_errors arm ordering
+106|S|src|0.05|0.5|OSError widening
+107|S|src|0.05|0.55|Per-row swallow narrowing
+108|S|src|0.2|0.5|MCP return type plus pointer
+109|D|none|1.0|0.0|Testing heading carries the commands
+110|S|tests|0.3|0.1|Test file layout
+111|S|tests|0.1|0.1|tmp_path DBs
+112|S|tests|0.05|0.55|conftest inhabitant rule
+113|S|tests|0.2|0.0|Test target convention
+114|S|tests|0.05|0.4|Concurrency test assertion rules
+115|D|none|1.0|0.0|Test command every agent runs
+116|D|none|1.0|0.0|Lint command
+117|D|none|0.4|0.5|Format command plus pointer
+118|S|src|0.3|0.0|MCP registration heading
+119|S|src|0.2|0.05|register_tools boilerplate
+120|S|src|0.2|0.1|server discovery mechanics
+121|S|src|0.15|0.05|Tool parameter typing
+122|S|src|0.2|0.05|New module registration recipe
+123|S|src|0.05|0.5|Argument forwarding rule
+124|S|src|0.1|0.45|install_strict_arguments
+125|S|src|0.05|0.55|Docstring dedent adapter
+126|S|src|0.25|0.35|Wire golden regeneration
+127|S|src|0.3|0.0|CLI heading
+128|S|src|0.2|0.05|register_cli boilerplate
+129|S|src|0.2|0.05|cli provider discovery
+130|S|src|0.2|0.05|New module CLI registration
+131|S|src|0.25|0.35|init and where built in
+132|S|src|0.05|0.45|cli.run vs cli.main split
+133|S|src|0.05|0.55|Closed stdout gate internals
+134|S|src|0.1|0.6|atomic_write rule
+135|S|src|0.1|0.45|init channel precedence

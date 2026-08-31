@@ -1,0 +1,25 @@
+0|D|none|1.0|0.0|File title
+1|D|none|1.0|0.0|Orientation on what the project is
+136|S|src|0.3|0.0|Heading over module-creation rules
+137|S|src|0.3|0.45|Migration status plus pointer
+138|S|src|0.25|0.0|Registration contract for new module
+139|S|src|0.1|0.15|Concrete edit inside db.py
+140|S|src|0.1|0.15|Concrete edits server.py/cli.py
+141|S|src|0.3|0.0|Design preference for src modules
+142|S|src|0.2|0.0|Heading over embeddings depth
+143|S|src|0.07|0.6|embeddings implementation plus CB-174 history
+144|S|src|0.3|0.0|Heading over claims depth
+145|S|src|0.35|0.2|Module overview mixing orientation and internals
+146|D|none|0.55|0.2|Claim outcome vocabulary and retry rule
+147|D|none|0.5|0.2|Holder triple passed by worktree-setup
+148|S|src|0.15|0.45|Internal discriminator choice
+149|S|src|0.1|0.5|Two-layer split and ambient-transaction invariant
+150|S|src|0.1|0.35|Projection declaration
+151|D|none|0.5|0.55|Exit codes are the shell-caller API
+152|D|none|0.6|0.5|Governs worktree setup and finish claiming
+153|S|src|0.2|0.15|Scope statement for claims extenders
+154|S|src|0.25|0.0|Heading over milestones depth
+155|S|src|0.35|0.1|Milestones orientation and tables
+156|S|src|0.15|0.05|Auto-routing rule internal
+157|S|src|0.1|0.5|pull_next concurrency with fix history
+158|S|src|0.15|0.15|Close gate and eligibility
