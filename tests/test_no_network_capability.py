@@ -146,7 +146,7 @@ import codebugs
 # What counts as a network capability. Prefix-matched on the dotted module
 # path, so ``urllib.request`` catches ``urllib.request.anything``.
 # ---------------------------------------------------------------------------
-NETWORK_MODULES: frozenset[str] = frozenset(
+_DECLARED_NETWORK_MODULES: frozenset[str] = frozenset(
     {
         # stdlib: opens or serves a socket
         "socket",
@@ -210,6 +210,51 @@ NETWORK_MODULES: frozenset[str] = frozenset(
         "openai",
         "anthropic",
     }
+)
+
+
+def _private_twin(dotted: str) -> str:
+    """``socket`` -> ``_socket``. A leading underscore does not create a name.
+
+    The underscore attaches to the TOP-LEVEL component, because that is what
+    an ``import`` statement resolves and where CPython actually keeps these:
+    ``_socket``, ``_ssl`` and ``_asyncio`` are top-level modules, not
+    submodules of anything.
+    """
+    head, _, rest = dotted.partition(".")
+    return f"_{head}.{rest}" if rest else f"_{head}"
+
+
+# The capability set the gate consults: what is declared above, plus each
+# name's private twin, COMPUTED (CB-268).
+#
+# `import _socket` used to be green, and it is the cheapest bypass of this
+# whole file: one line, no indirection. `_socket.socket` IS the implementation
+# the row `socket` exists to forbid, and it proceeded because it is a stdlib
+# name (so the third-party ratchet does not judge it) that nobody had listed
+# (so the enumeration did not either) — it drove straight between the two
+# mechanisms.
+#
+# The form is DERIVED rather than three more strings, and that was decided
+# against the obvious. A hand-written second list is one edit away from
+# disagreeing with the first — the reason `types.rank_case_sql` and
+# `types.severity_rank` are both derived from the `SEVERITIES` tuple (CB-22) —
+# and it would have been wrong by a third on the day it was written: the
+# executor who found this named two twins and there are three (`_socket`,
+# `_ssl`, `_asyncio`). Deriving means the next network name added above closes
+# its own twin with no second edit and no chance of the two tables drifting.
+#
+# What this does NOT close, so the claim is not wider than the check: it covers
+# twins of the names in the set and nothing else. `logging.handlers.SocketHandler`
+# and `multiprocessing.connection.Client` still open sockets and remain the
+# declared residual of T-124. `select`/`selectors` are deliberately absent —
+# they multiplex descriptors that are already open, which is not the capability
+# this gate is about. Most twins the derivation produces do not exist as
+# modules at all (`_requests`, `_urllib.request`); an entry naming nothing
+# importable costs nothing and refuses nothing, which is the ordinary price of
+# deriving instead of curating.
+NETWORK_MODULES: frozenset[str] = _DECLARED_NETWORK_MODULES | frozenset(
+    _private_twin(name) for name in _DECLARED_NETWORK_MODULES
 )
 
 # A FROM-import of one of the modules above is judged name by name. A row here
@@ -663,6 +708,83 @@ class TestTheGateItself:
     )
     def test_ordinary_imports_are_not_flagged(self, innocent):
         assert not _capability_imports("victim.py", innocent)
+
+    @pytest.mark.parametrize(
+        "twin",
+        [
+            "import _socket",
+            "import _ssl",
+            "import _asyncio",
+            "from _socket import socket",
+            "import _socket as s",
+        ],
+    )
+    def test_a_private_twin_is_caught(self, twin):
+        """CB-268. `import _socket` was green, and it is the cheapest bypass here.
+
+        `_socket.socket` is the very implementation the row `socket` exists to
+        forbid. It proceeded because it drove BETWEEN the file's two
+        mechanisms: a stdlib name, so the third-party ratchet does not judge
+        it, and unlisted, so the capability set did not either.
+        """
+        assert _capability_imports("victim.py", twin), f"the gate does not see {twin!r}"
+
+    def test_the_twin_rule_is_derived_and_not_a_second_list(self):
+        """Structural, and it is the point of the fix rather than decoration.
+
+        Three more strings would have been the letter: one edit from
+        disagreeing with the list above, and already wrong by a third on the
+        day it was written (the executor who found this named two twins; there
+        are three). Deriving means the next network name added closes its own
+        twin with no second edit. So the assertion is on the RELATION between
+        the two sets, not on the three names that relation happens to produce
+        today.
+        """
+        for name in _DECLARED_NETWORK_MODULES:
+            assert _private_twin(name) in NETWORK_MODULES, name
+        assert _DECLARED_NETWORK_MODULES <= NETWORK_MODULES
+        # Non-vacuity: the derivation must actually ADD something, and the three
+        # names it adds that really exist are the ones the card measured.
+        assert NETWORK_MODULES - _DECLARED_NETWORK_MODULES
+        assert {"_socket", "_ssl", "_asyncio"} <= NETWORK_MODULES
+
+    def test_the_twins_are_stdlib_so_the_ratchet_could_not_have_caught_them(self):
+        """The premise that makes the fix belong in the capability set.
+
+        If these were foreign names, `DECLARED_THIRD_PARTY` would already
+        refuse them and this addition would be redundant. Measured here rather
+        than asserted in prose, so a Python release that stops shipping one of
+        them turns the suite red instead of quietly making the argument false.
+        """
+        for twin in ("_socket", "_ssl", "_asyncio"):
+            assert twin in sys.stdlib_module_names, twin
+
+    @pytest.mark.parametrize(
+        "innocent",
+        [
+            "from urllib.request import pathname2url",
+            "from codebugs import db",
+            "import _collections_abc",
+            "import selectors",
+            "import select",
+        ],
+    )
+    def test_the_twin_rule_leaves_the_innocent_alone(self, innocent):
+        """The other half: the derivation must not widen what is refused.
+
+        `pathname2url` is the tree's one declared row and must stay declarable;
+        `select`/`selectors` multiplex descriptors that are already open, which
+        is deliberately not the capability this gate is about; and a private
+        name whose base is not in the set (`_collections_abc`) is nobody's
+        business here.
+        """
+        # Judged AS `db.py`, because that is where the tree's one declared row
+        # lives and a declared row is keyed by file: asking about
+        # `pathname2url` under any other name would be asking a different
+        # question from the one this test is for.
+        found = _capability_imports("db.py", innocent)
+        undeclared = [key for key in found if key not in DECLARED_EXCEPTIONS]
+        assert not undeclared, f"{innocent!r} became a refusal: {undeclared}"
 
     def test_the_todays_tree_exception_is_the_from_import_and_not_the_module(self):
         """The measurement that shaped the whole design.
