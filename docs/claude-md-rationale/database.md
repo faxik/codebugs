@@ -182,3 +182,103 @@ ever leaving its own bullet.
 `tests/golden/mcp_schema.json` carries the word `authored` once as ordinary prose inside `query`'s
 description (the authored-versus-ring meta distinction), and that defeated the first draft of the
 sentence, which claimed zero occurrences in either golden.
+
+---
+
+### CB-218 — the upward walk is three-valued {#cb-218-обход-вверх-трёхзначен}
+
+**Justifies the rule** "THE UPWARD WALK IS THREE-VALUED TOO", `CLAUDE.md` → `## Code rules` →
+`### Database`.
+
+**The measurement.** On the unfixed tree, with the execute bit off a directory that HOLDS the
+project's tracker and an unrelated `.codebugs/` one level above it, `codebugs where` printed a clean
+binding to the stranger at exit 0 with no warning, and `stats` answered about the stranger's empty
+population.
+
+**The `.git` half, reproduced in isolation.** An unanswerable `.git` reads as *no boundary here* and
+the walk crosses the repository boundary. It was reproduced in ISOLATED form — the repository
+directory fully readable, its `.codebugs/` provably absent, and a symbolic-link loop at `.git` — so
+nothing else could be blamed.
+
+**A truncating version of the unexamined list was written first and refuted by measurement.** One
+wall makes every question below it unanswerable too, the list runs deepest-first, and a cap keeping
+the first entries kept the wall's shadows while dropping the entry naming the wall itself.
+
+**Why the `_enclosing_worktree_root` sentence is written in the past tense (CB-239).** When CB-218
+landed, that function took the same primitive with NO behaviour change — said that way round because
+no test could discriminate it — since it then only chose between two refusal sentences and was
+reached only after the walk had already recorded the same prefix. CB-227 later made it RETURN the
+third value instead of dropping it, so it no longer merely picks a refusal sentence; while both
+sentences stood in the present tense the document said the opposite of itself two bullets apart and
+a reader could not tell which half held today. Every claim about live code is now written so its
+as-of is visible.
+
+**What the preflight replaced (CB-11).** Before it, a misconfigured server looked healthy at startup
+and failed every call forever, with no single moment naming the cause.
+
+---
+
+### CB-86 — an environmental sqlite failure {#cb-86-средовой-отказ-sqlite}
+
+**Justifies the rule** "An ENVIRONMENTAL sqlite failure is classified inside `_open`",
+`CLAUDE.md` → `## Code rules` → `### Database`.
+
+**Why it was missed three times.** CB-71's `open(` sweep and CB-79's `OSError` widening were both
+structurally blind to `sqlite3.OperationalError`, because it is not an `OSError`. The class of "the
+CLI crashed at an I/O boundary" was closed three times without anyone enumerating the family.
+
+**The rejected design is the instructive part.** Adding a `sqlite3.OperationalError` arm at
+`cli.main` was refuted by this repo's own `tests/test_bench.py:789`, which ratifies the traceback as
+the discriminator between a post-commit failure and an input error — a central arm cannot tell those
+apart, which is verbatim CB-55's constraint applied to a different exception class. The "exit code
+is unchanged so no new lie is possible" argument **proves too much**: it would equally license the
+central `except OSError` CB-55 forbids.
+
+**Why one classification point once sufficed for a read-only database FILE as well, and no longer
+does (CB-199, CB-213).** Three raise sites live inside `_open`, and one of them is
+`merge.ensure_schema`, several frames down through the `_resolved_order()` loop — verified by
+running it. CB-195 made that seed write conditional on a read, so once the seed rows exist `_open`
+attempts no write of its own and the failure surfaces later, at the domain's own INSERT. The
+sentence in the rules layer is deliberately in the past tense so the two bullets cannot be read as
+disagreeing.
+
+**Why the two absences were measured rather than reasoned.** A sibling card had added three
+prose-sourced entries to the code set, in the paragraph congratulating itself for avoiding exactly
+that.
+
+---
+
+### CB-17 / CB-21 — INSERT/UPDATE column parity {#cb-21-паритет-колонок}
+
+**Justifies the rule** "A column settable at INSERT should be settable at UPDATE",
+`CLAUDE.md` → `## Code rules` → `### Database`.
+
+**What this bullet used to say, and why it was replaced.** It read *"this rule is currently violated
+… read it as a target with a known outstanding debt"*, because `update_finding` reached only
+`status, severity, tags, meta, reported_at_ref` while `update_requirement` could already rewrite
+`description` — the identical asymmetry as CB-17 — and `source` was INSERT-settable on **both**
+entities yet appeared in neither update contract. Nothing anywhere stated the intended matrix.
+
+**The card's own premise was corrected by the work.** CB-21 recommended making `file`/`description`
+mutable because "there is no integrity argument for freezing" them. There is one: they are inputs of
+the derived `auto:v1` fingerprint, so writing them would re-key identity. CB-61 later negotiated
+exactly one such operation, `normalize_categories`, which issues its own UPDATE for precisely that
+reason.
+
+---
+
+### CB-25 — "no filter" is not truthiness {#cb-25-пустой-фильтр}
+
+**Justifies the rule** «"No filter" is `None` and `""`», `CLAUDE.md` → `## Code rules` →
+`### Database`.
+
+**What the write-side-only sweep found, with the detail of each case.** `merge.get_sessions` had a
+`types.MERGE_STATUSES` that was **dead code**, so the CHECK constraint was the only enforcement;
+`milestones.list_milestones` had `MILESTONE_KINDS`/`MILESTONE_STATES` all along and simply never
+consulted them on query; and `blockers.query_blockers` had its `TRIGGER_TYPES` check sitting
+*inside* the truthy guard, so a falsey value skipped it entirely.
+
+**Why the first sweep missed one.** It grepped `if status:|if severity:|if priority:|…`, an
+enumeration of the filters already known, and therefore could not find `trigger_type`. That is this
+repository's recurring lesson in a new place: a rule expressed as an enumeration is the letter, and
+the letter cannot decide.
