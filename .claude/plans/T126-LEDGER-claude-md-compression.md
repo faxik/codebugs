@@ -99,10 +99,114 @@ uv run --extra dev python -m pytest \
 
 ## Часть II. Ведомость снятого
 
-*(заполняется по мере правки, по разделу на коммит)*
+**Прочти сперва вот это, иначе ведомость введёт в заблуждение своей краткостью.** Правка НЕ является
+законченным проходом по всему документу. Это **калибровочная выборка из шести блоков**, охватывающая
+45 553 байта исходника (19,6 % файла) и намеренно взятая из пяти разных регистров письма, чтобы
+измерить достижимую степень сжатия, а не оценить её на глаз. Результат замера — 4,2 % — и есть
+главный вывод юнита, разобранный в разделе `## Эскалации` файла брифа. Оставшиеся 80 % файла **не
+тронуты**, и это осознанная остановка, а не незавершённость: доводить проход до конца имеет смысл
+только после того, как держатель направления выберет форму (см. три варианта в эскалации (г)).
+
+Условные обозначения: **С** — снято совсем, **Ф** — свёрнуто (сказано короче, все утверждения на
+месте), **П** — переставлено или разбито на абзацы без изменения содержания.
+
+### Блок 1 — вступление `## Workflow`, история CB-50 (771 → 712 Б, −7,7 %)
+
+| | Что | Куда делось |
+|---|---|---|
+| Ф | `That is CB-50, and the harness below is its fix.` отдельным предложением в конце | идентификатор CB-50 перенесён в первое предложение абзаца; фраза про починку слита с `Prose cannot enforce prose` |
+| Ф | `a branch with no type prefix, integrated without a merge commit, which by then pointed at main's own SHA` | `no type prefix, no merge commit, and by then pointing at main's own SHA` — три утверждения те же |
+| С | `That code is new` (о коде возврата 15) | снято, потому что это утверждение о новизне на момент написания: оно стареет само и ничего не предписывает |
+
+Замеры 13:37 / 15:30 / `2957070` / имя ветки и правило «a convention that exists only as a pattern in
+the log is not a rule» сохранены дословно — это §3 п. 4.
+
+### Блок 2 — пост-мерж-алярм, CB-121 (6 085 → 5 937 Б, −2,4 %)
+
+| | Что | Куда делось |
+|---|---|---|
+| Ф | `They are worth reading before touching this, because each is a way the alarm can lie.` отдельным предложением | слито в заголовочную фразу: `Four details are load-bearing, each a cross-model review finding rather than foresight, and each is a way the alarm can lie.` |
+| Ф | `The alarm must first know that main's tip *is the merge this run made*, and a two-parent tip does not establish that:` | переставлено в `A two-parent tip does not establish that main's tip *is the merge this run made*:` — то же утверждение одним придаточным вместо двух |
+| П | пояснение про `exit 15` против `exit 13` | оба значения сохранены, переставлены так, чтобы противопоставление стояло рядом |
+
+**Пинуемые токены `check-then-act`, `alarm`, `exit 15`, `CB-121`, `exit 13`, `in-lock SHA re-check`
+и формулировка строки таблицы не тронуты.** Таблица принуждения не тронута вовсе — см. находку П4
+в части I: четырнадцать её строк не охраняет ничто.
+
+### Блок 3 — `exists` трёхзначен, CB-203/218/224/227 (10 550 → 9 755 Б, −7,5 %)
+
+Самый результативный блок, и единственный, где нашлась настоящая тройная повторность.
+
+| | Что | Куда делось |
+|---|---|---|
+| П | один пункт-абзац на 10,5 КБ | разбит на пять абзацев с полужирными зачинами; содержание не менялось |
+| Ф | **три** отдельных причитания о том, что счётчик в прозе протухает — оговорка про «not another count», предложение `How many that is, is a question for that list and not for this sentence`, и заключительное `A third correct count would rot exactly as the first two did` | слиты в одно: `the same rot runs through every count this bullet ever carried — "three copies" was four at CB-24, "five sites" was six at CB-218 — so a number that decides anything belongs in a test, not in this paragraph` |
+| С | из этого слияния выпало одно частное сведение: что в этом самом абзаце **стоял** счётчик промахов сторожа и был **удалён**, а не поправлен | снято, потому что правило («число, которое что-то решает, живёт в тесте») теперь сказано прямо, а адрес, где промахи перечислены поимённо, сохранён: `the ones it does not are named one by one in the gate's own docstring` |
+| С | перекрёстная ссылка `this document's own Embeddings section names that shape for a different claim` | снята как указатель, дублирующий общий урок; сам урок («A universal property re-asserted in prose after each fix is a "gate that cannot fire" written as text») оставлен дословно |
+
+Всё остальное — восемь способов сломать трекер с их errno, порядок `lstat` перед `stat`, перечни
+написаний, которые ловит сторож, живая иерархия классов, четыре обхода за границей гейта,
+семантический часовой, второй род вопроса (`WHAT DOES THIS FILE SAY`), замеры `chmod 000`, счётчики
+12/10 и два/три — сохранено дословно.
+
+### Блок 4 — отказ после коммита, `cli.domain_errors()` (2 454 → 2 343 Б, −4,5 %)
+
+| | Что | Куда делось |
+|---|---|---|
+| Ф | `(CB-159 — an earlier version of this paragraph named only the end-to-end pin below, with nothing exercising the wrapper on its own)` | `(CB-159, filed because this paragraph once named only the end-to-end pin, leaving the wrapper itself unexercised)` |
+| С | слово `twice` в `measured against this exact mutant, twice` | снято: сколько раз снимали замер, ничего не предписывает; сам замер (какой тест краснеет и что 5 из 6 прочих не затронуты) сохранён |
+| С | `— this paragraph used to name it as the still-outstanding case` | снято как чистая хроника: поправка уже сказана отдельным утверждением (`was the last asymmetry and is closed`) |
+
+### Блок 5 — `conftest.py` как единственный вид жильца, CB-204/215 (6 031 → 5 806 Б, −3,7 %)
+
+| | Что | Куда делось |
+|---|---|---|
+| П | один пункт-абзац на 6 КБ | разбит на три абзаца |
+| Ф | удвоенное рассуждение «вид, а не счёт»: `and that sentence is the property, deliberately not another count: the clause before it was already rewritten once the moment a second one appeared, and it would have to be rewritten again here` | слито в `a count in prose is the thing this document has twice been wrong about, so the property is a sentence instead` |
+| Ф | две отдельные заключительные границы (`One boundary worth knowing…` и `What it does NOT do:…`) | объединены в одну фразу `Two boundaries, both found by running rather than by reading:` — обе границы сохранены целиком |
+
+Замеры 1071/2739, 141 секунда против ~170, 2878 тестов, дата 2026-08-26 — сохранены.
+
+### Блок 6 — функция тождества находок, CB-43, пункты (1)–(13) (19 662 → 19 087 Б, −2,9 %)
+
+| | Что | Куда делось |
+|---|---|---|
+| П | тринадцать пунктов, слитых в один абзац на 19,6 КБ | каждый пункт — отдельный абзац; нумерация и формулировки не менялись. Это главный выигрыш блока, и он не байтовый, а читательский |
+| С | в пункте (8): `— every other count in this document is held by a test, and the two places one was left as prose it was wrong ("three copies" was four; CB-24's four sites were nineteen)` | снято как повтор: тот же урок теперь сказан один раз в блоке 3 (тот же раздел `### Database`), а оба примера живут по своим адресам — «three copies было four» в блоке 3, «CB-24's four sites were nineteen» в собственном пункте про население CB-24. Указатель на сам храповик (`TestEscalateOptOutRatchet`, читается AST, а не grep) сохранён |
+| Ф | в пункте (13): длинный пересказ самопротиворечия CB-247 (`That opening clause used to read "one observation-time invariant"… so the paragraph contradicted itself without ever leaving its own bullet. The PATH is where the three differ, and that difference is the subject of the rest of this item rather than something the defining clause should have flattened into it.`) | свёрнуто в `The PATH is where the three differ, and the defining clause must not flatten that: escalate и promote_tags на пути наблюдения, authored на пути обновления (the clause once read "one observation-time invariant" and was therefore wrong about the very member it was introducing — CB-247)`. Правило, ошибка и карта сохранены |
+| С | в пункте (13): `and it defeated the first draft of this very sentence, which claimed zero occurrences in either golden` | снято как чистая хроника: верное утверждение (`carries the word authored once as ordinary prose inside query's description`) стоит рядом и с датой замера |
 
 ---
 
-## Часть III. Инвентарь несущих утверждений и проверка по нему
+## Часть III. Инвентарь и проверка по нему
 
-*(заполняется в конце: для каждого несущего утверждения — где оно живёт в новой редакции)*
+**Инвентарь построен до первой правки семью дешёвыми субагентами** (`sonnet`) по непересекающимся
+диапазонам строк — это объём чтения, а не суждение, и по каскаду он обязан уходить вниз. Итог —
+**1 456 несущих утверждений**, каждое с номером строки, классом и формулировкой. Файлы инвентаря
+лежат в рабочем каталоге сессии (`inv-01…inv-07`); сводка по классам — в эскалации (г).
+
+**Проверка по инвентарю выполнена только для шести тронутых блоков**, и это прямое следствие того,
+что проход калибровочный: для нетронутых 80 % файла проверять нечего — текст там байт в байт
+исходный. По шести блокам сверка велась построчно при написании замены, и её механическая половина
+снята дважды — до и после каждой правки:
+
+| Гейт | Результат |
+|---|---|
+| Идентификаторы карт (109: 98 `CB-N`, 4 латинских `T-N`, 5 `ARCH-00N`, 2 `BT-N`) | **пропаж ноль** |
+| Кириллические `Т-N` | **ноль**, как и было |
+| Токены механизмов в обратных кавычках (1 276) | **пропаж ноль** |
+| Имена тестов (55) | **пропаж ноль** |
+| Пути (134) | **пропаж ноль** |
+| Четыре пинующих утверждения | **13 passed** после каждой правки |
+
+**Ноль пропавших токенов — не признак того, что ничего не потеряно.** Гейт судит написание, а
+смысл он судить не может, о чём §5 брифа говорит прямо. Носителем содержательной половины является
+ведомость выше и сквозной перечит; о том, что перечит нашёл, сказано словами в
+`## Отчёт по регламенту`.
+
+**Команда для приёмщика, чтобы повторить оба множества:**
+
+```
+python3 .claude/plans/T126-idents.py snapshot CLAUDE.md /tmp/after.json
+python3 .claude/plans/T126-idents.py diff .claude/plans/T126-baseline.json /tmp/after.json
+```
