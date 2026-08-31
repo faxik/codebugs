@@ -72,8 +72,8 @@ connection already open", `CLAUDE.md` → `## Code rules` → `### Database`.
 sites specifically because it ran an UNCONDITIONAL write on every `db.connect()`, so it was — by
 accident, not by design — the mechanism that made a read-only DATABASE FILE (reached via the walk
 route) fail *inside* `_open()`'s classification, on every verb, including a pure read. CB-195 made
-that write conditional on the seed row being missing, which is the whole point of that fix: a purely
-reading `db.connect()` must never take the write lock merely to attempt a redundant insert.
+that write conditional on the seed row being missing; the point of that fix was that a purely
+reading `db.connect()` was taking the write lock merely to attempt a redundant insert.
 
 **Measured directly, both before and after.** On the unfixed tree, `stats` on a `chmod 444` tracker
 file used to refuse at exit 1 with the clean message — a read-only tracker could not even be READ;
