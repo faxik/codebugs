@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`meta_key` now means the literal top-level key you typed, on both the filter and the grouping
+  axis — a dotted key used to silently answer about something else (CB-167).** `query(meta_key=…)`
+  and `stats(by="meta:…")` built a SQLite JSON *path* out of your key by pasting it after `$.`, and
+  in that grammar a dot means *descend*. Both directions were live on a real tracker. A card here
+  carries the top-level key `misassigned_to_1.81`; asking for it returned **nothing at all**, in the
+  shape of a successful empty answer — the worst kind, because an empty queue is indistinguishable
+  from a correctly-filtered one. In the other direction `meta_key="loc.skipped"` returned rows by
+  descending into a nested structure nobody had declared as a feature. The key is now compared as a
+  **bound value** rather than assembled into path syntax, so every character means itself: `.`, `[`,
+  `]`, `"`, backslashes, control characters and non-ASCII names all match the key you actually
+  typed. **What you may need to change:** if you relied on the undeclared nesting traversal —
+  `meta_key="loc.skipped"` reaching `meta.loc.skipped` — it no longer works, and there is
+  deliberately no replacement parameter for nested lookup yet. That behaviour was never documented,
+  and removing it is the point of the fix rather than a side effect of it.
+- **The grouping axis stopped refusing keys it can now handle.** `stats(by="meta:a.b")` used to exit
+  with an error naming this card as an open question, because a key containing `.`, `[`, `]`, `"` or
+  a control character could not be told apart from path syntax. Nothing is refused on those grounds
+  any more; the only meta axis still refused is the empty one (`meta:`), which is kept because an
+  empty `meta_key` already means "no filter" on the sibling filter and one spelling should not mean
+  two things.
+- **One unparseable `meta` no longer takes the whole query down with it.** A row whose `meta` column
+  does not parse as JSON — reachable by hand-editing or by importing from elsewhere — used to abort
+  any `meta_key` filter or meta grouping outright. Such rows are now skipped and the rest of the
+  corpus answers normally.
+- **A key whose value is JSON `null` now counts as present for `meta_key`.** `query(meta_key=k)`
+  documents itself as filtering by key *existence*, and a key holding `null` does exist; it used to
+  be reported as absent. Note the grouping axis deliberately still treats a `null` value as
+  ungrouped, because there is no rankable value there to group on — the two surfaces answer
+  different questions and now say so.
+
 ### Changed
 
 - **The safety note on the embedding tools now says only what is actually checked, and a new check
@@ -1075,6 +1107,12 @@ each says what to change.
   behaviour is not measured — the asymmetry is tracked as CB-167 and the refusal message
   names it. A key that is absent, JSON null, or holds an object or array is reported as
   ungrouped, never invented.
+
+  **SUPERSEDED by CB-167, see Unreleased.** This paragraph describes the behaviour that
+  shipped in this release and is left standing as the record of it. Both halves are gone
+  now: the refusal was removed rather than narrowed, and the two `meta_key` filters this
+  paragraph deliberately left alone were fixed in the same change, so the asymmetry it
+  declares no longer exists.
 
   **One guard is deliberately looser than canonical JSON, and the reason is that
   this package writes non-canonical JSON itself.** A row is skipped only when its

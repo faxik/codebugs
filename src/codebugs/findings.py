@@ -3076,34 +3076,6 @@ GROUP_META_PREFIX = "meta:"
 # same prose-against-code shape `TestBt4FreshnessDeclarations` uses.
 GROUP_AXES_HELP = f"{', '.join(GROUP_COLUMNS)}, {GROUP_TAG}, {GROUP_META_PREFIX}<key>"
 
-# Characters SQLite's JSON-path grammar spends on structure. A key containing
-# one cannot be named by the naive `"$." + key` this package builds, and the
-# failure is SILENT: measured on SQLite 3.46, `json_extract('{"a.b":1,"a":{"b":2}}',
-# '$.a.b')` answers 2 — the NESTED value — while `'$."a.b"'` answers 1. So the
-# path a caller gets is not the key a caller asked for.
-#
-# `.` and `[` are measured broken (wrong value, or None). `"` measured WORKS
-# under naive concatenation on this version and is refused anyway, because it is
-# the grammar's own quoting character and NO escape form addresses it (`$."q\"k"`
-# and `$."q"k"` both answer None), so a key holding one could not be expressed by
-# the quoted spelling any eventual fix must use — refusing it now keeps that
-# decision free rather than shipping a behaviour that would have to break. `]` is
-# inert today and is refused with its partner so the rule is one sentence.
-#
-# THE COST IS REAL AND WAS MEASURED, not assumed away: of the 313 distinct
-# top-level meta keys on this tracker (measured 2026-08-25 — a moving corpus, so
-# read it as a measurement rather than an invariant), exactly TWO carry a dot,
-# `misassigned_to_1.81` and `misassigned_to_1.98`, and none carry the other
-# three. Those two keys cannot be grouped by until CB-167 decides the grammar.
-_META_PATH_METACHARS = '.["]'
-
-# What counts as a value this axis can rank. Positive enumeration on purpose:
-# `json_type` answers NULL for an absent key, and `NULL NOT IN (...)` is NULL,
-# which `WHERE` excludes — so a negative list would depend on NULL semantics to
-# get the common case right. A row is grouped only on affirmative proof, the same
-# shape `reconcile.live_source_clause` is built on.
-_META_SCALAR_TEST = "json_type(meta, ?) IN ('text','integer','real','true','false')"
-
 # THE GUARD MUST NOT BE STRICTER THAN THE ENGINE IT GUARDS, and the first draft
 # of it was — found by adversarial review, and it defeated this work's central
 # claim rather than some edge case.
@@ -3126,24 +3098,101 @@ _META_SCALAR_TEST = "json_type(meta, ?) IN ('text','integer','real','true','fals
 # for `{"k": NaN}` at flags 0/1/4/8 and 1 at flags 2/6, while `json_type`,
 # `json_extract` and `json_each` all read that same document happily. The guard
 # now matches what they accept instead of a stricter standard they do not apply.
+#
+# MOVED ABOVE ITS FIRST USE BY CB-167 and not otherwise touched: the meta-key
+# guard below is built from it at module level, so a definition further down the
+# file is a `NameError` at import rather than a style question.
 _JSON5 = 6
+
+
+# A META KEY NAME IS A BOUND VALUE, NEVER PART OF A PATH (CB-167). This is the
+# one place a caller's key name becomes SQL, and both surfaces — the two
+# `query_findings` filters and the `meta:<key>` grouping axis — go through it.
+#
+# WHAT WAS WRONG. The package used to build `"$." + key` and hand that to
+# `json_extract`. In JSON-path grammar a dot means DESCEND, so the path a caller
+# got was not the key a caller asked for: measured on SQLite 3.46.1,
+# `json_extract('{"a.b":1,"a":{"b":2}}', '$.a.b')` answers 2 — the NESTED value —
+# while the top-level key `a.b` holding 1 was unreachable. Both directions were
+# live on this tracker: `query(meta_key="misassigned_to_1.81")` returned nothing
+# over a card that carries exactly that key, and `query(meta_key="loc.skipped")`
+# returned rows by a path nobody declared.
+#
+# WHY BINDING RATHER THAN ESCAPING, which is the decision and not an implementation
+# detail. A quoting-and-escaping rule was measured and very nearly shipped; it is
+# correct on 542 of 546 enumerated names and WRONG on the four containing a NUL
+# byte, because SQLite decodes a path label and then compares it as a C STRING,
+# truncating at the first NUL. That does not merely lose the odd key — it makes an
+# ORDINARY one answer with a stranger's value: with `{"a\0z": X, "a": Y}` stored,
+# the path for `a` returns X. Every one of ten spellings failed the same way.
+# Binding the name as a VALUE removes the grammar from the problem entirely: a NUL
+# inside a bound parameter is DATA, not a terminator, and comparison runs over the
+# whole length. That is this tree's standing rule about lease deadlines (CB-41)
+# applied to a name — make the bad state unrepresentable instead of re-deriving an
+# escaping discipline at every new site. `json_each` also enumerates the
+# document's IMMEDIATE children, which is precisely the "top-level meta key" both
+# tool descriptions promise; a path has to have top-level-ness imposed on it by
+# grammar, and this card is the history of that being imposed wrongly.
+#
+# THE GUARD IS NOT OPTIONAL AND IS NOT NEW POLICY. `json_each` RAISES on malformed
+# JSON, which would abort the whole query over one hand-edited row — but so does
+# today's `json_extract` (measured, both), so guarding is a repair rather than a
+# regression. `json_valid(meta, _JSON5)` is the file's own existing pattern and the
+# flag is load-bearing: bare `json_valid` rejects `NaN`, which this package's own
+# write path stores, so a bare guard would silently drop such rows from every meta
+# filter. `json_type(meta) = 'object'` then says in SQL what the surfaces promise.
+# It is defence in depth by measurement, not by faith: an ARRAY's keys are
+# INTEGERS and a scalar's key is NULL, so neither can equal a bound TEXT name
+# today — the guard forecloses that by construction instead of resting on SQLite's
+# type-ordering rule, and costs a measured +5.2% on a 5000-row tracker.
+_META_OBJECT_GUARD = f"json_valid(meta, {_JSON5}) AND json_type(meta) = 'object'"
+
+# What counts as a value the grouping axis can rank. Positive enumeration on
+# purpose: a row is grouped only on affirmative proof, the same shape
+# `reconcile.live_source_clause` is built on. Written against `json_each`'s `type`
+# column rather than `json_type(meta, <path>)`, so the axis and the filters read
+# the key the same way and cannot drift apart.
+_META_SCALAR_TYPES = "('text','integer','real','true','false')"
+_META_SCALAR_TEST = f"je.type IN {_META_SCALAR_TYPES}"
+
+
+def _meta_key_condition(*, with_value: bool) -> str:
+    """The `query_findings` filter for a top-level meta key, by NAME (CB-167).
+
+    Returns a condition with ONE bound placeholder for the key, plus a second for
+    the value when `with_value` is set — the caller appends the parameters in that
+    textual order, which is this file's standing rule for built `WHERE` clauses.
+
+    `findings.meta` is qualified deliberately: `json_each` exposes columns named
+    `id`, `key`, `value` and `type`, and leaving the correlation unqualified works
+    only by accident of `json_each` having no `meta` column of its own.
+    """
+    inner = "SELECT 1 FROM json_each(findings.meta) WHERE key = ?"
+    if with_value:
+        inner += " AND value = ?"
+    return f"({_META_OBJECT_GUARD} AND EXISTS ({inner}))"
 
 
 class _GroupAxis(NamedTuple):
     kind: str  # "column" | "tag" | "meta"
     column: str | None
-    meta_path: str | None
+    meta_key: str | None
 
 
 def _resolve_group_axis(group_by: str) -> _GroupAxis:
     """The one place a `group_by` value becomes an axis. Raises on anything else.
 
-    The refusal for a dotted key NAMES CB-167 deliberately. The two `meta_key`
-    FILTERS in `query_findings` build their path the same naive way and are left
-    untouched by this change: their consumer population — callers who may be
-    relying on the accidental nesting traversal — is NOT measured, and changing a
-    shipped surface on an unmeasured population is a worse trade than declaring
-    the asymmetry. So the divergence is stated at the one place a user meets it.
+    CB-167 CLOSED THE ASYMMETRY THIS DOCSTRING USED TO DECLARE. It said the two
+    `meta_key` FILTERS in `query_findings` built their path the same naive way and
+    were deliberately left alone, so a dotted key was refused HERE and silently
+    wrong THERE. Both surfaces now resolve a key name the same way — as a BOUND
+    VALUE compared by `json_each`, never as path syntax — so no character is
+    special on either, and the refusal that named CB-167 as an open question is
+    gone rather than narrowed: the question is answered.
+
+    The field is `meta_key`, a NAME, and no longer `meta_path`. That rename is the
+    point of the change and not tidying: as long as the axis carried a path, the
+    grammar could be re-imposed by any later edit.
     """
     if group_by in GROUP_COLUMNS:
         return _GroupAxis("column", group_by, None)
@@ -3159,26 +3208,15 @@ def _resolve_group_axis(group_by: str) -> _GroupAxis:
                 f"Invalid group_by: {group_by!r}. '{GROUP_META_PREFIX}' needs a key, "
                 f"e.g. '{GROUP_META_PREFIX}found_by'"
             )
-        # A CONTROL character is refused for the SAME reason a dot is, and NUL is
-        # the one that proves it (adversarial review). SQLite's path is a C
-        # string, so it TRUNCATES at a NUL: measured, `json_extract('{"a":"WRONG_A"}',
-        # '$.a' + chr(0) + 'b')` answers `'WRONG_A'` — the key `a\0b` silently
-        # reads the neighbouring key `a`, which is the dotted-key failure exactly.
-        # And a LEADING NUL leaves the bare path `'$.'`, which raises
-        # `sqlite3.OperationalError` — the environmental exception class the empty
-        # key is refused to avoid, escaping a domain function that promises
-        # `ValueError` and reaching the CLI as a raw traceback, since
-        # `domain_errors()` classifies neither.
-        bad = sorted({c for c in key if c in _META_PATH_METACHARS or ord(c) < 0x20})
-        if bad:
-            raise ValueError(
-                f"Invalid group_by: {group_by!r}. A meta key containing "
-                f"{', '.join(repr(c) for c in bad)} cannot be told apart from a JSON "
-                "path here — SQLite reads '$.a.b' as a nested lookup, not as the "
-                "top-level key 'a.b' — and the grammar for naming such a key has not "
-                "been decided (CB-167). Every other key is groupable."
-            )
-        return _GroupAxis("meta", None, f"$.{key}")
+        # NO CHARACTER IS REFUSED ANY MORE, and the deletion is the fix rather
+        # than a relaxation of it (CB-167). The old refusal listed `.`, `[`, `]`,
+        # `"` and every control character, because each of them changed what a
+        # `"$." + key` path MEANT. The key is no longer spliced into a path, so
+        # none of them means anything here: the name is bound and compared whole,
+        # NUL included — which the path grammar could not do at all, since it
+        # truncates a label at the first NUL and then answers with a neighbouring
+        # key's value.
+        return _GroupAxis("meta", None, key)
     raise ValueError(f"Invalid group_by: {group_by}. Must be one of ({GROUP_AXES_HELP})")
 
 
@@ -3250,12 +3288,35 @@ def _membership_sql(
             list(params),
         )
 
-    # axis.kind == "meta". The path is BOUND, never interpolated, so a key
+    # axis.kind == "meta". The key NAME is BOUND, never interpolated, so a key
     # holding a space cannot reach the SQL text as syntax — and no S608
     # suppression is owed for it either, unlike the interpolated-identifier
     # sites elsewhere in this file. (Spelled as the bare rule code on purpose:
     # ruff parses a suppression directive out of ANY comment, prose included,
     # and warns that this one is malformed.)
+    #
+    # A CORRELATED SUBQUERY, NOT A JOIN, AND THAT IS THE WHOLE OF WHY THIS SHAPE
+    # LOOKS HEAVIER THAN THE TAG BRANCH BESIDE IT (CB-167). A JSON object may
+    # carry the SAME key twice — `json.dumps` cannot write that, but a
+    # hand-edited or imported document can, and `json_valid` accepts it. Joining
+    # `json_each` would then emit TWO rows for ONE finding: measured, a card with
+    # `occurrence_count = 7` and a duplicated key contributed 14 to `get_stats`'
+    # occurrence SUM while its finding count stayed 1 — one group's two numbers
+    # describing different populations, which is exactly the defect the tag
+    # branch's DISTINCT exists to prevent. The SCALAR SUBQUERY is what keeps the
+    # old cardinality AND the old choice — `json_extract` returned the FIRST such
+    # key's value, and so does this (measured on the same fixture).
+    #
+    # `LIMIT 1` is EXPLICITNESS, not load-bearing, and it is said that way round
+    # because the mutant was run: a scalar subquery already yields its first row,
+    # so deleting `LIMIT 1` changes nothing and no test can discriminate it. What
+    # a test DOES discriminate is rewriting this as a JOIN, which is the shape
+    # somebody would reach for by copying the tag branch above —
+    # `test_a_duplicated_key_yields_ONE_row_not_two` reddens on exactly that.
+    #
+    # The EXISTS arm and the SELECT arm must therefore ask the SAME question, or
+    # a row would be admitted by one and given a NULL group key by the other; the
+    # scalar-type test is shared between them for that reason rather than copied.
     #
     # A GROUP KEY IS ALWAYS TEXT, and this is the only axis that could have made
     # it otherwise — a column key is text and a tag is filtered to `type='text'`.
@@ -3277,15 +3338,20 @@ def _membership_sql(
     # placeholders in the SELECT, then the caller's WHERE values, then one more
     # for the scalar test. Prepending or appending as a block would bind the
     # path to a filter's placeholder and corrupt exactly the FILTERED queries.
-    path = axis.meta_path
+    key = axis.meta_key
+    pick = (
+        "SELECT CASE je.type WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' "
+        "ELSE CAST(je.value AS TEXT) END FROM json_each(findings.meta) je "
+        f"WHERE je.key = ? AND {_META_SCALAR_TEST} LIMIT 1"
+    )
+    live = (
+        "SELECT 1 FROM json_each(findings.meta) je "
+        f"WHERE je.key = ? AND {_META_SCALAR_TEST}"
+    )
     return (
-        "SELECT id, severity, occurrence_count, "
-        f"CASE WHEN json_valid(meta, {_JSON5}) THEN (CASE json_type(meta, ?) "
-        "WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' "
-        "ELSE CAST(json_extract(meta, ?) AS TEXT) END) END AS group_key "
-        f"FROM findings {where} {more} "
-        f"CASE WHEN json_valid(meta, {_JSON5}) THEN {_META_SCALAR_TEST} ELSE 0 END",
-        [path, path, *params, path],
+        f"SELECT id, severity, occurrence_count, ({pick}) AS group_key "
+        f"FROM findings {where} {more} {_META_OBJECT_GUARD} AND EXISTS ({live})",
+        [key, *params, key],
     )
 
 
@@ -3344,11 +3410,19 @@ def _axis_counts(
         "nonscalar_value_rows": 0,
     }
     if axis.kind == "meta":
+        # Same key-as-bound-value discipline as `_membership_sql` (CB-167): this
+        # counter asks about the SAME key on the SAME rows, so reading it through
+        # a path while the groups came from `json_each` would let the reported
+        # "carried a container" number describe a different key than the groups.
+        container = (
+            "SELECT 1 FROM json_each(findings.meta) je "
+            "WHERE je.key = ? AND je.type IN ('object','array')"
+        )
         counts["nonscalar_value_rows"] = conn.execute(
-            f"SELECT COALESCE(SUM(CASE WHEN json_valid(meta, {_JSON5}) THEN "
-            "(CASE WHEN json_type(meta, ?) IN ('object','array') THEN 1 ELSE 0 END) "
-            f"ELSE 0 END), 0) AS c FROM findings {where}",
-            [axis.meta_path, *params],
+            f"SELECT COALESCE(SUM(CASE WHEN {_META_OBJECT_GUARD} "
+            f"AND EXISTS ({container}) THEN 1 ELSE 0 END), 0) AS c "
+            f"FROM findings {where}",
+            [axis.meta_key, *params],
         ).fetchone()["c"]
     return counts
 
@@ -3529,13 +3603,19 @@ def query_findings(
         # the caller got the unfiltered queue back (CB-28). The MCP description already
         # declares meta_key required; this enforces it instead of discarding the value.
         raise ValueError("meta_value requires meta_key")
+    # CB-167: the key is a NAME compared as a bound value, not a path fragment.
+    # `_meta_key_condition` is the single definition; the grouping axis resolves
+    # the same name through the same guard, so the two surfaces cannot drift.
+    # The `meta_value` comparison is deliberately unchanged in MEANING — it still
+    # compares against a TEXT parameter, so a NUMERIC stored value still does not
+    # match (CB-276 owns that, and this unit must not fix it while it is here).
     if meta_key and meta_value:
-        conditions.append("json_extract(meta, ?) = ?")
-        params.append(f"$.{meta_key}")
+        conditions.append(_meta_key_condition(with_value=True))
+        params.append(meta_key)
         params.append(meta_value)
     elif meta_key:
-        conditions.append("json_extract(meta, ?) IS NOT NULL")
-        params.append(f"$.{meta_key}")
+        conditions.append(_meta_key_condition(with_value=False))
+        params.append(meta_key)
     if commit:
         if not re.fullmatch(r"[0-9a-fA-F]+", commit):
             raise ValueError(f"commit filter must be hex, got: {commit!r}")
@@ -4913,9 +4993,17 @@ def register_tools(mcp, conn_factory) -> None:
             tag: Filter by tag (finds findings containing this tag)
             meta_key: Filter by metadata key existence. Reads the row's AUTHORED
                       top-level meta (the column), never the occurrence ring.
+                      The value is a LITERAL key name, never a path: `.` `[` `]`
+                      `"` and every other character mean themselves, so
+                      `meta_key="a.b"` matches the top-level key `a.b` and does
+                      NOT descend into `a` → `b` (CB-167 — it used to descend,
+                      which made a real key unfindable and an undeclared nested
+                      one findable). A key present with a JSON `null` value
+                      COUNTS as existing.
             meta_value: Filter by metadata value (requires meta_key; same
                         authored top-level meta as meta_key — ring meta is not
-                        consulted)
+                        consulted). Compared as TEXT, so a NUMERIC stored value
+                        does not match a numeric-looking string (CB-276).
             commit: Matches the first-report column OR any occurrence in the
                     ring (prefix match, hex validated) — "what was observed on
                     this commit" (CB-128). `staleness_check` uses the NEWEST
@@ -4935,10 +5023,13 @@ def register_tools(mcp, conn_factory) -> None:
                       `nonscalar_value_rows` beside `groups`; the counts sum to
                       the population only while the last three are 0.
                       `meta:<key>` reads the AUTHORED top-level meta, like
-                      `meta_key` does, and a key holding `.`, `[`, `]` or `"` is
-                      REFUSED — SQLite cannot tell such a name from a path
-                      (CB-167). A key that is absent, JSON null, or holds an
-                      object/array is ungrouped rather than invented.
+                      `meta_key` does, and `<key>` is a LITERAL key name: any
+                      character is allowed, `.` `[` `]` `"` included, and a
+                      dotted name means that exact top-level key and never a
+                      nested lookup (CB-167). A key that is absent or holds an
+                      object/array is ungrouped rather than invented; a JSON
+                      null value is ungrouped here, though the `meta_key`
+                      FILTER does count such a key as present.
                       OVERLAPS `grouping_tags` DELIBERATELY and differently:
                       that tool is a tag census with pair co-occurrence over
                       `status`/`category` only; this is a distribution that
@@ -5143,8 +5234,10 @@ def register_tools(mcp, conn_factory) -> None:
                       so the totals exceed the number of findings. `population`,
                       `ungrouped_rows`, `multi_group_rows` and
                       `nonscalar_value_rows` ride beside `groups` on every axis
-                      and are what make that readable. A meta key holding `.`,
-                      `[`, `]` or `"` is refused (CB-167).
+                      and are what make that readable. `meta:<key>` names a
+                      LITERAL top-level key: every character is allowed, and a
+                      dotted name is that exact key rather than a nested lookup
+                      (CB-167).
         """
         with conn_factory() as conn:
             return get_stats(conn, group_by=group_by)
@@ -5609,7 +5702,11 @@ def register_cli(sub, commands) -> None:
             # halves back at CB-19. Fixed here rather than left for the sweep
             # because this change is what makes an unknown axis MORE likely: the
             # vocabulary just grew a `meta:<key>` form that refuses on a key
-            # a caller can perfectly reasonably type.
+            # a caller can perfectly reasonably type. (CB-167 later removed that
+            # particular refusal — a key name is a bound value now, so no
+            # character is refused — but the wrapper is unaffected: `meta:` with
+            # an empty key and an unknown axis are still refusals, and they are
+            # what it exists to render as one line instead of a traceback.)
             #
             # Ordering is `domain_errors()`': json.JSONDecodeError re-raises
             # first, and only then does bad input print one line and exit 1.
