@@ -67,53 +67,47 @@ finish (worktree removal, claim release) and speaks at the very end, with a loud
 already ran and the premise is unconfirmed*, and the block says in words not to re-run: a second
 finish after a landed merge is a worse outcome than the defect being reported.
 
-**Four details are load-bearing, each a cross-model review finding rather than foresight, and each is
-a way the alarm can lie.**
+**Four details are load-bearing, and each is a way the alarm can lie.**
 
-1. **Identity, not shape.** A two-parent tip does not establish that main's tip *is the merge this run
-   made*: an off-harness merge landing a moment after ours has two parents too, and its first parent
-   is *our* merge — so its parents would be reported as ours, with a confident and wrong story.
+1. **Identity, not shape.** A two-parent tip does not establish that main's tip *is the merge this
+   run made* — an off-harness merge landing a moment after ours has two parents too, and its first
+   parent is *our* merge, so its parents would be reported as ours with a confident and wrong story.
    `ORIG_HEAD` supplies identity: `git merge` sets it to the HEAD it merged into, which **is** the
-   merge's first parent by construction. So the tip is ours exactly when it has two parents and its
-   first parent is `ORIG_HEAD`. Anything else is one verdict, `tip-not-ours`, which says what it does
-   not know instead of inventing a cause — and that single verdict covers a stranger's commit or
-   merge, an *Already up to date* merge (which sets `ORIG_HEAD` to the **current** tip, so it cannot
-   masquerade as a match), an octopus and a root commit. Both git behaviours are pinned as premise
-   tests.
+   merge's first parent by construction. **So the tip is ours exactly when it has two parents and
+   its first parent is `ORIG_HEAD`.** Anything else is one verdict, `tip-not-ours`, which says what
+   it does not know instead of inventing a cause — and that single verdict covers a stranger's
+   commit or merge, an *Already up to date* merge (which sets `ORIG_HEAD` to the **current** tip, so
+   it cannot masquerade as a match), an octopus and a root commit. Both git behaviours are pinned as
+   premise tests.
 2. **`tip-not-ours` is usually benign, and the text says so.** A plan note landing on main in the
-   moment after a perfectly correct merge produces it. The block therefore tells the operator to read
-   the log rather than to fix anything, and only the two real mismatches carry the *fix it forward on
-   a new branch* advice.
+   moment after a perfectly correct merge produces it, so the block tells the operator to read the
+   log rather than to fix anything; only the two real mismatches carry the *fix it forward on a new
+   branch* advice.
 3. **The block is delivered from an `EXIT` trap armed the instant the merge returns**, not from a
    trailing `if`. Under `set -euo pipefail` any failure in the cleanup — its own final
-   `git log … | sed`, or any statement a later edit inserts — would otherwise kill the script between
-   detecting the condition and reporting it, presenting a landed merge as an ordinary failure. That
-   is CB-41's rule again: make the bad state unrepresentable rather than re-establish discipline at
-   each insertion point. The initial verdict is the pessimistic `unreadable`, so a signal arriving
-   before the verdict is computed still reports *could not look*. The residual is stated rather than
-   claimed away: the interval between `git merge` returning and `trap` executing is two assignments
-   wide, and nothing in the script can close that.
+   `git log … | sed`, or any statement a later edit inserts — would otherwise kill the script
+   between detecting the condition and reporting it, presenting a landed merge as an ordinary
+   failure. That is CB-41's rule again: make the bad state unrepresentable rather than re-establish
+   discipline at each insertion point. The initial verdict is the pessimistic `unreadable`, so a
+   signal arriving before the verdict is computed still reports *could not look*. **The residual is
+   stated rather than claimed away:** the interval between `git merge` returning and `trap`
+   executing is two assignments wide, and nothing in the script can close it.
 4. **The reads are `--no-replace-objects` and stdout-only.** Replace refs and `info/grafts` make `^@`
    answer with parents that are not in the commit's own header, so without the flag the "an object's
    parents are immutable" argument would be true of the object and false of the answer. Stdout-only
    is the one place fail-closed is deliberately **not** applied — folding stderr in would make any
-   `warning:` git emitted unparseable and fire the alarm on an honest finish, and an alarm that cries
-   wolf is one nobody reads; the rc still separates an error from an empty answer. Every answer is
-   shape-checked as well, because `rev-parse` echoes an argument it does not recognise back at you
-   and exits 0.
-
-Rejected forms, with their reasons: making the merge name the pinned `TESTED_HEAD` closes only the
-branch half and pays a false refusal, since `pre-merge-commit` refuses a head with no ref; and a real
-CAS needs `git update-ref` over `commit-tree`, which this repo's own CI alarm treats as a
-hook-bypassing shape.
+   `warning:` git emitted unparseable and fire the alarm on an honest finish, and an alarm that
+   cries wolf is one nobody reads; the rc still separates an error from an empty answer. Every
+   answer is shape-checked as well, because `rev-parse` echoes an argument it does not recognise
+   back at you and exits 0.
 
 `merge.ff=false` is the one no hook could replace: **git fires no hook on a fast-forward at all**,
-because no commit is created, so nothing can catch it after the fact. Verified by replaying the
-incident in a throwaway repo — default config gives `Fast-forward` and zero merge commits;
-`merge.ff=false` gives a merge commit. Two precise limits, because the first draft of this section
-overstated it: it does nothing when the branch is already an ancestor of main (git says "Already up
-to date" and main does not move, which is harmless), and it is *configuration*, so
-`git config merge.ff true` turns it off without anyone typing `--ff`.
+because no commit is created, so nothing can catch it after the fact. **Two precise limits:** it
+does nothing when the branch is already an ancestor of main (git says "Already up to date" and main
+does not move, which is harmless), and it is *configuration*, so `git config merge.ff true` turns it
+off without anyone typing `--ff`.
+
+→ почему именно так: `docs/claude-md-rationale/workflow.md#cb-121-четыре-несущие-детали`
 
 **The merge gate closed, and CB-57's own prescription turned out to be wrong (verified by running
 it).** The card said to validate "the branch behind `MERGE_HEAD`" in a `pre-merge-commit` hook. On
@@ -188,52 +182,42 @@ Note the scope was narrowed twice under review. It first trusted **any** `<remot
 **configured** remote's — at which point `git remote add junk <anything>` plus a fetch was still a
 two-command bypass. Only main's declared upstream counts now.
 
-**`MERGE_HEAD` is read fail-closed, and it was not at first.** The conflicted-merge gate is a `while
-read` over that file, and two states made it run **zero** times, leave the refusal flag at `0`, and
-fall through to the merge-in-progress exemption: an **empty** `MERGE_HEAD` (which an interrupted git
-can leave behind, so this was reachable by accident) let arbitrary staged content land on main with
-no merge at all; and a `MERGE_HEAD` with **no trailing newline** — `read` returns non-zero on an
-unterminated last line — landed a real two-parent merge of an untyped branch. Neither typed
-`--no-verify`. Both reproduced. The loop now uses `|| [[ -n "$_sha" ]]` and counts what it saw, and
-refuses when it saw nothing: the "guard reporting clean because it could not look" shape that the CI
-job and the `pre-merge-commit` hook were *already* hardened against in this same change — `pre-commit`
-was the one place left failing open.
+**`MERGE_HEAD` is read fail-closed.** The conflicted-merge gate is a `while read` over that file, and
+two states make a naive loop run **zero** times, leave the refusal flag at `0`, and fall through to
+the merge-in-progress exemption: an **empty** `MERGE_HEAD`, which an interrupted git can leave behind
+and is therefore reachable by accident, and a `MERGE_HEAD` with **no trailing newline**, since `read`
+returns non-zero on an unterminated last line. The loop therefore uses `|| [[ -n "$_sha" ]]`, counts
+what it saw, and **refuses when it saw nothing** — the "guard reporting clean because it could not
+look" shape, which the CI job and the `pre-merge-commit` hook were already hardened against.
 
-**`core.hooksPath` made `_guard_enforcement_armed` lie**, which matters more than the other findings
-because that guard's entire job is *this clone is actually armed*. It resolved
-`--git-common-dir`/hooks, which does **not** follow the redirect, so `git config core.hooksPath
-<empty-dir>` left the guard returning `0` while nothing was installed and a commit of arbitrary
-content on main then succeeded. Both the guard and `install-hooks.sh` now use `git rev-parse
---git-path hooks`, which does follow it (verified both ways) — **and a RELATIVE value is refused
-outright**, because git resolves one against the top of *each* working tree, so
-`core.hooksPath=.githooks` names a different directory in the primary checkout and in every linked
-worktree. Round 3 reproduced that too: armed in the primary, main checked out in a linked worktree
-with no `.githooks` there, guard `0`, source commit onto main `0`. "This clone is armed" is not a
-statement the guard can make about a per-worktree path, so it declines to make it. The value is read
-with **`--type=path`**, so git does its own `~` expansion first: reading it raw classed `~/hooks` as
-relative and refused a genuinely armed clone, while the same function was resolving the same setting
-through `--git-path` two lines earlier — one setting, two answers. Known residual: with
-`extensions.worktreeConfig` and an *absolute* per-worktree value the asymmetry returns, bounded because
-the integration merge runs in the primary where the gate does fire.
+**`core.hooksPath` can make `_guard_enforcement_armed` lie**, which matters more than the other
+findings because that guard's entire job is *this clone is actually armed*. `--git-common-dir`/hooks
+does **not** follow the redirect, so both the guard and `install-hooks.sh` use `git rev-parse
+--git-path hooks`, which does — **and a RELATIVE value is refused outright**, because git resolves
+one against the top of *each* working tree, so `core.hooksPath=.githooks` names a different directory
+in the primary checkout and in every linked worktree. "This clone is armed" is not a statement the
+guard can make about a per-worktree path, so it declines to make it. The value is read with
+**`--type=path`**, so git does its own `~` expansion first; reading it raw classes `~/hooks` as
+relative and refuses a genuinely armed clone. **Known residual:** with `extensions.worktreeConfig`
+and an *absolute* per-worktree value the asymmetry returns, bounded because the integration merge
+runs in the primary, where the gate does fire.
 
-**The bootstrap gate's "monotonic" condition took three attempts.** It first gated on the file
-existing, so one `rm` was a permanent silent disarm (round 2). It then read the literal ref `main`, so
-any clone with no *local* main — `git clone --single-branch --branch fix/…` is enough, and
-`origin/main` being present does not help — collapsed it straight back (round 3). It now reads
-`--all`, **and distinguishes an ERROR from an empty result**, because `2>/dev/null || true` made those
-identical: round 4 reproduced the full disarm once more through a `--filter=tree:0` clone whose
-promisor remote had gone away, where `git log --all -- <path>` exits 128. The claim "no checkout shape
-can hide the history" was true and still insufficient — the hole had moved from a checkout shape to an
-error path. It now fails closed on the error, which is the third distinct door onto the same defect.
+**The bootstrap gate's condition must be MONOTONIC.** It gates on whether the path has **history** on
+main, read with `--all` — a clone with no *local* main (`git clone --single-branch --branch fix/…` is
+enough, and `origin/main` being present does not help) would otherwise collapse it — **and it
+distinguishes an ERROR from an empty result**, failing closed on the error: `2>/dev/null || true`
+makes those identical, and `git log --all -- <path>` exits 128 in a `--filter=tree:0` clone whose
+promisor remote has gone away.
 
-**A non-ASCII plan note could not land on main** — a false refusal, and the mirror image of a bug
-this repo already had. `git diff --cached --name-only` C-quotes such a path by default, the allowlist
-regex misses it, and the commit is refused; the same default once made `_guard_conflict_markers`
-silently *accept* a conflict marker. Both readers now pass `-c core.quotePath=false`. **A third
-reader has since joined them** — the commit-msg gate below derives a BASENAME from that same staged
-set, so a C-quoted path there yields a basename no human could ever type, which is a *permanent*
-false refusal of every non-ASCII plan note rather than a one-off. The test that pins this no longer
-says "both readers", because a count in a name is a count that goes stale.
+**Every reader of the staged set passes `-c core.quotePath=false`.** `git diff --cached --name-only`
+C-quotes a non-ASCII path by default, which makes the allowlist regex miss it and refuses the commit;
+the same default once made `_guard_conflict_markers` silently *accept* a conflict marker. The
+commit-msg gate below derives a BASENAME from that same staged set, so a C-quoted path there yields a
+basename no human could ever type — a *permanent* false refusal of every non-ASCII plan note rather
+than a one-off. The test that pins this names no count, because a count in a name is a count that
+goes stale.
+
+→ почему именно так: `docs/claude-md-rationale/workflow.md#сторожа-читают-fail-closed`
 
 **A plan note landing on main must be NAMED in the commit message, and the mechanism is a
 `commit-msg` hook — NOT the pre-commit hook originally specified.** The rule this mechanises is that
