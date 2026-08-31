@@ -346,6 +346,126 @@ _guard_finishable_branch "${BRANCH}" || exit $?
 _guard_branch_type "${BRANCH}" || exit $?
 
 # ---------------------------------------------------------------------------
+# THE WORKTREE-FINISH LOCK (CB-187). The SECOND lock this script takes, and the
+# OUTER one. A gate, not an alarm: it refuses before any work is paid for.
+#
+# THE DEFECT. The integration lock (`exec 9>`, [7/7]) serializes only the
+# INTEGRATION. The checks phase [6/7] — ruff plus the full suite, ~200s — sits
+# entirely OUTSIDE it, so two processes can walk the same worktree at once, and
+# the winner's ordinary post-merge cleanup (`git worktree remove`, at the end of
+# this file) deletes the directory out from under the loser's running suite.
+#
+# The loss is not the work — the branch lands, the tree is recreated in seconds.
+# The loss is the EXPLANATION: the loser printed `✗ pytest failed — fix in the
+# worktree, then re-run` and exited 1, i.e. it named a defect of the branch when
+# what happened was external destruction of its working directory, in the very
+# second that same branch landed successfully. Exit 1 is this package's code for
+# BAD INPUT, and the race had no code of its own at all. A refusal that reports
+# the wrong cause is dearer than the refusal, because it misdirects the next
+# reader — measured, it already cost one discarded run and one card filed on a
+# wrong diagnosis (CB-185, closed not_a_bug).
+#
+# WHY A LOCK RATHER THAN A RULE. Three sources of a second finish are all
+# SANCTIONED traffic, not abuse: a retry loop (exit 13 is prescribed to be cured
+# by a literal re-run), session rotation (a background loop outliving its
+# session), and a level-(3) manager and a direction holder independently driving
+# one unit. So "do not start a second finish" is point-of-use discipline against
+# behaviour the regulations themselves produce. CB-41's rule applies: make the
+# bad state UNREPRESENTABLE instead of forbidden.
+#
+# THE NAME IS DERIVED FROM THE CANONICAL IDENTITY, AND THIS IS THE ONE DETAIL
+# THAT DECIDES WHETHER THE GATE CAN FIRE AT ALL. `_resolve_worktree_path` above
+# accepts BOTH the full directory name and the branch suffix — `fix-cb-50-thing`
+# and `cb-50-thing` resolve to the SAME tree — so two invocations of one branch
+# legitimately arrive with DIFFERENT spellings of `$1`. Measured on this repo's
+# live worktrees, 2026-08-31: both spellings returned the identical path. A lock
+# named from `$1` would therefore have produced two file names, two inodes, and
+# zero mutual exclusion — the gate installed and unable to fire. Measured too:
+# `flock -n` on two different names both return 0. So the name comes from the
+# RESOLVED PATH, never from what the operator typed.
+#
+# The path is made into a file name by stripping REPO_ROOT and replacing `/`
+# with `-`, which is unambiguous where a bare basename is not: `.worktrees/foo`
+# and the legacy `.claude/worktrees/foo` are two different trees whose basenames
+# collide, and this repo still resolves both. RESIDUAL, named rather than
+# closed: a path deep enough to push the name past the filesystem's 255-byte
+# limit fails loudly at the open below rather than being truncated, because
+# truncation would restore exactly the ambiguity this avoids.
+#
+# PLACEMENT. After the two branch guards and BEFORE [1/7], which is the first
+# phase that MUTATES anything (the auto-commit). Earlier is impossible — the
+# name needs the resolved path. Later would defeat the purpose, since the point
+# is not to pay for the checks. Being after the branch guards is deliberate and
+# free: they are two git calls, and a branch that can never finish deserves its
+# own diagnosis rather than a lock refusal. It is also after the `-d` check on
+# the resolved path, which disposes of a hazard a naive placement would have
+# had: `_resolve_worktree_path` returns 0 unconditionally and hands back a
+# CONSTRUCTED path for a slug nobody has, so a lock taken before that check
+# would be named after the operator's typo.
+#
+# THE FILE LIVES BESIDE THE WORKTREE, NEVER INSIDE IT, following
+# `.integrate.lock`. Inside, it would be deleted along with the tree by the
+# winner's cleanup — at precisely the moment it exists for.
+#
+# THE FILE IS NEVER DELETED, for the same reason `.integrate.lock` is not:
+# `flock` locks an INODE, so unlinking the file lets the next process create a
+# fresh inode and take a lock on that, and the exclusion evaporates. Measured.
+#
+# LOCK ORDER IS FIXED: this one (worktree) first, the integration lock second,
+# on every path. Uniform order is why there is no wait cycle. A future edit must
+# not reorder them.
+#
+# THE RESULT IS READ THREE-VALUED, WHICH `flock` ITSELF MAKES POSSIBLE. Measured
+# on util-linux 2.41.3: `flock -n` returns 1 for "held by someone else" and 65
+# for an error (a bad descriptor), so the two are distinguishable and there is
+# no need to report "another finish is running" about a state we could not read.
+# Only rc 1 earns exit 16; anything else is an ordinary failure and exits 1,
+# exactly as the integration lock's own timeout does.
+#
+# The open is written `if ! exec 8>` and not as a bare `exec`: measured, a bare
+# redirect failure on `exec` kills a non-interactive shell outright regardless
+# of `set -e`, so it could not be reported.
+#
+# Descriptor 8, because 9 is the integration lock's.
+_finish_lock_name() {
+    local rel="${1#"${REPO_ROOT}/"}"
+    rel="${rel//\//-}"
+    printf '%s' "${rel#-}"
+}
+WORKTREE_LOCK_FILE="${WORKTREE_DIR}/.finish-$(_finish_lock_name "${WORKTREE_PATH}").lock"
+mkdir -p "${WORKTREE_DIR}"
+if ! exec 8>"${WORKTREE_LOCK_FILE}"; then
+    echo "  ERROR: could not open the worktree-finish lock:"
+    echo "    ${WORKTREE_LOCK_FILE}"
+    exit 1
+fi
+_wt_lock_rc=0
+flock -n 8 || _wt_lock_rc=$?
+if (( _wt_lock_rc == 1 )); then
+    echo "  ✗ A finish of this worktree is ALREADY RUNNING."
+    echo "    Worktree: ${WORKTREE_PATH}"
+    echo "    Branch:   ${BRANCH}"
+    echo ""
+    echo "  Nothing was done and nothing was paid for: this refusal happens"
+    echo "  before the checks, so no suite ran and no commit was made."
+    echo ""
+    echo "  This is normal traffic, not a mistake — a retry loop, a rotated"
+    echo "  session, or two drivers of one unit. Let the running finish end and"
+    echo "  read what IT says; the two invocations may have been spelled"
+    echo "  differently and still name this same worktree."
+    echo ""
+    echo "  Do NOT delete ${WORKTREE_LOCK_FILE} to get past this — the lock is"
+    echo "  held on the inode, so removing the file only turns the gate off."
+    echo "  To see who holds it: fuser -v ${WORKTREE_LOCK_FILE}"
+    exit 16
+elif (( _wt_lock_rc != 0 )); then
+    echo "  ERROR: could not read the worktree-finish lock (flock exit ${_wt_lock_rc})."
+    echo "  This is NOT 'another finish is running' — that is exit 16. Something"
+    echo "  is wrong with the lock itself: ${WORKTREE_LOCK_FILE}"
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
 echo "[1/7] Working tree status..."
 STATUS=$(git -C "${WORKTREE_PATH}" status --short)
 if [[ -n "${STATUS}" ]]; then
@@ -530,6 +650,82 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# "MY WORKING DIRECTORY VANISHED" IS NOT "THE CHECKS FAILED" (CB-187, half b).
+#
+# The lock above closes the case of a second finish of THIS worktree. It cannot
+# close every way the directory can disappear mid-run — an operator's `git
+# worktree remove`, an `rm -rf`, a cleanup script — so before either check arm
+# is allowed to blame the branch, it asks whether there was still a tree to run
+# in. The lock is the fix; this is the honest diagnosis when the fix does not
+# apply. Both are needed and neither replaces the other.
+#
+# BOTH ARMS, NOT JUST pytest. The card names pytest; the ruff arm has the
+# IDENTICAL shape — a `(cd "${WORKTREE_PATH}" && …)` subshell whose `cd` fails
+# when the directory is gone — and would have printed the same false diagnosis,
+# just earlier and more cheaply. Fixing only the arm someone enumerated is this
+# repository's most-repeated defect. So the report is ONE function called from
+# both, rather than two texts a later edit can let drift.
+#
+# ABSENCE IS ASSERTED ONLY ON AFFIRMATIVE PROOF, and getting this backwards
+# would rebuild the very defect being fixed, with the sign flipped. `[[ -d … ]]`
+# answers a THREE-valued question with two values (CB-203/CB-218/CB-224/CB-227,
+# one file over): *could not look* comes back spelled *nothing is there*. Here
+# that would mean a directory that EXISTS but could not be seen is declared
+# gone, and a genuine suite failure is then excused as "not your fault" — a
+# false exoneration, which is worse than the false accusation this card is
+# about. So the primitives are COMPOSED so the undetermined cases fall out on
+# their own: the parent must be present AND searchable before a missing child
+# means anything, a name that resolves at all is not gone, and a DANGLING
+# SYMLINK is not gone either — the name is there, `-e` is simply false through
+# it. Anything unproven degrades to the ordinary check-failure message: erring
+# toward the OLD behaviour, never toward the new claim.
+#
+# Measured over six states, 2026-08-31 (present; removed with a searchable
+# parent; present under an unsearchable parent; removed under an unsearchable
+# parent; a dangling symlink; the whole parent removed): exactly one — removal
+# with a searchable parent, which is what `git worktree remove` leaves — reports
+# GONE. The last two rows are the declared cost: a real disappearance that
+# cannot be PROVEN prints the old message, and that is the direction to be wrong
+# in.
+#
+# SCOPE, stated rather than implied: this covers the two check arms, which is
+# where the false diagnosis was observed. Other statements in this script also
+# reach into the worktree; they are not covered here, and widening the claim
+# without measuring each one is how a gate comes to be described better than it
+# behaves.
+_worktree_is_provably_gone() {
+    local path="$1" parent
+    parent="$(dirname -- "${path}")"
+    [[ -d "${parent}" ]] || return 1
+    [[ -x "${parent}" ]] || return 1
+    [[ -e "${path}" ]] && return 1
+    [[ -L "${path}" ]] && return 1
+    return 0
+}
+
+_report_check_failure() {
+    local what="$1"
+    if _worktree_is_provably_gone "${WORKTREE_PATH}"; then
+        echo "  ✗ ${what} could not run: THE WORKTREE DIRECTORY IS GONE."
+        echo "    ${WORKTREE_PATH}"
+        echo ""
+        echo "  This is NOT a failure of the branch. The directory was removed"
+        echo "  from underneath this run, so there was nothing left to check."
+        echo "  The usual cause is another finish of this same worktree that"
+        echo "  landed and then ran its ordinary cleanup — read the log or the"
+        echo "  journal (.worktrees/landing-attempts.log) before concluding"
+        echo "  anything about the code."
+        echo ""
+        echo "  Nothing of this run landed. If the branch really did land under"
+        echo "  the other run, there is nothing to redo; otherwise recreate the"
+        echo "  worktree with tools/worktree-setup.sh and start again."
+        exit 17
+    fi
+    echo "  ✗ ${what} failed — fix in the worktree, then re-run."
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
 # Gates run in the WORKTREE, on the post-forward-merge tree — the combined
 # state that is about to become main, not the branch in isolation.
 echo ""
@@ -544,14 +740,12 @@ else
     # of the existing tree is non-conformant to it, so adding it would refuse
     # every finish including ones that changed nothing formatting-related.
     if ! (cd "${WORKTREE_PATH}" && uv run --extra dev ruff check src/ tests/); then
-        echo "  ✗ ruff check failed — fix in the worktree, then re-run."
-        exit 1
+        _report_check_failure "ruff check"
     fi
     echo "  ✓ ruff check clean"
 
     if ! (cd "${WORKTREE_PATH}" && uv run --extra dev python -m pytest tests/ -q); then
-        echo "  ✗ pytest failed — fix in the worktree, then re-run."
-        exit 1
+        _report_check_failure "pytest"
     fi
     echo "  ✓ tests pass"
 fi
