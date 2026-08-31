@@ -28,3 +28,38 @@ source row, and by nothing else — so an "externals are covered" fixture whose 
 *live* finding proves nothing.
 
 **Cost of the per-row predicate, for the record.** `source_is_terminal` ran a `sqlite_master` probe plus a status `SELECT` for every candidate row, and per-bucket construction of the replacement would have added eight `sqlite_master` reads inside the exclusive-lock hold.
+
+## Что в этом файле, и чего в нём нет
+
+**Что в этом файле.** Обоснования правил из корневого `CLAUDE.md`: почему правило появилось, какой
+инцидент его породил, что показали раунды состязательного ревю, какие формы были отвергнуты и по
+какому замеру. С Т-131 сюда же переехала операционная глубина — устройство сторожей и хуков,
+пределы алярмов, внутренности гейтов.
+
+**Чего в этом файле НЕТ, и это важнее.** Здесь нет ни одного правила, которое нужно знать до начала
+работы. Всё такое осталось в корневом `CLAUDE.md`, потому что этот файл не впрыскивается в сессию —
+его открывает только тот, кого сюда послали. Если ты ищешь, как завести рабочее дерево, что значит
+код отказа или что можно коммитить на `main`, — тебе не сюда, а в корень.
+
+**Кто сюда ходит.** Тот, кто правит соответствующую подсистему, — и тот, кто собирается ослабить
+правило и обязан сперва узнать, чем за него заплатили.
+
+---
+
+# Перенесено из корня юнитом Т-131
+
+## Architecture
+
+This line used to claim "~40 lines"; it was 159 before that change and is larger now, so the count is dropped rather than re-guessed
+
+## Architecture / Known architectural debt
+
+- ~~`blockers.py` cross-module reach into private `_row_to_dict`~~ — **resolved.** `blockers.py` calls the public `db.row_to_dict()` (`blockers.py:87`, `:307`, `:442`) and does not reach into `reqs` at all; no private `_row_to_dict` exists anywhere in the package (CB-5).
+
+- **A VIEW was rejected for a measured reason, not the obvious one.** The obvious objection — a view's DDL would hardcode the terminal sets — is false; it could be regenerated from `kind.terminal` on every schema init. The real one: `CREATE VIEW` over a missing source table **succeeds**, and the first `SELECT` from it raises `no such table`. A view therefore fails **closed, with a crash**, for exactly the raw-connection callers this design must keep working.
+
+## Architecture migration (in progress)
+
+Query with `reqs_query --section "Architecture Migration"` or MCP tool `reqs_query(section="Architecture Migration")` for the full plan (ARCH-001 through ARCH-005).
+
+**All phases complete**: schema registry (ARCH-001) -> tool registration (ARCH-002) -> entity types (ARCH-003) -> CLI unification (ARCH-004) -> embedding separation (ARCH-005).
