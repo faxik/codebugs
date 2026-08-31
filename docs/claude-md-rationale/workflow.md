@@ -322,9 +322,7 @@ earlier the same section had stated the reason — **a convention that exists on
 log is not a rule** — and then declined to bind it. **Prose cannot enforce prose**; the harness below
 is the fix.
 
-**The re-check row was NARROWED, and what closes the remaining gap is a second alarm — not a gate
-(CB-121).** That row used to read *"The tested state is the landed state"*, and it overclaimed: the
-in-lock re-check is a **check-then-act**. It proves main and the branch were still the tested ones
+It proves main and the branch were still the tested ones
 **at the moment of the check**; two statements later `git merge "${BRANCH}"` resolves both refs
 again, by NAME, for itself. Nothing carries a verified SHA into the merge and porcelain git has no
 `--expect-old-oid`, so a window sits between them. The flock serializes **finishes against each
@@ -344,6 +342,11 @@ of them while asserting the premise is this section's own recurring defect.
    commit or merge, an *Already up to date* merge (which sets `ORIG_HEAD` to the **current** tip, so
    it cannot masquerade as a match), an octopus and a root commit. Both git behaviours are pinned as
    premise tests.
+
+2. **`tip-not-ours` is usually benign, and the text says so.** A plan note landing on main in the
+   moment after a perfectly correct merge produces it, so the block tells the operator to read the
+   log rather than to fix anything; only the two real mismatches carry the *fix it forward on a new
+   branch* advice.
 
 3. **The block is delivered from an `EXIT` trap armed the instant the merge returns**, not from a
    trailing `if`. Under `set -euo pipefail` any failure in the cleanup — its own final

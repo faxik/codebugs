@@ -72,14 +72,14 @@ DEFAULT_CEILING = 8_000
 # `.claude/plans/T131-ceiling-mutation-proof.py`.
 CEILINGS: dict[str, tuple[int, str]] = {
     "CLAUDE.md": (
-        42_072,
-        "achieved 38,072 after the T-131 directive/depth split plus one SLACK; "
+        41_921,
+        "achieved 37,921 after the T-131 directive/depth split plus one SLACK; "
         "the root is injected into EVERY session, so this is the number that "
         "matters most",
     ),
     "src/codebugs/CLAUDE.md": (
-        114_322,
-        "achieved 110,322 plus one SLACK. Far above the benchmark's ~6 KB average "
+        114_397,
+        "achieved 110,397 plus one SLACK. Far above the benchmark's ~6 KB average "
         "nested file, and deliberately so: this package is 25 modules in ONE flat "
         "directory, so there is a single hook point for the whole domain. It is "
         "paid only by a session that reads a file in src/codebugs/, never at "

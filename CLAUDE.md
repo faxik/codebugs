@@ -33,7 +33,10 @@ table's own title. It asserts that main's first-parent line carries nothing but 
 mechanically enforced"* with a *"refuses with"* column was a category error inside the very table
 meant to be precise (round-3 review). It is an **alarm**. The gate is branch protection on
 `origin/main`; see the CI limits below.
-The narrowed row is
+
+**The re-check row was NARROWED, and what closes the remaining gap is a second alarm — not a gate
+(CB-121).** That row used to read *"The tested state is the landed state"*, and it overclaimed: the
+in-lock re-check is a **check-then-act**. The narrowed row is
 still a checkable claim — the state matched under the lock, and a mismatch there really does refuse
 with exit 13 before anything lands. It simply no longer promises the interval it cannot cover.
 
@@ -47,11 +50,6 @@ finish (worktree removal, claim release) and speaks at the very end, with a loud
 — deliberately not `exit 13`, which means *nothing landed, re-run*. `exit 15` means *the merge step
 already ran and the premise is unconfirmed*, and the block says in words not to re-run: a second
 finish after a landed merge is a worse outcome than the defect being reported.
-
-2. **`tip-not-ours` is usually benign, and the text says so.** A plan note landing on main in the
-   moment after a perfectly correct merge produces it, so the block tells the operator to read the
-   log rather than to fix anything; only the two real mismatches carry the *fix it forward on a new
-   branch* advice.
 
 `merge.ff=false` is the one no hook could replace: **git fires no hook on a fast-forward at all**,
 because no commit is created, so nothing can catch it after the fact. **Two precise limits:** it
@@ -377,6 +375,8 @@ rewritten the same way, expect the same one-time manual merge.
 
 - `ruff` for linting/formatting, line length 100.
 
+### Database
+
 - Use parameterized queries exclusively. Never interpolate values into SQL.
 
 ### Testing
@@ -387,7 +387,7 @@ rewritten the same way, expect the same one-time manual merge.
 
 - Run format: `uv run ruff format src/ tests/`
 
-`SIG_DFL` fixes both and yields **141** (`128 + SIGPIPE`), deliberately distinguishable from `1`. 
+### CLI
 
 **`cli.run` REFUSES at the process entry, before any work, with the same 141** — one vocabulary for one condition ("the reader of my output is gone"), uniform on 3.11 through 3.14, measured by the `contracts` matrix in `.github/workflows/ci.yml` (`test_cli_signals.py` + `test_fsio.py`). **Honest scope: 3.15 and later are admitted by `requires-python` and are NOT verified** until they are added to that matrix; narrowing the sentence to the pinned version alone was rejected as the more expensive option, since it would leave `requires-python = ">=3.11"` advertising a range nothing checks. **The price is a real behaviour change on 3.13 and is named rather than absorbed**: a closed-object stdout there used to let the write land and then fail on output, and now lands nothing — which is the point, since with the refusal ahead of the work there is no committed write left to misreport.
 **Four residuals, each measured, none a regression** (every one proceeds today too): `fileno()` does not govern `write()` — `io.TextIOBase()` raises `UnsupportedOperation` from both, so it is accepted and then fails, and refusing it instead would refuse every pytest capture object; a writable descriptor can still fail to be written (`/dev/full`, a full filesystem, a hung-up PTY), which is a **write failure, not a closed stdout**, and needs its own outcome as a separate negotiation; a file opened for WRITING landing on fd 1 passes the probe and takes the output; and **the 141 is not unconditional** — finalization also flushes `sys.stderr`, and a failing stderr flush rewrites the status to 120 even with `sys.stdout = None`, reachable only by installing an stderr in-process before `run`, so no CLI invocation reaches it and making it unconditional would mean `os._exit`.
