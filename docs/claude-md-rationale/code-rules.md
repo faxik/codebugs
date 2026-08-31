@@ -111,3 +111,27 @@ redirects only reads" — which flattened two channels `db.declared_tracker_root
 apart. **The defect that fixed was worse than the ignored flag itself**: the warning fired on the path
 where the flag had been dropped, so it printed "commands will read DIR, not CWD" immediately *after*
 initializing CWD — two adjacent lines asserting the opposite of what was on disk.
+
+---
+
+### Testing — CB-204, CB-215 {#тестирование}
+
+**Justifies the rules** in `CLAUDE.md` → `## Code rules` → `### Testing`.
+
+**Why the conftest rule stopped being a count (CB-204).** It read *"exists for exactly one thing and
+should stay that way"*, and had to be rewritten the first time a second qualifying property
+appeared.
+
+**The ambient-state fixture was verified, not theorized.** With `CODEBUGS_ROOT` exported, the
+findings CLI tests moved a real CB-1 from `low`/`open` to `high`/`fixed` in the developer's own
+tracker.
+
+**What the CB-204 session guard is worth, measured 2026-08-26 by running it.** With an empty
+`.codebugs/` directly above the temporary root, **1071 of 2739 tests** fail or error. After the guard,
+that same state is one refusal in 0.7s at exit 4.
+
+**Why the CB-215 alarm exists, measured on main's own history.** The median gap between first-parent
+commits is 141 seconds against a suite run of about 170, so a merge arriving mid-run is an ordinary
+Tuesday.
+
+**Silence on a still tree was measured** over the full suite: 2878 tests, nothing printed.

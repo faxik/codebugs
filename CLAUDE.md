@@ -827,16 +827,18 @@ rewritten the same way, expect the same one-time manual merge.
 ### Testing
 - Tests live in `tests/test_<module>.py`. Most test classes use a fresh in-memory DB via a `conn` fixture.
 - Tests requiring `db.connect()`, cross-module schemas, or git operations use `tmp_path` file-based DBs.
-- Each test file defines its own fixtures. `tests/conftest.py` is not a shared-fixture drawer: it admits **exactly one KIND of inhabitant** — a property that protects the whole suite, whose failure mode is silent or unattributable, and which every future test file would otherwise have to remember for itself. Ordinary fixtures are not that, and still belong in the file that uses them. **A safety property whose failure mode is silent corruption must not be an enumeration every future file has to remember**, and neither must one whose failure mode is a thousand failures pointing at code that is fine. **The rule is stated as a KIND, never as a COUNT (CB-204)**: it read *"exists for exactly one thing and should stay that way"* and had to be rewritten the first time a second qualifying property appeared — a count in prose is the thing this document has twice been wrong about, so the property is a sentence instead: **every inhabitant answers one question in a different place — WHAT DID THIS RUN ACTUALLY JUDGE?** It is asked of the TRACKER by an ambient-state fixture and by the CB-204 session guard, where the failure is a test that NAMES one state and gets another because `db.connect()` resolves against ambient state the test never declared; and of the SOURCE TREE by the CB-215 alarm below.
+- Each test file defines its own fixtures. `tests/conftest.py` is not a shared-fixture drawer: it admits **exactly one KIND of inhabitant** — a property that protects the whole suite, whose failure mode is silent or unattributable, and which every future test file would otherwise have to remember for itself. Ordinary fixtures are not that, and still belong in the file that uses them. **A safety property whose failure mode is silent corruption must not be an enumeration every future file has to remember**, and neither must one whose failure mode is a thousand failures pointing at code that is fine. **The rule is stated as a KIND, never as a COUNT (CB-204)** — a count in prose is the thing this document has twice been wrong about — so the property is a sentence instead: **every inhabitant answers one question in a different place — WHAT DID THIS RUN ACTUALLY JUDGE?** It is asked of the TRACKER by an ambient-state fixture and by the CB-204 session guard, where the failure is a test that NAMES one state and gets another because `db.connect()` resolves against ambient state the test never declared; and of the SOURCE TREE by the CB-215 alarm below.
 
-  The ambient-state fixture clears `CODEBUGS_ROOT` and the tracker-root override, because three modules shell out to the CLI with mutating verbs and a forgotten guard silently rewrites the developer's real tracker — verified, not theorized: with the variable exported, the findings CLI tests moved a real CB-1 from `low`/`open` to `high`/`fixed`. The CB-204 session guard asks **the product's own walk** (`db._find_db_root`, the single function `_resolve_db` uses for the discovery route, called with an explicit start exactly as `cli.py:91` calls it) whether a `.codebugs/` sits at or above `tmp_path_factory.getbasetemp()`, and refuses the whole session with one named diagnostic if so. Three things about it are load-bearing and each was measured. **The walk is asked, never re-implemented**: a parent climb to `/` would falsely alarm on a tracker above a `.git` DIRECTORY (the walk stops there) and would MISS one reachable only by following a `.git` FILE to a linked worktree's main checkout (the walk jumps) — both are oracle rows, and a structural pin fails if the delegation is replaced. **The start point comes from the factory the `tmp_path` fixture is built on**, not from the literal `/tmp`: `--basetemp` and `TMPDIR` both move it, so a hardcoded `/tmp` would be a gate that cannot fire. **The declared channels are deliberately NOT checked** — the first fixture already neutralizes them before every test, so refusing on one would be the false alarm that gets a guard deleted by the first person it inconveniences. What it does NOT do, said plainly: the tests are not hermetic afterwards, they merely stop lying about why they failed. Measured 2026-08-26 by running it: with an empty `.codebugs/` directly above the temporary root, **1071 of 2739 tests** fail or error, and after the guard that same state is one refusal in 0.7s at exit 4.
+  The ambient-state fixture clears `CODEBUGS_ROOT` and the tracker-root override, because three modules shell out to the CLI with mutating verbs and **a forgotten guard silently rewrites the developer's real tracker** — verified, not theorized. The CB-204 session guard asks **the product's own walk** (`db._find_db_root`, the single function `_resolve_db` uses for the discovery route, called with an explicit start exactly as `cli.py:91` calls it) whether a `.codebugs/` sits at or above `tmp_path_factory.getbasetemp()`, and refuses the whole session with one named diagnostic if so. **Three things about it are load-bearing and each was measured.** *The walk is asked, never re-implemented*: a parent climb to `/` would falsely alarm on a tracker above a `.git` DIRECTORY (the walk stops there) and would MISS one reachable only by following a `.git` FILE to a linked worktree's main checkout (the walk jumps) — both are oracle rows, and a structural pin fails if the delegation is replaced. *The start point comes from the factory the `tmp_path` fixture is built on*, not from the literal `/tmp`: `--basetemp` and `TMPDIR` both move it, so a hardcoded `/tmp` would be a gate that cannot fire. *The declared channels are deliberately NOT checked* — the first fixture already neutralizes them before every test, so refusing on one would be the false alarm that gets a guard deleted by the first person it inconveniences. **What it does NOT do, said plainly: the tests are not hermetic afterwards, they merely stop lying about why they failed.**
 
-  **The CB-215 alarm is an ALARM rather than a guard for the reason this document keeps drawing that line**: by the time the two samples can be compared the run is over, so there is nothing left to refuse. It fingerprints every file in the tree — path, size, `mtime_ns` — before the first test and again in the terminal summary, and prints what differs. It exists because the suite is re-run by an acceptor **in the main checkout**, which is exactly where other directions land their branches, while structural tests here read source files from disk: measured on main's own history, the median gap between first-parent commits is 141 seconds against a run of ~170, so a merge arriving mid-run is an ordinary Tuesday and the partial red it produces is indistinguishable from a regression. Four properties are load-bearing. **The exit status is never touched, and the message says so in words** — a moved tree is ordinary traffic, and refusing over it would manufacture a false red out of noise. **The discriminator is the FILES, not `HEAD`**, measured: `git rev-parse` fails outright in a tree unpacked without a git directory, does not move in a worktree when `main` moves (the case that must stay silent), and cannot see an editor or a formatter writing a file nobody committed; the commit name is printed as a SIGNATURE when git answers, and its absence is never a failure. **Nothing is pruned by judgement** — `.claude/plans/` is deliberately watched, because `tests/test_exposure_matrix.py` really does read `.claude/plans/exposure-scripts/matrix.py` off the real tree, so *"the suite does not look there"* is precisely the unchecked premise the alarm exists to stop people acting on; the two prune tables hold only what is not a source of anything (git's own directory, the virtual environment, the two worktree directories, the tracker, and caches), each with the sentence saying why, and a bare list with no reasons becomes the place inconvenient paths are hidden. **And on a still tree it prints nothing at all** — not a header, not an empty section; measured over the full suite, 2878 tests, silent. Two boundaries, both found by running rather than by reading: the same name is pruned as a FILE and as a DIRECTORY by ONE predicate, because `.git` is a directory in the main checkout and a file in every linked worktree, and a rule that answered differently in the two would be the wrong rule for a defect whose whole subject is main-versus-worktree; and the alarm cannot stop the race, only report it, over a window running from the first test to the last — a tree that moved during collection is invisible to it.
+  **The CB-215 alarm is an ALARM rather than a guard for the reason this document keeps drawing that line**: by the time the two samples can be compared the run is over, so there is nothing left to refuse. It fingerprints every file in the tree — path, size, `mtime_ns` — before the first test and again in the terminal summary, and prints what differs. It exists because the suite is re-run by an acceptor **in the main checkout**, which is exactly where other directions land their branches, while structural tests here read source files from disk, so a merge arriving mid-run is ordinary and the partial red it produces is indistinguishable from a regression. **Four properties are load-bearing.** *The exit status is never touched, and the message says so in words* — a moved tree is ordinary traffic, and refusing over it would manufacture a false red out of noise. *The discriminator is the FILES, not `HEAD`*, measured: `git rev-parse` fails outright in a tree unpacked without a git directory, does not move in a worktree when `main` moves (the case that must stay silent), and cannot see an editor or a formatter writing a file nobody committed; the commit name is printed as a SIGNATURE when git answers, and its absence is never a failure. *Nothing is pruned by judgement* — `.claude/plans/` is deliberately watched, because `tests/test_exposure_matrix.py` really does read `.claude/plans/exposure-scripts/matrix.py` off the real tree, so *"the suite does not look there"* is precisely the unchecked premise the alarm exists to stop people acting on; the two prune tables hold only what is not a source of anything (git's own directory, the virtual environment, the two worktree directories, the tracker, and caches), each with the sentence saying why, and **a bare list with no reasons becomes the place inconvenient paths are hidden**. *And on a still tree it prints nothing at all* — not a header, not an empty section. **Two boundaries, both found by running rather than by reading:** the same name is pruned as a FILE and as a DIRECTORY by ONE predicate, because `.git` is a directory in the main checkout and a file in every linked worktree, and a rule that answered differently in the two would be the wrong rule for a defect whose whole subject is main-versus-worktree; and the alarm cannot stop the race, only report it, over a window running from the first test to the last — a tree that moved during collection is invisible to it.
 - Test the domain module's public API, not internal helpers.
-- **A concurrency test's ASSERTION is the hard part, not its scheduling (CB-27, CB-30).** Three separate drafts in one iteration could not have failed against the unfixed code, which is the failure this repo keeps shipping. Three rules, each earned: **(a) check that the final STATE actually discriminates.** In the `mark_items` race the item ends at `b` both before and after the fix, so the only real discriminator is *which writer is refused* — capture the competing thread's exception and assert on it. **(b) Never wait unboundedly on the losing writer.** After the fix it blocks at `BEGIN IMMEDIATE` and can never complete, so "let B finish" just burns `busy_timeout`. Copy the bounded three-event interleave in `tests/test_findings.py:504-547`, whose docstring explains why the `b_started` guard before the 1.0s `b_read` wait is what stops a false pass. **(c) To probe a commit seam, hook BOTH seams.** Unfixed code closes with `conn.commit()`; `db.txn` closes with `conn.execute("COMMIT")`. A hook keyed on one gives a vacuous pass on the other. `CommitPausingConnection` in `tests/test_milestones.py` does both, fires *after* the underlying commit (firing before it leaves the write lock held, so the injecting connection deadlocks), and is single-threaded — no timing luck. Corollary: **a test that passes on both sides can still be right**, but only when it pins behaviour the change deliberately preserved; say so in its name or docstring, or a reader cannot tell it from a broken one.
+- **A concurrency test's ASSERTION is the hard part, not its scheduling (CB-27, CB-30).** Three separate drafts in one iteration could not have failed against the unfixed code, which is the failure this repo keeps shipping. Three rules, each earned: **(a) check that the final STATE actually discriminates.** In the `mark_items` race the item ends at `b` both before and after the fix, so the only real discriminator is *which writer is refused* — capture the competing thread's exception and assert on it. **(b) Never wait unboundedly on the losing writer.** After the fix it blocks at `BEGIN IMMEDIATE` and can never complete, so "let B finish" just burns `busy_timeout`. Copy the bounded three-event interleave in `tests/test_findings.py:504-547`, whose docstring explains why the `b_started` guard before the 1.0s `b_read` wait is what stops a false pass. **(c) To probe a commit seam, hook BOTH seams.** Unfixed code closes with `conn.commit()`; `db.txn` closes with `conn.execute("COMMIT")`, and a hook keyed on one gives a vacuous pass on the other. `CommitPausingConnection` in `tests/test_milestones.py` does both, fires *after* the underlying commit (firing before it leaves the write lock held, so the injecting connection deadlocks), and is single-threaded — no timing luck. **Corollary: a test that passes on both sides can still be right**, but only when it pins behaviour the change deliberately preserved; say so in its name or docstring, or a reader cannot tell it from a broken one.
 - Run tests: `uv run python -m pytest tests/ -v`
 - Run lint: `uv run ruff check src/ tests/`
 - Run format: `uv run ruff format src/ tests/`
+
+→ почему именно так: `docs/claude-md-rationale/code-rules.md#тестирование`
 
 ### MCP tool registration
 - Each domain module defines `register_tools(mcp, conn_factory)` and calls `register_tool_provider()` at module level.
@@ -1050,11 +1052,11 @@ delete, so `release_reason` (`explicit` | `terminal:<status>`) is a queryable re
   `undetermined` means the database was too contended to tell — **re-issue the identical call**; the
   primitive is an idempotent upsert, so a replay converges on `already_mine` and can never
   double-claim.
-- **Ownership is the triple** `(holder, holder_kind, holder_repo)`, compared NULL-safely. Both
-  claim and release authorize on the full triple: a same-text holder of another kind or in another
-  repo is a different claimant.
-- **The discriminator is `touch_count`, never a timestamp.** `utc_now()` is whole-second, so a
-  retry inside one second is indistinguishable by clock.
+- **Ownership is the triple** `(holder, holder_kind, holder_repo)`, compared NULL-safely. Both claim
+  and release authorize on the full triple: a same-text holder of another kind or in another repo is
+  a different claimant.
+- **The discriminator is `touch_count`, never a timestamp.** `utc_now()` is whole-second, so a retry
+  inside one second is indistinguishable by clock.
 - **Two layers.** `_claim_core` / `_release_core` emit statements and never open or commit a
   transaction — that is what the terminal hook calls, since it runs inside `update_finding`'s open
   transaction. `claim` / `release` wrap the core in `db.txn` and classify contention.
@@ -1067,49 +1069,47 @@ delete, so `release_reason` (`explicit` | `terminal:<status>`) is a queryable re
   rebuilt). A kind declaring it must satisfy P1-P4, documented on `EntityRef.set_status`.
 - **Exit codes are the API for shell callers**: `0` proceed, `1` error, `3` held by someone else,
   `4` already resolved, `5` contended (retry). `codebugs claims --format ids` prints bare ids and
-  exits 0 on an empty list so a shell loop needs no parsing. **`141` was added package-wide by
-  CB-78** and is not a claims outcome — it is documented here only because this is where the
-  exit-code list lives; the **CLI** section owns it. It is `128 + SIGPIPE`, meaning *the reader of
-  my stdout **or stderr** went away* (the disposition is process-wide, so `codebugs bad-verb 2>&1 |
-  head -0` yields it too), and it can come back from any verb. It is deliberately distinguishable from `1` — that
-  distinction is the whole reason the alternative "silent exit 0" was rejected, since a
-  `codebugs export-csv /dev/stdout | gzip > backup.gz` whose `gzip` dies must never report success
-  over a truncated backup. A `| while read` loop that `break`s now kills the producer at 141 rather
-  than 1; both are non-zero, so no `set -e` script changes behaviour. Observable only when the
-  reader closes without draining (any size) or un-drained output exceeds the 64 KB pipe buffer.
+  exits 0 on an empty list so a shell loop needs no parsing.
+  **`141` was added package-wide by CB-78** and is not a claims outcome — it is documented here only
+  because this is where the exit-code list lives; the **CLI** section owns it. It is `128 + SIGPIPE`,
+  meaning *the reader of my stdout **or stderr** went away* (the disposition is process-wide, so
+  `codebugs bad-verb 2>&1 | head -0` yields it too), and it can come back from any verb. It is
+  **deliberately distinguishable from `1`** — that distinction is the whole reason the alternative
+  "silent exit 0" was rejected, since a `codebugs export-csv /dev/stdout | gzip > backup.gz` whose
+  `gzip` dies must never report success over a truncated backup. A `| while read` loop that `break`s
+  kills the producer at 141 rather than 1; both are non-zero, so no `set -e` script changes
+  behaviour. **Observable only when the reader closes without draining (any size) or un-drained
+  output exceeds the 64 KB pipe buffer.**
   **`74` was added by CB-136** and is not a claims outcome either — same reason it is recorded here,
   same **CLI** ownership. It is `EX_IOERR` from `sysexits(3)`, meaning *my output could not be
   WRITTEN* on a descriptor that was healthy at the process entry — `/dev/full`, a filesystem that
-  filled while the verb ran, a wedged PTY — and it deliberately asserts **nothing** about whether the
-  command's effect landed, because the write that failed is usually the line reporting a mutation
+  filled while the verb ran, a wedged PTY — and it **deliberately asserts nothing about whether the
+  command's effect landed**, because the write that failed is usually the line reporting a mutation
   that has already committed. It replaces the two codes that state produced before it (`1`
-  unbuffered, with a raw traceback; `120` block-buffered, with "Exception ignored while flushing
+  unbuffered with a raw traceback; `120` block-buffered with "Exception ignored while flushing
   sys.stdout"), the first of which is this package's code for **bad input** printed over a landed
-  write — the CB-15/CB-16 lie. `141` is deliberately not reused: there the reader is gone, here it is
-  present and the medium is full, and blurring that is what CB-78 refused. When a verb had already
+  write — the CB-15/CB-16 lie. **`141` is deliberately not reused**: there the reader is gone, here it
+  is present and the medium is full, and blurring that is what CB-78 refused. When a verb had already
   chosen its own non-zero code, `74` wins, since the caller never received the output that code
-  describes. Three limits, each measured rather than assumed, because the first draft of this
-  paragraph overclaimed and cross-model review said so. **`EPIPE` is excluded and reports `141`**:
-  `cli.run` restores the SIGPIPE *disposition* but cannot clear an inherited signal *mask*, so a
-  caller that blocked SIGPIPE gets `EPIPE` back from the write instead of dying by signal, and
-  calling that "the medium is full" would undo CB-78 inside CB-136's own fix. **It covers what goes
-  through `sys.stdout`** — `print` and the `csv` writer, i.e. every verb's ordinary output — and NOT
+  describes. **Three limits, each measured rather than assumed.** *`EPIPE` is excluded and reports
+  `141`*: `cli.run` restores the SIGPIPE *disposition* but cannot clear an inherited signal *mask*,
+  so a caller that blocked SIGPIPE gets `EPIPE` back from the write instead of dying by signal, and
+  calling that "the medium is full" would undo CB-78 inside CB-136's own fix. *It covers what goes
+  through `sys.stdout`* — `print` and the `csv` writer, i.e. every verb's ordinary output — and NOT
   `export-csv <path>`, where `fsio.atomic_write` writes through its own file object and CB-76's arm
   still reports exit 1, `export-csv /dev/stdout` included; that is unchanged behaviour rather than a
-  hole this opened, and nothing is committed on that path, so it is not the CB-15/CB-16 lie. **A verb
-  that CRASHES** keeps its traceback and its own code, so a still-buffered stdout can reach `120`
+  hole this opened, and nothing is committed on that path, so it is not the CB-15/CB-16 lie. *A verb
+  that CRASHES* keeps its traceback and its own code, so a still-buffered stdout can reach `120`
   there as before — trading a crash's traceback for a tidy code is the worse of the two.
 - **Adoption**: autosorter's `worktree-setup.sh` claims every card in the branch name (and in
   `--items`) **before** `git worktree add`, with an EXIT trap that releases them if setup aborts;
-  `worktree-finish.sh` releases whatever the branch still holds. Exactly one of those calls may be
-  fatal — the setup gate. Everything else is guarded, so a missing or contended tracker can never
-  abort a finish after the merge has landed.
-  **This repo's own `tools/worktree-*.sh` now follow the same shape (CB-58)** — see the Workflow
-  section for the exit-code handling and the trap. One detail worth carrying to any third adopter,
-  because it was only obvious after building it: **the fatal/guarded asymmetry is about WHEN, not
-  about importance** — setup may abort because nothing has been created yet and a refusal is free,
-  while finish runs after the merge has landed, where a false failure over tracker bookkeeping is
-  the worse outcome.
+  `worktree-finish.sh` releases whatever the branch still holds. **Exactly one of those calls may be
+  fatal — the setup gate.** Everything else is guarded, so a missing or contended tracker can never
+  abort a finish after the merge has landed. This repo's own `tools/worktree-*.sh` follow the same
+  shape (CB-58). One detail worth carrying to any third adopter: **the fatal/guarded asymmetry is
+  about WHEN, not about importance** — setup may abort because nothing has been created yet and a
+  refusal is free, while finish runs after the merge has landed, where a false failure over tracker
+  bookkeeping is the worse outcome.
   **Two places codebugs deliberately diverges from `FINAL-DESIGN.md` §6.2–§6.3, both because that
   section was written for autosorter's script and one of its premises does not hold here.** Do not
   "fix" either back without reading this.
@@ -1117,17 +1117,15 @@ delete, so `release_reason` (`explicit` | `terminal:<status>`) is a queryable re
      both `3` and `4`). That flag also clears the pure-git branch guard, and this repo never deletes
      merged branches, so it is needed for *ordinary follow-up work* — one flag for both jobs would
      turn the claim gate off exactly when people are doing normal work. `CODEBUGS_SETUP_NO_CLAIM=1`
-     is the typed alternative and it builds with **no** claim rather than stealing one. **Ratified
-     by the owner, 2026-08-19**, against the design doc, on this reasoning.
-  2. **Finish leaves restore ON** (design §6.3 passes `--no-restore`). The design's own text says
-     why the difference is correct: there, `[7b/9] auto-resolve-codebugs.py` has already flipped the
-     card to `fixed` from a `Fixes:` trailer, so the release is a no-op and `--no-restore` guards a
-     rare case. **This repo has no auto-resolve step** — `worktree-finish.sh` tells the operator to
-     close the card by hand — so the card is typically still `in_progress`, and `--no-restore` would
-     leave every finished branch's card `in_progress` with no holder: CB-58's own defect,
-     reintroduced by CB-58's fix. Restore is a CAS against the projected value, so it still cannot
-     resurrect a card someone already closed; the operator-closed case returns `not_claimed` at
-     exit 0 and writes nothing.
+     is the typed alternative and it builds with **no** claim rather than stealing one. Ratified by
+     the owner, 2026-08-19, against the design doc.
+  2. **Finish leaves restore ON** (design §6.3 passes `--no-restore`). The design's own text says why
+     the difference is correct: there, an auto-resolve step has already flipped the card to `fixed`
+     from a `Fixes:` trailer, so the release is a no-op. **This repo has no auto-resolve step**, so
+     the card is typically still `in_progress`, and `--no-restore` would leave every finished
+     branch's card `in_progress` with no holder: CB-58's own defect, reintroduced by CB-58's fix.
+     Restore is a CAS against the projected value, so it still cannot resurrect a card someone
+     already closed; the operator-closed case returns `not_claimed` at exit 0 and writes nothing.
 - Deferred by design, not forgotten: `steal`, claim history queries, audit/divergence tooling,
   retention, `expected_status`/`changed`, and `pull_next` integration.
   See `docs/superpowers/plans/design-council-entity-claims/FINAL-DESIGN.md` §10.
