@@ -210,3 +210,20 @@ the log is not a rule» сохранены дословно — это §3 п. 4
 python3 .claude/plans/T126-idents.py snapshot CLAUDE.md /tmp/after.json
 python3 .claude/plans/T126-idents.py diff .claude/plans/T126-baseline.json /tmp/after.json
 ```
+
+**Исходная точка проверяема, а не принимается на веру.** `T126-baseline.json` — порождённый файл,
+и он воспроизводится побайтово из редакции `main`, на которой резалась ветка:
+
+```
+python3 .claude/plans/T126-idents.py snapshot <(git show main:CLAUDE.md) /tmp/regen.json
+diff <(python3 -c "import json;print(json.dumps(json.load(open('/tmp/regen.json')),sort_keys=True))") \
+     <(python3 -c "import json;print(json.dumps(json.load(open('.claude/plans/T126-baseline.json')),sort_keys=True))")
+```
+
+Он оставлен в дереве не потому, что незаменим, а потому, что избавляет читающего от необходимости
+знать, от какого SHA снята исходная точка, — к моменту приёмки `main` уедет вперёд.
+
+**И проба П4 повторяется одной командой:** `bash .claude/plans/T126-p4-probe.sh`. Она отказывается
+работать, если `CLAUDE.md` в дереве грязен (`tests/manual/mutation_guard.py::require_clean_tree`,
+страж CB-173), и восстанавливает файл из `trap … EXIT`, а не по счастливому стечению
+обстоятельств.
