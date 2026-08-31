@@ -17,10 +17,27 @@ A gate cannot be a rule expressed as prose, because prose is what failed:
 CB-165 measured the population at 9 tables, CB-179 re-measured it at 20, and
 the re-measurement found that the very table CB-165 named as its EXEMPLAR had
 been missed. Both counts were produced by searching for suggestive NAMES, and
-``ASSEMBLED_BY_THE_WRAPPER`` carries no suggestive word at all. So this gate
-keys on USE, not on names, and it is a gate rather than a helper because a
-helper only reaches the files somebody carried it into: table twenty-one gets
-the discipline by construction here, and by luck there.
+``ASSEMBLED_BY_THE_WRAPPER`` carries no suggestive word at all. So the one
+thing this gate never keys on is a NAME, and it is a gate rather than a helper
+because a helper only reaches the files somebody carried it into: table
+twenty-one gets the discipline by construction here, and by luck there.
+
+**It keys on SHAPE and on USE, and the first draft of this paragraph claimed
+only the second — which was an overclaim in the file whose subject is
+overclaiming.** Trigger one (a dict whose values are all reasons) really is a
+shape, and it is what pays for most of ``DECLARED_EXCEPTIONS`` below: fixtures
+and oracles share that shape with exception tables. Cross-model review of this
+very branch proposed dropping it and recognising by use alone. **Measured on
+this tree, that trade is bad and the measurement is the argument.** A use-only
+trigger — membership driving a ``continue`` or filtering a comprehension —
+recognises 11 of the 21 governed tables and loses TEN: all eight of
+``tests/test_update_parity.py`` (reached through a registry, and consumed by
+set operations and ``.get`` rather than by membership at all) and BOTH
+``conftest.py`` prune tables, which are two of the five CB-179 found broken.
+Admitting ``if x in T: return`` as well recovers exactly one of those ten and
+brings in five fresh false positives, this file's own ``_VIEW_CALLS`` among
+them. Ten real tables lost to save about five declared rows is the wrong way
+round, so shape stays — as a measured choice rather than an unexamined one.
 
 
 WHAT THIS GATE DOES NOT SEE
@@ -65,6 +82,17 @@ wider than its check is the defect this direction exists to close.
 7. **Whether the world a gate checks against is the RIGHT world.** The gate
    sees that keys are held against something external. It cannot tell a real
    oracle from a set that trivially contains every key.
+
+Limits 6 and 7 share one cause, and it is **CB-269, deferred out loud rather
+than absorbed**: this file INFERS a convention that was never ESTABLISHED. A
+shared ``assert_table_discipline(table, *, live)`` that the gate then REQUIRED
+would make both halves one implementation instead of twenty-one hand-written
+pairs, collapse the inference below to a name lookup, remove limit 6 by
+construction, and turn limit 7's world into a named argument at one call site.
+That is the better altitude and it is not what this file does. It was left
+undone because the form rewrites all twenty-one tables while CB-179's own brief
+forbids touching the fifteen that are already correct — a real cost, not a
+shrug, and the card carries the threshold for taking it up.
 
 The recognition rule and its cost are argued at ``_is_candidate``.
 """

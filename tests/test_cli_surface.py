@@ -144,6 +144,13 @@ class TestExcludedActionAttrs:
         `_EXCLUDED_ACTION_ATTRS`. Asking it what argparse produces would be
         asking the exclusion whether it excludes anything — circular, and it
         would answer "no stale rows" by construction.
+
+        Named rather than left to be discovered: `sub._choices_actions` holds
+        pseudo-actions that `collect_cli_surface` also serializes, and this
+        walk does not visit them. Measured today they contribute no attribute
+        the walk does not already see, and the direction of the gap is a FALSE
+        REFUSAL — an attribute only a pseudo-action carries would read as
+        stale — which is the loud failure rather than the silent one.
         """
         from codebugs import cli
 

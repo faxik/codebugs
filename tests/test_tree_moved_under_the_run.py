@@ -605,16 +605,28 @@ class TestNothingIsPrunedByJudgement:
         )
 
     def test_the_stale_check_would_actually_refuse_a_source_directory(self):
-        """Non-vacuity: the check above must be able to fail.
+        """Non-vacuity: the check above must be able to FAIL, and it is run here.
 
         Every row passes today, so without this the whole test could be a
-        tautology over an empty intersection and nobody would know. `tests` is
-        a directory the suite unmistakably reads, and the assertion is that it
-        WOULD be reported stale if anyone pruned it.
+        tautology over an empty intersection and nobody would know.
+
+        The first draft of this test asserted two facts about the check's
+        INPUTS — that git tracks something under `tests`, and that
+        `.claude/plans` is not pruned — and never ran the predicate at all.
+        That is the shape this whole direction exists to close: a check that
+        would go on passing while the thing it certifies changed underneath
+        it. So the predicate itself is run, over the real tables plus one name
+        the suite unmistakably reads, and the assertion is that it reports
+        exactly that name.
         """
         components = {part for path in self._tracked_paths() for part in path.split("/")}
-        assert "tests" in components
-        assert os.path.join(".claude", "plans") not in _PRUNED_PATHS
+        planted = set(_PRUNED_NAMES) | {"tests"}
+        stale = sorted(name for name in planted if name in components)
+        assert stale == ["tests"], (
+            f"the stale predicate reported {stale} over the real prune table plus "
+            "a planted source directory — it must report the planted one and "
+            "nothing else, or it is not measuring what the test above claims"
+        )
 
     def test_the_directories_the_suite_actually_reads_are_not_pruned(self):
         """A structural pin beside the behavioural row above, for the same rule.
