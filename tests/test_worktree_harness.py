@@ -6049,28 +6049,33 @@ class TestPostMergeAlarmIsNotAGate:
     def test_claude_md_names_the_window_and_calls_the_alarm_an_alarm(self) -> None:
         """Prose under the table, per the same treatment `main-invariants.yml` got.
 
-        RETARGETED BY T-131, not weakened. The directive/depth split moved the
-        REASONING about the alarm — why the re-check is a check-then-act and what
-        window it leaves — out of the root and into the workflow reference, while
-        `exit 15`, which an operator meets on their terminal, stayed in the root.
-        So each half is now asserted where it actually lives.
+        SURVIVED T-131's directive/depth split, and the split is why this
+        docstring exists. An intermediate state of that unit had moved the
+        REASONING — why the in-lock re-check is a check-then-act — out to
+        `docs/claude-md-rationale/workflow.md`, leaving behind a root sentence
+        ("The narrowed row is still a checkable claim") with nothing to refer
+        to. The coherence pass moved the antecedent back, so the whole passage
+        is in the root again and this pin asserts on the root exactly as it
+        always did. What did NOT come back is the four-load-bearing-details
+        list, which is rationale and now lives in the reference.
 
-        The occurrence is searched for rather than taken with `.index()`: the
-        reference file also carries T-129's older archive heading for CB-121, and
-        keying on the first match would pin the heading instead of the prose.
+        The occurrence is searched for rather than taken with `.index()`, so a
+        second mention of the card elsewhere in the file cannot make the window
+        land on the wrong passage.
         """
-        root = self.CLAUDE_MD.read_text()
-        assert "exit 15" in root, (
+        md = self.CLAUDE_MD.read_text()
+        assert "CB-121" in md
+        assert "exit 15" in md, (
             "the code an operator sees on a post-merge alarm left the root; "
             "refusal codes are directive and belong where every session loads them"
         )
-
-        ref = (REPO_ROOT / "docs" / "claude-md-rationale" / "workflow.md").read_text()
-        assert "CB-121" in ref
         windows = [
-            ref[max(0, m - 2000) : m + 4000].lower()
-            for m in _all_occurrences(ref, "CB-121")
+            md[max(0, m - 2000) : m + 4000].lower()
+            for m in _all_occurrences(md, "CB-121")
         ]
+        assert any("alarm" in w for w in windows), (
+            "CB-121 is mentioned but the alarm is not named"
+        )
         assert any("alarm" in w and "check-then-act" in w for w in windows), (
             "no CB-121 passage names the alarm and the check-then-act together; "
             "the reasoning has been lost or split apart"
