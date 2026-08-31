@@ -324,8 +324,9 @@ onto main's first-parent line, which is what `.github/workflows/main-invariants.
 
 **`install-hooks.sh` sets `merge.ff=false` before anything arming-related can abort**, so a clone
 missing `tools/pre-merge-commit-hook.sh` — an older main, a `git checkout <old-commit>`, the
-CB-57 bootstrap window itself — cannot arm the pre-commit hook, exit 1 at the merge-hook
-step and leave `merge.ff` **unset** — the installer skipping the one mechanism no hook can replace.
+CB-57 bootstrap window itself — still arms the pre-commit hook and still exits 1 at the merge-hook
+step, but does so **with `merge.ff` already set**. **With that step last it left `merge.ff` unset
+instead**, and the installer could skip the one mechanism no hook can replace.
 **The precise claim:** four commands still precede it (sourcing the guards, resolving the repo root,
 resolving the hooks dir, `mkdir -p`) and each is fatal under `set -e`, so "a step that cannot fail
 goes first" is not literally true of it.

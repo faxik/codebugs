@@ -120,9 +120,24 @@ rule fired on it. Measured on git 2.53: it does not. The claim was written into 
 that exists to list what the harness cannot do, and it survived a green suite because nothing pinned
 it — a gate described better than it behaves, in the section whose subject is exactly that.
 
-**The installer ordering was reproduced in review and verified fixed by running it.** An earlier
-draft of that line read "a step that cannot fail goes first", and review pointed out that four
-fallible commands precede it, which is why the rule now states the precise claim instead.
+**The installer ordering was reproduced in review and verified fixed by running it. What was
+reproduced, since the rule states only that the order is load-bearing:** with `merge.ff=false` set
+LAST, a clone missing `tools/pre-merge-commit-hook.sh` — an older main, a `git checkout
+<old-commit>`, the CB-57 bootstrap window itself — armed the pre-commit hook, printed its tick, then
+exited 1 at the merge-hook step and left `merge.ff` **unset**. The installer could therefore skip
+the one mechanism no hook can replace, and skip it while reporting a tick: git fires no hook on a
+fast-forward, so nothing catches the omission afterwards either.
+
+**Re-measured 2026-08-31 (T-132) against the CURRENT order**, in a throwaway clone carrying every
+tool file except the merge hook: `[1/4]` sets `merge.ff=false`, `[2/4]` symlinks the pre-commit
+hook, `[3/4]` prints `✗` and exits 1, `[4/4]` is never reached — so afterwards `merge.ff` is
+`false`, `pre-commit` is armed, and `pre-merge-commit` and `commit-msg` are not. **Two of the three
+things the historical failure did are therefore still live and only the third was removed**, which
+is why the rule is worded as a contrast rather than as a denial: a flat "such a clone cannot arm the
+pre-commit hook, exit 1 and leave `merge.ff` unset" is true only if the negation is read over the
+whole conjunction, and false on the reading that takes the three separately. An earlier draft of
+that line read "a step that cannot fail goes first", and review pointed out that four fallible
+commands precede it, which is why the rule now states the precise claim instead.
 
 ---
 
