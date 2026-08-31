@@ -2155,9 +2155,17 @@ class TestGuardsAreActuallyInvoked:
         assert guard_at < create_at, "branch type is validated after the worktree is created"
 
     def test_enforcement_armed_runs_before_the_lock_is_opened(self) -> None:
-        """Fail fast, rather than after waiting up to 60s on the lock."""
+        """Fail fast, rather than after waiting up to 60s on the lock.
+
+        The anchor is the STATEMENT that opens the integration lock, never the
+        bare `exec 9>`. CB-187's own explanatory comment names that descriptor
+        in prose 400 lines earlier, and a bare-substring anchor then finds the
+        COMMENT and reports the guard as running after a "lock" that is only a
+        sentence about one. This is the identical hazard the sibling test
+        already guards against for `--no-ff`, applied to its neighbour.
+        """
         src = self.FINISH.read_text()
-        assert src.index("_guard_enforcement_armed") < src.index("exec 9>")
+        assert src.index("_guard_enforcement_armed") < src.index('exec 9>"${LOCK_FILE}"')
 
     def test_skew_check_uses_the_value_the_gates_ran_against(self) -> None:
         """CB-41's shape, reintroduced by this card's own round-1 fix.
@@ -2217,7 +2225,10 @@ class TestGuardsAreActuallyInvoked:
         src = self.FINISH.read_text()
         calls = [i for i in range(len(src)) if src.startswith("_guard_interpreter_matches_main ", i)]
         assert len(calls) == 2, f"expected a pre-check and an in-lock re-check, found {len(calls)}"
-        lock_at = src.index("exec 9>")
+        # The statement that opens the lock, not the header comment that names
+        # the descriptor in prose — the same precision the merge anchor below
+        # already needed, and for the same reason.
+        lock_at = src.index('exec 9>"${LOCK_FILE}"')
         # The integration merge itself, not the header comment that mentions
         # `--no-ff` 400 lines earlier.
         merge_at = src.index('git -C "${REPO_ROOT}" merge "${BRANCH}" --no-ff')
