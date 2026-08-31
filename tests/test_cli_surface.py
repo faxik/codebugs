@@ -11,12 +11,13 @@ the MCP wire golden.
 
 from __future__ import annotations
 
+import argparse
 import json
 import pathlib
 
 import pytest
 
-from tests.cli_surface import collect_cli_surface
+from tests.cli_surface import _EXCLUDED_ACTION_ATTRS, collect_cli_surface
 
 # A sentinel distinct from every real value a verb record's key can hold
 # (JSON scalars, lists, `None`, booleans) — used so the detail loop below can
@@ -114,6 +115,72 @@ class TestCliSurfaceGolden:
         current = collect_cli_surface()
 
         assert current == expected, _drift_message(current, expected)
+
+
+class TestExcludedActionAttrs:
+    """`_EXCLUDED_ACTION_ATTRS` carries both halves of the discipline (CB-179).
+
+    Every row of that table takes one argparse attribute out from under the
+    golden comparison, and the golden is one of the two gates on what a
+    command-line user sees. It used to be a bare `frozenset` whose entire
+    justification lived in a comment above it, so a second row could be added
+    with no reason at all and a row that had stopped exempting anything would
+    sit there forever. Neither test below implies the other: a row can name a
+    live attribute and carry no reason, and a reasoned row can name an
+    attribute argparse stopped producing two releases ago.
+    """
+
+    @staticmethod
+    def _attributes_argparse_actually_produces() -> set[str]:
+        """Every `vars(action)` key the REAL parser yields, unexcluded.
+
+        Built from `cli.build_parser` rather than from a constructed toy
+        parser, so the world this table is judged against is the same one the
+        golden is generated from.
+        """
+        from codebugs import cli
+
+        seen: set[str] = set()
+        parser, _sub, _commands = cli.build_parser()
+        stack = [parser]
+        while stack:
+            current = stack.pop()
+            for action in current._actions:
+                seen.update(vars(action))
+                choices = getattr(action, "choices", None)
+                if isinstance(choices, dict):
+                    stack.extend(
+                        sub for sub in choices.values() if isinstance(sub, argparse.ArgumentParser)
+                    )
+        assert seen, "premise: the real parser yields at least one action attribute"
+        return seen
+
+    def test_every_excluded_attribute_carries_a_real_reason(self):
+        empty = [
+            name
+            for name, reason in _EXCLUDED_ACTION_ATTRS.items()
+            if not isinstance(reason, str) or len(reason.strip()) < 20
+        ]
+        assert empty == [], (
+            f"_EXCLUDED_ACTION_ATTRS row(s) with no real reason: {empty} — an "
+            "exclusion here removes an attribute from the snapshot that gates "
+            "the user-visible CLI, so it owes an argument, not a name."
+        )
+
+    def test_no_excluded_attribute_is_stale(self):
+        """Self-deleting: a row exempting nothing must be removed.
+
+        An attribute argparse no longer sets is not being excluded from
+        anything, and leaving the row is how a table becomes a standing licence
+        nobody re-reads.
+        """
+        produced = self._attributes_argparse_actually_produces()
+        stale = sorted(name for name in _EXCLUDED_ACTION_ATTRS if name not in produced)
+        assert stale == [], (
+            f"_EXCLUDED_ACTION_ATTRS names {stale}, which no `vars(action)` in "
+            "the real parser returns any more — delete the row. This table may "
+            "only SHRINK."
+        )
 
 
 class TestVerbActionsByIdentityAliasBoundary:

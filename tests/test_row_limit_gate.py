@@ -420,6 +420,27 @@ class TestEveryBindingSiteIsGuarded:
             f"-- delete them: {stale}"
         )
 
+    def test_every_declared_exception_carries_a_non_empty_reason(self):
+        """The other half, and neither test implies the other (CB-179).
+
+        The table above self-deletes, so a row cannot rot into permission for
+        a site that has gone away. Nothing held the SECOND half: a row naming a
+        live site with a blank reason was accepted, and a row whose only
+        justification is a comment beside the table is text no test reads. The
+        table is empty today, which is exactly why this was missed and exactly
+        why it matters -- an empty table with the right shape is the prepared
+        bed the first unjustified row lands in.
+        """
+        empty = [
+            key
+            for key, reason in DECLARED_EXCEPTIONS.items()
+            if not isinstance(reason, str) or not reason.strip()
+        ]
+        assert empty == [], (
+            f"DECLARED_EXCEPTIONS row(s) with no reason: {empty} -- a reason "
+            "names who decided and why. Without one the row is just permission."
+        )
+
     def test_premise_the_gate_can_see_the_source_at_all(self):
         """A gate that reads nothing reports clean. Prove it reads something.
 

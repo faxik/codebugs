@@ -1010,6 +1010,61 @@ class TestActiveCountsIsTheSingleDefinition:
             "_active_counts; add to EXEMPT with a reason, or derive from it"
         )
 
+    def _evaluators(self):
+        """The functions the gate above judges — the world EXEMPT rows name."""
+        import ast
+        import pathlib
+
+        tree = ast.parse(pathlib.Path(blockers.__file__).read_text())
+        found = []
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.FunctionDef):
+                continue
+            names = {
+                c.func.id
+                for c in ast.walk(fn)
+                if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+            }
+            if "_get_active_blockers_by_type" in names:
+                found.append(fn.name)
+        return found
+
+    def test_every_exempt_row_carries_a_non_empty_reason(self):
+        """Half one (CB-179). The table had the right SHAPE and no gates at all.
+
+        `dict[str, str]` says the author foresaw that a row owes a reason, and
+        nothing made him supply one. The table is empty today, which is why
+        neither half was noticed missing and precisely why the halves matter:
+        an empty table with the right shape is the prepared bed the first
+        unjustified row lands in, and this one sits under a gate whose whole
+        subject is that a check over elements cannot check their composition.
+        """
+        empty = [
+            name
+            for name, reason in self.EXEMPT.items()
+            if not isinstance(reason, str) or not reason.strip()
+        ]
+        assert empty == [], (
+            f"EXEMPT row(s) with no reason: {empty} -- a reason names why that "
+            "evaluator may re-derive rather than read the shared aggregation."
+        )
+
+    def test_no_exempt_row_is_stale(self):
+        """Half two, and the half nothing held: the table may only SHRINK.
+
+        A row naming a function that is no longer an evaluator -- renamed,
+        deleted, or no longer touching the blocker set -- exempts nothing, and
+        leaving it is how the table becomes the place a real regression is
+        parked under an old name.
+        """
+        evaluators = self._evaluators()
+        assert len(evaluators) >= 4, evaluators  # the gate's own non-vacuity floor
+        stale = [name for name in self.EXEMPT if name not in evaluators]
+        assert stale == [], (
+            f"EXEMPT names {stale}, which no longer evaluates the blocker set "
+            "at all -- delete the row rather than leaving a standing exemption."
+        )
+
 
 class TestDeferredWrappersUseTheSinglePass:
     """The wrappers are where CB-69's cost actually lands, so the wrappers are
