@@ -58,10 +58,6 @@ def snapshot(path: str) -> dict:
     }
 
 
-def _fam(name: str) -> str:
-    return name.split("-")[0]
-
-
 def diff(before: dict, after: dict) -> int:
     rc = 0
     print(f"размер: {before['bytes']} → {after['bytes']} байт "
