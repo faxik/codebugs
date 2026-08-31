@@ -194,12 +194,19 @@ relative and refuses a genuinely armed clone. **Known residual:** with `extensio
 and an *absolute* per-worktree value the asymmetry returns, bounded because the integration merge
 runs in the primary, where the gate does fire.
 
-**The bootstrap gate's condition must be MONOTONIC.** It gates on whether the path has **history** on
-main, read with `--all` — a clone with no *local* main (`git clone --single-branch --branch fix/…` is
-enough, and `origin/main` being present does not help) would otherwise collapse it — **and it
-distinguishes an ERROR from an empty result**, failing closed on the error: `2>/dev/null || true`
-makes those identical, and `git log --all -- <path>` exits 128 in a `--filter=tree:0` clone whose
-promisor remote has gone away.
+**The bootstrap gate's condition must be MONOTONIC, and this is the one place it is stated.** It
+gates on whether the path has **history** on main — which deleting the file cannot undo, so a
+missing source reports as "cannot verify the hook identity" instead of vanishing, whereas gating on
+"does the file exist" makes one `rm` a permanent, flagless disarm, landable on a perfectly typed
+branch. That history is read with `--all` — a clone with no *local* main
+(`git clone --single-branch --branch fix/…` is enough, and `origin/main` being present does not
+help) would otherwise collapse it — **and it distinguishes an ERROR from an empty result**, failing
+closed on the error: `2>/dev/null || true` makes those identical, and `git log --all -- <path>`
+exits 128 in a `--filter=tree:0` clone whose promisor remote has gone away. **Later paragraphs need
+this condition and none of them restates it** — the T-23 one below, and the bootstrap wall at the
+end of this section — because a four-review-round condition in two places is two rules one edit
+apart, which is this section's own argument about `_hook_source_known` applied to the prose that
+describes it.
 
 **Every reader of the staged set passes `-c core.quotePath=false`.** `git diff --cached --name-only`
 C-quotes a non-ASCII path by default, which makes the allowlist regex miss it and refuses the commit;
@@ -324,8 +331,9 @@ onto main's first-parent line, which is what `.github/workflows/main-invariants.
 
 **`install-hooks.sh` sets `merge.ff=false` before anything arming-related can abort**, so a clone
 missing `tools/pre-merge-commit-hook.sh` — an older main, a `git checkout <old-commit>`, the
-CB-57 bootstrap window itself — cannot arm the pre-commit hook, exit 1 at the merge-hook
-step and leave `merge.ff` **unset** — the installer skipping the one mechanism no hook can replace.
+CB-57 bootstrap window itself — still arms the pre-commit hook and still exits 1 at the merge-hook
+step, but does so **with `merge.ff` already set**. **With that step last it left `merge.ff` unset
+instead**, and the installer could skip the one mechanism no hook can replace.
 **The precise claim:** four commands still precede it (sourcing the guards, resolving the repo root,
 resolving the hooks dir, `mkdir -p`) and each is fatal under `set -e`, so "a step that cannot fail
 goes first" is not literally true of it.
@@ -412,11 +420,12 @@ one the pin asked for, and refuses when something outranked it.** Without that c
 lands a different pin that main would adopt on its next `uv run` — CB-135 rebuilt out of the very
 mechanism this section documents.
 
-**The pin is `3.14.4`, full patch, and the second half of that was chosen rather than defaulted.**
-A bare `3.14` — i.e. `MAJOR.MINOR` — leaves a divergent state representable — uv resolves it to whatever 3.14.x a machine
-happens to have, so two machines legitimately differ — and this guard's whole subject is making that
-state unrepresentable. **The cost is the ordinary cost of a pin:** it must be bumped by a deliberate,
-reviewable edit, and a machine without that exact build downloads one. Note `uv python list` shows
+**The pin is `3.14.4`, full patch, and the FULL-PATCH half of that was chosen rather than
+defaulted.** A bare `3.14` (i.e. `MAJOR.MINOR`) leaves a divergent state representable — uv resolves
+it to whatever 3.14.x a machine happens to have, so two machines legitimately differ — and this
+guard's whole subject is making that state unrepresentable. **The cost is the ordinary cost of a
+pin:** it must be bumped by a deliberate, reviewable edit, and a machine without that exact build
+downloads one. Note `uv python list` shows
 only the newest patch per minor, so checking downloadability needs `--all-versions`.
 
 **`uv` rebuilds a mismatched environment by itself**, so the pin does most of the work and the guard
@@ -554,7 +563,7 @@ than guess what one of those resolves to the guard refuses and says so.
   **`--first-parent` is load-bearing, not decoration, and restricting the range alone is NOT
   enough:** a branch that merges a SIBLING branch absorbs its commits into the range, and if the
   sibling is older — the ordinary case — date order puts it first, so the derived subject names the
-  sibling's card; on that shape a range-only fix is **worse** than the `git log -1` (`log -1`) code it replaced.
+  sibling's card; on that shape a range-only fix is **worse** than the `git log -1` code it replaced.
   Following first parents skips every absorbed lineage, main's forward-merge included.
   **The FIRST commit of that line wins, not the last**, because branches here end on review fixups,
   which describe an iteration's tail rather than its subject. Do **not** write that as
@@ -660,10 +669,8 @@ the head-*acceptability* rules — typed branch, or upstream `main` — are abou
 
 **The bootstrap is a real constraint, not an oversight.** `worktree-finish.sh` cannot land the commit
 that first creates `tools/`, because `_guard_enforcement_armed` refuses when main has no
-`tools/pre-commit-hook.sh` for the hook to point at. **The condition must be MONOTONIC:** the gate is
-whether **the path has history on main**, which deleting the file cannot undo, so a missing source
-reports as "cannot verify the hook identity" instead of vanishing. Gating on "does the file exist"
-instead makes one `rm` a permanent, flagless disarm, landable on a perfectly typed branch. So **run
+`tools/pre-commit-hook.sh` for the hook to point at. This is the wall **the monotonic condition
+stated above** exists to get past — it is stated there and deliberately not restated here. So **run
 `tools/install-hooks.sh` right after such a merge** or the next finish refuses — correctly, since a
 clone armed before the new hook really is missing part of its enforcement. If `tools/` is ever
 rewritten the same way, expect the same one-time manual merge.
@@ -754,7 +761,7 @@ rewritten the same way, expect the same one-time manual merge.
 - **An ENVIRONMENTAL sqlite failure is classified inside `_open` and raised as a TYPE, never classified at the CLI boundary (CB-86).** `sqlite3.OperationalError` derives from `sqlite3.Error → Exception`, **not** `OSError`, so a sweep for `open(` and a widening of `OSError` are both structurally blind to it — the third vocabulary of "the CLI crashed at an I/O boundary". `db._is_environmental` — PRIVATE, deliberately, because a caller at the boundary is the rejected design — keys on `{8 READONLY, 10 IOERR, 13 FULL, 14 CANTOPEN}` with the same `& 0xFF` mask as `is_contention`, which is load-bearing because a read-only *directory* raises the extended `1544`; `_open` converts a match into `db.TrackerUnwritableError`, a **sibling** of `DatabaseNotFoundError`. **State the claim precisely:** a type raised from `_open` means *this failed while opening a connection*, not *nothing was written anywhere* — no handler connects twice today, but that is a property of the call sites rather than of the type. The narrowed live claim is the next bullet's (CB-199): one classification point covers *opening a connection*. **`SQLITE_PERM` (3) is deliberately absent** (measured: `chmod 000` yields 14, and no CLI path produces 3) and **`SQLITE_NOTADB` (26) cannot be added** because it arrives as `DatabaseError`; both absences were measured rather than reasoned. **`SQLITE_CANTOPEN` is ambiguous** — identical code and message for a missing file and an unopenable one — so `os.path.exists` picks the message, **for message selection only**; an unreadable *parent* still reads as "not found", stated here rather than discovered later.
 
   → почему именно так: `docs/claude-md-rationale/database.md#cb-86-средовой-отказ-sqlite`
-- **One classification point covers OPENING A CONNECTION — never a write on a connection already open (CB-199, open).** `_open` classifies an environmental sqlite failure and raises `TrackerUnwritableError`, so a read-only DATABASE FILE reached by the walk is **not** detected at connect time once the seed rows exist: `_open` then attempts no write of its own, because CB-195 made the seed write conditional on a read so that a purely reading `db.connect()` never takes the write lock for a redundant insert. **What the narrowing costs, exactly, because all three halves are load-bearing:** a READ on a read-only tracker now SUCCEEDS — a capability gained, not a defect; a WRITE verb still refuses, still at exit 1, still with nothing landed; and only the MESSAGE narrows, the failure surfacing from the domain's own INSERT *outside* `_open`'s try/except as a raw traceback instead of the clean one-liner. `tests/test_db_unwritable.py::TestTheFourShapesEndToEnd::test_B_read_only_database_file` pins exactly that three-way shape rather than hiding the narrowing or refusing the read-side gain over it. **CB-199 stays open by design:** any write-based probe restoring early detection would have to attempt a write on every `db.connect()`, reintroducing the write-lock contention CB-195 removed, so it is not a two-line fix.
+- **One classification point covers OPENING A CONNECTION — never a write on a connection already open (CB-199, open).** `_open` classifies an environmental sqlite failure and raises `TrackerUnwritableError`, so a read-only DATABASE FILE reached by the walk is **not** detected at connect time once the seed rows exist: `_open` then attempts no write of its own, because CB-195 made the seed write conditional on a read so that a purely reading `db.connect()` never takes the write lock for a redundant insert. **What the narrowing costs, exactly, and all three parts of it are load-bearing:** a READ on a read-only tracker now SUCCEEDS — a capability gained, not a defect; a WRITE verb still refuses, still at exit 1, still with nothing landed; and only the MESSAGE narrows, the failure surfacing from the domain's own INSERT *outside* `_open`'s try/except as a raw traceback instead of the clean one-liner. `tests/test_db_unwritable.py::TestTheFourShapesEndToEnd::test_B_read_only_database_file` pins exactly that three-way shape rather than hiding the narrowing or refusing the read-side gain over it. **CB-199 stays open by design:** any write-based probe restoring early detection would have to attempt a write on every `db.connect()`, reintroducing the write-lock contention CB-195 removed, so it is not a two-line fix.
   **"Steady state" is a real qualifier and has a real other side (CB-202).** While a seed row is MISSING — the first open of any tracker, and any whose seed rows were removed — the insert does run, and a reading `db.connect()` waits out a concurrent writer exactly as it did before (measured; the figures are in the archive). That is one open per tracker and no read-first rule can avoid it, so it is a BOUNDARY rather than a residual defect. `src/codebugs/db.py:_open`'s own comment carries the same narrowing at the site, and says in words not to widen it back.
   **A schema-init function must not execute a string it did not itself check against the database, and the ratchet holding that keys on a PRIMITIVE rather than on a spelling (CB-202).** `tests/test_db_infra.py::TestSchemaInitRunsNoUncheckedDml` resolves SQL text through constants, loops, `split`/`strip`, f-string and concatenation prefixes and `executescript` bodies; derives its entry points from the `register_schema` calls rather than from the NAME `ensure_schema`, which had left every migration helper those functions call entirely unread; follows the module-local closure; and accepts a branch only when a READ could have fed it. **It is fail-closed on what it cannot resolve, and its docstring enumerates what it still cannot see** — a ratchet whose promise is wider than its check is the defect CB-202 exists to close, so the enumeration is part of the fix rather than a caveat on it. **How many helpers there are, and how many execute sites they hold, is a question for the ratchet and deliberately not for this paragraph:** both counts that once stood here were stale by the time anyone re-ran them.
   → почему именно так: `docs/claude-md-rationale/database.md#cb-199-одна-точка-классификации`
@@ -815,7 +822,7 @@ rewritten the same way, expect the same one-time manual merge.
 
   → почему именно так: `docs/claude-md-rationale/database.md#cb-60-нормализация-категорий`
 - **Requirements deliberately have NO identity function** — DECIDED on CB-45 (the card delegated it verbatim: "decide … or documents why not"): requirement rows are authored artifacts with caller-assigned ids on every write path (the same explicit-id bypass that skips dedup for findings), no automated filer emits requirement observations, and reqs similarity already exists via embeddings — a fingerprint column with zero writers would be dead code. Revisit trigger: an automated requirements filer appearing.
-- **Similarity extension (CB-45): `similarity.py` is the package's FIRST self-registering non-domain module — legal because it issues ZERO SQL.** All row access goes through the public accessor `findings.similarity_candidates` (raw rows, `meta_json` as the stored STRING per CB-24 consequence 4, deterministic `ORDER BY created_at, id`); **no other module may SELECT from findings.** Detector: char-trigram Jaccard over `similarity.normalize_text` = the fingerprint normalization (public wrapper `findings.normalized_identity_text`) plus an ANSI-remnant strip — **the extra cleanup lives in the extension because `auto:v1` is versioned and must not drift.** `DEFAULT_THRESHOLD = 0.7` is CALIBRATED, not chosen, and `tests/manual/verify_similarity_corpus.py` reproduces the numbers exactly. `MIN_TEXT_LEN = 40` lives in the SCORING layer, so resolver, report and check share one policy — trigram Jaccard scores "Bug 1"/"Bug 2" ≈ 0.8 and two empty strings 1.0.
+- **Similarity extension (CB-45): `similarity.py` is the package's FIRST self-registering non-domain module — legal because it issues ZERO SQL.** All row access goes through the public accessor `findings.similarity_candidates` (raw rows, `meta_json` as the stored STRING per CB-24 consequence 4, deterministic `ORDER BY created_at, id`); **no other module may SELECT from findings.** Detector: char-trigram Jaccard over `similarity.normalize_text` = the fingerprint normalization (public wrapper `findings.normalized_identity_text`) plus an ANSI-remnant strip — **the extra cleanup lives in the extension because `auto:v1` is versioned and must not drift.** `DEFAULT_THRESHOLD = 0.7` is CALIBRATED, not chosen — the corpus, the family counts and the rejected 0.95 are recorded in the archive section this bullet points to, and `tests/manual/verify_similarity_corpus.py` reproduces those numbers exactly. `MIN_TEXT_LEN = 40` lives in the SCORING layer, so resolver, report and check share one policy — trigram Jaccard scores "Bug 1"/"Bug 2" ≈ 0.8 and two empty strings 1.0.
 
   The file-time resolver stamps `meta.similar_to = [{id, score, status}]` from a pool of live ∪ {`wont_fix`, `not_a_bug`} rows in the same category — a "resembles CB-N, already dismissed" link is the most valuable annotation, and `fixed` stays out because exact matches already reopen — newest 500, **trigrams memoized BY CONTENT**, since an `(id, created_at)` key collides across databases within one whole-second timestamp. **The pool's category is a VALUE, not a filter**: findings permit `category=""`, which the accessor's `category=` filter convention reads as "no filter", so the resolver passes the explicit-tuple twin `categories=("",)` and matches exactly — otherwise every empty-category observation pools the whole table. `similar_to` is reserved on ADD only and writable via `update_finding(meta_update=)` — an unrepairable annotation is the CB-26 shape; `resolver_errors` is refused on both paths. **The update-side exemption is DECLARED at registration** (`updatable_keys=("similar_to",)`) and read from the registry (`db.resolver_updatable_meta_keys()`), never hardcoded in findings — **core must not know an extension's key names.** The annotation pool is likewise DERIVED (`LIVE_STATUSES + RECURRENCE_STATUSES`, both public from findings), so `TestBranchTotality`'s classification guarantee reaches the pool instead of a re-spelled enumeration.
 
@@ -1014,8 +1021,9 @@ at all and is therefore not a privacy surface.
 
 **AND THAT CHANNEL IS NOT ENOUGH ON A UNIFORM TRACKER, WHICH IS WHERE THE FIX RE-CREATED THE VERY
 DEFECT IT REMOVES.** With every stored vector the same width — the ordinary case, and the one the
-write guard guarantees — a query of a DIFFERENT width returns `[]` under the SQL filter: "nothing is
-similar" about a full tracker, while `embedding_stats` says `mixed: False`. So `search_similar`
+write guard guarantees — a query of a DIFFERENT width **used to** raise loudly from
+`cosine_similarity` and, once the SQL filter was in place, **returned** `[]`: "nothing is similar"
+about a full tracker, while `embedding_stats` said `mixed: False`. So `search_similar`
 **refuses instead, on AFFIRMATIVE PROOF only** — the result is empty AND the tracker holds vectors
 AND none of them is this width. An empty tracker still answers `[]`, because there an empty answer is
 true; a mixed tracker where some rows matched never reaches the branch, so CB-174's
