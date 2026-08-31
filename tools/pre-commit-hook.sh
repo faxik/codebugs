@@ -10,7 +10,8 @@
 # It enforces three things, all already written in CLAUDE.md:
 #
 #   1. On main, the ONLY thing that may be committed is a .claude/plans/*.md
-#      note. Everything else belongs on a branch, in a worktree.
+#      note, or a .claude/plans/briefs/*.html daily brief (CB-266). Everything
+#      else belongs on a branch, in a worktree.
 #   2. On any other branch, the branch must carry a sanctioned type.
 #   3. On main, an id appearing in .claude/plans/CASCADE-IDS.md must be the one
 #      the allocator would have computed — a hand-typed cascade number is how
@@ -696,11 +697,32 @@ if [[ "${branch}" == "main" ]]; then
     staged=$(git -c core.quotePath=false diff --cached --no-renames --name-only)
     [[ -z "${staged}" ]] && exit 0
 
-    offending=$(echo "${staged}" | grep -vE '^\.claude/plans/[^/]+\.md$' || true)
+    # CB-266: the letter used to be `.claude/plans/*.md` — one level, `.md`
+    # only — and it was narrower than the ratified intent ("a plan artefact the
+    # owner reads"). Since 2026-08-29 the level-(1) curator's daily brief lands
+    # at `.claude/plans/briefs/DAILY-<date>.html`: a second level, an `.html`
+    # extension, and by intent exactly the kind of note this exception exists
+    # for. The allowance is widened by exactly that one shape — one level under
+    # `briefs/`, extension `.html` — and no wider: `briefs/` is not thrown open
+    # to any file, or the next script to write there mints a silent bypass.
+    #
+    # THIS REGEX IS DUPLICATED, BYTE-FOR-BYTE, IN THREE PLACES, and it cannot be
+    # a shared file: this hook and commit-msg-hook.sh each run from
+    # .git/hooks/ as a standalone script and must work when tools/ is absent
+    # from the checked-out tree (same constraint as the branch-type predicate
+    # above), and .github/workflows/main-invariants.yml executes on a different
+    # machine entirely. The three copies are:
+    #   - HERE (negative: what falls outside this is a violation)
+    #   - tools/commit-msg-hook.sh (positive: which staged files this hook's
+    #     naming rule must judge — same shape, opposite arm)
+    #   - .github/workflows/main-invariants.yml (negative, mirrors this one)
+    # tests/test_worktree_harness.py asserts the three literal regex strings
+    # equal; do not edit one copy without the other two.
+    offending=$(echo "${staged}" | grep -vE '^\.claude/plans/([^/]+\.md|briefs/[^/]+\.html)$' || true)
     if [[ -n "${offending}" ]]; then
         echo "ERROR: refusing to commit on main." >&2
         echo "" >&2
-        echo "  Files outside .claude/plans/*.md:" >&2
+        echo "  Files outside .claude/plans/*.md or .claude/plans/briefs/*.html:" >&2
         echo "${offending}" | sed 's/^/    /' >&2
         echo "" >&2
         echo "  THOSE FILES ARE STILL STAGED. A refused commit unstages nothing:" >&2
@@ -718,7 +740,8 @@ if [[ "${branch}" == "main" ]]; then
         echo "" >&2
         echo "  CLAUDE.md: every code edit happens on a short-lived branch, in a" >&2
         echo "  worktree. The only thing that may land on main directly is a" >&2
-        echo "  .claude/plans/*.md note." >&2
+        echo "  .claude/plans/*.md note, or a .claude/plans/briefs/*.html daily" >&2
+        echo "  brief." >&2
         echo "" >&2
         echo "  Move the work onto a branch (the stash is shared across worktrees," >&2
         echo "  because it lives in the common git dir):" >&2

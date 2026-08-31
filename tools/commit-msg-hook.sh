@@ -5,8 +5,9 @@
 # ONE rule, and it is the mechanisation of a convention that was broken four
 # times after it was adopted:
 #
-#   ON MAIN, EVERY .claude/plans/*.md FILE IN THE STAGED SET MUST BE NAMED IN
-#   THE COMMIT MESSAGE.
+#   ON MAIN, EVERY .claude/plans/*.md FILE (and, since CB-266,
+#   .claude/plans/briefs/*.html) IN THE STAGED SET MUST BE NAMED IN THE
+#   COMMIT MESSAGE.
 #
 # THE INCIDENT. `.claude/plans/` is the one directory parallel sessions may
 # commit to on main, and they do so constantly. One session ran
@@ -146,7 +147,23 @@ staged=$(git -c core.quotePath=false diff --cached --no-renames --name-only)
 # state two refusals that could drift apart. Deletions are IN scope: `git add
 # <dir>` stages a removal too, and deleting a stranger's note damages the same
 # provenance as adding one.
-plans=$(echo "${staged}" | grep -E '^\.claude/plans/[^/]+\.md$' || true)
+#
+# CB-266 widened this set to match pre-commit-hook.sh's allowance: the
+# level-(1) curator's daily brief at `.claude/plans/briefs/DAILY-<date>.html`
+# is a plan note by intent (the owner reads it), and once pre-commit lets it
+# land the naming rule MUST reach it too — not as a courtesy, but because this
+# hook's own reason for existing is `git add .claude/plans/` sweeping in an
+# UNTRACKED file. `git add .claude/plans/` is recursive: it stages
+# `.claude/plans/briefs/` exactly as it stages the top level (measured), so
+# before this widening a brief could not land on main at all and could not be
+# swept, and after pre-commit's widening it becomes exactly the kind of file
+# this hook exists to make someone name.
+#
+# THIS REGEX IS DUPLICATED, BYTE-FOR-BYTE, IN THREE PLACES — see
+# tools/pre-commit-hook.sh's comment at its `grep` call (this one differs only
+# in `-E` vs `-vE`: positive selection here, negative refusal there) for why a
+# shared file is not achievable and which test asserts the three copies equal.
+plans=$(echo "${staged}" | grep -E '^\.claude/plans/([^/]+\.md|briefs/[^/]+\.html)$' || true)
 [[ -z "${plans}" ]] && exit 0
 
 # ---------------------------------------------------------------------------
@@ -337,8 +354,9 @@ if [[ -z "${body}" ]]; then
     echo "  removed, so it names nothing at all." >&2
     echo "" >&2
 fi
-echo "  On main, .claude/plans/*.md is the one thing that may be committed" >&2
-echo "  directly, and parallel sessions all write there. 'git add" >&2
+echo "  On main, .claude/plans/*.md (and .claude/plans/briefs/*.html) is the" >&2
+echo "  one thing that may be committed directly, and parallel sessions all" >&2
+echo "  write there. 'git add" >&2
 echo "  .claude/plans/' has repeatedly swept an UNTRACKED note belonging to" >&2
 echo "  another direction into a commit describing unrelated work: the content" >&2
 echo "  survives, the provenance does not. Naming the file is the check —" >&2

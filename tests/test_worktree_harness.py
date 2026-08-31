@@ -14,6 +14,7 @@ guard that fired for the wrong reason.
 from __future__ import annotations
 
 import fcntl
+import functools
 import os
 import re
 import shutil
@@ -1595,7 +1596,14 @@ class TestHarnessIntegrity:
         assert wf.exists(), "CB-59's CI workflow is missing"
         text = wf.read_text()
         assert "--first-parent --no-merges" in text
-        assert r"^\.claude/plans/[^/]+\.md$" in text
+        # CB-266 widened the allowlist letter (was `.claude/plans/*.md` only) to
+        # also admit the level-(1) curator's daily brief,
+        # `.claude/plans/briefs/*.html`. This exact literal is the ONE existing
+        # pin on the expression this whole card was filed about — an earlier
+        # measurement claiming "no test pins it" was wrong by one hit, found by
+        # re-running the grep rather than trusting the count. See
+        # TestAllowlistRegexAgreement for the three-copy consistency check.
+        assert r"^\.claude/plans/([^/]+\.md|briefs/[^/]+\.html)$" in text
 
         match = re.search(r"BASELINE:\s*([0-9a-f]{40})", text)
         assert match, "workflow declares no 40-char baseline SHA"
@@ -2321,6 +2329,52 @@ class TestPreCommitHook:
         (deep / "note.md").write_text("# notes\n")
         assert self._commit(repo, ".claude/plans/sub/note.md").returncode != 0
 
+    def test_daily_brief_on_main_allowed(self, repo: Path) -> None:
+        """CB-266: the level-(1) curator's daily brief is a plan note by intent.
+
+        `.claude/plans/briefs/DAILY-<date>.html` — a second path level, an
+        `.html` extension — landed directly on main from 2026-08-29
+        (813bb6d), and the letter of this hook refused it: the allowlist was
+        `.claude/plans/*.md` only, narrower than the ratified intent ("a plan
+        artefact the owner reads"). Widened by exactly this one shape.
+        """
+        self._install(repo)
+        briefs = repo / ".claude" / "plans" / "briefs"
+        briefs.mkdir(parents=True)
+        (briefs / "DAILY-2026-08-30.html").write_text("<html>brief</html>\n")
+        assert self._commit(repo, ".claude/plans/briefs/DAILY-2026-08-30.html").returncode == 0
+
+    def test_nested_brief_path_refused(self, repo: Path) -> None:
+        """CB-266's own oracle mutant (depth): `briefs/` is one level, not a subtree."""
+        self._install(repo)
+        deep = repo / ".claude" / "plans" / "briefs" / "sub"
+        deep.mkdir(parents=True)
+        (deep / "x.html").write_text("<html>x</html>\n")
+        assert self._commit(repo, ".claude/plans/briefs/sub/x.html").returncode != 0
+
+    def test_non_html_file_under_briefs_refused(self, repo: Path) -> None:
+        """CB-266's own oracle mutant (extension): the widening is narrow ON PURPOSE.
+
+        `briefs/` is not thrown open to any file — only `*.html` — or the next
+        script to write there mints a silent bypass of the whole rule.
+        """
+        self._install(repo)
+        briefs = repo / ".claude" / "plans" / "briefs"
+        briefs.mkdir(parents=True)
+        (briefs / "evil.py").write_text("import os\n")
+        assert self._commit(repo, ".claude/plans/briefs/evil.py").returncode != 0
+
+    def test_html_file_outside_briefs_still_refused(self, repo: Path) -> None:
+        """CB-266's own oracle mutant (scope): `.html` alone is not the allowance —
+        only `.claude/plans/briefs/*.html` is. A second-level `.html` note
+        anywhere else under `.claude/plans/` is still a violation.
+        """
+        self._install(repo)
+        other = repo / ".claude" / "plans" / "other"
+        other.mkdir(parents=True)
+        (other / "x.html").write_text("<html>x</html>\n")
+        assert self._commit(repo, ".claude/plans/other/x.html").returncode != 0
+
     def test_source_edit_on_sanctioned_branch_allowed(self, repo: Path) -> None:
         self._install(repo)
         git(repo, "checkout", "-q", "-b", "fix/cb-50-harness")
@@ -2660,6 +2714,189 @@ def invocations(src: str, command: str) -> list[str]:
         if rest.startswith(command + " "):
             out.append(rest)
     return out
+
+
+class TestAllowlistRegexAgreement:
+    """CB-266 oracle mutant #5: the allowlist regex is duplicated byte-for-byte
+    in three places (tools/pre-commit-hook.sh, tools/commit-msg-hook.sh,
+    .github/workflows/main-invariants.yml) because none of them can source a
+    shared file — the two hooks run from `.git/hooks/` as standalone scripts
+    and must work when `tools/` is absent from the checked-out tree, and the
+    workflow runs on a different machine entirely. Same constraint CLAUDE.md
+    already documents for the branch-type predicate's own SHARED MERGE-GATE
+    PREDICATE markers, and the same reason a plain "one copy" refactor is not
+    achievable here.
+
+    Before CB-266, a grep of tests/ for this expression found exactly ONE
+    hit, in test_ci_workflow_asserts_the_first_parent_invariant above — and
+    that one pins only the CI copy. No test compared the three copies to each
+    other, so a divergence between them (one file gets patched, the other two
+    do not) would have gone undetected. This class is that comparison: the
+    substitute this codebase's own convention prescribes for an "unreachable
+    single copy" — a test that refuses to let the texts disagree, rather than
+    a shared file that cannot exist.
+    """
+
+    @staticmethod
+    def _extract(text: str, *, flag: str) -> str:
+        """The literal regex string bound to `grep <flag> '...'`."""
+        marker = f"grep {flag} '"
+        idx = text.index(marker)
+        start = idx + len(marker)
+        end = text.index("'", start)
+        return text[start:end]
+
+    def test_the_three_copies_are_byte_identical(self) -> None:
+        pre_commit = (REPO_ROOT / "tools" / "pre-commit-hook.sh").read_text()
+        commit_msg = (REPO_ROOT / "tools" / "commit-msg-hook.sh").read_text()
+        workflow = (REPO_ROOT / ".github" / "workflows" / "main-invariants.yml").read_text()
+
+        # pre-commit-hook.sh and the workflow REFUSE what falls OUTSIDE the
+        # pattern (grep -vE); commit-msg-hook.sh SELECTS what falls INSIDE it
+        # (grep -E) — two decisions sharing one expression (CLAUDE.md §2 п.3).
+        neg_hook = self._extract(pre_commit, flag="-vE")
+        pos_hook = self._extract(commit_msg, flag="-E")
+        neg_ci = self._extract(workflow, flag="-vE")
+
+        assert neg_hook == pos_hook == neg_ci, (
+            "the allowlist regex has diverged across its three copies:\n"
+            f"  tools/pre-commit-hook.sh (negative):        {neg_hook!r}\n"
+            f"  tools/commit-msg-hook.sh (positive):        {pos_hook!r}\n"
+            f"  .github/workflows/main-invariants.yml (neg): {neg_ci!r}"
+        )
+
+    def test_the_comparison_actually_discriminates_a_divergent_copy(self) -> None:
+        """A self-check on fixture text, not on the repository's real files.
+
+        Demonstrates the exact mutant the class above exists to catch — break
+        the expression in one of the three sources — without mutating the
+        repository itself to prove it.
+        """
+        good = r"^\.claude/plans/([^/]+\.md|briefs/[^/]+\.html)$"
+        mutated = r"^\.claude/plans/([^/]+\.md|briefs/[^/]+\.HTML)$"  # one place diverged
+        pre_commit_text = f"offending=$(echo \"$x\" | grep -vE '{good}' || true)\n"
+        commit_msg_text = f"plans=$(echo \"$x\" | grep -E '{good}' || true)\n"
+        workflow_text = f"offending=$(printf '%s\\n' \"$x\" \\\n  | grep -vE '{mutated}' || true)\n"
+
+        neg_hook = self._extract(pre_commit_text, flag="-vE")
+        pos_hook = self._extract(commit_msg_text, flag="-E")
+        neg_ci = self._extract(workflow_text, flag="-vE")
+
+        assert neg_hook == pos_hook, "the fixture's two non-mutated copies must still agree"
+        assert neg_ci != neg_hook, (
+            "the fixture's mutant copy was not actually different from the good ones — "
+            "this test would not have caught a real divergence"
+        )
+
+
+class TestMainInvariantsAuditScript:
+    """CB-266 P2 / oracle items 1-3, exercised on the CI copy specifically.
+
+    §13 п.18 forbids a string oracle for this unit's textual half: a mutant
+    saying the same false thing in different words would leave a
+    substring-in-YAML assertion green. So this class does not read the YAML —
+    it extracts the audit step's own `run: |` block and executes it, in a
+    throwaway repo, against exactly the shapes CB-266 is about: an honest
+    brief (must pass) and the three named mutants (must each still refuse).
+    TestPreCommitHook and TestCommitMsgNamingGate cover the same shapes on
+    the two git-hook copies; this is the third copy, which cannot be tested
+    by installing a git hook because it is not one.
+    """
+
+    WORKFLOW = REPO_ROOT / ".github" / "workflows" / "main-invariants.yml"
+
+    @classmethod
+    @functools.lru_cache(maxsize=1)
+    def _extract_script(cls) -> str:
+        """The step's own `run: |` block, dedented. Cached: the file is static
+        for the life of the process, and this is re-derived once per test
+        method otherwise (four times here) for no reason — /simplify (2026-08-30)."""
+        text = cls.WORKFLOW.read_text()
+        marker = "\n        run: |\n"
+        idx = text.index(marker)
+        body = text[idx + len(marker) :]
+        lines: list[str] = []
+        for ln in body.splitlines():
+            if ln.strip() == "":
+                lines.append("")
+                continue
+            assert ln.startswith(" " * 10), f"unexpected indentation in run block: {ln!r}"
+            lines.append(ln[10:])
+        return "\n".join(lines)
+
+    def _run(self, repo: Path, baseline: str) -> subprocess.CompletedProcess[str]:
+        env = dict(os.environ)
+        env["BASELINE"] = baseline
+        return subprocess.run(
+            ["bash", "-c", self._extract_script()],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+    @staticmethod
+    def _commit_all(repo: Path, message: str) -> None:
+        git(repo, "add", "-A")
+        git(repo, "commit", "-m", message)
+
+    @pytest.mark.parametrize(
+        "rel_dir,filename,content,commit_msg,expect_ok",
+        [
+            pytest.param(
+                "briefs",
+                "DAILY-2026-08-30.html",
+                "<html>brief</html>\n",
+                "docs(curator): DAILY-2026-08-30.html",
+                True,
+                id="a brief-shaped commit is accepted",
+            ),
+            pytest.param(
+                "briefs/sub",
+                "x.html",
+                "<html>x</html>\n",
+                "docs: nested brief path",
+                False,
+                id="oracle mutant #1 (depth): nested under briefs/ is refused",
+            ),
+            pytest.param(
+                "briefs",
+                "evil.py",
+                "import os\n",
+                "docs: not actually a brief",
+                False,
+                id="oracle mutant #2 (extension): wrong extension under briefs/ is refused",
+            ),
+            pytest.param(
+                "other",
+                "x.md",
+                "# x\n",
+                "docs: two levels, still not briefs/",
+                False,
+                id="oracle mutant #3 (scope): two levels outside briefs/ is refused",
+            ),
+        ],
+    )
+    def test_commit_shape_is_judged_correctly(
+        self,
+        repo: Path,
+        rel_dir: str,
+        filename: str,
+        content: str,
+        commit_msg: str,
+        expect_ok: bool,
+    ) -> None:
+        baseline = git(repo, "rev-parse", "HEAD")
+        d = repo / ".claude" / "plans" / rel_dir
+        d.mkdir(parents=True)
+        (d / filename).write_text(content)
+        self._commit_all(repo, commit_msg)
+        r = self._run(repo, baseline)
+        if expect_ok:
+            assert r.returncode == 0, r.stdout + r.stderr
+            assert "clean" in r.stdout, r.stdout
+        else:
+            assert r.returncode != 0, r.stdout + r.stderr
 
 
 CASCADE_REGISTRY_REL = ".claude/plans/CASCADE-IDS.md"
@@ -4058,11 +4295,14 @@ class TestCommitMsgNamingGate:
             (hooks / "pre-commit").chmod(0o755)
 
     @staticmethod
-    def _plan(repo: Path, name: str, body: str = "note\n") -> str:
-        d = repo / ".claude" / "plans"
+    def _plan(repo: Path, name: str, body: str = "note\n", *, subdir: str = "") -> str:
+        """A plan note under `.claude/plans/`, or (CB-266) a daily brief under
+        `.claude/plans/briefs/` when `subdir="briefs"`."""
+        d = repo / ".claude" / "plans" / subdir if subdir else repo / ".claude" / "plans"
         d.mkdir(parents=True, exist_ok=True)
         (d / name).write_text(body, encoding="utf-8")
-        return f".claude/plans/{name}"
+        rel = f"{subdir}/{name}" if subdir else name
+        return f".claude/plans/{rel}"
 
     @staticmethod
     def _commit(
@@ -4113,6 +4353,27 @@ class TestCommitMsgNamingGate:
         r = self._add_and_commit(repo, "docs(dir-1): handoff", p)
         assert r.returncode != 0
         assert "T20-brief.md" in r.stderr
+
+    def test_a_named_daily_brief_lands(self, repo: Path) -> None:
+        """CB-266 §3 п.3: the naming rule was widened alongside pre-commit's.
+
+        Not a courtesy — `git add .claude/plans/` recursively stages
+        `.claude/plans/briefs/` (measured; see the sibling comment in
+        pre-commit-hook.sh), so once a brief can land at all it is exactly the
+        kind of untracked file this hook exists to make someone name.
+        """
+        self._install(repo)
+        p = self._plan(repo, "DAILY-2026-08-30.html", subdir="briefs")
+        r = self._add_and_commit(repo, "docs(curator): DAILY-2026-08-30.html", p)
+        assert r.returncode == 0, r.stderr
+
+    def test_an_unnamed_daily_brief_is_refused(self, repo: Path) -> None:
+        """CB-266's own oracle mutant #4: a brief the message does not name."""
+        self._install(repo)
+        p = self._plan(repo, "DAILY-2026-08-30.html", subdir="briefs")
+        r = self._add_and_commit(repo, "docs(curator): daily brief", p)
+        assert r.returncode != 0
+        assert "DAILY-2026-08-30.html" in r.stderr
 
     def test_the_incident_shape_two_notes_only_one_named(self, repo: Path) -> None:
         """The literal failure this unit mechanises.
