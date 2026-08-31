@@ -194,12 +194,18 @@ relative and refuses a genuinely armed clone. **Known residual:** with `extensio
 and an *absolute* per-worktree value the asymmetry returns, bounded because the integration merge
 runs in the primary, where the gate does fire.
 
-**The bootstrap gate's condition must be MONOTONIC.** It gates on whether the path has **history** on
-main, read with `--all` — a clone with no *local* main (`git clone --single-branch --branch fix/…` is
-enough, and `origin/main` being present does not help) would otherwise collapse it — **and it
-distinguishes an ERROR from an empty result**, failing closed on the error: `2>/dev/null || true`
-makes those identical, and `git log --all -- <path>` exits 128 in a `--filter=tree:0` clone whose
-promisor remote has gone away.
+**The bootstrap gate's condition must be MONOTONIC, and this is the one place it is stated.** It
+gates on whether the path has **history** on main — which deleting the file cannot undo, so a
+missing source reports as "cannot verify the hook identity" instead of vanishing, whereas gating on
+"does the file exist" makes one `rm` a permanent, flagless disarm, landable on a perfectly typed
+branch. That history is read with `--all` — a clone with no *local* main (`git clone
+--single-branch --branch fix/…` is enough, and `origin/main` being present does not help) would
+otherwise collapse it — **and it distinguishes an ERROR from an empty result**, failing closed on
+the error: `2>/dev/null || true` makes those identical, and `git log --all -- <path>` exits 128 in a
+`--filter=tree:0` clone whose promisor remote has gone away. **Two later paragraphs need this
+condition and neither restates it** — the T-23 one below, and the bootstrap wall at the end of this
+section — because a four-review-round condition in two places is two rules one edit apart, which is
+this section's own argument about `_hook_source_known` applied to the prose that describes it.
 
 **Every reader of the staged set passes `-c core.quotePath=false`.** `git diff --cached --name-only`
 C-quotes a non-ASCII path by default, which makes the allowlist regex miss it and refuses the commit;
@@ -661,10 +667,8 @@ the head-*acceptability* rules — typed branch, or upstream `main` — are abou
 
 **The bootstrap is a real constraint, not an oversight.** `worktree-finish.sh` cannot land the commit
 that first creates `tools/`, because `_guard_enforcement_armed` refuses when main has no
-`tools/pre-commit-hook.sh` for the hook to point at. **The condition must be MONOTONIC:** the gate is
-whether **the path has history on main**, which deleting the file cannot undo, so a missing source
-reports as "cannot verify the hook identity" instead of vanishing. Gating on "does the file exist"
-instead makes one `rm` a permanent, flagless disarm, landable on a perfectly typed branch. So **run
+`tools/pre-commit-hook.sh` for the hook to point at. This is the wall **the monotonic condition
+stated above** exists to get past — it is stated there and deliberately not restated here. So **run
 `tools/install-hooks.sh` right after such a merge** or the next finish refuses — correctly, since a
 clone armed before the new hook really is missing part of its enforcement. If `tools/` is ever
 rewritten the same way, expect the same one-time manual merge.
