@@ -2155,9 +2155,17 @@ class TestGuardsAreActuallyInvoked:
         assert guard_at < create_at, "branch type is validated after the worktree is created"
 
     def test_enforcement_armed_runs_before_the_lock_is_opened(self) -> None:
-        """Fail fast, rather than after waiting up to 60s on the lock."""
+        """Fail fast, rather than after waiting up to 60s on the lock.
+
+        The anchor is the STATEMENT that opens the integration lock, never the
+        bare `exec 9>`. CB-187's own explanatory comment names that descriptor
+        in prose 400 lines earlier, and a bare-substring anchor then finds the
+        COMMENT and reports the guard as running after a "lock" that is only a
+        sentence about one. This is the identical hazard the sibling test
+        already guards against for `--no-ff`, applied to its neighbour.
+        """
         src = self.FINISH.read_text()
-        assert src.index("_guard_enforcement_armed") < src.index("exec 9>")
+        assert src.index("_guard_enforcement_armed") < src.index('exec 9>"${LOCK_FILE}"')
 
     def test_skew_check_uses_the_value_the_gates_ran_against(self) -> None:
         """CB-41's shape, reintroduced by this card's own round-1 fix.
@@ -2217,7 +2225,10 @@ class TestGuardsAreActuallyInvoked:
         src = self.FINISH.read_text()
         calls = [i for i in range(len(src)) if src.startswith("_guard_interpreter_matches_main ", i)]
         assert len(calls) == 2, f"expected a pre-check and an in-lock re-check, found {len(calls)}"
-        lock_at = src.index("exec 9>")
+        # The statement that opens the lock, not the header comment that names
+        # the descriptor in prose — the same precision the merge anchor below
+        # already needed, and for the same reason.
+        lock_at = src.index('exec 9>"${LOCK_FILE}"')
         # The integration merge itself, not the header comment that mentions
         # `--no-ff` 400 lines earlier.
         merge_at = src.index('git -C "${REPO_ROOT}" merge "${BRANCH}" --no-ff')
@@ -6454,3 +6465,281 @@ class TestUnknownSlugRefusal:
         r = self._finish(armed)
         assert "Usage:" in r.stdout, r.stdout[-2000:]
         assert r.returncode == 1, (r.returncode, r.stdout[-2000:], r.stderr[-2000:])
+
+
+class TestFlockPremises:
+    """What `flock -n` actually does — pinned, not assumed (CB-187).
+
+    The worktree-finish lock rests on four properties of `flock(1)`, and the
+    whole gate is worth nothing if any of them changes under a system upgrade.
+    Pinned here for the same reason this file pins git's `MERGE_HEAD` and
+    `GITHEAD_` behaviour: a suite that turns red is better than a gate that is
+    silently disarmed.
+
+    Measured on util-linux 2.41.3, 2026-08-31.
+    """
+
+    @staticmethod
+    def _sh(script: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    def test_premise_a_free_file_is_acquired_and_a_held_one_is_refused_with_1(
+        self, tmp_path: Path
+    ) -> None:
+        """rc 1 is what "someone else holds it" looks like — the gate's input."""
+        lock = tmp_path / "x.lock"
+        free = self._sh(f'exec 8>"{lock}"; flock -n 8; echo "rc=$?"')
+        assert "rc=0" in free.stdout, (free.stdout, free.stderr)
+
+        # A second process really holds it while we look. The holder is proven
+        # alive before the probe runs: a holder that died would make this test
+        # pass for the wrong reason, which is the vacuous-fixture trap this file
+        # already learned once.
+        held = self._sh(
+            f'flock "{lock}" -c "sleep 5" & holder=$!\n'
+            "sleep 0.4\n"
+            'kill -0 "$holder" || { echo "HOLDER-DEAD"; exit 1; }\n'
+            'echo "holder-alive=yes"\n'
+            f'( exec 8>"{lock}"; flock -n 8; echo "rc=$?" )\n'
+            'kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null; true\n'
+        )
+        assert "holder-alive=yes" in held.stdout, (held.stdout, held.stderr)
+        assert "rc=1" in held.stdout, (held.stdout, held.stderr)
+
+    def test_premise_a_failure_is_distinguishable_from_a_refusal(self) -> None:
+        """The gate reads the result THREE-valued, and this is what lets it.
+
+        `flock -n` on a descriptor that was never opened does NOT return 1. If
+        it did, "another finish is running" and "the lock could not be read"
+        would be one code and the gate would have to claim the first about the
+        second — this repository's most-repeated defect, in a new place.
+        """
+        r = self._sh("flock -n 8; echo rc=$?")
+        assert "rc=1" not in r.stdout, (r.stdout, r.stderr)
+        assert re.search(r"rc=(\d+)", r.stdout), r.stdout
+        assert int(re.search(r"rc=(\d+)", r.stdout).group(1)) not in (0, 1), r.stdout
+
+    def test_premise_two_names_do_not_exclude_each_other(self, tmp_path: Path) -> None:
+        """The mechanism of trap 1, in isolation.
+
+        This is WHY the lock may not be named from `$1`: two spellings of one
+        worktree would give two file names, and `flock` would happily hand a
+        lock to each. The gate would be installed and unable to fire.
+        """
+        r = self._sh(
+            f'exec 8>"{tmp_path}/a.lock"; flock -n 8; echo "first=$?"\n'
+            f'( exec 7>"{tmp_path}/b.lock"; flock -n 7; echo "second=$?" )\n'
+        )
+        assert "first=0" in r.stdout and "second=0" in r.stdout, (r.stdout, r.stderr)
+
+    def test_premise_unlinking_the_file_destroys_the_exclusion(self, tmp_path: Path) -> None:
+        """Why the lock file is NEVER deleted, in one measurement.
+
+        `flock` holds the INODE. Remove the name and the next process creates a
+        different inode, locks that, and the exclusion is simply gone — which is
+        why the exit-16 message tells the operator not to delete the file.
+        """
+        lock = tmp_path / "c.lock"
+        r = self._sh(
+            f'exec 8>"{lock}"; flock -n 8; echo "first=$?"\n'
+            f'rm -f "{lock}"\n'
+            f'( exec 7>"{lock}"; flock -n 7; echo "second=$?" )\n'
+        )
+        assert "first=0" in r.stdout, (r.stdout, r.stderr)
+        assert "second=0" in r.stdout, (
+            "deleting the lock file no longer defeats the lock — the message "
+            "warning against it should be re-read: " + r.stdout
+        )
+
+
+class TestWorktreeFinishLock:
+    """Two finishes of ONE worktree exclude each other (CB-187, half a).
+
+    Behavioural, in a throwaway repo, for the reason `TestMergeSubjectDerivation`
+    is: a structural test reads the code that was written, and the defect this
+    closes is precisely a gate that READS correctly and cannot fire. The
+    discriminating case is trap 1 — two spellings of one worktree — and no
+    reading of the script reveals whether they collapse to one lock.
+
+    The lock file's NAME is DISCOVERED from the product, never re-derived here.
+    A test that spelled the naming rule out a second time would agree with a
+    wrong implementation as readily as with a right one.
+    """
+
+    BRANCH = "fix/cb-999-lockrace"
+    SPELLING_FULL = "fix-cb-999-lockrace"
+    SPELLING_SUFFIX = "cb-999-lockrace"
+
+    def _worktree(self, armed: dict) -> Path:
+        """A worktree carrying NO commit of its own.
+
+        Deliberate: every assertion below is about a refusal that happens
+        BEFORE [1/7], so the branch's content is irrelevant to it, and an empty
+        branch gives the probe run a cheap, deterministic stopping point
+        (`_guard_nonempty_diff`, exit 9) at a phase LATER than the lock.
+        """
+        repo = armed["repo"]
+        wt = repo / ".worktrees" / self.SPELLING_FULL
+        git(repo, "worktree", "add", "-q", "-b", self.BRANCH, str(wt), "main")
+        return wt
+
+    def _finish(self, armed: dict, slug: str) -> subprocess.CompletedProcess[str]:
+        witness = Path(armed["bin"]) / "uv-was-called"
+        uv = Path(armed["bin"]) / "uv"
+        if not uv.exists():
+            # Any invocation of uv means the run reached a phase that costs
+            # real time. The witness is how "the suite never ran" is PROVEN
+            # rather than inferred from the absence of a line in stdout.
+            uv.write_text(
+                "#!/usr/bin/env bash\n"
+                f'printf "%s\\n" "$*" >> "{witness}"\n'
+                "exit 1\n"
+            )
+            uv.chmod(0o755)
+        return subprocess.run(
+            [str(armed["repo"] / "tools" / "worktree-finish.sh"), slug],
+            cwd=str(armed["repo"]),
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": f"{armed['bin']}{os.pathsep}{os.environ['PATH']}"},
+        )
+
+    @staticmethod
+    def _locks(repo: Path) -> list[Path]:
+        return sorted((repo / ".worktrees").glob(".finish-*.lock"))
+
+    def test_two_spellings_of_one_worktree_cannot_both_finish(self, armed: dict) -> None:
+        """THE test. Without it the fix for CB-187 would be vacuous.
+
+        `_resolve_worktree_path` accepts both the directory name and the branch
+        suffix, so two legitimate invocations of one branch arrive spelled
+        differently. A lock named from `$1` gives two files, two inodes and no
+        exclusion at all — measured directly in TestFlockPremises. Here the
+        second spelling must be refused by a lock the FIRST spelling created.
+        """
+        repo = armed["repo"]
+        self._worktree(armed)
+        main_before = git(repo, "rev-parse", "main")
+
+        # 1. A probe run, purely to let the SCRIPT name its own lock file. It
+        #    refuses at [3/7] on the empty branch, which also shows the lock is
+        #    taken earlier than that guard.
+        probe = self._finish(armed, self.SPELLING_FULL)
+        assert probe.returncode == 9, (probe.returncode, probe.stdout[-2000:])
+        locks = self._locks(repo)
+        assert len(locks) == 1, f"expected exactly one lock file, found {locks}"
+        lock_path = locks[0]
+
+        # 2. Hold it, as a concurrent finish would.
+        fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            # 3. The SAME spelling is refused — the ordinary case.
+            same = self._finish(armed, self.SPELLING_FULL)
+            assert same.returncode == 16, (same.returncode, same.stdout[-3000:])
+
+            # 4. The OTHER spelling is refused too. This is the discriminator:
+            #    a `$1`-named lock passes here at exit 9.
+            other = self._finish(armed, self.SPELLING_SUFFIX)
+            assert other.returncode == 16, (
+                "a second spelling of the same worktree was NOT excluded — the "
+                "lock is named from the operator's argument rather than from "
+                "the resolved worktree",
+                other.returncode,
+                other.stdout[-3000:],
+            )
+            assert "ALREADY RUNNING" in other.stdout, other.stdout[-3000:]
+
+            # 5. Independent corroboration of the same claim, from the file
+            #    system rather than from an exit code: three runs, two
+            #    spellings, ONE lock file.
+            assert self._locks(repo) == [lock_path], self._locks(repo)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+        # 6. And nothing was landed or paid for by either refusal.
+        assert git(repo, "rev-parse", "main") == main_before
+        assert not (Path(armed["bin"]) / "uv-was-called").exists(), (
+            "a refused finish still invoked uv, i.e. it paid for a check phase"
+        )
+
+    def test_the_refusal_costs_nothing_and_says_so(self, armed: dict) -> None:
+        """Refused BEFORE [1/7], the first phase that mutates anything.
+
+        [1/7] auto-commits a dirty worktree. A lock taken after it would let the
+        loser rewrite the tree it is about to be told to leave alone, and a lock
+        taken after [6/7] would defeat the entire purpose, which is not paying
+        for the checks.
+        """
+        repo = armed["repo"]
+        self._worktree(armed)
+        probe = self._finish(armed, self.SPELLING_FULL)
+        assert probe.returncode == 9, (probe.returncode, probe.stdout[-2000:])
+        lock_path = self._locks(repo)[0]
+
+        fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            r = self._finish(armed, self.SPELLING_FULL)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+        assert r.returncode == 16, (r.returncode, r.stdout[-3000:])
+        assert "[1/7]" not in r.stdout, (
+            "the refusal arrived after the first mutating phase: " + r.stdout[-3000:]
+        )
+        # The text must not read as an accusation against the branch, and it
+        # must not invite the one repair that turns the gate off.
+        assert "Do NOT delete" in r.stdout, r.stdout[-3000:]
+        assert str(lock_path) in r.stdout, r.stdout[-3000:]
+
+    def test_the_refusal_is_recorded_in_the_journal(self, armed: dict) -> None:
+        """A silent refusal would HIDE the over-count it explains (CB-176).
+
+        The journal exists to price "landing has become painful". A finish
+        refused as a duplicate is one of the two lines a race used to write, so
+        suppressing it would quietly improve the number instead of making it
+        attributable. With a code of its own the pair becomes readable: one real
+        attempt, one rejected double.
+        """
+        repo = armed["repo"]
+        self._worktree(armed)
+        assert self._finish(armed, self.SPELLING_FULL).returncode == 9
+        lock_path = self._locks(repo)[0]
+
+        journal = repo / ".worktrees" / "landing-attempts.log"
+        before = journal.read_text().splitlines() if journal.exists() else []
+
+        fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert self._finish(armed, self.SPELLING_FULL).returncode == 16
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+        after = journal.read_text().splitlines()
+        assert len(after) == len(before) + 1, (before, after)
+        assert after[-1].split()[2] == "16", after[-1]
+
+    def test_a_free_lock_lets_the_finish_through(self, armed: dict) -> None:
+        """The other side of the gate, so it is not one that always refuses.
+
+        A gate asserted only on its refusals is indistinguishable from a wall.
+        """
+        repo = armed["repo"]
+        self._worktree(armed)
+        r = self._finish(armed, self.SPELLING_FULL)
+        assert r.returncode == 9, (r.returncode, r.stdout[-2000:])
+        assert "[1/7]" in r.stdout, r.stdout[-2000:]
+        assert len(self._locks(repo)) == 1
+
+        # And the lock is released by the process exiting, so an honest re-run
+        # is not refused by its own predecessor — the retry that exit 13
+        # PRESCRIBES must not be blocked by this gate.
+        again = self._finish(armed, self.SPELLING_FULL)
+        assert again.returncode == 9, (again.returncode, again.stdout[-2000:])
+        assert "ALREADY RUNNING" not in again.stdout, again.stdout[-2000:]
