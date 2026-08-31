@@ -291,3 +291,393 @@ range.
 **How the observed CB-111 subject was actually produced.** The exit-13 refusal used to print the bare
 short form of the re-run command, so the refusal routed the operator into the derivation that main's
 move had just broken.
+
+## Что в этом файле, и чего в нём нет
+
+**Что в этом файле.** Обоснования правил из корневого `CLAUDE.md`: почему правило появилось, какой
+инцидент его породил, что показали раунды состязательного ревю, какие формы были отвергнуты и по
+какому замеру. С T-131 сюда же переехала операционная глубина — устройство сторожей и хуков,
+пределы алярмов, внутренности гейтов.
+
+**Чего в этом файле НЕТ, и это важнее.** Здесь нет ни одного правила, которое нужно знать до начала
+работы. Всё такое осталось в корневом `CLAUDE.md`, потому что этот файл не впрыскивается в сессию —
+его открывает только тот, кого сюда послали. Если ты ищешь, как завести рабочее дерево, что значит
+код отказа или что можно коммитить на `main`, — тебе не сюда, а в корень.
+
+**Кто сюда ходит.** Тот, кто правит соответствующую подсистему, — и тот, кто собирается ослабить
+правило и обязан сперва узнать, чем за него заплатили.
+
+---
+
+# Перенесено из корня юнитом T-131
+
+## Workflow — `main` is never edited directly
+
+**This section once said the harness was unnecessary — "plain git is enough" — and that claim was
+falsified within two hours by the very rule it was introducing (CB-50).** It landed at 13:37 on
+2026-08-16 (`2957070`) mandating a typed branch and `git merge --no-ff`; at 15:30 main was advanced
+by `merge worktree-cb-45-similarity-seam: Fast-forward` — no type prefix, no merge commit, and by
+then pointing at main's own SHA, so every further merge would fast-forward again. Two sentences
+earlier the same section had stated the reason — **a convention that exists only as a pattern in the
+log is not a rule** — and then declined to bind it. **Prose cannot enforce prose**; the harness below
+is the fix.
+
+It proves main and the branch were still the tested ones
+**at the moment of the check**; two statements later `git merge "${BRANCH}"` resolves both refs
+again, by NAME, for itself. Nothing carries a verified SHA into the merge and porcelain git has no
+`--expect-old-oid`, so a window sits between them. The flock serializes **finishes against each
+other** and nothing else, and the traffic that walks into that window is **ordinary sanctioned
+work**: level-(2) sessions commit plan notes to main continuously, and since 2026-08-22
+`tools/cascade-mint.sh` does it automatically while holding a *different* lock. Both parents, because what lands is a merge and checking one
+of them while asserting the premise is this section's own recurring defect.
+**Four details are load-bearing, and each is a way the alarm can lie.**
+
+1. **Identity, not shape.** A two-parent tip does not establish that main's tip *is the merge this
+   run made* — an off-harness merge landing a moment after ours has two parents too, and its first
+   parent is *our* merge, so its parents would be reported as ours with a confident and wrong story.
+   `ORIG_HEAD` supplies identity: `git merge` sets it to the HEAD it merged into, which **is** the
+   merge's first parent by construction. **So the tip is ours exactly when it has two parents and
+   its first parent is `ORIG_HEAD`.** Anything else is one verdict, `tip-not-ours`, which says what
+   it does not know instead of inventing a cause — and that single verdict covers a stranger's
+   commit or merge, an *Already up to date* merge (which sets `ORIG_HEAD` to the **current** tip, so
+   it cannot masquerade as a match), an octopus and a root commit. Both git behaviours are pinned as
+   premise tests.
+
+2. **`tip-not-ours` is usually benign, and the text says so.** A plan note landing on main in the
+   moment after a perfectly correct merge produces it, so the block tells the operator to read the
+   log rather than to fix anything; only the two real mismatches carry the *fix it forward on a new
+   branch* advice.
+
+3. **The block is delivered from an `EXIT` trap armed the instant the merge returns**, not from a
+   trailing `if`. Under `set -euo pipefail` any failure in the cleanup — its own final
+   `git log … | sed`, or any statement a later edit inserts — would otherwise kill the script
+   between detecting the condition and reporting it, presenting a landed merge as an ordinary
+   failure. That is CB-41's rule again: make the bad state unrepresentable rather than re-establish
+   discipline at each insertion point. The initial verdict is the pessimistic `unreadable`, so a
+   signal arriving before the verdict is computed still reports *could not look*. **The residual is
+   stated rather than claimed away:** the interval between `git merge` returning and `trap`
+   executing is two assignments wide, and nothing in the script can close it.
+
+4. **The reads are `--no-replace-objects` and stdout-only.** Replace refs and `info/grafts` make `^@`
+   answer with parents that are not in the commit's own header, so without the flag the "an object's
+   parents are immutable" argument would be true of the object and false of the answer. Stdout-only
+   is the one place fail-closed is deliberately **not** applied — folding stderr in would make any
+   `warning:` git emitted unparseable and fire the alarm on an honest finish, and an alarm that
+   cries wolf is one nobody reads; the rc still separates an error from an empty answer. Every
+   answer is shape-checked as well, because `rev-parse` echoes an argument it does not recognise
+   back at you and exits 0.
+**The merge gate is keyed on `GITHEAD_`, not on `MERGE_HEAD`.** On git 2.53 **a clean merge never
+writes `MERGE_HEAD`** — the merge is resolved in memory, the git dir holds `AUTO_MERGE`, `ORIG_HEAD`
+and `COMMIT_EDITMSG`, and `git rev-parse MERGE_HEAD` fails outright — so a hook keyed on that file
+exits 0 on every clean merge: a gate that cannot fire, which is worse than no gate, because the table
+above would then claim a rule nothing enforces. What git *does* provide is
+**`GITHEAD_<sha>=<what the caller named>`**, set per merge head, which is git's own record and what
+the merge strategies themselves read. **Not the commit *message***: parsing `Merge branch 'x'` is a
+name-matching heuristic, and it would be blind anyway because `worktree-finish.sh` passes its own
+`-m`. `tests/…::test_premise_merge_head_is_absent_on_a_clean_merge` and
+`…::test_premise_githead_env_names_the_merged_ref` pin both premises, so a git upgrade that changes
+either turns the suite red instead of silently disarming the hook.
+
+**`GITHEAD_` is not always a NAME.** Measured on git 2.53 against a real remote:
+`git merge origin/main` gives `GITHEAD_<sha>=origin/main`, but **`git pull` and `git merge FETCH_HEAD` give the
+raw OID**. So `GITHEAD_` is used only to LEARN WHICH COMMITS are being merged; **the decision is made
+from the refs that point at each of them.** Assuming it was a name refused every pull — a false
+refusal, which is the worse failure.
+
+**The sanctioned-type rule governs LOCAL branches.** Remote-tracking refs are *upstream's* namespace,
+which this repo does not name, so exactly one of them is consulted — main's own upstream — and only
+to recognise a pull. Concretely, given a merge head:
+
+- Candidates are **every ref pointing at that head**, always. There is no "judge the named ref
+  instead" branch; see the byte-identity note below for why that had to go.
+
+- **Every local branch must qualify.** With "any qualifies" there is a three-command bypass:
+  `git merge untyped` (refused), `git branch fix/tmp untyped`, `git commit` — git does not abort
+  after a refusal, it leaves the merge in progress and routes the operator into `pre-commit`, where
+  one typed alias at the same commit launders the whole thing.
+
+- A **remote ref other than main's upstream `main` neither qualifies nor disqualifies.** Requiring
+  *all* refs to qualify refuses a real `git pull` whenever upstream happens to have another branch
+  cut at that commit (`origin/release-1.0`), and `refs/remotes/<r>/HEAD` — the default-branch alias —
+  disqualifies the very pull the fallback exists for.
+
+- Upstream **`main` wins** over a non-qualifying local branch, so a stray local bookmark left at the
+  commit being pulled cannot refuse the pull.
+
+Nothing
+  is "stripped": a blind `${rest#*/}` collapses `refs/remotes/junk/main` to the accepted literal
+  `main`, and trusting any *configured* remote's `main` still leaves `git remote add junk <anything>`
+  plus a fetch as a two-command bypass.
+There is no local
+discriminator, and refusing remote refs instead would break `git pull` — the worse failure. Same
+shape as the `--separate-git-dir` misbinding: **when a rule cannot be decided from local evidence,
+supply external metadata rather than deepening the guess.** The external metadata is CB-59's
+server-side protection — **but only the half of it that was actually enabled.** The ratified scope
+(CI limits, item 4) refuses a force-push and a deletion of `origin/main`, so upstream's history
+cannot be rewritten under you; an upstream `main` that simply *holds untyped work* is untouched,
+because require-PR is deliberately off. **That half of the limit stays open**, and `TestKnownLimits`
+pins that the bypass still reproduces, so the day it stops being true someone re-reads this instead
+of trusting a stale claim.
+**`MERGE_HEAD` is read fail-closed.** The conflicted-merge gate is a `while read` over that file, and
+two states make a naive loop run **zero** times, leave the refusal flag at `0`, and fall through to
+the merge-in-progress exemption: an **empty** `MERGE_HEAD`, which an interrupted git can leave behind
+and is therefore reachable by accident, and a `MERGE_HEAD` with **no trailing newline**, since `read`
+returns non-zero on an unterminated last line. The loop therefore uses `|| [[ -n "$_sha" ]]`, counts
+what it saw, and **refuses when it saw nothing** — the "guard reporting clean because it could not
+look" shape, which the CI job and the `pre-merge-commit` hook were already hardened against.
+
+**`core.hooksPath` can make `_guard_enforcement_armed` lie**, which matters more than the other
+findings because that guard's entire job is *this clone is actually armed*. `--git-common-dir`/hooks
+does **not** follow the redirect, so both the guard and `install-hooks.sh` use `git rev-parse
+--git-path hooks`, which does — **and a RELATIVE value is refused outright**, because git resolves
+one against the top of *each* working tree, so `core.hooksPath=.githooks` names a different directory
+in the primary checkout and in every linked worktree. "This clone is armed" is not a statement the
+guard can make about a per-worktree path, so it declines to make it. The value is read with
+**`--type=path`**, so git does its own `~` expansion first; reading it raw classes `~/hooks` as
+relative and refuses a genuinely armed clone. **Known residual:** with `extensions.worktreeConfig`
+and an *absolute* per-worktree value the asymmetry returns, bounded because the integration merge
+runs in the primary, where the gate does fire.
+
+**The bootstrap gate's condition must be MONOTONIC, and this is the one place it is stated.** It
+gates on whether the path has **history** on main — which deleting the file cannot undo, so a
+missing source reports as "cannot verify the hook identity" instead of vanishing, whereas gating on
+"does the file exist" makes one `rm` a permanent, flagless disarm, landable on a perfectly typed
+branch. That history is read with `--all` — a clone with no *local* main
+(`git clone --single-branch --branch fix/…` is enough, and `origin/main` being present does not
+help) would otherwise collapse it — **and it distinguishes an ERROR from an empty result**, failing
+closed on the error: `2>/dev/null || true` makes those identical, and `git log --all -- <path>`
+exits 128 in a `--filter=tree:0` clone whose promisor remote has gone away. **Later paragraphs need
+this condition and none of them restates it** — the T-23 one below, and the bootstrap wall at the
+end of this section — because a four-review-round condition in two places is two rules one edit
+apart, which is this section's own argument about `_hook_source_known` applied to the prose that
+describes it.
+
+**Every reader of the staged set passes `-c core.quotePath=false`.** `git diff --cached --name-only`
+C-quotes a non-ASCII path by default, which makes the allowlist regex miss it and refuses the commit;
+the same default once made `_guard_conflict_markers` silently *accept* a conflict marker. The
+commit-msg gate below derives a BASENAME from that same staged set, so a C-quoted path there yields a
+basename no human could ever type — a *permanent* false refusal of every non-ASCII plan note rather
+than a one-off. The test that pins this names no count, because a count in a name is a count that
+goes stale.
+**Naming is the discriminator
+because git records nothing about *how* a path was staged**: the index cannot be asked whether
+`git add` was given a file or a directory. What separates the two cases is the author — you cannot
+name a file you did not know was there.
+
+**The phase is `commit-msg` and not `pre-commit`, and the measurement is the whole argument.** On git
+2.53, at `pre-commit` time the message being written does not exist anywhere: `$GIT_DIR/COMMIT_EDITMSG`
+holds the **PREVIOUS** commit's message, and on a clone's first commit it does not exist at all. A
+pre-commit naming check is therefore not a gate that fails open — it is a gate wired to someone
+else's input, which passes a sweeping commit whose predecessor happened to name the file and refuses
+a correct one whose predecessor did not; that is worse than absent, because it looks like
+enforcement. `commit-msg` receives the final message as `$1`, after `-m`, `-F` and the editor have
+all had their say, and `test_premise_pre_commit_cannot_see_the_message` pins it.
+
+**The message is truncated at the scissors FIRST, then comment-stripped**, because two auto-generated
+sources inside the message file would each make this a gate that cannot fire: git's default template
+lists the staged paths as comment lines (`#	new file:   .claude/plans/foo.md`), and `git commit -v`
+appends the whole diff below the scissors line, where every hunk header names its file — which
+`git stripspace --strip-comments` does **not** remove, because a diff is not a comment. **The
+scissors test is `>8` and `---` on one line rather than git's exact string**, because the comment
+character is configurable and anchoring on `#` would let a repo with `core.commentChar=;` keep its
+diff; over-truncating costs a loud refusal, under-truncating costs the gate. Comment stripping is
+delegated to `git stripspace`, which reads the same `core.commentChar` git itself will use, so the
+two cannot disagree.
+
+**Matching is by TOKEN, and a word boundary is the wrong tool.** `plan.md` is a substring of
+`my-plan.md`, so a sweeping commit naming its own note would launder the stranger's note beside it —
+and the swept file is by construction the one nobody wrote down. A regex `\b` does not fix it either,
+because `-` and `.` are non-word characters, so `\bplan\.md\b` matches *inside* `my-plan.md`.
+**The matcher also decides which names it will judge, which is the same predicate and not a second
+one.** A space is a boundary, so with `a b.md` and `b.md` both staged and only `a b.md` named, the
+occurrence of `b.md` INSIDE it is flanked by a space and the token end — two boundaries — and the
+stranger's note lands unnamed. That closes
+the class BY CONSTRUCTION, and the proof is two lines: if every staged basename is made only of name
+bytes, an occurrence of one strictly inside a longer one always has a name byte on at least one side,
+so it can never be flanked by two boundaries. **The general shape: a check that validates elements cannot validate their
+composition, and here the composition is *the matcher plus the set of names it is asked to match*.**
+
+On a branch there are no
+foreign untracked notes to sweep, so the rule there would be pure friction on every `wip` commit, and
+everything else on main is pre-commit's to refuse — duplicating that judgement would give one state
+two refusals that could drift. It is read fail-closed with a count, exactly like
+pre-commit's arm: an empty `MERGE_HEAD` must not read as an exempt one. That is not
+a hole this gate opened; `pre-commit`'s merge exemption already waves the whole staged set through on
+that path. The gate is an accident-stopper, and a merge state is not something one enters by accident.
+
+**`_guard_enforcement_armed` demands this hook too, since T-23.** The condition is the SAME monotonic
+one `pre-merge-commit` uses — extracted into `_hook_source_known` and called once per gated hook
+rather than copied, because a four-review-round condition in two places is two rules one edit apart;
+`test_bootstrap_condition_is_one_function_called_per_gated_hook` counts the call sites. **Two of the three hooks share a predicate — disjoint halves, neither redundant, and they must not
+disagree.** (The third, commit-msg, shares nothing with them: it reads the message, they read refs.)
+A CONFLICTED merge never reaches `pre-merge-commit`, and neither does a merge this hook has already
+refused: both are finished with `git commit`, which fires `pre-commit`. So the predicate is
+duplicated **byte-identically** into `pre-commit-hook.sh` between the `# ---8<--- SHARED MERGE-GATE PREDICATE` markers, and **a test compares the two blocks verbatim rather than grepping for a
+substring.** The integration merge does not pass `--no-verify`: leaving it would make the harness the
+single caller exempt from the gate.
+`tests/test_worktree_harness.py::TestGitSequencerPremises` pins both directions, so a git version
+that starts running the hook turns the suite red instead of quietly making this paragraph true.
+**`install-hooks.sh` sets `merge.ff=false` before anything arming-related can abort**, so a clone
+missing `tools/pre-merge-commit-hook.sh` — an older main, a `git checkout <old-commit>`, the
+CB-57 bootstrap window itself — still arms the pre-commit hook and still exits 1 at the merge-hook
+step, but does so **with `merge.ff` already set**. **With that step last it left `merge.ff` unset
+instead**, and the installer could skip the one mechanism no hook can replace.
+**The precise claim:** four commands still precede it (sourcing the guards, resolving the repo root,
+resolving the hooks dir, `mkdir -p`) and each is fatal under `set -e`, so "a step that cannot fail
+goes first" is not literally true of it.
+
+Moving the
+   baseline forward is how a violation would be laundered, so it is a deliberate, reviewable edit,
+   and a test asserts the SHA is a real commit here.
+
+**DAG inspection cannot prove
+   how a merge commit reached the ref; only a protected ref can.** An **evil merge** (content in
+   neither parent) is invisible for a second reason: `git show --name-only` on a merge prints
+   nothing.
+
+Both this job and the pre-commit hook had that
+   defect; both are fixed and both are pinned.
+
+That scope was **ratified by the owner as sufficient for CB-59**, on this
+   reasoning: force-push and deletion are the class **nothing local can catch**, because they
+   rewrite or destroy history every local hook has already approved, whereas require-PR and a
+   required check constrain *how work arrives* — already governed by `merge.ff=false`, the three
+   hooks and `_guard_enforcement_armed` **for a clone that has run `tools/install-hooks.sh`**.
+   CB-59 is closed at that scope, not at this paragraph's original four items.
+
+The trigger split is pinned **in both
+   directions**, because a test asserting only the negative half left deleting
+   `push: branches: [main]` outright green, turning "gate that cannot fire" into "workflow that
+   never fires".
+
+   `test_ci_suite_job_checks_out_the_history_its_own_suite_reads` pins it, and each of its four
+   properties was earned rather than chosen. **Comments do not count**, since the fix's own comment
+   carries the literal `fetch-depth: 0` and a raw grep would stay green after the key itself was
+   deleted — and the stripping is WHOLE-LINE only, so an inline `#` is TOLERATED by the matchers
+   rather than parsed. **A file is not a composition**: two jobs, two checkouts, so "somewhere in
+   `ci.yml`" is satisfied by moving the key to `contracts` and leaving the gate just as broken.
+   **The key must be a `with:` INPUT and the explanation a COMMENT LINE**, or a step whose multiline
+   `name:` scalar contains both strings satisfies every assertion at depth 1. **Exactly one
+   checkout, carrying no `if:`**, or `if: ${{ false }}` on the first plus a second bare checkout
+   defeats it. **NOT closed, and named so it is not rediscovered:** a job-level `if:` switching the
+   whole `tests` job off is the same shape and this test does not look at it.
+**What the guard compares, and why the two sides are probed differently.** The worktree side is
+`uv run --extra dev python -c <probe>` — byte for byte the launcher `[6/7]` uses for pytest, so the
+answer IS the interpreter the suite will run under, and the call syncs the worktree to the pin as a
+side effect, which is wanted on a tree about to be tested. The main side is
+`<repo_root>/.venv/bin/python` executed DIRECTLY, deliberately **not** through `uv run`: that would
+rebuild a checkout other sessions are working in, and **a guard must not mutate the tree it is
+judging**. It also answers the exact question the incident asked — what main ACTUALLY has, not what
+it would acquire next time somebody ran something there. `pyvenv.cfg` is not read: it describes an
+environment rather than being one.
+The version-shape check
+(`_interpreter_version_is_sane`) earns its keep in exactly one state the pin check cannot catch: **a
+NON-version that PREFIX-MATCHES the pin.** A bare pin like `"3"` accepts anything spelled `"3."` plus
+more as if it were a legitimate patch release, so a stub `"3.0"` on both sides clears the pin check
+by looking like one while still failing the strict `X.Y.Z` shape — there the shape check is the only
+backstop. `test_two_prefix_matching_non_versions_refuse_rather_than_agree` is what holds it;
+`test_two_undeterminable_sides_refuse_rather_than_agree` is kept as a premise fixture but is **not
+sufficient on its own** (CB-140).
+**Anchor the structural test on the `git merge` and
+not on the echo announcing it** — "after the text that says a merge is coming" is not "after the
+merge".
+
+**It is asserted a SECOND time, inside the lock, because a pre-check is not an invariant at landing
+time.** main's `.venv` is gitignored, so `_guard_main_clean` cannot see it move and the in-lock SHA
+re-checks are about commits: a `UV_PYTHON=… uv sync` in main during the suite run would land work
+tested on one interpreter onto a main that now has another. It is a second CALL rather than a stored
+sample (~100ms) so it cannot drift from the thing it is checking.
+Compare the resolved venv *directories*,
+never the interpreters they resolve to — two honest venvs built from one system python both resolve
+to a single `/usr/bin/pythonX.Y`, so an interpreter-level test would refuse every ordinary case.
+
+**The usual bootstrap wall applies, and it is milder than CB-57's.** `worktree-finish.sh` runs from
+the REPO ROOT, so the script that lands this change is MAIN's copy, which does not yet contain the
+call; the first finish AFTER it lands is the first gated one. No re-run of `install-hooks.sh` is
+needed, because this guard is in the script rather than in an installed hook.
+
+  The claim carries a **holder triple** (`--holder <branch> --holder-kind branch --repo <root>`),
+  mutual exclusion is the partial unique index, and there is a release path — including
+  `_auto_release_on_terminal`, so closing the card releases the claim in the same transaction.   **Order is load-bearing: the claim happens BEFORE `git worktree add`,** for the same reason
+  `_guard_branch_type` does — otherwise the losing side of a race owns a branch and a directory by
+  the time it is told no. An
+  **EXIT trap** releases whatever the run took if setup aborts, armed after the first successful
+  claim and **disarmed on success** — leaving it armed would make every setup that *worked* release
+  its own claim on the way out. 
+
+  Following first parents skips every absorbed lineage, main's forward-merge included.
+  **The FIRST commit of that line wins, not the last**, because branches here end on review fixups,
+  which describe an iteration's tail rather than its subject. Do **not** write that as
+  `--reverse -1`: git applies the count BEFORE reversing, so it returns the NEWEST commit and
+  silently restores the behaviour this removed (measured).
+  **The refusal tests the POPULATION, not its first line**: `git commit --allow-empty-message` puts a
+  blank line at the head, and reading that as an empty population is a false refusal that also
+  asserts something untrue about the repository. It cannot drift from what lands: both inputs are the
+  pinned `TESTED_*` values and the in-lock re-checks refuse with exit 13 if either moved.
+No ordering flag reaches it (measured:
+  `--first-parent` and `--topo-order` both pick the base commit) because it is not a traversal
+  question — the commits really are this branch's ancestry and this merge really does land them.
+
+One `_retry_hint` builds the line for all
+  four refusal paths (forward-merge conflict, main moved, branch moved, merge failed); a test refuses
+  the exact literal `echo "      tools/worktree-finish.sh ${SLUG}"` — the spelling that regressed —
+  while the helper-call count holds the other three sites. 
+
+**How the harness itself is tested, and where that stops.**
+`tests/test_worktree_harness.py` covers every guard on both sides — the state it must refuse and the
+state it must allow — **and separately asserts that `worktree-finish.sh` actually calls each one.**
+That second class exists because two adversarial reviews deleted guard *invocations* from the script,
+including the branch-type guard that exists for the 2026-08-16 incident, and the whole suite stayed
+green, because nothing executed the script: every guard was unit-tested and the composition was not.
+**Do not read the per-guard tests as covering the wiring.**
+
+**Two lessons a vacuous test taught, both worth keeping:** a test that sets up its own fixture must
+**assert the fixture exists**, and `git rev-parse` is not a safe place to be sloppy with argv — it
+echoes an unrecognised option-looking argument back at you and exits 0.
+
+The wiring tests are **structural**: they read the script and assert each guard is invoked with
+`|| exit $?`, in the right phase. **But "executing the whole script is impractical" is narrower than
+it reads, and CB-116 is the proof:** `TestMergeSubjectDerivation` runs `worktree-finish.sh` end to
+end in a throwaway repo under `--skip-checks`, which disables ruff and pytest and *not* the safety
+guards, and the merge it lands is onto that repo's main. So a property of the SCRIPT'S OUTPUT can be
+tested behaviourally, and had to be: the CB-116 defect was invisible to every structural test, because
+the defective code called `git log`, which is exactly what a structural test would look for. **What
+stays impractical is the gate run itself, not the script.** Three more structural tests came with
+CB-57, each pinning a property whose failure mode is silent — a gate present in the tree and absent
+in effect: the integration merge must **not** carry `--no-verify`, the installer must arm the merge
+hook and point it at main's checkout, and the CI workflow must carry a baseline SHA that is a real
+commit in this repository.
+
+**The branch predicate is constructed FOUR times across THREE files** — `_guards.sh` once,
+`pre-commit-hook.sh` twice (its own branch check, plus the copy inside the shared merge-gate block),
+`pre-merge-commit-hook.sh` once — because neither hook may source the library: each runs from
+`.git/hooks/` as a symlink and must work when `tools/` is missing from the checked-out tree. **The
+test counts constructions per SITE, not per file**, because a per-file count let a degraded regex in
+`pre-commit-hook.sh` stay green on the shared block's copy. **Same types is *not* the same
+predicate** — a prefix test accepts `fix/a/b`, which `_guard_branch_type` refuses — so a divergence
+would let a branch clear the finish guard and then be refused by the merge hook, after the whole
+suite had already run.
+
+**Byte-identical is not the same claim as "the two hooks agree".** The shared predicate once took a
+second argument — what the caller typed, from `GITHEAD_` — and judged that ref alone when it
+resolved: identical code, two different rules, because only `pre-merge-commit` HAS that argument, and
+the byte-identity test structurally could not see it because the divergence lived in the arguments.
+The predicate now takes only the merge head, so both callers pass identical information. **The
+general form, which this repo keeps relearning: sharing an implementation does not share a decision
+if the callers supply different inputs.**
+
+**Cherry-pick and revert have no marker-file exemption, and the honest scope is narrower than "they
+are now refused".** The merge-in-progress exemption used to fire on mere existence of `MERGE_HEAD`,
+`CHERRY_PICK_HEAD` *or* `REVERT_HEAD`, so one empty file turned off both of this hook's rules —
+reachable the same way an empty `MERGE_HEAD` was, since a conflicted cherry-pick leaves the file
+until `--continue`/`--abort`. **But a CLEAN `git cherry-pick` or `git revert` onto main never reaches
+`pre-commit` at all** — git's sequencer commits directly — so it still lands, verified by running
+both. What the change buys is that a *marker file* no longer launders a commit; clean cherry-pick and
+revert onto main are caught only by the CI alarm, since they leave a single-parent commit on the
+first-parent line. **That is the honest statement.**
+
+**The same fail-closed validation is NOT scoped to main**, because the exemption it guards is not:
+while it was, `: > .git/MERGE_HEAD` on an untyped branch still skipped the branch-type check. Only
+the head-*acceptability* rules — typed branch, or upstream `main` — are about main.
+This is the wall **the monotonic condition
+stated above** exists to get past — it is stated there and deliberately not restated here. 

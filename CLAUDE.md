@@ -8,15 +8,6 @@ AI-native code finding & requirements tracker. SQLite-backed, exposed via MCP se
 Borrowed from `../autosorter` (2026-08-16), including a scaled-down port of its
 `tools/worktree-*.sh` harness.
 
-**This section once said the harness was unnecessary — "plain git is enough" — and that claim was
-falsified within two hours by the very rule it was introducing (CB-50).** It landed at 13:37 on
-2026-08-16 (`2957070`) mandating a typed branch and `git merge --no-ff`; at 15:30 main was advanced
-by `merge worktree-cb-45-similarity-seam: Fast-forward` — no type prefix, no merge commit, and by
-then pointing at main's own SHA, so every further merge would fast-forward again. Two sentences
-earlier the same section had stated the reason — **a convention that exists only as a pattern in the
-log is not a rule** — and then declined to bind it. **Prose cannot enforce prose**; the harness below
-is the fix.
-
 **What is now mechanically enforced** (`tools/install-hooks.sh` arms it; run once per clone):
 
 | Rule | Mechanism | Refuses with |
@@ -45,13 +36,7 @@ meant to be precise (round-3 review). It is an **alarm**. The gate is branch pro
 
 **The re-check row was NARROWED, and what closes the remaining gap is a second alarm — not a gate
 (CB-121).** That row used to read *"The tested state is the landed state"*, and it overclaimed: the
-in-lock re-check is a **check-then-act**. It proves main and the branch were still the tested ones
-**at the moment of the check**; two statements later `git merge "${BRANCH}"` resolves both refs
-again, by NAME, for itself. Nothing carries a verified SHA into the merge and porcelain git has no
-`--expect-old-oid`, so a window sits between them. The flock serializes **finishes against each
-other** and nothing else, and the traffic that walks into that window is **ordinary sanctioned
-work**: level-(2) sessions commit plan notes to main continuously, and since 2026-08-22
-`tools/cascade-mint.sh` does it automatically while holding a *different* lock. The narrowed row is
+in-lock re-check is a **check-then-act**. The narrowed row is
 still a checkable claim — the state matched under the lock, and a mismatch there really does refuse
 with exit 13 before anything lands. It simply no longer promises the interval it cannot cover.
 
@@ -60,46 +45,11 @@ by the time it can look, **the merge step has already run**, so it cannot refuse
 row in the table above. Immediately after the integration merge and **before** `flock -u 9` — after
 the unlock another finish could move main, and the alarm would start lying in the way it exists to
 catch — `worktree-finish.sh` asks whether the merge that just ran has `TESTED_MAIN` as its first
-parent and `TESTED_HEAD` as its second. Both parents, because what lands is a merge and checking one
-of them while asserting the premise is this section's own recurring defect. It then lets the cleanup
+parent and `TESTED_HEAD` as its second. It then lets the cleanup
 finish (worktree removal, claim release) and speaks at the very end, with a loud block and `exit 15`
 — deliberately not `exit 13`, which means *nothing landed, re-run*. `exit 15` means *the merge step
 already ran and the premise is unconfirmed*, and the block says in words not to re-run: a second
 finish after a landed merge is a worse outcome than the defect being reported.
-
-**Four details are load-bearing, and each is a way the alarm can lie.**
-
-1. **Identity, not shape.** A two-parent tip does not establish that main's tip *is the merge this
-   run made* — an off-harness merge landing a moment after ours has two parents too, and its first
-   parent is *our* merge, so its parents would be reported as ours with a confident and wrong story.
-   `ORIG_HEAD` supplies identity: `git merge` sets it to the HEAD it merged into, which **is** the
-   merge's first parent by construction. **So the tip is ours exactly when it has two parents and
-   its first parent is `ORIG_HEAD`.** Anything else is one verdict, `tip-not-ours`, which says what
-   it does not know instead of inventing a cause — and that single verdict covers a stranger's
-   commit or merge, an *Already up to date* merge (which sets `ORIG_HEAD` to the **current** tip, so
-   it cannot masquerade as a match), an octopus and a root commit. Both git behaviours are pinned as
-   premise tests.
-2. **`tip-not-ours` is usually benign, and the text says so.** A plan note landing on main in the
-   moment after a perfectly correct merge produces it, so the block tells the operator to read the
-   log rather than to fix anything; only the two real mismatches carry the *fix it forward on a new
-   branch* advice.
-3. **The block is delivered from an `EXIT` trap armed the instant the merge returns**, not from a
-   trailing `if`. Under `set -euo pipefail` any failure in the cleanup — its own final
-   `git log … | sed`, or any statement a later edit inserts — would otherwise kill the script
-   between detecting the condition and reporting it, presenting a landed merge as an ordinary
-   failure. That is CB-41's rule again: make the bad state unrepresentable rather than re-establish
-   discipline at each insertion point. The initial verdict is the pessimistic `unreadable`, so a
-   signal arriving before the verdict is computed still reports *could not look*. **The residual is
-   stated rather than claimed away:** the interval between `git merge` returning and `trap`
-   executing is two assignments wide, and nothing in the script can close it.
-4. **The reads are `--no-replace-objects` and stdout-only.** Replace refs and `info/grafts` make `^@`
-   answer with parents that are not in the commit's own header, so without the flag the "an object's
-   parents are immutable" argument would be true of the object and false of the answer. Stdout-only
-   is the one place fail-closed is deliberately **not** applied — folding stderr in would make any
-   `warning:` git emitted unparseable and fire the alarm on an honest finish, and an alarm that
-   cries wolf is one nobody reads; the rc still separates an error from an empty answer. Every
-   answer is shape-checked as well, because `rev-parse` echoes an argument it does not recognise
-   back at you and exits 0.
 
 `merge.ff=false` is the one no hook could replace: **git fires no hook on a fast-forward at all**,
 because no commit is created, so nothing can catch it after the fact. **Two precise limits:** it
@@ -109,45 +59,7 @@ off without anyone typing `--ff`.
 
 → почему именно так: `docs/claude-md-rationale/workflow.md#cb-121-четыре-несущие-детали`
 
-**The merge gate is keyed on `GITHEAD_`, not on `MERGE_HEAD`.** On git 2.53 **a clean merge never
-writes `MERGE_HEAD`** — the merge is resolved in memory, the git dir holds `AUTO_MERGE`, `ORIG_HEAD`
-and `COMMIT_EDITMSG`, and `git rev-parse MERGE_HEAD` fails outright — so a hook keyed on that file
-exits 0 on every clean merge: a gate that cannot fire, which is worse than no gate, because the table
-above would then claim a rule nothing enforces. What git *does* provide is
-**`GITHEAD_<sha>=<what the caller named>`**, set per merge head, which is git's own record and what
-the merge strategies themselves read. **Not the commit *message***: parsing `Merge branch 'x'` is a
-name-matching heuristic, and it would be blind anyway because `worktree-finish.sh` passes its own
-`-m`. `tests/…::test_premise_merge_head_is_absent_on_a_clean_merge` and
-`…::test_premise_githead_env_names_the_merged_ref` pin both premises, so a git upgrade that changes
-either turns the suite red instead of silently disarming the hook.
-
-**`GITHEAD_` is not always a NAME.** Measured on git 2.53 against a real remote:
-`git merge origin/main` gives `GITHEAD_<sha>=origin/main`, but **`git pull` and `git merge FETCH_HEAD` give the
-raw OID**. So `GITHEAD_` is used only to LEARN WHICH COMMITS are being merged; **the decision is made
-from the refs that point at each of them.** Assuming it was a name refused every pull — a false
-refusal, which is the worse failure.
-
-**The sanctioned-type rule governs LOCAL branches.** Remote-tracking refs are *upstream's* namespace,
-which this repo does not name, so exactly one of them is consulted — main's own upstream — and only
-to recognise a pull. Concretely, given a merge head:
-
-- Candidates are **every ref pointing at that head**, always. There is no "judge the named ref
-  instead" branch; see the byte-identity note below for why that had to go.
-- **Every local branch must qualify.** With "any qualifies" there is a three-command bypass:
-  `git merge untyped` (refused), `git branch fix/tmp untyped`, `git commit` — git does not abort
-  after a refusal, it leaves the merge in progress and routes the operator into `pre-commit`, where
-  one typed alias at the same commit launders the whole thing.
-- A **remote ref other than main's upstream `main` neither qualifies nor disqualifies.** Requiring
-  *all* refs to qualify refuses a real `git pull` whenever upstream happens to have another branch
-  cut at that commit (`origin/release-1.0`), and `refs/remotes/<r>/HEAD` — the default-branch alias —
-  disqualifies the very pull the fallback exists for.
-- Upstream **`main` wins** over a non-qualifying local branch, so a stray local bookmark left at the
-  commit being pulled cannot refuse the pull.
-- The trusted ref is matched **exactly** (`refs/remotes/<branch.main.remote|origin>/main`). Nothing
-  is "stripped": a blind `${rest#*/}` collapses `refs/remotes/junk/main` to the accepted literal
-  `main`, and trusting any *configured* remote's `main` still leaves `git remote add junk <anything>`
-  plus a fetch as a two-command bypass.
-
+- The trusted ref is matched **exactly** (`refs/remotes/<branch.main.remote|origin>/main`).
 **A merge head with NO ref at all is refused, and that is a real cost, not a free win.** It catches a
 bare SHA or a tag, but it also refuses four legitimate-if-rare flows, verified: a one-shot
 `git pull --no-rebase <URL> main`, `git merge FETCH_HEAD` with no tracking ref, a `branch.main.remote`
@@ -161,60 +73,8 @@ new trust path with no review round left to attack it is a worse trade than a ra
 `main` is **trusted** — `branch.main.remote`, defaulting to `origin` — and nothing local can prove
 what it contains or how it got there: `git update-ref refs/remotes/origin/main <any-sha>`, a mistyped
 fetch refspec, a rewritten `remote.origin.fetch` (which then re-arms on every ordinary `git fetch`),
-or simply an upstream whose `main` holds untyped work all land content here. There is no local
-discriminator, and refusing remote refs instead would break `git pull` — the worse failure. Same
-shape as the `--separate-git-dir` misbinding: **when a rule cannot be decided from local evidence,
-supply external metadata rather than deepening the guess.** The external metadata is CB-59's
-server-side protection — **but only the half of it that was actually enabled.** The ratified scope
-(CI limits, item 4) refuses a force-push and a deletion of `origin/main`, so upstream's history
-cannot be rewritten under you; an upstream `main` that simply *holds untyped work* is untouched,
-because require-PR is deliberately off. **That half of the limit stays open**, and `TestKnownLimits`
-pins that the bypass still reproduces, so the day it stops being true someone re-reads this instead
-of trusting a stale claim.
-
+or simply an upstream whose `main` holds untyped work all land content here.
 → почему именно так: `docs/claude-md-rationale/workflow.md#cb-57-гейт-мержа`
-
-**`MERGE_HEAD` is read fail-closed.** The conflicted-merge gate is a `while read` over that file, and
-two states make a naive loop run **zero** times, leave the refusal flag at `0`, and fall through to
-the merge-in-progress exemption: an **empty** `MERGE_HEAD`, which an interrupted git can leave behind
-and is therefore reachable by accident, and a `MERGE_HEAD` with **no trailing newline**, since `read`
-returns non-zero on an unterminated last line. The loop therefore uses `|| [[ -n "$_sha" ]]`, counts
-what it saw, and **refuses when it saw nothing** — the "guard reporting clean because it could not
-look" shape, which the CI job and the `pre-merge-commit` hook were already hardened against.
-
-**`core.hooksPath` can make `_guard_enforcement_armed` lie**, which matters more than the other
-findings because that guard's entire job is *this clone is actually armed*. `--git-common-dir`/hooks
-does **not** follow the redirect, so both the guard and `install-hooks.sh` use `git rev-parse
---git-path hooks`, which does — **and a RELATIVE value is refused outright**, because git resolves
-one against the top of *each* working tree, so `core.hooksPath=.githooks` names a different directory
-in the primary checkout and in every linked worktree. "This clone is armed" is not a statement the
-guard can make about a per-worktree path, so it declines to make it. The value is read with
-**`--type=path`**, so git does its own `~` expansion first; reading it raw classes `~/hooks` as
-relative and refuses a genuinely armed clone. **Known residual:** with `extensions.worktreeConfig`
-and an *absolute* per-worktree value the asymmetry returns, bounded because the integration merge
-runs in the primary, where the gate does fire.
-
-**The bootstrap gate's condition must be MONOTONIC, and this is the one place it is stated.** It
-gates on whether the path has **history** on main — which deleting the file cannot undo, so a
-missing source reports as "cannot verify the hook identity" instead of vanishing, whereas gating on
-"does the file exist" makes one `rm` a permanent, flagless disarm, landable on a perfectly typed
-branch. That history is read with `--all` — a clone with no *local* main
-(`git clone --single-branch --branch fix/…` is enough, and `origin/main` being present does not
-help) would otherwise collapse it — **and it distinguishes an ERROR from an empty result**, failing
-closed on the error: `2>/dev/null || true` makes those identical, and `git log --all -- <path>`
-exits 128 in a `--filter=tree:0` clone whose promisor remote has gone away. **Later paragraphs need
-this condition and none of them restates it** — the T-23 one below, and the bootstrap wall at the
-end of this section — because a four-review-round condition in two places is two rules one edit
-apart, which is this section's own argument about `_hook_source_known` applied to the prose that
-describes it.
-
-**Every reader of the staged set passes `-c core.quotePath=false`.** `git diff --cached --name-only`
-C-quotes a non-ASCII path by default, which makes the allowlist regex miss it and refuses the commit;
-the same default once made `_guard_conflict_markers` silently *accept* a conflict marker. The
-commit-msg gate below derives a BASENAME from that same staged set, so a C-quoted path there yields a
-basename no human could ever type — a *permanent* false refusal of every non-ASCII plan note rather
-than a one-off. The test that pins this names no count, because a count in a name is a count that
-goes stale.
 
 → почему именно так: `docs/claude-md-rationale/workflow.md#сторожа-читают-fail-closed`
 
@@ -222,35 +82,7 @@ goes stale.
 `commit-msg` hook.** The rule it mechanises is that parallel sessions add files to main **by name,
 never by directory**: `.claude/plans/` is the one place they may all write, and `git add
 .claude/plans/` sweeps an UNTRACKED note belonging to another direction into a commit describing
-unrelated work — the bytes survive, the **provenance** does not. **Naming is the discriminator
-because git records nothing about *how* a path was staged**: the index cannot be asked whether
-`git add` was given a file or a directory. What separates the two cases is the author — you cannot
-name a file you did not know was there.
-
-**The phase is `commit-msg` and not `pre-commit`, and the measurement is the whole argument.** On git
-2.53, at `pre-commit` time the message being written does not exist anywhere: `$GIT_DIR/COMMIT_EDITMSG`
-holds the **PREVIOUS** commit's message, and on a clone's first commit it does not exist at all. A
-pre-commit naming check is therefore not a gate that fails open — it is a gate wired to someone
-else's input, which passes a sweeping commit whose predecessor happened to name the file and refuses
-a correct one whose predecessor did not; that is worse than absent, because it looks like
-enforcement. `commit-msg` receives the final message as `$1`, after `-m`, `-F` and the editor have
-all had their say, and `test_premise_pre_commit_cannot_see_the_message` pins it.
-
-**The message is truncated at the scissors FIRST, then comment-stripped**, because two auto-generated
-sources inside the message file would each make this a gate that cannot fire: git's default template
-lists the staged paths as comment lines (`#	new file:   .claude/plans/foo.md`), and `git commit -v`
-appends the whole diff below the scissors line, where every hunk header names its file — which
-`git stripspace --strip-comments` does **not** remove, because a diff is not a comment. **The
-scissors test is `>8` and `---` on one line rather than git's exact string**, because the comment
-character is configurable and anchoring on `#` would let a repo with `core.commentChar=;` keep its
-diff; over-truncating costs a loud refusal, under-truncating costs the gate. Comment stripping is
-delegated to `git stripspace`, which reads the same `core.commentChar` git itself will use, so the
-two cannot disagree.
-
-**Matching is by TOKEN, and a word boundary is the wrong tool.** `plan.md` is a substring of
-`my-plan.md`, so a sweeping commit naming its own note would launder the stranger's note beside it —
-and the swept file is by construction the one nobody wrote down. A regex `\b` does not fix it either,
-because `-` and `.` are non-word characters, so `\bplan\.md\b` matches *inside* `my-plan.md`. **The
+unrelated work — the bytes survive, the **provenance** does not. **The
 match must be flanked by a boundary: the string edge, or an ASCII byte that cannot occur in the
 name.** Every **non-ASCII** byte counts as part of a name, so an ambiguous neighbour refuses rather
 than matches; **the stated cost** is that a filename hugged by typographic quotes or dashes
@@ -258,40 +90,19 @@ than matches; **the stated cost** is that a filename hugged by typographic quote
 semantics so the verdict cannot depend on the committer's locale — **honest scope: that line is
 determinism insurance and no test discriminates it**, since under a UTF-8 locale codepoint-wise
 classification happens to agree on every case here.
-
-**The matcher also decides which names it will judge, which is the same predicate and not a second
-one.** A space is a boundary, so with `a b.md` and `b.md` both staged and only `a b.md` named, the
-occurrence of `b.md` INSIDE it is flanked by a space and the token end — two boundaries — and the
-stranger's note lands unnamed. **So a staged basename containing a space or ASCII punctuation outside
-`[A-Za-z0-9._-]` is REFUSED outright** rather than judged by a rule that cannot see it. That closes
-the class BY CONSTRUCTION, and the proof is two lines: if every staged basename is made only of name
-bytes, an occurrence of one strictly inside a longer one always has a name byte on at least one side,
-so it can never be flanked by two boundaries. Non-ASCII names are untouched, because a non-ASCII byte
-is a NAME byte. **The general shape: a check that validates elements cannot validate their
-composition, and here the composition is *the matcher plus the set of names it is asked to match*.**
-
-**Scope, and what it deliberately does not touch.** Only `main`, and only `.claude/plans/*.md` or
+**So a staged basename containing a space or ASCII punctuation outside
+`[A-Za-z0-9._-]` is REFUSED outright** rather than judged by a rule that cannot see it. Non-ASCII names are untouched, because a non-ASCII byte
+is a NAME byte. **Scope, and what it deliberately does not touch.** Only `main`, and only `.claude/plans/*.md` or
 `.claude/plans/briefs/*.html` (the second widened by CB-266 to match `pre-commit-hook.sh`'s own
 widening, on the same reasoning: `git add .claude/plans/` recursively sweeps `briefs/`, so once a
-brief can land at all, this hook's reason for existing reaches it too). On a branch there are no
-foreign untracked notes to sweep, so the rule there would be pure friction on every `wip` commit, and
-everything else on main is pre-commit's to refuse — duplicating that judgement would give one state
-two refusals that could drift. **Deletions are in scope**, because `git add <dir>` stages a removal
+brief can land at all, this hook's reason for existing reaches it too). **Deletions are in scope**, because `git add <dir>` stages a removal
 too and deleting a stranger's note damages the same provenance. **A merge is exempt, and the
 discriminator differs from `pre-merge-commit`'s in a way that would invert the rule if assumed:** a
 clean merge writes no `MERGE_HEAD` at `pre-merge-commit` time, but by `commit-msg` time git **has**
 written it, for clean and conflicted merges alike (measured, and pinned, because if a future git
-stops doing it every integration would be refused). It is read fail-closed with a count, exactly like
-pre-commit's arm: an empty `MERGE_HEAD` must not read as an exempt one. **What the exemption costs,
+stops doing it every integration would be refused). **What the exemption costs,
 said plainly:** a *deliberate* operator can put the repo into a merge state (`git merge --no-commit`,
-or any conflicted merge), stage an unnamed note, and commit — the naming rule is skipped. That is not
-a hole this gate opened; `pre-commit`'s merge exemption already waves the whole staged set through on
-that path. The gate is an accident-stopper, and a merge state is not something one enters by accident.
-
-**`_guard_enforcement_armed` demands this hook too, since T-23.** The condition is the SAME monotonic
-one `pre-merge-commit` uses — extracted into `_hook_source_known` and called once per gated hook
-rather than copied, because a four-review-round condition in two places is two rules one edit apart;
-`test_bootstrap_condition_is_one_function_called_per_gated_hook` counts the call sites. A clone armed
+or any conflicted merge), stage an unnamed note, and commit — the naming rule is skipped. A clone armed
 before T-23 is refused at its next finish until `tools/install-hooks.sh` is re-run, which is correct:
 it really is missing a third of its enforcement. **What stays open:** the gate is invisible to the CI
 alarm, which reads paths and not messages, and to `--amend` — an amend that changes only the message
@@ -299,14 +110,6 @@ stages nothing against HEAD, so a note already landed under a naming message can
 rewritten. Both are authored acts rather than accidents, which is what this hook is for.
 
 → почему именно так: `docs/claude-md-rationale/workflow.md#t-23-именование-заметки-плана`
-
-**Two of the three hooks share a predicate — disjoint halves, neither redundant, and they must not
-disagree.** (The third, commit-msg, shares nothing with them: it reads the message, they read refs.)
-A CONFLICTED merge never reaches `pre-merge-commit`, and neither does a merge this hook has already
-refused: both are finished with `git commit`, which fires `pre-commit`. So the predicate is
-duplicated **byte-identically** into `pre-commit-hook.sh` between the `# ---8<--- SHARED MERGE-GATE PREDICATE` markers, and **a test compares the two blocks verbatim rather than grepping for a
-substring.** The integration merge does not pass `--no-verify`: leaving it would make the harness the
-single caller exempt from the gate.
 
 **What this does NOT do, stated plainly because the honest scope is the point.** The local half is
 CLIENT-SIDE and PER-CLONE: hooks and git config cannot be committed. A fresh clone has none of it
@@ -323,52 +126,33 @@ commits directly. **Note the case split on those last two:** *clean* skips the h
 the *conflicted* form is finished with `git commit` and **is** gated. **That case split covers
 `commit-msg` too** — measured on git 2.53, a clean cherry-pick or revert reaches **neither** hook, so
 it lands an unnamed plan note at exit 0; only the conflicted form is gated.
-`tests/test_worktree_harness.py::TestGitSequencerPremises` pins both directions, so a git version
-that starts running the hook turns the suite red instead of quietly making this paragraph true. **A
+**A
 typed branch committed in the *primary* checkout** also satisfies `pre-commit` while ignoring the
 worktree rule entirely. **Most of these are what the CI job is for** — they flatten a non-merge commit
 onto main's first-parent line, which is what `.github/workflows/main-invariants.yml` asserts against.
-
-**`install-hooks.sh` sets `merge.ff=false` before anything arming-related can abort**, so a clone
-missing `tools/pre-merge-commit-hook.sh` — an older main, a `git checkout <old-commit>`, the
-CB-57 bootstrap window itself — still arms the pre-commit hook and still exits 1 at the merge-hook
-step, but does so **with `merge.ff` already set**. **With that step last it left `merge.ff` unset
-instead**, and the installer could skip the one mechanism no hook can replace.
-**The precise claim:** four commands still precede it (sourcing the guards, resolving the repo root,
-resolving the hooks dir, `mkdir -p`) and each is fatal under `set -e`, so "a step that cannot fail
-goes first" is not literally true of it.
 
 → почему именно так: `docs/claude-md-rationale/workflow.md#общий-предикат-и-честная-область`
 
 **The CI job's own limits, because a gate described better than it behaves is the failure this
 section exists to record.**
 
-1. It is scoped to a **pinned baseline SHA**, since main's history predates the rule. Moving the
-   baseline forward is how a violation would be laundered, so it is a deliberate, reviewable edit,
-   and a test asserts the SHA is a real commit here.
+1. It is scoped to a **pinned baseline SHA**, since main's history predates the rule. 
+
 2. **Anything merge-shaped is invisible to it**, and `amend`/`rebase`/`reset` do **not** necessarily
    leave a non-merge commit on the first-parent line: `git commit --amend` on a *merge* stays a
    merge, `git rebase --rebase-merges` recreates merges, and a force-push to a fabricated merge-only
-   history passes — `--no-merges` excludes all of it by construction. **DAG inspection cannot prove
-   how a merge commit reached the ref; only a protected ref can.** An **evil merge** (content in
-   neither parent) is invisible for a second reason: `git show --name-only` on a merge prints
-   nothing.
+   history passes — `--no-merges` excludes all of it by construction. 
+
 3. It uses **`--no-renames`**, and that is not cosmetic: with rename detection on, `--name-only`
    prints only the *destination* path, so `git mv src/keep.py .claude/plans/keep.md` shows one
-   allowlisted path and deletes source from main. Both this job and the pre-commit hook had that
-   defect; both are fixed and both are pinned.
+   allowlisted path and deletes source from main. 
+
 4. **A workflow cannot refuse a push by itself** — it reports afterwards. So this job is an
    **alarm**; the **gate** is branch protection on `origin/main`, ON since 2026-08-21 at a
    deliberately narrower scope than this list originally demanded. **Enabled: force pushes refused,
    branch deletion refused. NOT enabled: require-pull-request**, and with it the two settings that
    only mean anything behind a PR — marking `ci.yml`'s `tests` job required, and disabling squash-
-   and rebase-merging. That scope was **ratified by the owner as sufficient for CB-59**, on this
-   reasoning: force-push and deletion are the class **nothing local can catch**, because they
-   rewrite or destroy history every local hook has already approved, whereas require-PR and a
-   required check constrain *how work arrives* — already governed by `merge.ff=false`, the three
-   hooks and `_guard_enforcement_armed` **for a clone that has run `tools/install-hooks.sh`**.
-   CB-59 is closed at that scope, not at this paragraph's original four items.
-   **One residual open, one closed, both measured rather than assumed.** Still open: an **unarmed**
+   and rebase-merging.    **One residual open, one closed, both measured rather than assumed.** Still open: an **unarmed**
    clone can push a non-merge commit straight to `main`, since require-PR is off —
    `main-invariants.yml` is the alarm for that, not a gate. Closed on 2026-08-22:
    **`enforce_admins` is now `true`**, so the protection binds the owner too, where it had been
@@ -378,14 +162,13 @@ section exists to record.**
    exactly the friction the setting buys. **All of this is repository configuration, not committed
    state, so nothing in this tree can verify or restore it, and a later measurement — not this
    paragraph — is the authority.**
+
 5. **`main-invariants.yml` deliberately does not subscribe to `pull_request`.** A job skipped by an
    `if:` is reported as **passing** for required-status-check purposes, so marking it required would
    have produced a check that can never fail on the only path where protection evaluates it — this
    section's own "gate that cannot fire", reintroduced inside its own fix. Lint and tests therefore
-   live in a separate `ci.yml` which does run on PRs. The trigger split is pinned **in both
-   directions**, because a test asserting only the negative half left deleting
-   `push: branches: [main]` outright green, turning "gate that cannot fire" into "workflow that
-   never fires".
+   live in a separate `ci.yml` which does run on PRs. 
+
 6. It needs **`fetch-depth: 0`** because the AUDIT step reads history: with a shallow checkout the
    baseline commit is absent and `origin/main` may not exist, dropping the audit back to `HEAD`.
    **`ci.yml` needs the same key for a DIFFERENT reason, and that asymmetry is why it was missed for
@@ -393,17 +176,7 @@ section exists to record.**
    reads this repository's real history — `test_ci_workflow_asserts_the_first_parent_invariant` —
    so under the default depth-1 checkout `ci.yml`'s `tests` job was red in CI **always** and green
    in every local run, and a gate that cannot pass hides the regressions it exists to catch.
-   `test_ci_suite_job_checks_out_the_history_its_own_suite_reads` pins it, and each of its four
-   properties was earned rather than chosen. **Comments do not count**, since the fix's own comment
-   carries the literal `fetch-depth: 0` and a raw grep would stay green after the key itself was
-   deleted — and the stripping is WHOLE-LINE only, so an inline `#` is TOLERATED by the matchers
-   rather than parsed. **A file is not a composition**: two jobs, two checkouts, so "somewhere in
-   `ci.yml`" is satisfied by moving the key to `contracts` and leaving the gate just as broken.
-   **The key must be a `with:` INPUT and the explanation a COMMENT LINE**, or a step whose multiline
-   `name:` scalar contains both strings satisfies every assertion at depth 1. **Exactly one
-   checkout, carrying no `if:`**, or `if: ${{ false }}` on the first plus a second bare checkout
-   defeats it. **NOT closed, and named so it is not rediscovered:** a job-level `if:` switching the
-   whole `tests` job off is the same shape and this test does not look at it. `contracts` stays
+`contracts` stays
    shallow deliberately: it runs `tests/test_cli_signals.py` and `tests/test_fsio.py`, neither of
    which reads history.
 
@@ -434,26 +207,8 @@ OUTRANKS the pin file, and a subsequent plain `uv run` snaps the tree back to th
 measured) — which is why the repair command below is written with `UV_PYTHON=`, and why its effect
 only has to survive until the finish completes.
 
-**What the guard compares, and why the two sides are probed differently.** The worktree side is
-`uv run --extra dev python -c <probe>` — byte for byte the launcher `[6/7]` uses for pytest, so the
-answer IS the interpreter the suite will run under, and the call syncs the worktree to the pin as a
-side effect, which is wanted on a tree about to be tested. The main side is
-`<repo_root>/.venv/bin/python` executed DIRECTLY, deliberately **not** through `uv run`: that would
-rebuild a checkout other sessions are working in, and **a guard must not mutate the tree it is
-judging**. It also answers the exact question the incident asked — what main ACTUALLY has, not what
-it would acquire next time somebody ran something there. `pyvenv.cfg` is not read: it describes an
-environment rather than being one.
-
 **Fail-closed.** No `.venv` in main, no `uv` on `PATH`, a non-zero rc, an empty answer, an
-unparseable answer — every one refuses with **exit 14**. The version-shape check
-(`_interpreter_version_is_sane`) earns its keep in exactly one state the pin check cannot catch: **a
-NON-version that PREFIX-MATCHES the pin.** A bare pin like `"3"` accepts anything spelled `"3."` plus
-more as if it were a legitimate patch release, so a stub `"3.0"` on both sides clears the pin check
-by looking like one while still failing the strict `X.Y.Z` shape — there the shape check is the only
-backstop. `test_two_prefix_matching_non_versions_refuse_rather_than_agree` is what holds it;
-`test_two_undeterminable_sides_refuse_rather_than_agree` is kept as a premise fixture but is **not
-sufficient on its own** (CB-140).
-
+unparseable answer — every one refuses with **exit 14**.
 **The worktree must carry its own `pyproject.toml`, and that is not tidiness.** `uv run` resolves a
 project by walking UP, and every worktree lives INSIDE the repo at `.worktrees/<slug>`, so a worktree
 missing that file resolves against MAIN's project and the guard would compare main against main — an
@@ -464,33 +219,16 @@ precisely that.
 `.python-version` arriving from main must be in the tree before it is judged — and BEFORE `[6/7]`, so
 a refusal costs seconds instead of the suite run it is declaring meaningless. It is **outside** the
 `--skip-checks` branch: that flag skips ruff and pytest, which are CHECKS, and this is what decides
-whether running them would have meant anything. **Anchor the structural test on the `git merge` and
-not on the echo announcing it** — "after the text that says a merge is coming" is not "after the
-merge".
-
-**It is asserted a SECOND time, inside the lock, because a pre-check is not an invariant at landing
-time.** main's `.venv` is gitignored, so `_guard_main_clean` cannot see it move and the in-lock SHA
-re-checks are about commits: a `UV_PYTHON=… uv sync` in main during the suite run would land work
-tested on one interpreter onto a main that now has another. It is a second CALL rather than a stored
-sample (~100ms) so it cannot drift from the thing it is checking.
-
+whether running them would have meant anything.
 **A shared `.venv` is refused, and the comparison is between DIRECTORIES.** Point main's `.venv` at a
 worktree's and the two sides become one environment: it can only agree, and the worktree removal at
-the end of the finish then leaves main's link dangling. Compare the resolved venv *directories*,
-never the interpreters they resolve to — two honest venvs built from one system python both resolve
-to a single `/usr/bin/pythonX.Y`, so an interpreter-level test would refuse every ordinary case.
-
+the end of the finish then leaves main's link dangling.
 **Bumping the pin is a two-step procedure, and the guard makes the order mandatory.** A branch that
 changes `.python-version` is refused until main is brought to the NEW interpreter first —
 `(cd <repo_root> && UV_PYTHON=<new> uv sync --extra dev)`, then re-run the finish. **A bare `uv sync`
 is not enough**: it re-reads main's OLD pin and puts the old interpreter straight back. The refusal
 prints that command with both versions filled in, because a gate with no way out is a wall rather
 than a diagnostic.
-
-**The usual bootstrap wall applies, and it is milder than CB-57's.** `worktree-finish.sh` runs from
-the REPO ROOT, so the script that lands this change is MAIN's copy, which does not yet contain the
-call; the first finish AFTER it lands is the first gated one. No re-run of `install-hooks.sh` is
-needed, because this guard is in the script rather than in an installed hook.
 
 **What this does NOT do.** It is per-clone and client-side like the rest of the harness — it says
 nothing about the interpreter any other machine or CI actually used, only that these two trees agree.
@@ -506,21 +244,14 @@ than guess what one of those resolves to the guard refuses and says so.
 - **Create:** `tools/worktree-setup.sh <type>/<slug> [base]`, which validates the name, refuses a
   card already carried by another branch, **claims every card the branch names through the claims
   ledger**, creates `.worktrees/<type>-<slug>`, and primes the worktree's own dev environment.
-  The claim carries a **holder triple** (`--holder <branch> --holder-kind branch --repo <root>`),
-  mutual exclusion is the partial unique index, and there is a release path — including
-  `_auto_release_on_terminal`, so closing the card releases the claim in the same transaction. The
+The
   card still reads `in_progress` while the branch holds it, because the status flip arrives as the
   claim's projection (`EntityKind.busy_status`).
-  **Order is load-bearing: the claim happens BEFORE `git worktree add`,** for the same reason
-  `_guard_branch_type` does — otherwise the losing side of a race owns a branch and a directory by
-  the time it is told no. **Exit codes are handled as the API they are**: `3` (held by someone else)
+**Exit codes are handled as the API they are**: `3` (held by someone else)
   is FATAL and prints the incumbent's triple — this is the **setup gate**, the one tracker call in
   the harness allowed to abort; `4` (already resolved) warns and proceeds, because a follow-up branch
   on a closed card is legitimate; `5` (undetermined) is retried **once** with the identical call,
-  which converges rather than double-claiming because the primitive is an idempotent upsert. An
-  **EXIT trap** releases whatever the run took if setup aborts, armed after the first successful
-  claim and **disarmed on success** — leaving it armed would make every setup that *worked* release
-  its own claim on the way out. `CODEBUGS_SETUP_NO_CLAIM=1` skips the tracker entirely and is the
+  which converges rather than double-claiming because the primitive is an idempotent upsert. `CODEBUGS_SETUP_NO_CLAIM=1` skips the tracker entirely and is the
   documented escape hatch past a `3`; **`--allow-duplicate` deliberately does not punch through it**,
   because it answers a different question (another *branch* carries the id) and, since this repo
   never deletes merged branches, it is needed for ordinary follow-up work — overloading it would make
@@ -532,13 +263,16 @@ than guess what one of those resolves to the guard refuses and says so.
   branch; a card-driven branch carries its id (`fix/cb-48-tracker-root-init`). Work already started
   on main moves over with `git stash push <files>` → setup → `git stash pop` in the worktree; the
   stash is shared across worktrees because it lives in the common git dir.
+
 - **Worktrees live in `.worktrees/`,** slug = branch with `/`→`-`, matching autosorter. Both that
   directory and the legacy `.claude/worktrees/` are gitignored; the legacy path still works and
   `worktree-finish.sh` resolves either, but new worktrees go in `.worktrees/`.
+
 - **Then work there, entirely.** Check which checkout you are in before any `Edit`/`Write` to a
   source file. **A surgical `git checkout <branch> -- <files>` onto main is editing main directly**,
   wearing a hat. Conflicts get resolved *inside* the worktree, never by committing a resolution on
   main.
+
 - **Tests and lint run in the worktree, and it needs its own environment.** `uv run --extra dev
   python -m pytest tests/ -q` — **`--extra dev` is not optional there.** `pytest` and `ruff` live in
   `project.optional-dependencies`, which `uv run` does not install by default, so a fresh worktree
@@ -550,6 +284,7 @@ than guess what one of those resolves to the guard refuses and says so.
   source and passes on a tree you did not touch. The mirror-image trap is at the MCP-registration
   rules — from a worktree, a bare `python` reaches `codebugs` through main's editable install, which
   is why `tests/dump_schema.py` must be run with `PYTHONPATH=src`.
+
 - **Integrate with `tools/worktree-finish.sh <slug> ['commit msg'] [--merge-msg '…']`.** It commits
   any dirty state, runs the guards, forward-merges main *into the worktree* so conflicts surface in
   safe space, runs `ruff check` and the full suite there against the combined tree, then merges onto
@@ -557,6 +292,7 @@ than guess what one of those resolves to the guard refuses and says so.
   card's whole iteration recoverable as one unit; a fast-forward scatters it. **Never delete the
   branch** — no merged branch has ever been deleted here, and that is the record; the script removes
   the worktree only.
+
 - **The integration message follows `Merge <branch>: <what changed> (CB-NN)`, and when it is not
   given it is derived from `main..<branch> --first-parent --no-merges --reverse` — the FIRST commit
   on the branch's OWN line among the commits main does not have (CB-116).**
@@ -564,39 +300,28 @@ than guess what one of those resolves to the guard refuses and says so.
   enough:** a branch that merges a SIBLING branch absorbs its commits into the range, and if the
   sibling is older — the ordinary case — date order puts it first, so the derived subject names the
   sibling's card; on that shape a range-only fix is **worse** than the `git log -1` code it replaced.
-  Following first parents skips every absorbed lineage, main's forward-merge included.
-  **The FIRST commit of that line wins, not the last**, because branches here end on review fixups,
-  which describe an iteration's tail rather than its subject. Do **not** write that as
-  `--reverse -1`: git applies the count BEFORE reversing, so it returns the NEWEST commit and
-  silently restores the behaviour this removed (measured).
   **A branch with no commit of its own carrying a subject is REFUSED rather than guessed** —
   reachable when the content arrived through a merge commit, since `_guard_nonempty_diff` has already
   proved the content is real — and the derivation therefore runs at the `TESTED_MAIN`/`TESTED_HEAD`
   sample rather than under the lock, so that refusal costs nothing instead of the whole gate run.
-  **The refusal tests the POPULATION, not its first line**: `git commit --allow-empty-message` puts a
-  blank line at the head, and reading that as an empty population is a false refusal that also
-  asserts something untrue about the repository. It cannot drift from what lands: both inputs are the
-  pinned `TESTED_*` values and the in-lock re-checks refuse with exit 13 if either moved.
   **One limit stays open and is documented rather than guessed at:** `worktree-setup.sh <branch>
   [base]` can cut a branch from a NON-MAIN base, whose commits sit on this branch's own first-parent
-  line, so the derivation names the base's first commit. No ordering flag reaches it (measured:
-  `--first-parent` and `--topo-order` both pick the base commit) because it is not a traversal
-  question — the commits really are this branch's ancestry and this merge really does land them.
-  **Pass `--merge-msg` on a branch cut from a non-main base.**
+  line, so the derivation names the base's first commit.   **Pass `--merge-msg` on a branch cut from a non-main base.**
+
 - **Every re-run hint echoes back the `--merge-msg` the aborted run was given**, and that half is
   orthogonal to the derivation — it would be needed even if the derivation were perfect, because the
   exit-13 refusal fires precisely BECAUSE main moved, so printing the bare short form routes the
-  operator into the derivation that main's move had broken. One `_retry_hint` builds the line for all
-  four refusal paths (forward-merge conflict, main moved, branch moved, merge failed); a test refuses
-  the exact literal `echo "      tools/worktree-finish.sh ${SLUG}"` — the spelling that regressed —
-  while the helper-call count holds the other three sites. **It echoes the `--merge-msg` and nothing
+  operator into the derivation that main's move had broken. **It echoes the `--merge-msg` and nothing
   else, deliberately:** `--skip-checks` and `--allow-stale-base` are relaxations, so dropping them
   makes a retry stricter, and the positional commit message applies only to a still-dirty worktree.
+
 - **`ruff check` is the lint gate; `ruff format` is deliberately not**, because a large part of the
   existing tree is non-conformant to it and gating on it would refuse every finish. Pin ruff 0.15.7:
   0.16.x flags the whole repo.
+
 - **Session end:** `git status` clean in main *and* in every worktree, then `git worktree remove
   <path>`. Never `--force`: a removal that refuses is telling you work is uncommitted there.
+
 - **The only thing that may land on main directly** is a `.claude/plans/*.md` note — one level, not
   a subtree — or, since CB-266, a `.claude/plans/briefs/*.html` daily brief — one level under
   `briefs/`, not a subtree of it either, and no other extension. The pre-commit hook holds that
@@ -608,69 +333,11 @@ than guess what one of those resolves to the guard refuses and says so.
 
 → почему именно так: `docs/claude-md-rationale/workflow.md#cb-58-и-cb-116-порядок-работы`
 
-**How the harness itself is tested, and where that stops.**
-`tests/test_worktree_harness.py` covers every guard on both sides — the state it must refuse and the
-state it must allow — **and separately asserts that `worktree-finish.sh` actually calls each one.**
-That second class exists because two adversarial reviews deleted guard *invocations* from the script,
-including the branch-type guard that exists for the 2026-08-16 incident, and the whole suite stayed
-green, because nothing executed the script: every guard was unit-tested and the composition was not.
-**Do not read the per-guard tests as covering the wiring.**
-
-**Two lessons a vacuous test taught, both worth keeping:** a test that sets up its own fixture must
-**assert the fixture exists**, and `git rev-parse` is not a safe place to be sloppy with argv — it
-echoes an unrecognised option-looking argument back at you and exits 0.
-
-The wiring tests are **structural**: they read the script and assert each guard is invoked with
-`|| exit $?`, in the right phase. **But "executing the whole script is impractical" is narrower than
-it reads, and CB-116 is the proof:** `TestMergeSubjectDerivation` runs `worktree-finish.sh` end to
-end in a throwaway repo under `--skip-checks`, which disables ruff and pytest and *not* the safety
-guards, and the merge it lands is onto that repo's main. So a property of the SCRIPT'S OUTPUT can be
-tested behaviourally, and had to be: the CB-116 defect was invisible to every structural test, because
-the defective code called `git log`, which is exactly what a structural test would look for. **What
-stays impractical is the gate run itself, not the script.** Three more structural tests came with
-CB-57, each pinning a property whose failure mode is silent — a gate present in the tree and absent
-in effect: the integration merge must **not** carry `--no-verify`, the installer must arm the merge
-hook and point it at main's checkout, and the CI workflow must carry a baseline SHA that is a real
-commit in this repository.
-
-**The branch predicate is constructed FOUR times across THREE files** — `_guards.sh` once,
-`pre-commit-hook.sh` twice (its own branch check, plus the copy inside the shared merge-gate block),
-`pre-merge-commit-hook.sh` once — because neither hook may source the library: each runs from
-`.git/hooks/` as a symlink and must work when `tools/` is missing from the checked-out tree. **The
-test counts constructions per SITE, not per file**, because a per-file count let a degraded regex in
-`pre-commit-hook.sh` stay green on the shared block's copy. **Same types is *not* the same
-predicate** — a prefix test accepts `fix/a/b`, which `_guard_branch_type` refuses — so a divergence
-would let a branch clear the finish guard and then be refused by the merge hook, after the whole
-suite had already run.
-
-**Byte-identical is not the same claim as "the two hooks agree".** The shared predicate once took a
-second argument — what the caller typed, from `GITHEAD_` — and judged that ref alone when it
-resolved: identical code, two different rules, because only `pre-merge-commit` HAS that argument, and
-the byte-identity test structurally could not see it because the divergence lived in the arguments.
-The predicate now takes only the merge head, so both callers pass identical information. **The
-general form, which this repo keeps relearning: sharing an implementation does not share a decision
-if the callers supply different inputs.**
-
 → почему именно так: `docs/claude-md-rationale/workflow.md#как-проверяется-сам-харнес`
-
-**Cherry-pick and revert have no marker-file exemption, and the honest scope is narrower than "they
-are now refused".** The merge-in-progress exemption used to fire on mere existence of `MERGE_HEAD`,
-`CHERRY_PICK_HEAD` *or* `REVERT_HEAD`, so one empty file turned off both of this hook's rules —
-reachable the same way an empty `MERGE_HEAD` was, since a conflicted cherry-pick leaves the file
-until `--continue`/`--abort`. **But a CLEAN `git cherry-pick` or `git revert` onto main never reaches
-`pre-commit` at all** — git's sequencer commits directly — so it still lands, verified by running
-both. What the change buys is that a *marker file* no longer launders a commit; clean cherry-pick and
-revert onto main are caught only by the CI alarm, since they leave a single-parent commit on the
-first-parent line. **That is the honest statement.**
-
-**The same fail-closed validation is NOT scoped to main**, because the exemption it guards is not:
-while it was, `: > .git/MERGE_HEAD` on an untyped branch still skipped the branch-type check. Only
-the head-*acceptability* rules — typed branch, or upstream `main` — are about main.
 
 **The bootstrap is a real constraint, not an oversight.** `worktree-finish.sh` cannot land the commit
 that first creates `tools/`, because `_guard_enforcement_armed` refuses when main has no
-`tools/pre-commit-hook.sh` for the hook to point at. This is the wall **the monotonic condition
-stated above** exists to get past — it is stated there and deliberately not restated here. So **run
+`tools/pre-commit-hook.sh` for the hook to point at. So **run
 `tools/install-hooks.sh` right after such a merge** or the next finish refuses — correctly, since a
 clone armed before the new hook really is missing part of its enforcement. If `tools/` is ever
 rewritten the same way, expect the same one-time manual merge.
@@ -681,221 +348,60 @@ rewritten the same way, expect the same one-time manual merge.
 
 1. Bump `version` in `pyproject.toml` and `__version__` in `src/codebugs/__init__.py` —
    `tests/test_release_version.py` refuses a disagreement, the installed distribution included.
+
 2. Retitle `## [Unreleased]` in `CHANGELOG.md` to `## [X.Y.Z] — <date>`, leave an empty
    `## [Unreleased]` above it, and open the section with a highlights paragraph written for a user.
+
 3. **After** the branch lands, tag the merge commit from the primary checkout
    (`git tag -a vX.Y.Z <merge-sha>`) — a tag made on the branch points at a commit that never landed.
 
 ## Architecture
 
 - **Domain modules** (`src/codebugs/`): `db.py` (findings + shared infra), `reqs.py`, `bench.py`, `blockers.py`, `merge.py`, `sweep.py`, `embeddings.py` (vector storage/similarity search, delegates from reqs), `milestones.py` (releases / streams / capacity-aware pull)
+
 - **Shared types** (`types.py`): Entity constants (statuses, priorities, severities), resolver functions, terminal states. Zero-dependency — safe to import from anywhere
+
 - **MCP server** (`server.py`): Thin `MCPServer` orchestrator (~48 lines). Discovers tool providers via registry, filters by `--mode` flag. Requires the mcp 2.x SDK (`mcp.server.mcpserver.MCPServer`, which replaced 1.x's `mcp.server.fastmcp.FastMCP`)
-- **CLI** (`cli.py`): Thin argparse orchestrator. Discovers CLI providers via registry, filters by `--mode` flag. Two entry points, and the split is load-bearing: `main()` is the importable body (three test modules call it in-process), while `run()` — what `[project.scripts]` and `python -m codebugs.cli` reach — first restores the POSIX `SIGPIPE` disposition (CB-78) and then refuses to run at all when stdout is already closed (CB-134). This line used to claim "~40 lines"; it was 159 before that change and is larger now, so the count is dropped rather than re-guessed
+
+- **CLI** (`cli.py`): Thin argparse orchestrator. Discovers CLI providers via registry, filters by `--mode` flag. Two entry points, and the split is load-bearing: `main()` is the importable body (three test modules call it in-process), while `run()` — what `[project.scripts]` and `python -m codebugs.cli` reach — first restores the POSIX `SIGPIPE` disposition (CB-78) and then refuses to run at all when stdout is already closed (CB-134). 
+
 - **Formatting** (`fmt.py`): Shared CLI output utilities (ASCII table formatting). Text for a stream, nothing else — file writing deliberately does NOT live here (CB-76)
+
 - **Filesystem output** (`fsio.py`): `atomic_write` — the only sanctioned way a CLI handler writes a file. Owns tempfile lifecycle, destination classification and atomic replacement; imports nothing from the package. See the export rule under **CLI** below
+
 - **Storage**: Single SQLite DB at `.codebugs/findings.db`; each domain module owns its schema via `ensure_schema(conn)`
-
-### Known architectural debt
-
-- ~~Staleness/provenance logic pending extraction~~ — **done, with one seam left.** `provenance.py` owns the staleness and commit-trailer logic (`file_status`, `check_findings`, `resolve_trailers`) and registers its own tools and CLI; `provenance` is a first-class `--mode`. Remaining seam, not worth its own card yet: `provenance.head_sha` only delegates to `db.git_rev_parse` and has no callers, while findings' provenance auto-capture (`findings.py:546`, `:581`) calls `db.git_rev_parse` directly.
-- **`db.connect()` import trigger**: `_ensure_modules_loaded()` still imports all known domain modules so their `register_schema()`, `register_tool_provider()`, and `register_cli_provider()` calls execute. All three registries are complete (ARCH-001 + ARCH-002 + ARCH-004). This trigger will be replaced by auto-discovery.
-- ~~`blockers.py` cross-module reach into private `_row_to_dict`~~ — **resolved.** `blockers.py` calls the public `db.row_to_dict()` (`blockers.py:87`, `:307`, `:442`) and does not reach into `reqs` at all; no private `_row_to_dict` exists anywhere in the package (CB-5).
-- **Findings naming exception**: The findings domain predates the naming conventions. Its MCP tools (`add`, `query`, `stats`, etc.) lack the domain prefix that most other modules use (`reqs_add`, `codebench_import`), and renaming MCP tools is a breaking change for clients. Findings is not quite alone — `provenance.py` exposes an unprefixed `staleness_check` too — **so treat the prefix as the rule for new tools rather than as an invariant that currently holds.**
-- **Milestones naming exception**: The milestones spec mandates spec-canonical tool names (`pull_next`, `release_item`, `triage_dismiss`, `mark_branch_only`, `wip_status`), kept verbatim because external consumers call them by name. Milestone management tools (`milestone_create`, `milestone_status`, `milestone_close`, …) do carry the domain prefix.
-- **Post-add hook**: `db.register_post_add_hook(name, fn)` is the extension point that lets `milestones.auto_route_finding` run inside `add_finding` / `batch_add_findings` before the final commit, so the finding and its `stream/triage` link land atomically. Other modules may register additional hooks. Since CB-43, hooks fire **only on genuine inserts** — a deduplicated observation (bump/reopen) does not re-fire them, because the matched card already has its projection.
-- **Pre-add resolver seam: built with its first consumer (CB-45; CB-44 had refused to build it speculatively).** `db.register_pre_add_resolver(name, fn, *, meta_keys, updatable_keys=())` runs resolvers inside `_add_one`'s insert path — **ANNOTATE-ONLY**: a resolver returns a meta patch or `None`, and redirect is deliberately inexpressible (identity is core; a future redirect variant is a new negotiated contract). **The never-commit contract is ENFORCED, not documented**: the runner refuses to run outside an open transaction (outside one, `SAVEPOINT`+`RELEASE` *is* a commit), detects a resolver that closed the caller's transaction after every call and again after its own `RELEASE`, and raises OUTSIDE the failure-swallow; its own `ROLLBACK TO` cleanup is guarded so it never masks the real error. **Each resolver runs under a SAVEPOINT named with a per-call NONCE plus index** — index-only naming lets a resolver commit and recreate the runner's savepoint by its predictable name, turning the runner's own `RELEASE` into a commit. A failure rolls back only that resolver's writes and is stamped QUERYABLY into `meta.resolver_errors` (`query(meta_key="resolver_errors")`), stderr being only the immediate channel. **Each resolver receives a DEEP COPY of the observation**, and validated outcomes are snapshotted into the patch — the runner reads `at` for its own error stamp and the patch becomes the row's meta, so a shared reference lets a failing resolver poison the stamp and abort the add at serialization. Outcomes are validated inside the savepoint (dict, string keys, `json.dumps(..., allow_nan=False)`) so a bad patch can never abort the add later at `meta_final` serialization. **`db.resolver_reserved_meta_keys()` AND `run_pre_add_resolvers()` both call `_ensure_modules_loaded()` first** — neither the reserved set nor the resolver registry may depend on which modules a process imported, since the common `meta=None` add path never touches the reserved set and a bare library connection would otherwise run with an empty registry and silently skip annotation. **The FIRING RULE has one predicate: `finding_id is None and annotate`** — an explicit id bypasses the whole observation machinery, and `dedup_action` is context, never the predicate — an explicit-id insert also carries `"created"`. CSV import passes `annotate=False` and strips the DYNAMIC reserved union from stored meta, or an annotated export would be refused on re-import.
-- **Status-change hook**: `db.register_status_change_hook(name, fn)` is the update-side twin of the post-add hook — same registration discipline, same in-transaction contract, same swallow-and-log policy. `findings.update_finding` and `reqs.update_requirement` fire it **only when the write actually changed the row** (a status was requested, `rowcount == 1`, and the value differs). `claims._auto_release_on_terminal` uses it to close a claim in the same transaction as the status write that resolved the entity, and `milestones.reconcile._reconcile_on_terminal` uses it to project that status onto the entity's milestone items.
-- **A DERIVED queue must not be trusted to a write-time hook alone (CB-26).** `milestone_items` is a *projection* of a finding or requirement, but routing ran once at add time and nothing moved the item when the source resolved, so `triage_inbox` went badly stale and `pull_next` could hand an agent finished work. The hook above is half the fix; the other half is the read-side filter — **since CB-31 that is `reconcile.live_source_clause`, one SQL fragment**, not a per-row Python predicate re-applied by hand. **The call sites are enumerated by `TestLiveSourceClauseCallSites`, not here — a count belongs in a test, and the two places this document left one in prose it was wrong.** **That second half is not belt-and-braces — it is the only reason the invariant holds**, because five writers bypass the hook entirely: `add_milestone_item` inserts `open` regardless of the source, `set_item_status` and `release_item(status='abandoned')` reopen, the requirements bulk and markdown importers write statuses without going through `update_requirement`, and `EntityRef.set_status` deliberately never fires hooks. **The general rule: eager reconciliation keeps stored state honest; only a read-side filter can make a guarantee, and you must enumerate the bypass writers before claiming one.** Four traps, each of which cost a review round: **(1)** select by `item_kind` as well as `item_ref` — `_validate_item_ref` skips externals and `UNIQUE` includes `item_kind`, so `(bug, CB-1)` and `(external, CB-1)` are both legal and only the first is a projection; **(2)** the predicate is `status != target`, not "not terminal" — both updaters permit `fixed → wont_fix`, which must remap `done → dismissed` — while `deferred` is excluded, because no queue returns a deferred row and closing one only destroys the deferral record; **(3)** decrement capacity *before* clearing `assigned_agent`, since the row is the only record of who held the slot; **(4)** `run_status_change_hooks` swallows and the caller commits anyway, so a multi-row hook needs a `SAVEPOINT` or it commits a partial reconciliation behind a success-shaped return — and "it logs to stderr, so it's visible" is false for an MCP caller, which is why the failure is recorded as an audit row instead. The hook is scoped to `kind='stream'` because `milestone_close`'s unfinished gate reads only item status and `done_commit` is never a gate, so auto-marking a release item `done` would let a release close over a missed integration (CB-32).
-
-- **The read-side filter is a SEAM, and its justification is the WRITE LOCK, not anti-drift (CB-31).** `source_is_terminal` cost two queries per row and `capacity._candidates` ran it *per candidate row inside `pull_next`'s `BEGIN IMMEDIATE` window*, so every concurrent agent waited behind it. `reconcile.live_source_clause(conn, *, alias)` folds the exclusion into SQL. **Anti-drift alone would NOT have justified a new API**: an AST ratchet over the existing call sites buys the same "record the decision" property with no new SQL at all, so **a seam has to earn its keep on cost.** Five rules, each earned: **(1) `NOT EXISTS`, never `status NOT IN (...)` over a LEFT JOIN or a scalar subquery** — a missing source row yields NULL, `NULL NOT IN (...)` is NULL, and `WHERE NULL` EXCLUDES, inverting fail-open into a queue that hides work; a row is hidden only on affirmative proof (recognised kind, existing table, matching row, terminal status). **(2) `alias` is REQUIRED, a bare identifier, and validated** — unqualified, the correlated `item_kind`/`item_ref` resolve against the SOURCE table first, which is harmless today *only* because `findings`/`requirements` happen to lack those column names; measured with an `item_kind` column added to `findings`, the subquery stops referencing the outer `item_kind` altogether and hides an `external` row that must stay live, failing **closed**. `EntityKind` validates `table` at construction (CB-22); nothing validated `alias`. **(3) Build it ONCE per traversal** — it probes `sqlite_master` per kind, so per-bucket construction adds reads inside the exclusive-lock hold, making the defect worse. **(4) The SET-WISE spelling lives on `EntityKind`, beside the row-wise one** — `EntityKind.terminal_exists_sql` next to `EntityRef.is_resolved`, because `entities.py` owns those tables, that status column and that terminal vocabulary. **(5) The caller owns null-safety on its own discriminator** — the fragment is never NULL, but ANDing it with `item_kind = ?` is, and `NOT NULL` is NULL, and `WHERE NULL` excludes. Use `IS`. **Co-location is the anti-drift mechanism; the DIFFERENTIAL test is a sample, not a proof** — it would miss a change to one side that every fixture row agrees on, and it is non-vacuous only because of two specific rows: an `external` pointing at a **terminal** finding, and a `bug` whose source row is **missing**. **Deliberately still unfiltered, both named:** `get_milestone_status` (a rollup reports stored state) and `closegate`'s unfinished gate (a false refusal is correct there — CB-32).
-- **A VIEW was rejected for a measured reason, not the obvious one.** The obvious objection — a view's DDL would hardcode the terminal sets — is false; it could be regenerated from `kind.terminal` on every schema init. The real one: `CREATE VIEW` over a missing source table **succeeds**, and the first `SELECT` from it raises `no such table`. A view therefore fails **closed, with a crash**, for exactly the raw-connection callers this design must keep working.
-
-→ почему именно так: `docs/claude-md-rationale/architecture.md#известный-архитектурный-долг`
 
 ## Code rules
 
-### Module structure
-- Each domain module owns its schema, constants, and public functions. No module should reach into another module's tables directly.
-- `db.py` is infrastructure — it provides `connect()`, ID generation, and findings CRUD. It must NOT import domain modules at the top level.
-- Domain modules may import `db` for connection/ID utilities. They must NOT import each other's private functions — only public interfaces.
-
 ### Naming and style
+
 - Python 3.11+. Type hints on all public function signatures.
+
 - `ruff` for linting/formatting, line length 100.
-- Public functions use keyword-only args after `conn`: `def f(conn, *, name, ...)`.
-- MCP tool functions are prefixed with the domain: `codebench_import`, `reqs_add`, `blockers_check`. (Exception: findings tools lack prefix — see known debt above.)
-- CLI handlers are named `cmd_<domain>_<action>()`. (Exception: findings handlers lack domain prefix — see known debt above.)
 
 ### Database
-- **DB discovery**: `db.connect()` walks up from cwd for an existing `.codebugs/`. No tracker found raises `db.DatabaseNotFoundError`, and `init_project` — the package's single `os.makedirs` — is the only function that creates the `.codebugs/` **directory**. A `.git/` **directory** stops the walk (submodules must not hijack the parent's DB); a `.git` **file** is followed via its `gitdir:`/`commondir` pointer, so git worktrees resolve to the main repo's DB.
-- **What counts as "a tracker" differs by how you got there, and the asymmetry is the point (CB-23).** On the **walk**, the `.codebugs/` *directory* is the opt-in: find one holding no `findings.db` and the database is created inside it. On a **named or declared** root (`project_dir`/`--repo`, `--tracker-root`, `$CODEBUGS_ROOT`) the *file* is the tracker, and a directory without one **fails closed naming the channel**. Standing in a directory is evidence about where you are; a named path is an assertion that can be stale, inherited by an unrelated subprocess, or mistyped — and that is where a silent second empty tracker does the damage CB-8 was filed for. **The benign half matters too**: `init_project` creates the directory *before* the database, so a Ctrl-C'd `init` leaves exactly this state, and the walk self-healing it is the right answer. **State the creation rule at the call site, not as a slogan.** `_open(path, create=...)` is the only function that opens a connection, and **exactly two callers pass `create=True`**: `init_project`, which has just made the directory, and `connect` on the walk route, where the directory was already there. Neither invents a directory. **"`init_project` is the only creator" is false as a flat statement** — `connect` creates, by design. `tests/test_db_infra.py::TestOpenCallSitesRatchet` pins the call-site count so a third creating caller cannot appear quietly, the same shape as the `BEGIN IMMEDIATE` allowlist.
-- **Discovery is a heuristic, so it has a declared override — and every override channel outranks the walk.** Resolution order in `_db_path` is: an explicit `project_dir` argument (what `--repo` passes; per-call, so it beats ambient state), then `--tracker-root`, then `$CODEBUGS_ROOT`, then the walk. Entry points call `db.set_tracker_root()` once; **nothing else may**, because about fifty `db.connect()` call sites pass no arguments and `db` is therefore the only place that can honor a declaration. **`set_tracker_root` validates nothing** — a root may be named before its tracker exists, and dying at startup for that would destroy the lazy-connect self-healing CB-11 protects; **the check belongs at use.** A declared root that resolves to no tracker **fails closed and names the channel that set it**, because the value is ambient — an export inherited by an unrelated subprocess — and "no tracker there" must never quietly become a second empty tracker, which is CB-8's failure mode arriving through a new door. A blank value in either channel is not a declaration, same convention as an empty query filter.
 
-  → почему именно так: `docs/claude-md-rationale/database.md#cb-23-что-считается-трекером`
-- **Some layouts are provably undiscoverable, and the honest response is an escape hatch, not a better guess.** `_worktree_main_root` accepts any commondir whose basename is `.git` — git's own heuristic — so a `--separate-git-dir` repo whose git dir is named `.git` binds to the admin directory instead of the checkout (CB-13). There is no local discriminator: git reports that directory as a valid work tree too, so any "fix" would be a different guess. The heuristic stays, `TestSeparateGitDirMisbinding` pins that it still reproduces (if that premise test ever fails, the fix below is moot), and a declared root is the remedy. **The general shape: when a rule cannot be decided from local evidence, supply external metadata rather than deepening the guess.**
-- **A binding you cannot see is a binding you cannot debug.** `db.describe_root()` never raises and reports `{root, source, source_label, path, exists, exists_reason, error, writable, dir_writable, unexamined}`; `codebugs where` and the MCP startup preflight are its only two consumers, deliberately — one resolver means the diagnostic and the server can never disagree about where the process is pointed. **Every key is unconditional, and that is the invariant rather than the list**: a key is always present, and its empty or `None` value means *the question was asked and there is nothing to say*, never *this channel does not exist*. Consumers therefore compare with `is` and print only what a reader needs — `writable` and `dir_writable` only when `False`, `unexamined` only when non-empty.
-- **`exists` IS THREE-VALUED, and the third value is the DEFAULT rather than an extra case (CB-203).** `os.path.isfile` answers a three-valued question with two values — it swallows every `OSError` the underlying stat raises — so *could not look* came back as *nothing is there*, and both consumers printed a promise on it. `db._path_state` returns `absent` on exactly ONE condition (`ENOENT` on the name itself) and `None` — undetermined, with a human reason in `exists_reason` — on every other way of failing to see a regular file, **so a mechanism nobody enumerated lands in *could not tell* by construction. That default is the whole fix**: three ways to break a tracker were known when the unit started and measurement found five more, each with its own errno, and there is no reason to think eight is the population. **`lstat` runs before `stat`, and the order is load-bearing**: `os.stat` on a DANGLING SYMLINK raises `FileNotFoundError` byte for byte like an empty name, and there the next command creates a database at the link's *target*, so a stat-first guard would call that proven absence. **The same predicate replaced `isfile`/`isdir` at every site that INSPECTS AN ALREADY-RESOLVED ROOT**, so the declared (`--tracker-root`/`$CODEBUGS_ROOT`) and named (`--repo`) routes stay fail-closed and simply stop asserting an absence they could not establish.
-
-  **THE PROPERTY, STATED AS A PROPERTY RATHER THAN AS A COUNT OF SITES (CB-218, CB-224).** Every question this module asks about what is at a path is either three-valued, or declared in an exceptions table with a reason — **and a test checks which**. Prose could not hold it: each time the claim was re-asserted as a universal it was false within one edit, and every count this bullet ever carried rotted the same way, so **a number that decides anything belongs in a test, not in this paragraph.** The property is held by `tests/test_two_valued_path_gate.py`, on the model of `test_no_network_capability.py`/`test_strict_bool_gates.py`: every two-valued read in `db.py` is either routed through `_path_state`, or named in that file's own self-deleting `DECLARED_EXCEPTIONS` table with a reason per row. Two rows exist today — `init_project`'s purely informational `created` flag, and `_open`'s CB-86 message-selection branch — each documented at the site it belongs to.
-
-  **THE GATE KEYS ON CAPABILITY, NOT ON SPELLING, BECAUSE AN ENUMERATION OF SPELLINGS IS THE SAME DEFECT ONE LEVEL UP (CB-227).** A call is resolved through the file's own import bindings and compared as an OBJECT, so `from os.path import isdir`, `import os.path as osp`, `from os import path`, and `posixpath`/`genericpath` — which are not aliases but literally the same functions — all land on one capability. An `except` clause is judged by asking the LIVE class hierarchy (`issubclass(caught, OSError) or issubclass(OSError, caught)`), so `IOError`, `EnvironmentError`, `os.error`, `Exception`, a bare `except:`, an `except*` group and the concrete errnos are all covered with no alias list anywhere, while `ValueError` and this module's own exception classes are correctly refused. A row is keyed `(function, primitive, call text)`, and **a row matching more than one call site is REFUSED rather than quietly stretched over both** — keyed `(function, primitive)`, one row licensed every call of that primitive in that function.
-
-  **THE PROPERTY, AT THE WIDTH IT IS ACTUALLY HELD AND NO WIDER.** The gate holds one sentence: *inside `src/codebugs/db.py`, a call asking WHAT IS AT A PATH and answering with two values is either fixed or declared.* Four evasions sit outside it, each reproduced rather than assumed. **(1)** An indirection that hides the NAME — `getattr(os.path, "isdir")(p)`, a primitive held in a dict or a tuple, `functools.partial`, `operator.methodcaller`, `eval` — needs value tracking, the same boundary `test_no_network_capability.py` draws around `__import__`; note a SIMPLE binding (`f = os.path.isdir` then `f(p)`) IS caught, because that is name resolution, while a conditional or container-held one is not. **(2)** A swallow returning through anything but a literal — `ok = False; return ok`, `return bool(x)`, a flag set in a `finally`, `contextlib.suppress(OSError)` — needs data-flow inside the function. **(3)** The same read MOVED into a sibling module `db.py` imports: the gate reads one file, by decision, and `provenance.py` keeps its own schedule. **(4) THE SEMANTIC SENTRY, and it is what CB-227's live harm actually was.** A function can answer three-valued perfectly — `except OSError: return None` — while its CALLER reads that `None` as *definitely not there*; the meaning lives in the caller, so no predicate over the reading function can ever see it. That is why CB-227 needed a behavioural oracle beside the gate, and why **the gate must never be described as covering it.**
-
-  **A SECOND KIND OF QUESTION WAS NEVER IN THIS VOCABULARY AT ALL, WHICH IS HOW TWO DOORS STAYED OPEN THROUGH CB-224'S OWN FIX: WHAT DOES THIS FILE SAY.** `_path_state` answers *what is at this path*; reading the `.git` file's `gitdir:` pointer and reading `commondir`'s contents are `read_text` calls that no stat can stand in for, so no swap of primitives was ever going to reach them — and both swallowed their failure into a confident negative. Both now return the `(path, detail)` third value this route already had; `_resolve_db` no longer asserts anything about a main checkout it could not locate; and `_enclosing_worktree_root` now RETURNS that third value instead of dropping it, which is what lets `init_project`'s already-ratified `WorktreeTrackerError` fire — **no policy was decided there, a refusal that already existed was simply unreachable**, and the same drop is why CB-224 closed only the `where` half of its own defect and left the `init` half creating a doomed tracker. A `.git` whose PATH cannot be examined at all still records-and-continues, because that is CB-218's ratified answer and not this card's to overturn.
-
-  → почему именно так, с замерами и раундами ревю:
-  `docs/claude-md-rationale/database.md#cb-203-трёхзначный-exists`
-- **THE UPWARD WALK IS THREE-VALUED TOO, AND WHAT IT DOES WITH THE THIRD VALUE IS THE WHOLE DECISION (CB-218).** `_walk_db_root` asks three questions per directory — is there a `.codebugs/`, is there a `.git` directory, is there a `.git` file — and `Path.is_dir()`/`is_file()` swallow the underlying `OSError` exactly as `os.path.isdir` does, so *could not look* arrives spelled *not there* in all three. **On an undetermined answer the walk RECORDS AND CONTINUES; it does not stop.** Stopping would turn one filesystem error on an unrelated ancestor into a refusal to work at all, and a false refusal is the worse outcome here; continuing is safe, while staying silent is not, because silence is the entire mechanism by which an unanswerable directory becomes a wrong bind rather than a visible one. The skipped candidates travel out as `describe_root`'s `unexamined`, both consumers name them, and the "no tracker anywhere" refusal stops claiming an absence about parents nobody could look at — while the refusal on a route that examined everything stays byte-identical. **Nothing is truncated in the human text:** one wall makes every question below it unanswerable too (the walk asks with absolute paths, each of which traverses it), the list runs deepest-first, and a cap keeping the first entries keeps the wall's shadows while dropping the entry naming the wall itself.
-
-  **Still two-valued, deliberately out of scope, and named so it is not mistaken for covered:** `_find_db_root`, the thin wrapper that discards the list, feeds `init_project`'s shadow guard and `cli`'s `--force` variant of it, so an unexaminable ancestor still lets `init` create a tracker a real one above would shadow. That is the same defect in a different decision, and it needs its own answer rather than a silent inheritance of this one's.
-
-  **The residual is named, not closed**: this reports on the PATH, never on the CONTENTS — a corrupt `findings.db` still reads as `writable: True` and a clean binding, and the failure surfaces only when a verb opens it (CB-201 item 1, now carried by its own card). `_writable_probe`'s docstring names that boundary and the rest of the `_is_environmental` family it does and does not cover, and declares its `except` arm as measured-dead insurance rather than implying coverage.
-
-  The preflight (`server._preflight`) is **warn-only and must stay that way**: it writes to stderr because MCP clients log stderr while tool responses cannot carry a startup diagnostic, and it is silent on the ordinary discovered path but announces a declared root, since a non-default binding is what a reader needs to see later (CB-11). **`exists` is separate from `error` because resolving is not the same as being there**: on the walk route a `.codebugs/` holding no database resolves cleanly and the next write *creates* the tracker, so nothing errors and nothing is visible — the CB-13 misbinding's exact shape, since the wrong root there is a stray directory. Both consumers say so, and that is the one case where the preflight speaks on a `discovery` binding.
-
-  **A path in a diagnostic is only a report if its coordinate system travels with it (CB-49)**: `declared_tracker_root()` returns the declared value absolutized — lexical `abspath`, never `realpath`, because a declared root is often a deliberately symlinked path and the job is to pin the coordinate system, not rewrite the declaration — so `where`, the preflight line, and the fail-closed error texts all report a root readable without knowing the process cwd. The one exception is deliberate: with a deleted cwd `abspath` itself needs `os.getcwd()`, so `_absolutized` falls back to the raw value rather than violate `describe_root`'s never-raises contract.
-
-  → почему именно так: `docs/claude-md-rationale/database.md#cb-218-обход-вверх-трёхзначен`
-- **An ENVIRONMENTAL sqlite failure is classified inside `_open` and raised as a TYPE, never classified at the CLI boundary (CB-86).** `sqlite3.OperationalError` derives from `sqlite3.Error → Exception`, **not** `OSError`, so a sweep for `open(` and a widening of `OSError` are both structurally blind to it — the third vocabulary of "the CLI crashed at an I/O boundary". `db._is_environmental` — PRIVATE, deliberately, because a caller at the boundary is the rejected design — keys on `{8 READONLY, 10 IOERR, 13 FULL, 14 CANTOPEN}` with the same `& 0xFF` mask as `is_contention`, which is load-bearing because a read-only *directory* raises the extended `1544`; `_open` converts a match into `db.TrackerUnwritableError`, a **sibling** of `DatabaseNotFoundError`. **State the claim precisely:** a type raised from `_open` means *this failed while opening a connection*, not *nothing was written anywhere* — no handler connects twice today, but that is a property of the call sites rather than of the type. The narrowed live claim is the next bullet's (CB-199): one classification point covers *opening a connection*. **`SQLITE_PERM` (3) is deliberately absent** (measured: `chmod 000` yields 14, and no CLI path produces 3) and **`SQLITE_NOTADB` (26) cannot be added** because it arrives as `DatabaseError`; both absences were measured rather than reasoned. **`SQLITE_CANTOPEN` is ambiguous** — identical code and message for a missing file and an unopenable one — so `os.path.exists` picks the message, **for message selection only**; an unreadable *parent* still reads as "not found", stated here rather than discovered later.
-
-  → почему именно так: `docs/claude-md-rationale/database.md#cb-86-средовой-отказ-sqlite`
-- **One classification point covers OPENING A CONNECTION — never a write on a connection already open (CB-199, open).** `_open` classifies an environmental sqlite failure and raises `TrackerUnwritableError`, so a read-only DATABASE FILE reached by the walk is **not** detected at connect time once the seed rows exist: `_open` then attempts no write of its own, because CB-195 made the seed write conditional on a read so that a purely reading `db.connect()` never takes the write lock for a redundant insert. **What the narrowing costs, exactly, and all three parts of it are load-bearing:** a READ on a read-only tracker now SUCCEEDS — a capability gained, not a defect; a WRITE verb still refuses, still at exit 1, still with nothing landed; and only the MESSAGE narrows, the failure surfacing from the domain's own INSERT *outside* `_open`'s try/except as a raw traceback instead of the clean one-liner. `tests/test_db_unwritable.py::TestTheFourShapesEndToEnd::test_B_read_only_database_file` pins exactly that three-way shape rather than hiding the narrowing or refusing the read-side gain over it. **CB-199 stays open by design:** any write-based probe restoring early detection would have to attempt a write on every `db.connect()`, reintroducing the write-lock contention CB-195 removed, so it is not a two-line fix.
-  **"Steady state" is a real qualifier and has a real other side (CB-202).** While a seed row is MISSING — the first open of any tracker, and any whose seed rows were removed — the insert does run, and a reading `db.connect()` waits out a concurrent writer exactly as it did before (measured; the figures are in the archive). That is one open per tracker and no read-first rule can avoid it, so it is a BOUNDARY rather than a residual defect. `src/codebugs/db.py:_open`'s own comment carries the same narrowing at the site, and says in words not to widen it back.
-  **A schema-init function must not execute a string it did not itself check against the database, and the ratchet holding that keys on a PRIMITIVE rather than on a spelling (CB-202).** `tests/test_db_infra.py::TestSchemaInitRunsNoUncheckedDml` resolves SQL text through constants, loops, `split`/`strip`, f-string and concatenation prefixes and `executescript` bodies; derives its entry points from the `register_schema` calls rather than from the NAME `ensure_schema`, which had left every migration helper those functions call entirely unread; follows the module-local closure; and accepts a branch only when a READ could have fed it. **It is fail-closed on what it cannot resolve, and its docstring enumerates what it still cannot see** — a ratchet whose promise is wider than its check is the defect CB-202 exists to close, so the enumeration is part of the fix rather than a caveat on it. **How many helpers there are, and how many execute sites they hold, is a question for the ratchet and deliberately not for this paragraph:** both counts that once stood here were stale by the time anyone re-ran them.
-  → почему именно так: `docs/claude-md-rationale/database.md#cb-199-одна-точка-классификации`
-- Each module defines its schema as a module-level string (`SCHEMA` or `<DOMAIN>_SCHEMA`) and provides `ensure_schema(conn)`.
-- All schema changes must be additive (new tables, new columns with defaults) or use explicit migration functions.
 - Use parameterized queries exclusively. Never interpolate values into SQL.
-- SQLite WAL mode is enabled. `db.connect()` also sets `busy_timeout=5000` explicitly — it used to be inherited from `sqlite3.connect(timeout=5.0)`'s default and appear nowhere in the source. That timeout is what turns a losing writer into a clean `rowcount=0` instead of an `OperationalError`.
-- **Never write a plain `BEGIN`.** It pins a read snapshot, and the later write upgrade dies with `SQLITE_BUSY_SNAPSHOT`, which `busy_timeout` cannot rescue. Use `db.txn(conn)`, which issues `BEGIN IMMEDIATE`, saves/restores `isolation_level`, and is reentrant (it yields `False` and does nothing when a transaction is already open). **`db.txn` is now the ONLY executable `BEGIN IMMEDIATE` in the package** — the two grandfathered sites are gone (CB-40), and `tests/test_claims.py::test_24` now *counts* occurrences rather than deduplicating `(filename, statement)`, because the old set-based check would have passed any number of raw sites inside an already-allowed file, and zero as well.
-- **Assigning `conn.isolation_level` COMMITS an open transaction — so the save/restore idiom is not a neutral wrapper (CB-40).** `merge.merge` and `capacity.pull_next` both opened with `conn.isolation_level = None`, which meant that calling either from inside a caller's transaction silently committed the caller's unrelated work before starting its own — the exact inverse of the reentrancy contract every `db.txn` user advertises. Verified by running it: `in_transaction` goes `True → False` and a subsequent `ROLLBACK` finds nothing to undo. Both now use `db.txn`. **Both also refuse an ambient transaction outright, with a `raise` and not an `assert`** (`assert` is stripped under `-O`): each is an *acquisition* — a merge lock, a work claim — and under an ambient transaction `db.txn` yields `False`, so they would report success for a row no other connection can see yet. A gate that says "you hold the lock" before the lock is committed is worse than the defect being fixed.
-- **A refusal path that writes nothing needs no rollback machinery — and if it does write, reorder it so it doesn't.** The two raw sites existed because three paths did "roll back and return a value", which a plain `return` inside `with db.txn(...)` cannot do (it commits). An earlier design added a `TxnAbort` sentinel for this and was rejected in review: `db.txn` deliberately swallows a failed `ROLLBACK` (correct, so cleanup never masks the real exception), which would have let a refusal-shaped result come back with the transaction still live. The real fix was ordering — `merge.merge` now runs its head check **before** marking a stale holder abandoned, so `main_moved` has nothing to undo, and `lock_held` / no-candidate never wrote anything. All three simply return and commit an empty transaction.
-- **A deadline computed in Python is a defect waiting for something slow to happen — compute it in SQL (CB-41, and it took THREE review rounds to learn).** `merge()` writes a lease `expires_at`. Round 1 sampled it at the top of the function, before the write lock and before the injected git callback. Round 2 moved it below those — and left the stale-holder `abandoned` UPDATE between the sample and the write. Each time the lease landed **already expired**, the call returned `proceed: True`, and the next contender saw the lock reclaimable and *also* got `proceed: True`: two agents merging at once, which is the one thing the lock exists to prevent. **Point-of-use discipline is the wrong enforcement layer**, because it must be re-established every time a statement is inserted between the sample and the write — and twice it silently wasn't. The fix is to make the bad state unrepresentable: `strftime('%Y-%m-%dT%H:%M:%SZ','now', ?)` **inside the UPDATE**, so sampling and writing are one operation and no code can be inserted between them. `merge.py` now imports no clock at all. A comparison timestamp may still be read in Python — reading it early is *conservative* (an early `now` makes a lease look live, so you refuse rather than over-grant) — but anything **written as a deadline** goes in SQL. Note the corresponding test must assert the **SQL template**, not behaviour: any Python-sampled deadline still looks fresh unless real time passes during the call, which is exactly why the first regression test for this passed against the defect it was written for.
-- **An idempotency affordance can defeat the gate it sits in front of (CB-41).** `merge.merge`'s "already merging" short-circuit compared only `session_id` and never read `expires_at`, while the acquisition path below it treated an expired lease as reclaimable. So an expired holder retrying got `proceed: True` from the first branch while a competitor reclaimed the lease and got `proceed: True` from the second — two agents pushing to main, defeating the singleton lock without ever racing inside it. Every existing test used a *fresh* lease, where the two branches agree. **The remedy is renewal**: owning the lock renews it regardless of expiry, so expiry no longer decides anything on the self-owned path and the branches cannot disagree. Cost, accepted deliberately: the TTL still reclaims from a holder that **died** (a dead holder does not retry) but no longer bounds one that is alive, wedged and retrying — that needs liveness detection, not a timestamp.
-- **A value computed in Python from a row you just read must be written back inside ONE transaction — and that transaction owns the commit.** `update_finding` / `update_requirement` merge `meta` in Python over the row read at the top, so with the read and the write in separate statements two writers both read the stale value, both report success, and the later erases the earlier (CB-24). `busy_timeout` serializes the *writes*; it never touches the read that preceded them, so it cannot help. Wrap the whole body in `db.txn`, which takes the write lock before the read. Three consequences, each of which cost a real failure here: **(1) delete the function's own `conn.commit()`** — `db.txn` yields `False` under an ambient transaction and committing then commits the *caller's* work (`milestones.triage_dismiss` is such a caller, and it gained atomicity from this change); **(2) convert the returned row AFTER the block**, because `row_to_dict` raises `json.JSONDecodeError` on malformed stored `meta` and inside the block that rolls back a write the contract promises has landed — the CB-16 lie in a new place, and three existing tests caught it; **(3) a one-statement read-modify-write is not an instance of this** — `SET n = n + 1` or a SQL-side `json_patch` is already atomic. Note the no-op path now holds the write lock for one SELECT: deriving "will this write?" from the arguments beforehand was rejected because it duplicates the argument list, the same fragility the lazy-meta guard warns about.
-- **The CB-24 population is ~19 sites, not the four that got fixed — and two more consequences fall out of wrapping a function that RETURNS a row (CB-27, CB-30).** CB-24 fixed four sites; CB-27 was then filed as "nothing stops a FIFTH". A mechanical sweep (`grep -rn "conn.commit()"` → 43 executable sites, vs 7 `db.txn` users, then read every committing function) found **19 instances, 13 still unfixed** — in `blockers.py`, `merge.py`, `sweep.py` and three milestone modules no card had named. **This repo's recurring lesson, now for the sixth time: a rule expressed as an enumeration gets fixed at the sites someone enumerated, and the population is always larger than the list.** The outstanding 13 are on CB-36 with `file:line`; what would mechanically enforce the rule is CB-37, still undecided (the obvious AST predicate *certifies the very bug it was built to catch*, and is blind both to reads behind helpers like `_get_item_by_ref` and to cross-table check-then-act). Two consequences beyond CB-24's original three, both of which cost a review round: **(4) read the row RAW inside the block.** `_get_item_by_ref` calls `_row_to_item`, which `json.loads`es `meta_json` — *before* any write. Wrapping such a function without swapping to a non-parsing lookup (`_spine._get_item_row_by_ref`) leaves consequence (2) unsatisfiable, because there is no state in which the write lands and the parse then fails. Beware `sqlite3.Row` is not a `dict`: it has no `.get()`. **(5) capture the mutated row with `UPDATE … RETURNING *`, never re-read after the commit.** `release_item` re-resolved by `item_ref` *after* committing, so a newer attachment inserted in that window was returned instead — reporting `status='open'` for an item it had just marked `done`. Note what this does and does not buy: the returned row is now the row written (self-consistency), but *which* attachment was selected is still arbitrary — that is CB-33. `pull_next` has the identical window and is CB-39. And a statement that gains `RETURNING` can never again have its `rowcount` read (next bullet), which forecloses rowcount-based hardening of `_decrement_capacity` (CB-38).
-- **The `RETURNING` rule.** A statement either carries `RETURNING` and its outcome is read by fetching, or it carries no `RETURNING` and its outcome is read from `cursor.rowcount`. Never both: on a `RETURNING` statement `rowcount` is `0` until the cursor is exhausted, so reading it reports "nothing happened" *while the write has already landed* — strictly worse than a no-op.
-- **One assignment per column in a built `SET` clause.** Update functions assemble `SET` from an `updates`/`sets` list, and SQLite silently accepts `SET meta = ?, meta = ?` — applying only the **last** assignment. Two branches that each write the same column therefore destroy each other's work with a success-shaped return value. So: a column that more than one argument can affect must be **accumulated into a single value first and appended exactly once**, and that value must be built by mutating **one** object, never by re-reading the pre-update row per branch (a stale re-read loses data even after the duplicate assignment is gone — both faults have to go). `update_finding` and `update_requirement` are the worked example (CB-16); their docstrings carry the ordering contract, and `TestUpdateMetaComposition` guards it in both test files. **Assert such a guard against the SQL template, not the executed statement** — `set_trace_callback` reports parameters already expanded, so a guard reading it cannot tell a real assignment from the same text inside a value, and gives both false passes and false failures. The `RecordingConnection` subclass in each test file captures templates by overriding `execute`, which makes `sql.count("meta = ?") == 1` exact.
-- **A column settable at INSERT should be settable at UPDATE, or documented as immutable — and the two entities must be checked against each other, not each against itself.** That second clause is the lesson: `severity` was write-once on findings while the sibling `priority` was already mutable on requirements (CB-17), and the asymmetry was invisible from inside `findings.py`. **The rule is DECLARED and GATED, because enumeration by inspection does not converge** — three independent passes over the same function each found a DIFFERENT missing column, and prose is the wrong enforcement layer for a defect whose defining property is invisibility from inside one file (CB-21). `tests/test_update_parity.py` is that enforcement layer: for BOTH entities it reads `PRAGMA table_info`, the `update_*` signature, the MCP wrapper's signature and the CLI parser's argparse dests, and fails on any column that is neither declared MUTABLE (naming the parameters that write it) nor declared IMMUTABLE **with a reason** — so a new column, a new writing parameter or a new surface argument turns a test red instead of waiting for a fourth inspection. **The residual findings cells were closed by DECLARATION rather than by widening the function:** `description`, `category` and `file` are the three inputs of the derived `auto:v1` fingerprint, so an argument for any of them would make `update_finding` a RE-KEY of identity, and re-keying is a separate negotiated contract (CB-43 item 6). `reported_at_commit` is the worked example of deliberate immutability, and says so in its docstring; `source` carries BT-4's first-reporter reason on both entities. **A declaration is not a verdict**: whether `description`/`file` should become mutable stays OPEN, the `IMMUTABLE` docstring says so, and the gate's job is to force that answer to be stated rather than rediscovered. **The surface axis is declared but deliberately NOT closed** — the CLI `update` verb has no `--tags`/`--meta-update`/`--reported-at-ref` and `reqs-update` no `--section`/`--tags`/`--meta-update`, each recorded in `SURFACE_GAPS` with its reason, and a hole declared for an argument that is in fact present fails the gate too, so the list cannot rot into permission to skip a surface. That axis is CB-6.
-
-  → почему именно так: `docs/claude-md-rationale/database.md#cb-21-паритет-колонок`
-- **Match a field's own insert contract, not its neighbour's — and when you unify, unify every site at once.** This rule used to read "`severity` is exact-match on update, because that is what `add_finding` enforces". **CB-19 closed that**: `resolve_severity` now runs on `add`, `batch_add`, `update`, CSV import *and* the query filters, so severity normalizes exactly like `status`. The rule survives as the reason it was done that way — making the update path lenient while insert stayed strict would have created a worse, same-field inconsistency, so the seam had to move in one step rather than per-site. What normalization forgives is still **spelling, never meaning**: severity has no aliases, so `crit`/`P0`/`sev1` raise.
-- **Never `ORDER BY` a vocabulary column directly — it sorts alphabetically.** `severity` and `priority` are TEXT with a CHECK constraint, not ordered types, so `ORDER BY severity` yields `critical, high, low, medium` and `ORDER BY priority` yields `could, must, should` — the latter inverting the ranking outright. Under a `LIMIT` this **truncates the rows that matter** rather than merely displaying them oddly, and nothing signals it (CB-20). Use `types.rank_case_sql(column, vocabulary)`, which derives the rank from the tuple so the SQL cannot drift from the vocabulary, binds the values rather than interpolating them, and sends unknown values last. **Its params must be spliced at the fragment's textual position, not prepended** — in `query_findings` that is after the WHERE params and before `LIMIT`/`OFFSET`; getting it wrong corrupts *filtered* queries only, so unfiltered tests keep passing. `blockers.query_deferred_entities` orders by `EntityKind.sort_col`, whose precedence is declared alongside it as `sort_vocabulary`; keep the pair together. Note `findings.get_stats` and `reqs.get_reqs_stats` are immune only because they pre-seed their output dict with the vocabulary — that is load-bearing, not decoration.
-- **A vocabulary must resolve on BOTH sides of the entity — the write path and the query filter.** Normalizing writes while a filter compares raw text against a canonical column is worse than doing neither, because the caller can store a value and then be unable to find it by the same spelling, and the failure is *silent*: `query_requirements(priority="SHOULD")` returned zero rows for a row `update_requirement(priority="SHOULD")` had just written as `should`, and "no requirements" is indistinguishable from an empty queue (CB-19). The resolvers live in `types.py` — `resolve_severity`, `resolve_priority`, `resolve_finding_status`, `resolve_requirement_status` — and every one of the five write sites and four filter sites goes through them. **`_resolve` is also where non-string input is refused**, so `None` raises `ValueError` (the documented contract) rather than `AttributeError` from `.lower()`; guarding per-resolver would leave the next one to re-acquire the hole. Two things this rule does *not* say: an empty-string filter is still "no filter" and is never validated (now because `is_vocabulary_filter_active` says so explicitly — see the next bullet; it used to be because the `if severity:` guard short-circuited first, which was the CB-25 defect), and normalization forgives **spelling, never meaning** — severity has no aliases, so `crit`/`P0`/`sev1` still raise, and adding aliases needs evidence of real callers.
-- **"No filter" is `None` and `""` — never truthiness, and never decided with `!=`.** A vocabulary filter guarded by `if severity:` conflates *not supplied*, *the documented empty filter*, and *wrong input*: a falsey non-string skips the condition entirely, so `query_findings(severity=0)` returned the **whole table**, and an unfiltered queue is indistinguishable from a correctly filtered one (CB-25). The resolver cannot help — it is never reached. `types.is_vocabulary_filter_active` is the one definition, and **it is type-based on purpose: deciding this with `value is not None and value != ""` reintroduces the defect inside its own fix**, because `unittest.mock.ANY` is truthy yet compares equal to `""`, and a `str` subclass overriding `__ne__` does the same to a valid `"open"` — so **the predicate must never run equality (or `len`) on the value.** Both traps are pinned in `tests/test_types.py::TestIsVocabularyFilterActive`; without those two cases the wrong predicate passes every other test. Three consequences: **(1)** it is scoped to *vocabulary* filters and must not be reached for on `ids`/`tags`, where an empty list legitimately means "no filter" and where an active empty filter emits `id IN ()` — valid SQLite returning **zero** rows, a silent empty queue replacing a silent full one, quieter and worse; **(2)** a caller whose contract is *default*, not *no filter*, still uses it but keeps its own default — `provenance.check_findings` maps `None`/`""` to `"open"`; **(3)** three more filters validated their vocabulary on the **write side only** — `merge.get_sessions`, `milestones.list_milestones` and `blockers.query_blockers` — and all now resolve on query too. **Sweep for the SHAPE, not for the names:** grepping the filters already known is an enumeration and cannot find the one nobody listed; the shape (`if <name>:` wrapping a vocabulary check) finds it in one grep. Free-text filters are **not** fixed and are tracked as CB-29; a filter discarded by *routing* rather than by validation is CB-28.
-
-  → почему именно так: `docs/claude-md-rationale/database.md#cb-25-пустой-фильтр`
-- **On a WRITE path, `None` is the only "not supplied" — and that is deliberately NOT the query-side rule (CB-82).** `types.is_vocabulary_filter_active` treats `None` **and** `""` as "no filter", which is right for a filter: an absent filter matches everything. A stored value is the opposite — absent means *invent one* — so resolving it with truthiness lets a falsey WRONG TYPE be silently replaced by a default. `bench.import_csv` did exactly that with `date or utc_now()[:10]` and `run_id or _next_run_id(conn)`, so `date=[]`, `date={}` and `date=""` all stored today's date and reported success (measured; **the card itself got this wrong**, claiming the dict cases raised — `{}` is falsey and took the same silent path). Validate every non-payload argument **before anything is parsed or written**, so a refusal costs no partial work, and raise the `ValueError` the module contract promises rather than leaking `sqlite3.ProgrammingError` or `json.dumps`' `TypeError`. Two rules the guard itself must follow: **serialize a JSON container ONCE and store that exact string** — validating with one `json.dumps` and storing with a second leaves a window where a mutable or `__iter__`-overriding subclass shows different data to each, which is CB-74's "validating one view while consuming another" in a new place (Codex diff review; pinned by a test whose list mutates between iterations); and **check member types explicitly**, because `json.dumps` complains about neither — it writes `[1, 2]` for tags and silently COERCES a non-string dict key to a string, and a non-string tag later crashes `bench-list`'s `",".join(tags)`. **Do not narrow beyond the card while you are in there**: the first draft added `allow_nan=False`, which would have refused `meta={"x": nan}` that stores and round-trips fine today — an unrequested behaviour change riding along inside a validation fix. Note the guard makes the downstream `x or default` unreachable for bad input, so rewriting it as `x is None` is defence-in-depth that **no test can discriminate** while the guard holds; say that rather than claiming it is covered.
-- **Findings have an identity function (CB-43): `add` is an upsert, not an insert.** A FINDING is a defect; an OCCURRENCE is one observation of it. Every observation routes through a fingerprint: a hit on a LIVE row (`open`/`in_progress`/`stale`) bumps `occurrence_count` and returns that row (`was_new: False`); a hit on `fixed` REOPENS it as a regression, and the status-change hook must fire `milestones.reconcile._reconcile_on_reopen` to reopen the stream item, because the terminal reconciler early-returns on nonterminal and the add-side router is `INSERT OR IGNORE` — without it the reopened card is invisible to every queue, strictly worse than a duplicate; a hit on `wont_fix`/`not_a_bug` files a new row carrying `meta.recurrence_of` (a decision stays decided).
-
-  **(1)** The branch table is TOTAL over `FINDING_STATUSES`, pinned by `tests/test_dedup.py::TestBranchTotality` — an unclassified status silently resumes the duplicate explosion.
-
-  **(2)** At most one live row per fingerprint is a **partial unique index** (`ux_findings_fingerprint_live`), declared in `_POST_MIGRATION_INDEXES` and NEVER in `SCHEMA`: SCHEMA runs before `_migrate_statuses`' hardcoded rebuild, which would either crash on the missing column or silently drop the index.
-
-  **(3)** An explicit `finding_id` is an assertion of identity and BYPASSES both derivation and matching. Most test call sites build fixtures from identical tuples, **so a helper that wants N distinct entities must vary its default description.**
-
-  **(4)** The `auto:v1:` fallback hashes a canonical JSON array — never a joined string, since separators are ambiguous in free text — of category, file, and the description normalized by stripping the observation's OWN meta string values, then ISO timestamps (BEFORE lowercasing: the pattern anchors on `T`/`Z`), then digit-bearing hex runs. **General numbers are KEPT**, because `rc=124` versus `rc=1` is a real family split.
-
-  **(5)** `update_finding` pre-checks terminal→live transitions against the index and raises a domain `ValueError` naming the blocking row: `db.is_contention` matches codes {5,6} and `SQLITE_CONSTRAINT` is 19, so a leaked `IntegrityError` is unclassifiable everywhere.
-
-  **(6)** `fingerprint` is INSERT-settable and `update_finding` documents it as immutable. **Exactly one re-key is sanctioned** (CB-61): `findings.normalize_categories` (MCP `categories_normalize`, CLI `categories-normalize`), and it issues its own UPDATE rather than routing through the updater, so no caller acquires a re-key by argument. **Its boundaries are the point:** DRY RUN BY DEFAULT (no write transaction is opened at all without `apply=True`/`--apply`); only an `auto:v1` hash is re-derived, only from the CATEGORY input and only with the SAME normalizer version, so a `NULL` and a caller-SUPPLIED hash stay byte-identical; a row whose stored inputs no longer reproduce its stored hash is skipped WHOLE — its category is not rewritten either — and reported as `unverifiable`; and a fold that would put two live rows on one fingerprint is REPORT-AND-STOP, writing nothing and naming the pairs, because an automatic merge would have to invent a winner.
-
-  **(7) An import is not an observation, and `findings.import_findings` — not the CLI handler — is where that means something (CB-51).** A fingerprint hit on a reopen-status row is SKIPPED; a live hit still bumps and a `wont_fix` hit still files a recurrence, neither of which was a defect. The id guard compares CONTENT as well as id, so a colliding foreign row lands with a fresh local id and `meta.imported_id`. **The id half cannot simply be deleted:** a row written with an explicit id stores `fingerprint = NULL`, NULL matches nothing, so a fingerprint-only skip cannot see it and every pre-CB-43 row and every explicit-id row would duplicate on each re-import. The whole loop runs in ONE `db.txn` (CB-77), so a read failure lands nothing and **the rollback path must print no count**. **`batch_add_findings` is deliberately NOT the seam**: it has no `annotate` parameter, so import would silently run the similarity resolver per row inside the held write lock, and it validates every member before the transaction opens, which forbids per-row error partitioning. A faithful backup RESTORE — id, status, `occurrence_count`, `created_at` verbatim — is a different seam again (a raw INSERT bypassing identity, resolvers and post-add hooks) and is CB-97, not this.
-
-  **(8) SEVERITY IS MONOTONIC UNDER OBSERVATION, and it is the only column a bump refreshes (CB-52).** `_bump_row` writes the more severe of (stored, observed) — **escalation only**, so a `critical` card re-observed `low` stays `critical`; use `update_finding` to downgrade deliberately. The comparison goes through `types.severity_rank`, derived from the `SEVERITIES` tuple exactly as `rank_case_sql` is, because a second hand-written precedence table is one drift from disagreeing with the first (CB-22) — and **the direction is the trap**: `SEVERITIES` runs most-severe-first, so the worse of two is `min` over ranks and `max()` is backwards in both spellings. **`escalate=False` has exactly one call site, `import_findings`** — an import is not an observation (CB-51), so a peer's CSV records the occurrence but must not re-rate a local card on foreign evidence; `escalate` is deliberately NOT exposed on `add_finding` (where `annotate` is), so no MCP or CLI caller can turn the invariant off by argument, and the count is pinned by `tests/test_dedup.py::TestEscalateOptOutRatchet`, **read by AST rather than grep**. **The parameter-ordering hazard is closed structurally rather than documented:** every fragment of a built `SET` clause is appended with its own parameter, `meta` included — point-of-use discipline is the wrong enforcement layer (CB-41). The general form of that abstraction across the package's seven string-built SET clauses is CB-37's question, not this card's. **Two things this rule does NOT do, both deliberate and both ratified:** `reported_at_commit` stays frozen (CB-53's separate answer — readers consult the ring), and **milestone routing is NOT re-evaluated** — `stream/security` placement is decided once at filing time, which is CB-35's open question.
-
-  **(9) TAGS UNION UNDER OBSERVATION (BT-4): a bump merges the observation's tags into the `tags` column — on live AND reopen bumps, because a regression is an observation.** Union is exact string equality (no casefold — `Tag` and `tag` both live), first-encountered order with stored tags before observed, deduplicated; the merged container is `json.dumps`ed ONCE and that exact string is the bound parameter (CB-82), and `tags = ?` is appended INSIDE the sets builder paired with its own parameter, exactly once (CB-16). **`promote_tags=False` has exactly one call site, `import_findings`** — foreign tags stay out of the local column while the ring still records them; it is absent from the `add_finding`/`batch_add_findings` signatures, so no surface can turn the union off by argument, and the count is pinned by `tests/test_dedup.py::TestPromoteTagsOptOutRatchet` (AST, same shape as the escalate ratchet). **Stored tags are STRICT-parsed pre-write, on the promote path only** — the union cannot be computed from a value that does not parse, so a bump over malformed stored tags fails with nothing landed: this MOVED the malformed-stored-tags corruption class from post-commit (`PostCommitCorruptionError`, which stays as the defensive classifier with an honest reachability note) to pre-write `json.JSONDecodeError`. On the import path the column is neither read nor written, so an import's live-hit on a corrupt row still lands. A valid non-list stored value is displaced, not merged (the ring guard's convention), never a `TypeError`. The manual `update_finding` path acquired NO union — it never calls `_bump_row`, and a pin test holds that a status write leaves the column untouched. **Tag REMOVAL is deliberately not built**: `update_finding(tags=)` stays a full replace, so a hand-removed tag returns with the next observation carrying it — the sub-decision (a cap / tombstones / a `finding_tags` table) is OPEN with the owner.
-
-  **(10) THREE MORE FIELDS ARE OBSERVATION-FROZEN, DECLARED IN WORDS (BT-4).** `source` = the FIRST reporter, frozen by design — later observations' sources live only in the ring, and an imported observation's ring source can be a peer tracker's; this closes CB-21's `source` cell as a DECLARED immutability, and `tests/test_update_parity.py` carries `source` in `IMMUTABLE` with this reason, on both entities. `reported_at_ref` = observation-frozen but manually mutable BY DESIGN via `update_finding(reported_at_ref=)`, since a release is tagged after filing — do not confuse it with the immutable `reported_at_commit` — and `query(ref=)` matches the first-observed-or-manually-assigned ref exactly, never the ring; no ring reader is built until a consumer of latest-observation semantics appears. Top-level `meta` = the row's AUTHORED state — a re-observation's meta lands only as per-occurrence evidence in `meta.occurrences[*].meta`, `query(meta_key=)`/`meta_value` read the authored column, and promoting specific keys into the row is a future allowlist by measured demand, not a general merge. Pinned by `tests/test_boundary.py::TestBt4FreshnessDeclarations` (prose↔code) and `tests/test_dedup.py::TestObservationFrozenFields` (behaviour).
-
-  **(11) THE `attention` BLOCK — a serious divergence between an observation and the card it matched becomes a STRUCTURAL, top-level field instead of something a reader has to dig out of the body (BT-5).** The key is present in EVERY `add`/`batch_add` response, on all four branches, and `[]` is a normal answer meaning *evaluated, nothing fired* — never *no such channel*; the precedent is `claims._response`, whose keys are all unconditional. The signal vocabulary is CLOSED, and the signal×branch matrix is DERIVED and LIVE: `_ATTENTION_SIGNALS_BY_ACTION` is read by the builder, so a wrong cell changes the RESPONSE and not merely a test, and an unclassified action raises `KeyError` — fail-closed, because *evaluated, nothing fired* is the one meaning a new dedup branch must not be able to borrow. Two signals today: `severity_escalated` (`from`/`to`, branches `bumped`/`reopened`) and `category_divergence` (`observed`/`stored`, every branch that HAS a matched row — `recurrence_of_closed` included, where the comparison is against the dismissed twin — with BOTH sides normalized, so a difference of spelling is not a signal while a difference of name is, and a non-string stored category is skipped for `_existing_categories`' reason). Transport is `AddOutcome`/`BumpOutcome`, and two properties of it are load-bearing: **the single severity comparison stays inside `_bump_row`** (a second one anywhere is the drift CB-41/CB-52 exist to foreclose), and signals are assembled INSIDE the transaction so `_finalize_add` stays MECHANICAL — the post-commit conversion path must not acquire a new way to fail. Import carries no block BY CONSTRUCTION (`import_findings` reads the outcome directly and never calls `_finalize_add`), which is why there is no opt-out flag: it would be dead code. Audience is MCP-only — the CLI prints fixed lines and does not serialize the response, and there is no batch verb there. **The wire golden is NOT the gate on the response shape**: no `outputSchema` is snapshotted and the live schema carries `additionalProperties: True`, so extending it would be a gate that cannot fire; the gate is the behavioural MCP-result test. Exact numbers — cells, signals — live in the tests and deliberately not here.
-
-  **(12) STRIP WITH VISIBILITY, ON THE ADD PATH ONLY (CB-56/CB-60, closed by the wire pin at CB-160).** `add`/`batch_add` do not REFUSE a caller-supplied `meta` key that is identity machinery's own OUTPUT (`occurrences`, `occurrences_dropped`, `regressed`, `recurrence_of`, `category_minted`, `fingerprint_refusals`, plus any extension's own reserved keys via `db.resolver_reserved_meta_keys()`) — a `get` → modify → `add` round trip is a real caller shape. What gets stripped is reported, never silent: `stripped_meta_keys` follows the `attention` discipline exactly — a top-level list, unconditional on every branch, `[]` meaning "checked, nothing to strip" and never "no such channel" — because a caller must be able to tell from the response alone which of its own keys did not land (the CB-15 "discarded caller data" shape applies to a silent strip exactly as to a silent refusal). **`resolver_errors` stays an outright REFUSAL rather than a strip**, because it reports a FAILURE state — a resolver's annotation attempt did not land — rather than machinery input, and silently discarding a caller's belief "my last observation's resolver failed" is exactly what stripping-with-visibility exists to avoid for everything else. **The UPDATE path is untouched**: `update`'s `meta_update` refuses every reserved key outright (a resolver-declared UPDATABLE key like `similar_to` is the one exception, from the registry, never a literal), because an unrepairable stamp surviving under a silent strip is the CB-26 shape. **One boundary is named rather than claimed closed**: CSV import strips the same dynamic reserved union INCLUDING `resolver_errors` — silently, with no response key, because import is not an observation (CB-51) — so "one behaviour on every ingestion surface" is NOT what this achieves; the divergence is narrowed to one key and pinned by test rather than reconciled. Both tool descriptions name `stripped_meta_keys` explicitly.
-
-  **(13) THE THIRD OPT-OUT OF THE SAME FAMILY, AND THE ONE THAT REFUSES A COMBINATION RATHER THAN NARROWING A MERGE (CB-230).** Read it with items (8) and (9): what makes the three a family is *a keyword-only opt-out that turns off one write this package makes on its own initiative, has exactly one call site, is absent from every surface, and has an AST ratchet pinning the count*. **The PATH is where the three differ, and the defining clause must not flatten that**: `escalate` and `promote_tags` sit on the observation path, `authored` on the UPDATE path (CB-247). `update_finding(..., authored=False)` is a SERVICE write governing EXACTLY ONE COLUMN — under it the `updated_at = ?` assignment is simply not appended to the built `SET`, and everything below that `if` (the id parameter, the UPDATE, the hook firing, the re-read) is outside it deliberately, so the flag can change whether the row claims a human last touched it and never what lands. **`authored=False` has exactly one call site, `loc.py`'s anchor refresh** — an anchor is this module's own output rather than something a person or a commit wrote, so refreshing it must not make the card look recently changed; the count is pinned by `tests/test_cb230_service_write.py::TestServiceWriteCallSiteRatchet`, and `authored` is deliberately absent from the MCP and CLI surfaces, which that same ratchet asserts against the MCP wrapper's SIGNATURE and the CLI's argparse DESTS rather than against any text. **Do not re-check that with a grep over the wire goldens**: `tests/golden/mcp_schema.json` carries the word `authored` once as ordinary prose inside `query`'s description, so a raw text search answers a different question from the one being asked. **Where it differs from its two siblings: they NARROW what a merge does, while this one makes a COMBINATION unrepresentable.** `status=` together with `authored=False` is REFUSED, and the refusal sits ABOVE the transaction, so nothing is written before it fires: a status change is an authored act, and the one way this flag could ever have erased a real date is foreclosed by construction rather than by discipline at the point of use — CB-41's rule applied to a flag instead of to a deadline.
-
-  → почему именно так: `docs/claude-md-rationale/database.md#cb-43-функция-тождества-находок`
-
-- **Category spelling is normalized and MINTING a new category is gated — on the OBSERVATION path only (CB-60).** `types.normalize_category` (casefold, strip, hyphen/whitespace runs → `_`) runs in `add_finding`/`batch_add_findings` when `finding_id is None` — the same predicate as dedup and the pre-add resolvers — and **BEFORE `auto:v1` derivation**, so twin spellings hash and store one canonical name. A category the table does not already hold (compared on normalized forms, so a pre-CB-60 stored spelling still legitimizes its normalized twin) requires `new_category=True` (on both domain functions, MCP `add`/`batch_add`, CLI `--new-category`): without it a near-miss is refused naming the canonical spelling — Levenshtein with a conservative length-scaled threshold, and **the flag escapes either refusal, so the threshold only shapes the message and never blocks a determined mint** — while a genuinely new name is refused listing the nearest existing ones. A permitted mint stamps `meta.category_minted: true`, so `query(meta_key="category_minted")` counts minting events; the stamp is reserved on ADD only (spoof-proof) and deliberately writable via `update_finding(meta_update=)`, because an unrepairable stamp is the CB-26 shape. `""` stays a legal, ungated category (similarity's pool matches it exactly). **NOT normalized and NOT gated, each deliberately:** explicit-`finding_id` adds (asserted identity — fixtures file verbatim), `import_findings` (CB-51's verbatim contract; a foreign `category_minted` is stripped like the other reserved keys) and `restore_findings` (raw INSERT). **The ADD path never rewrites a stored row**, which is exactly why an old-spelling row does not fingerprint-match a new normalized observation. The retro-fold EXISTS as a separate and explicit operation (`findings.normalize_categories`, CB-61 — see item (6) of the CB-43 bullet above for its boundaries), not as anything the add path acquired. **Running it on a live tracker is the OWNER's decision, not a consequence of the code landing** — it is dry-run by default and `--apply` is his to type. **A tracker that has not been folded still carries variant spellings.**
-
-  → почему именно так: `docs/claude-md-rationale/database.md#cb-60-нормализация-категорий`
-- **Requirements deliberately have NO identity function** — DECIDED on CB-45 (the card delegated it verbatim: "decide … or documents why not"): requirement rows are authored artifacts with caller-assigned ids on every write path (the same explicit-id bypass that skips dedup for findings), no automated filer emits requirement observations, and reqs similarity already exists via embeddings — a fingerprint column with zero writers would be dead code. Revisit trigger: an automated requirements filer appearing.
-- **Similarity extension (CB-45): `similarity.py` is the package's FIRST self-registering non-domain module — legal because it issues ZERO SQL.** All row access goes through the public accessor `findings.similarity_candidates` (raw rows, `meta_json` as the stored STRING per CB-24 consequence 4, deterministic `ORDER BY created_at, id`); **no other module may SELECT from findings.** Detector: char-trigram Jaccard over `similarity.normalize_text` = the fingerprint normalization (public wrapper `findings.normalized_identity_text`) plus an ANSI-remnant strip — **the extra cleanup lives in the extension because `auto:v1` is versioned and must not drift.** `DEFAULT_THRESHOLD = 0.7` is CALIBRATED, not chosen — the corpus, the family counts and the rejected 0.95 are recorded in the archive section this bullet points to, and `tests/manual/verify_similarity_corpus.py` reproduces those numbers exactly. `MIN_TEXT_LEN = 40` lives in the SCORING layer, so resolver, report and check share one policy — trigram Jaccard scores "Bug 1"/"Bug 2" ≈ 0.8 and two empty strings 1.0.
-
-  The file-time resolver stamps `meta.similar_to = [{id, score, status}]` from a pool of live ∪ {`wont_fix`, `not_a_bug`} rows in the same category — a "resembles CB-N, already dismissed" link is the most valuable annotation, and `fixed` stays out because exact matches already reopen — newest 500, **trigrams memoized BY CONTENT**, since an `(id, created_at)` key collides across databases within one whole-second timestamp. **The pool's category is a VALUE, not a filter**: findings permit `category=""`, which the accessor's `category=` filter convention reads as "no filter", so the resolver passes the explicit-tuple twin `categories=("",)` and matches exactly — otherwise every empty-category observation pools the whole table. `similar_to` is reserved on ADD only and writable via `update_finding(meta_update=)` — an unrepairable annotation is the CB-26 shape; `resolver_errors` is refused on both paths. **The update-side exemption is DECLARED at registration** (`updatable_keys=("similar_to",)`) and read from the registry (`db.resolver_updatable_meta_keys()`), never hardcoded in findings — **core must not know an extension's key names.** The annotation pool is likewise DERIVED (`LIVE_STATUSES + RECURRENCE_STATUSES`, both public from findings), so `TestBranchTotality`'s classification guarantee reaches the pool instead of a re-spelled enumeration.
-
-  `group_report` (MCP `similarity_report`, CLI `similarity-report`) is CB-46's dry run and reports its own evidence: **per-family `min_pair_score` is the DIAMETER over all member pairs, sub-threshold included** — recorded edges are ≥ threshold by construction and can never reveal union-find chaining — plus the edge list and member description excerpts. Default population is LIVE rows (`status="all"` widens), because grouping decided rows into a merge dry run would contradict decision-stays-decided. Embedding vectors are caller-supplied and OFFLINE-only (`group_report(vectors=)`): an MCP client cannot practically pass thousands of vectors per call.
-
-  → почему именно так: `docs/claude-md-rationale/database.md#cb-45-расширение-похожести`
-- **The one sanctioned cross-table status write** is `entities.EntityRef.set_status(conn, new_status=…, expected=…)`. It runs inside the caller's transaction, must not commit, and returns whether the row moved. Domain modules keep owning their own tables; this exists so the claims ledger can project a status without importing a domain module.
-- **An interpolated SQL identifier is validated BEFORE it reaches the f-string, and `types.is_sql_identifier` is the only copy of that pattern.** The usual site is the identifier's DECLARATION — `EntityKind.__post_init__`, below — but an identifier that arrives as an ARGUMENT has no declaration to be validated at, so it is checked at the boundary it enters through: `reconcile.live_source_clause` validates its `alias`, `entities.terminal_exists_sql` its `ref_expr`, and this document states that argument case as a rule of its own in the `live_source_clause` bullet above (CB-31, rule 2). **"At the declaration, never at the use" is the shape to prefer, not a universal**, and it was written as one here. Values are bound, with two deliberate and caller-unreachable exceptions — `claims.py` and `findings.py` each splice into a `SUBSTR` a `prefix_len` that `len()` computes from a module constant; identifiers (table, column, `ORDER BY` target) sometimes cannot be bound at all, and **only some** such sites carry `# noqa: S608` — most do not, `bench.py`'s run-listing query and `blockers.py`'s trigger-type query among the unmarked ones, and there is no inventory anywhere naming which sites got a marker and which did not. **That marker checks nothing today, and this is not an aside — `S608` is simply not in this repository's enabled lint rules.** `pyproject.toml` carries no `[tool.ruff.lint]` section at all, so `ruff check` runs its default selection and never evaluates `S608`; a `# noqa: S608` therefore suppresses a warning the linter was never going to raise in the first place. **The actual protection is validation, not the linter** — `EntityKind.__post_init__`, described below, and `types.is_sql_identifier` itself. **But that is the design and NOT what holds most of the tree, and reading it as the whole answer is how the next hole gets opened (CB-264).** Measured on `adcf354`, ruff `0.15.7`, a real `[tool.ruff.lint] select = ["S608"]` in a throwaway copy: `src/` carries 52 unsuppressed `S608` sites across 11 files, and **29 of them sit in nine files that never call `is_sql_identifier` once** — `reqs.py`, `sweep.py`, `milestones/foundation.py`, `milestones/capacity.py`, `bench.py`, `milestones/triage.py`, `merge.py`, `embeddings.py`, `blockers.py`. Nor are the remaining 23 held by it: 21 are in `findings.py`, whose single use of the validator is the import-time check over `_RESTORE_COLUMNS`, and that query is none of the 21. **What actually holds them is a THIRD mechanism this bullet left unnamed: the interpolated text is either a fixed literal fragment or a member of a CLOSED enumeration** — `findings.py` builds `axis.column` only out of a `_GroupAxis` that `_resolve_group_axis` returned, and `milestones/capacity.py`'s `_held_col`, which this bullet closes on, refuses a `size` outside `ITEM_SIZES` before composing `f"{size}_held"`, and `reqs.py` checks `group_by` against an inline `valid_groups` tuple on the line before it interpolates it — so the enumeration is sometimes a shared constant and sometimes local, which is why grepping for one spelling would not find them. **Membership in a closed set is not the same check as `is_sql_identifier`'s** — it asks *is this one of the names I ship*, not *is this shaped like a bare identifier* — which is why naming it separately matters. **This is NOT a security hole, and that was re-established rather than inherited**: all 52 sites were walked at the cut above and every interpolated expression traced to its assignment — 30 distinct ones, each a locally built clause fragment, a module constant, a literal picked by a Python conditional, a `?`-placeholder string, an integer from `len()` of a module constant, or a closed-enumeration member checked before interpolation. **The bound, stated rather than implied: that is `src/` only, and it traces assignments rather than proving unreachability from every caller.** It is a defect of DESCRIPTION, and its cost is exact: a reader concludes the tree is held by the validator when it is held by nothing arriving from outside, and **it is that second guarantee a new interpolating site must preserve.** **Turning `S608` on is a separate, deliberately accepted debt (CB-172), and it has a measured cost rather than a free one**: doing it lights up a batch of unsuppressed hits spread across many source files in a single change — this project's first lint-rule configuration ever. **What it does NOT do is surface the dead markers belonging to other rules, and the sentence that stood here said it did (CB-264).** `RUF100` (`unused-noqa`) is not in ruff's stable default selection, so enabling another rule does not raise it: measured on `adcf354` with ruff `0.15.7`, a real `[tool.ruff.lint]` section carrying `select = ["S608"]` and one carrying `extend-select = ["S608"]` each give 56 `S608` hits over `src/ tests/` and **zero** `RUF100`. It has to be selected in its own right — by its code, by a `RUF`/`RUF1` prefix, or by `ALL` — or reached through `--preview`, whose default selection is far wider (measured: 517 diagnostics with no `[tool.ruff.lint]` section at all, `RUF100` among them), so **"only if you select it" would be the same overclaim pointing the other way.** **And the dead-marker count is not a property of the tree, so it is quoted with its cut or not at all**: a marker is dead RELATIVE TO THE ENABLED SET, so replacing the default selection and extending it answer differently, and the paths walked move the answer again. On the cut that matches what CB-172 must leave green — ruff `0.15.7`, `extend-select = ["S608", "RUF100"]`, over the `src/ tests/` that `worktree-finish.sh` lints, on `adcf354` — it is **56 dead markers beside those 56 `S608` hits**, 17 in `src/` and 39 in `tests/`; the same tree answers 93 when `select` REPLACES the default set instead of extending it. **The error corrected here was this paragraph's own kind** — *the tool is assumed to work although nobody ran it* — committed in the sentence that exposes it, which is why every number above names the rules enabled, the paths walked, the ruff version and the commit. `EntityKind.__post_init__` validates `table`, `sort_col` and **every member** of `readable_cols`, so a malformed kind dies at construction — including via `dataclasses.replace()`, which the tests use. Before CB-22 the comment claimed all three were guarded and only `sort_col` was, inside `order_by()`; a kind carrying `readable_cols={"(SELECT meta FROM findings)"}` passed the membership check and `field()` returned the `meta` column. Note **an allowlist membership check guards the caller's argument, never the allowlist's own contents** — those are two different obligations, and only the first is visible at the query site. Two related traps: **anchor with `fullmatch`, not `^…$`** (`$` also matches before a trailing newline, so the old pattern accepted `"findings\n"`), and a check that is *duplicated* rather than *shared* is one drift away from disagreeing with itself — `entities._SAFE_IDENT` and `types._IDENT` were byte-identical and compiled to the same object only because `re` caches on the pattern string. The same shape recurs wherever a column name is composed: `milestones/capacity.py` builds `f"{size}_held"` and goes through `_held_col()`, because when it didn't, an unknown size raised `OperationalError` if the agent had a capacity row and **silently lost the increment while returning success** if it did not.
-
-### Error handling
-- Domain functions raise `ValueError` for invalid input and `KeyError` for missing entities.
-- MCP tools let exceptions propagate to the MCP server's built-in error handling.
-- CLI handlers catch domain exceptions and print to stderr with `sys.exit(1)`.
-- **A failure raised AFTER the commit must never be reported through the input-validation arm.** A domain update commits its write and only *then* can raise while serializing the return value from a row with malformed stored `meta`/`tags`. Reporting that as bad input prints a tidy one-line error and exits 1 for a mutation that **already landed** — a failure-shaped signal for a successful write, the same class of lie as CB-15/CB-16. **The rule is encoded exactly once, in `cli.domain_errors()`** — every CLI handler that touches a domain call routes it through `with domain_errors():` rather than catching exceptions itself, and **its two `except` arms must stay in this order**: `json.JSONDecodeError` re-raises unchanged FIRST (a matched row's corrupted stored `meta`/`tags`, discovered while serializing a write that already committed), and only THEN does a plain `(ValueError, KeyError)` arm print one line and `sys.exit(1)`. Reversing or collapsing the two loses exactly this distinction, because `json.JSONDecodeError` **is** a `ValueError` subclass — **enumerate what subclasses a widened catch before trusting it.** Two pins hold the order at different grains, and both are needed: `tests/test_findings.py::TestDomainErrorsOrderingPin` exercises `domain_errors()` directly, in isolation (CB-159), and `TestRetriageCliContract::test_a_committed_write_is_never_reported_as_bad_input` re-confirms it through the real `update` CLI verb and a corrupted database. `_cmd_query` and `_cmd_reqs_query` carry the same ordering, added when their vocabulary filters began resolving (CB-19). **The other half of this rule: a handler that catches nothing violates it just as surely as one that catches in the wrong order** — until then an unknown `--status` printed a raw traceback and leaked the connection. `_cmd_reqs_update` was the last asymmetry and is closed (T-57).
-- **`OSError` arrives from ambient sources, not just from `open()` — and a guard spelled as one errno is an enumeration (CB-79).** A sweep for `open(` structurally cannot see `os.getcwd()`, `subprocess`, `Path.read_text` or `sqlite3.connect`. All five subprocess guards (`provenance.py` ×4, `db.git_rev_parse`) catch `OSError`: a **strict widening**, since `FileNotFoundError` is an `OSError`, while `subprocess.SubprocessError` must stay in each tuple because it is **not** an `OSError` subclass and dropping it loses `CalledProcessError`/`TimeoutExpired`. **Widening a guard can expose a latent wrong answer**: the rename lookup swallowed its failure into `rename_output = ""` and the fall-through then reported `deleted` — the "guard reporting clean because it could not look" shape, stated as a fact about the file; it returns `unknown` now. **Degrade or raise is decided by the CALLER's contract, not by the failure**: `provenance` degrades (`file_status` → `unknown`, `_parse_trailers` → `[]`) because that is already what it does when git is unreachable, and `db._db_path` raises `DatabaseNotFoundError` because its callers all handle that; `verify_requirements` raises because it has **no** unknown vocabulary, so a false clean would be the worse answer. **Resolve an ambient value where it is USED, not at the top of the function** — `root` is consumed only by the `tests` check, so an eager `os.getcwd()` broke `checks=["ids"]` for a check that never looks at a directory. `_cmd_reqs_verify` needs the `json.JSONDecodeError`-before-`ValueError` ordering like its siblings, because `verify_requirements` calls `db.row_to_dict`.
-- **A per-row swallow inside an import loop catches the row-level exception CLASS, never the tree (CB-99).** Guarding a per-row INSERT with `except sqlite3.Error` — every SQLite exception there is — counts an environmental failure arriving mid-import as a malformed ROW and reports success, which is **strictly worse than the traceback CB-86 removes**, because a traceback is loud. The narrowing is to `sqlite3.IntegrityError`, **the class for a row that violates the table's constraints** — written as that sentence and deliberately NOT as a list of codes, because review measured such a list wrong in both directions (`SQLITE_MISMATCH` is also an `IntegrityError`; `SQLITE_TOOBIG` is a `DataError`, a sibling). What the split rests on is that CPython routes every environmental code to `OperationalError`, so nothing environmental is inside the arm; a test pins that a CHECK violation on `requirements` really is an `IntegrityError`, as a premise rather than an argument. **No classifier is involved, and that is better than reusing `_is_environmental`**: the exception TREE already draws this line, so reaching for a predicate would mean exporting a deliberately private one or growing a second copy of its enumeration. Two things to know before touching it: with the resolvers normalising `status`/`priority` before the INSERT and `INSERT OR REPLACE` foreclosing UNIQUE, **no parseable markdown row can currently violate a constraint at all** — so the arm is a safety net for a future schema, not a live path; and because the commit is at the END of the loop, propagating rather than swallowing means a mid-import failure lands **nothing** instead of a partial import reported as success. **Do not read that as "`skipped` stays 0"**: `skipped` has a second, live producer in the `len(cells) < 4` guard, reachable by construction because `_ROW_RE` anchors only on the leading id cell. It is the INTEGRITY contribution that is expected to stay 0.
-- All MCP tools return `dict[str, Any]`.
-
-→ почему именно так: `docs/claude-md-rationale/code-rules.md#обработка-ошибок`
 
 ### Testing
-- Tests live in `tests/test_<module>.py`. Most test classes use a fresh in-memory DB via a `conn` fixture.
-- Tests requiring `db.connect()`, cross-module schemas, or git operations use `tmp_path` file-based DBs.
-- Each test file defines its own fixtures. `tests/conftest.py` is not a shared-fixture drawer: it admits **exactly one KIND of inhabitant** — a property that protects the whole suite, whose failure mode is silent or unattributable, and which every future test file would otherwise have to remember for itself. Ordinary fixtures are not that, and still belong in the file that uses them. **A safety property whose failure mode is silent corruption must not be an enumeration every future file has to remember**, and neither must one whose failure mode is a thousand failures pointing at code that is fine. **The rule is stated as a KIND, never as a COUNT (CB-204)** — a count in prose is the thing this document has twice been wrong about — so the property is a sentence instead: **every inhabitant answers one question in a different place — WHAT DID THIS RUN ACTUALLY JUDGE?** It is asked of the TRACKER by an ambient-state fixture and by the CB-204 session guard, where the failure is a test that NAMES one state and gets another because `db.connect()` resolves against ambient state the test never declared; and of the SOURCE TREE by the CB-215 alarm below.
 
-  The ambient-state fixture clears `CODEBUGS_ROOT` and the tracker-root override, because three modules shell out to the CLI with mutating verbs and **a forgotten guard silently rewrites the developer's real tracker** — verified, not theorized. The CB-204 session guard asks **the product's own walk** (`db._find_db_root`, the single function `_resolve_db` uses for the discovery route, called with an explicit start exactly as `cli.py:91` calls it) whether a `.codebugs/` sits at or above `tmp_path_factory.getbasetemp()`, and refuses the whole session with one named diagnostic if so. **Three things about it are load-bearing and each was measured.** *The walk is asked, never re-implemented*: a parent climb to `/` would falsely alarm on a tracker above a `.git` DIRECTORY (the walk stops there) and would MISS one reachable only by following a `.git` FILE to a linked worktree's main checkout (the walk jumps) — both are oracle rows, and a structural pin fails if the delegation is replaced. *The start point comes from the factory the `tmp_path` fixture is built on*, not from the literal `/tmp`: `--basetemp` and `TMPDIR` both move it, so a hardcoded `/tmp` would be a gate that cannot fire. *The declared channels are deliberately NOT checked* — the first fixture already neutralizes them before every test, so refusing on one would be the false alarm that gets a guard deleted by the first person it inconveniences. **What it does NOT do, said plainly: the tests are not hermetic afterwards, they merely stop lying about why they failed.**
-
-  **The CB-215 alarm is an ALARM rather than a guard for the reason this document keeps drawing that line**: by the time the two samples can be compared the run is over, so there is nothing left to refuse. It fingerprints every file in the tree — path, size, `mtime_ns` — before the first test and again in the terminal summary, and prints what differs. It exists because the suite is re-run by an acceptor **in the main checkout**, which is exactly where other directions land their branches, while structural tests here read source files from disk, so a merge arriving mid-run is ordinary and the partial red it produces is indistinguishable from a regression. **Four properties are load-bearing.** *The exit status is never touched, and the message says so in words* — a moved tree is ordinary traffic, and refusing over it would manufacture a false red out of noise. *The discriminator is the FILES, not `HEAD`*, measured: `git rev-parse` fails outright in a tree unpacked without a git directory, does not move in a worktree when `main` moves (the case that must stay silent), and cannot see an editor or a formatter writing a file nobody committed; the commit name is printed as a SIGNATURE when git answers, and its absence is never a failure. *Nothing is pruned by judgement* — `.claude/plans/` is deliberately watched, because `tests/test_exposure_matrix.py` really does read `.claude/plans/exposure-scripts/matrix.py` off the real tree, so *"the suite does not look there"* is precisely the unchecked premise the alarm exists to stop people acting on; the two prune tables hold only what is not a source of anything (git's own directory, the virtual environment, the two worktree directories, the tracker, and caches), each with the sentence saying why, and **a bare list with no reasons becomes the place inconvenient paths are hidden**. *And on a still tree it prints nothing at all* — not a header, not an empty section. **Two boundaries, both found by running rather than by reading:** the same name is pruned as a FILE and as a DIRECTORY by ONE predicate, because `.git` is a directory in the main checkout and a file in every linked worktree, and a rule that answered differently in the two would be the wrong rule for a defect whose whole subject is main-versus-worktree; and the alarm cannot stop the race, only report it, over a window running from the first test to the last — a tree that moved during collection is invisible to it.
-- Test the domain module's public API, not internal helpers.
-- **A concurrency test's ASSERTION is the hard part, not its scheduling (CB-27, CB-30).** Three separate drafts in one iteration could not have failed against the unfixed code, which is the failure this repo keeps shipping. Three rules, each earned: **(a) check that the final STATE actually discriminates.** In the `mark_items` race the item ends at `b` both before and after the fix, so the only real discriminator is *which writer is refused* — capture the competing thread's exception and assert on it. **(b) Never wait unboundedly on the losing writer.** After the fix it blocks at `BEGIN IMMEDIATE` and can never complete, so "let B finish" just burns `busy_timeout`. Copy the bounded three-event interleave in `tests/test_findings.py:504-547`, whose docstring explains why the `b_started` guard before the 1.0s `b_read` wait is what stops a false pass. **(c) To probe a commit seam, hook BOTH seams.** Unfixed code closes with `conn.commit()`; `db.txn` closes with `conn.execute("COMMIT")`, and a hook keyed on one gives a vacuous pass on the other. `CommitPausingConnection` in `tests/test_milestones.py` does both, fires *after* the underlying commit (firing before it leaves the write lock held, so the injecting connection deadlocks), and is single-threaded — no timing luck. **Corollary: a test that passes on both sides can still be right**, but only when it pins behaviour the change deliberately preserved; say so in its name or docstring, or a reader cannot tell it from a broken one.
 - Run tests: `uv run python -m pytest tests/ -v`
+
 - Run lint: `uv run ruff check src/ tests/`
+
 - Run format: `uv run ruff format src/ tests/`
 
-→ почему именно так: `docs/claude-md-rationale/code-rules.md#тестирование`
-
-### MCP tool registration
-- Each domain module defines `register_tools(mcp, conn_factory)` and calls `register_tool_provider()` at module level.
-- `server.py` discovers providers via the registry and passes `_conn` as the `conn_factory`.
-- Tool parameters that accept JSON should use `str | list | None` (not just `str`) so MCP clients can pass native types.
-- New modules: define `register_tools(mcp, conn_factory)`, call `register_tool_provider("name", register_tools)` at module level.
-- **A declared argument must reach its query, or the call must fail — routing is not an excuse (CB-28).** The rule below covers *unknown* argument names; its twin failure is a **known, correctly spelled, correctly typed** argument that a branch simply never forwards: `query(status="deferred", severity="critical")` returned **every** deferred finding, and the caller read that as the critical ones — the same success-shaped lie, reached through routing instead of validation, where **no validation layer can see it**. Two different repairs, and picking the wrong one is how this becomes a stopgap: **forward when a path exists, refuse only when none could.** `deferred` is a *pseudo-status*, so it resolves to an id restriction — via `blockers.deferred_ids_and_counts` since CB-69, which returns the restricted ids and their active-blocker counts from ONE evaluation — and the **owning domain** applies its own filters; blockers never learns what `severity` or `priority` mean. **Refusal is right only where nothing could honour the argument**: an abandoned milestone item has no `done_commit` column, `set_item_status`' no-op path performs no write (use `mark_integrated`), and a lone `meta_value` has no key to look up. **The empty intersection is the trap**: an empty `ids` list means "no filter" to every domain query, so forwarding one returns the whole table — this defect reappearing inside its own fix, exactly as the naive predicate reintroduced CB-25 inside its. Short-circuit to an empty page; `TestDeferredEmptyIntersection` pins it.
-- **Unknown argument names are refused, not ignored.** `server.install_strict_arguments()` runs after registration and rejects any `tools/call` carrying an argument the tool does not declare. Without it the SDK builds each tool's argument model with pydantic's default `extra="ignore"`, so a typo'd name is dropped during validation and the tool returns a **success payload with the caller's data discarded** — while a bad *value* raises (CB-15). **`additionalProperties: false` is not an alternative**: the server never validates arguments against the JSON Schema, verified by injecting it and watching the call still succeed. This is the one place the project touches `MCPServer.middleware`, whose signature the SDK documents as **provisional** — if an upgrade breaks it, repair that function and `tests/test_server.py`, nothing else.
-- **What a client SEES must not depend on which interpreter built the server (CB-73).** The SDK reads `Tool.description` from `__doc__`, and CPython 3.13 dedents docstrings at compile time while 3.11/3.12 do not — so on the older hosts `requires-python` admits, clients receive the source indentation, and because MCP clients render descriptions as Markdown, CommonMark turns a 4-space-indented line after a blank line into an **indented code block**, rendering a tool's whole prose body as monospaced code. `server._NormalizedDescriptions` wraps the registrar and passes `description=`, a **public, declared** parameter of `MCPServer.tool()`. **Two alternatives were rejected for reasons worth keeping**: rewriting `fn.__doc__` is a global side effect on another module's objects, and rewriting the registered `Tool` objects afterwards reaches into the SDK's PRIVATE `_tool_manager._tools` — a worse coupling than the provisional-but-public one `install_strict_arguments` already documents. An explicit `description=` from a caller still wins, because **the adapter normalizes and does not decide**. `dedent_docstring` lives in `server.py` and `tests/_mcp_schema` imports it: now that the server emits normalized text, a second definition would be one drift away from the gate and the server disagreeing about the very thing they exist to keep in agreement.
-- **A parameter that exists in the domain layer is not reachable until it is declared here.** `append_note` sat unexposed behind the destructive `notes` for a long time (CB-18). When adding one, update the MCP wrapper, the CLI parser *and* handler, then regenerate the wire golden with `PYTHONPATH=src uv run python tests/dump_schema.py > tests/golden/mcp_schema.json` — from a worktree a bare `python` resolves `codebugs` through the editable install pointing at the main checkout and would snapshot the wrong tree.
-
-→ почему именно так: `docs/claude-md-rationale/code-rules.md#регистрация-mcp-инструментов`
-
 ### CLI
-- Each domain module defines `register_cli(sub, commands)` and calls `register_cli_provider()` at module level.
-- `cli.py` discovers providers via the registry and filters by `--mode` flag.
-- New modules: define `register_cli(sub, commands)`, call `register_cli_provider("name", register_cli)` at module level.
-- **Two commands are built into `cli.py` rather than owned by a domain module**, registered by `_register_builtins`: `init`, which bootstraps the DB every other command needs, and `where`, which diagnoses the case where that DB cannot be found at all. Both must work in every `--mode` and *before any tracker is reachable*, which is exactly what a domain module cannot promise. `--tracker-root` is likewise global: it lives on the `pre_parser`, so it is parsed before subcommand dispatch and binds every verb, not just `where`.
-- **The process entry point is `cli.run`, not `cli.main`, and the split exists so a signal disposition never leaks into an importable function (CB-78).** `run` restores the POSIX `SIGPIPE` default and calls `main`; `[project.scripts]` and the `__main__` guard both point at it. A dead READER on stdout otherwise makes every verb report a **committed** write as a failure — exit 1 with a `BrokenPipeError` traceback unbuffered, and exit 120 with "Exception ignored on flushing sys.stdout" block-buffered, the latter raised at interpreter shutdown where no `except` can reach it. `SIG_DFL` fixes both and yields **141** (`128 + SIGPIPE`), deliberately distinguishable from `1`. **Two properties are load-bearing, both established by measurement.** `main` must stay signal-free because three test modules call it in-process — installed there, the disposition is an unrestored process-global mutation that the whole pytest session inherits. And `run` must **never restore** it: doing so in a `finally` puts the block-buffered case back to exit 120, because that write is the shutdown flush and happens after `main` returns. "Do not mutate process-global state" and "fix the block-buffered case" are incompatible inside one function — **the split is what makes both true.** `server.main` is deliberately excluded (its stdout is the JSON-RPC transport), and says so at the call site. **Costs, stated because they are real:** `export-csv /dev/stdout` and `reqs-export` into a dead reader lose their one-line diagnostic, and an install predating the change keeps the old behaviour until `pipx reinstall` regenerates the console shim.
-- **A CLOSED stdout is a different state from a dead reader (CB-134).** `SIG_DFL` covers a pipe whose reader went away; it cannot cover a stdout that is already closed, because no write reaches the kernel and no signal is raised. **The dangerous case is the newest**: on 3.14, an invalid fd 1 makes `sys.stdout` `None`, `print` is a documented no-op against `None`, and the colour probe short-circuits on `hasattr(None, "fileno")` — so every verb runs, discards its whole output and **reports success**. That is the "silent exit 0" CB-78's ratification rejected by name, reached by upgrading the interpreter rather than by changing any code here: `codebugs export-csv /dev/stdout | gzip > backup.gz` reports success over a backup that was never written. **`cli.run` REFUSES at the process entry, before any work, with the same 141** — one vocabulary for one condition ("the reader of my output is gone"), uniform on 3.11 through 3.14, measured by the `contracts` matrix in `.github/workflows/ci.yml` (`test_cli_signals.py` + `test_fsio.py`). **Honest scope: 3.15 and later are admitted by `requires-python` and are NOT verified** until they are added to that matrix; narrowing the sentence to the pinned version alone was rejected as the more expensive option, since it would leave `requires-python = ">=3.11"` advertising a range nothing checks. **The price is a real behaviour change on 3.13 and is named rather than absorbed**: a closed-object stdout there used to let the write land and then fail on output, and now lands nothing — which is the point, since with the refusal ahead of the work there is no committed write left to misreport.
-  **`sys.stdout = None` before `sys.exit` is INSURANCE, and a mutant deleting it SURVIVES.** The mechanism is real: with content already buffered on a bad descriptor, finalization's flush fails and rewrites the status 141 → 120. It is simply not reachable from the gate, because nothing has written to stdout by the time the gate refuses, so the buffer is empty and the flush succeeds. The line stays as insurance against a future in which something prints earlier, and `test_premise_a_failed_shutdown_flush_rewrites_the_exit_status` pins the mechanism rather than pretending the gate exercises it. It lives in `run` and could not live in `main`, for the same reason `signal.signal` could not.
-  **The probe reads the descriptor's ACCESS MODE, and `fstat` was measured insufficient**: with fd 1 closed at exec, CPython's own startup opens a read-only file onto fd 1 (the lowest free descriptor), so `fstat` succeeds on a descriptor that raises `EBADF` on the first write. **A stream with NO descriptor is treated as USABLE** (`StringIO`, a pytest capture object), deliberately the opposite of this repo's fail-closed default: here the conservative direction is to do the work, not to refuse it. **The predicate claims less than its name**: `False` means *proven unusable*, `True` means *not provably broken* — never *a write will succeed*, the same affirmative-proof shape as `reconcile.live_source_clause`. **Four residuals, each measured, none a regression** (every one proceeds today too): `fileno()` does not govern `write()` — `io.TextIOBase()` raises `UnsupportedOperation` from both, so it is accepted and then fails, and refusing it instead would refuse every pytest capture object; a writable descriptor can still fail to be written (`/dev/full`, a full filesystem, a hung-up PTY), which is a **write failure, not a closed stdout**, and needs its own outcome as a separate negotiation; a file opened for WRITING landing on fd 1 passes the probe and takes the output; and **the 141 is not unconditional** — finalization also flushes `sys.stderr`, and a failing stderr flush rewrites the status to 120 even with `sys.stdout = None`, reachable only by installing an stderr in-process before `run`, so no CLI invocation reaches it and making it unconditional would mean `os._exit`.
-- **A CLI handler that writes a file uses `fsio.atomic_write`, never a bare `open(path, "w")` (CB-76).** `open(w)` truncates the destination *before* the first byte, so any write failure destroys the previous file. **The obvious guard is a trap and the card exists to say so**: `except OSError` alone converts the traceback into one tidy line *over a file that is now empty*, and `import_markdown` silently `continue`s past unmatched lines, so a truncated export round-trips as a successful, empty import. The helper writes a temp beside the destination and `os.replace`s it only after the handle **closed** successfully — quota and `ENOSPC` failures usually surface at flush/close, so replacing before that would install a bad file while reporting failure. **Four asymmetries with `open(w)` are handled rather than discovered later**: it **refuses a read-only destination inside a writable directory** (`open` authorizes on the file, `os.replace` on the directory, so without the check the fix would overwrite what the old code refused) using `os.access` with **effective** ids, since the default real-uid check would falsely refuse under setuid; it **writes in place, never replaces, when the destination is a FIFO/char device or an inode this process already holds open** — that second clause is what keeps `export-csv /dev/stdout > out.csv` working, and a node-kind check cannot substitute for it because `realpath("/dev/stdout")` resolves to the redirect target, an ordinary **regular** file; it treats **only `FileNotFoundError`** as "missing", so a symlink cycle's `ELOOP` refuses instead of being classified as absent and replacing the link; and it resolves the path **before** taking `dirname` so the temp lands beside the *resolved* target. **`/dev/stdout` needs BOTH halves of the alias check**: with stdout redirected to a **file**, `realpath` yields that regular file and only the held-open-inode test catches it; with stdout on a **pipe**, `realpath` yields `/proc/<pid>/fd/pipe:[N]`, which does not exist, so `os.stat` raises `FileNotFoundError` and a stat-based classifier reads "new file to create" and tries to `mkstemp` inside `/proc`. Two resolutions of one path, neither check sufficient alone — **the fd-directory test therefore runs BEFORE the stat.** **Deliberate narrowings — three:** a writable file inside a **non-writable directory** exported before and now fails cleanly, because atomicity is impossible there and an errno-keyed fallback cannot tell that case from `ENOSPC`/`EDQUOT` — the very conditions where the following write fails and the old file is lost; **block devices** are refused (a partial direct write corrupts persistent bytes); and a **socket** changes only its errno, since `open(sock,"w")` already fails today with `ENXIO`. What replacement cannot carry — ownership, ACLs, xattrs, hard-link aliases, and `fsync` durability — reaches users through the **CHANGELOG** entry; the module docstring carries the same list for the next maintainer, which is a different audience, not a user-visible channel. **`tests/test_fsio.py::TestWriteCallSitesRatchet` enforces this rule by AST** rather than leaving it as prose.
-- **Where `init` creates is decided by the CHANNEL, not by the fact that a root was declared (CB-48).** `$CODEBUGS_ROOT` is **ambient** — exported into a shell days ago, inherited by an unrelated subprocess — so it redirects reads only: **ambient state must never conjure a tracker in a directory the user is not in.** `--tracker-root DIR` is typed on the command line being run, so it is an assertion about *this* invocation, exactly as `project_dir`/`--repo` is, and `--tracker-root DIR init` therefore initializes DIR. Precedence is one rule for reads and writes alike — argument > flag > env > walk — so a positional `init DIR` still outranks the flag. **Any surviving mismatch is announced on stderr**, because otherwise `init` reports success for a tracker every other command will ignore — a success-shaped signal for a dead end, the same class of lie as CB-15/CB-16. A test that asserts only "the target got a tracker" cannot see the defect this fixed; `TestInitUnderTheTrackerRootFlag` asserts the directory that must **not** have one on every case.
 
-→ почему именно так: `docs/claude-md-rationale/code-rules.md#cli-и-выход-процесса`
+**`cli.run` REFUSES at the process entry, before any work, with the same 141** — one vocabulary for one condition ("the reader of my output is gone"), uniform on 3.11 through 3.14, measured by the `contracts` matrix in `.github/workflows/ci.yml` (`test_cli_signals.py` + `test_fsio.py`). **Honest scope: 3.15 and later are admitted by `requires-python` and are NOT verified** until they are added to that matrix; narrowing the sentence to the pinned version alone was rejected as the more expensive option, since it would leave `requires-python = ">=3.11"` advertising a range nothing checks. **The price is a real behaviour change on 3.13 and is named rather than absorbed**: a closed-object stdout there used to let the write land and then fail on output, and now lands nothing — which is the point, since with the refusal ahead of the work there is no committed write left to misreport.
+**Four residuals, each measured, none a regression** (every one proceeds today too): `fileno()` does not govern `write()` — `io.TextIOBase()` raises `UnsupportedOperation` from both, so it is accepted and then fails, and refusing it instead would refuse every pytest capture object; a writable descriptor can still fail to be written (`/dev/full`, a full filesystem, a hung-up PTY), which is a **write failure, not a closed stdout**, and needs its own outcome as a separate negotiation; a file opened for WRITING landing on fd 1 passes the probe and takes the output; and **the 141 is not unconditional** — finalization also flushes `sys.stderr`, and a failing stderr flush rewrites the status to 120 even with `sys.stdout = None`, reachable only by installing an stderr in-process before `run`, so no CLI invocation reaches it and making it unconditional would mean `os._exit`.
 
 ## Architecture migration (in progress)
 
-We are migrating toward a plugin architecture in phases. Query with `reqs_query --section "Architecture Migration"` or MCP tool `reqs_query(section="Architecture Migration")` for the full plan (ARCH-001 through ARCH-005).
-
-**All phases complete**: schema registry (ARCH-001) -> tool registration (ARCH-002) -> entity types (ARCH-003) -> CLI unification (ARCH-004) -> embedding separation (ARCH-005).
-
+We are migrating toward a plugin architecture in phases.
 **Current rules for new code:**
+
 - New domain modules must call `register_schema()`, `register_tool_provider()`, and `register_cli_provider()` at module level — do NOT edit `db.connect()`, `server.py`, or `cli.py`.
-- Add the new module import to `_ensure_modules_loaded()` in `db.py` (temporary, until auto-discovery).
-- Add the new module's mode slug to `SERVER_NAMES` (`server.py`) and to the `--mode` allowlist (`cli.py`) so it can be loaded in isolation.
-- Prefer self-contained modules that register themselves over central wiring.
 
 ## Embeddings
 
@@ -904,199 +410,27 @@ We are migrating toward a plugin architecture in phases. Query with `reqs_query 
 from.** The CALLER computes the vector, in its own process, and passes finished numbers as
 `embedding: list[float]`; the tools never receive the requirement's TEXT at all.
 
-**The safety claim is bounded to this package's own SOURCE TEXT and to the vector's route, and the
-bound is load-bearing rather than modest.** Do not write "codebugs cannot reach the network": the
-`mcp` dependency carries a network transport of its own — an HTTP mode exists and this project runs
-over stdio — and `subprocess` is used legitimately for git, which can of course run `curl`. What is
-true and checkable is **two narrower statements about source text, not one about capability**: no
-module under `src/codebugs/` imports one of the socket-opening modules the gate ENUMERATES, and no
-module imports anything at all from outside the package and the standard library that is not
-DECLARED by exact dotted name with a reason. The vector's own route is a third, separate claim: from
-the caller's argument into this tracker's database file and nowhere else. **The bound is about
-NAMING, not about the process**: importing the one declared MCP name already puts BOTH SSE transports
-(`mcp.server.sse`, `mcp.client.sse`) into `sys.modules` along with most of the SDK, so what the
-ratchet buys is that the source cannot NAME a second one without a row somebody reads — never that
-the transport is absent. **No module count is quoted here on purpose.** A claim wider than its
-measurement is the defect class this direction exists to close.
-
-**Those claims are held by a gate, because a safety assertion with no gate behind it is a "gate that
-cannot fire" written as prose** — the literal subject of CB-159/CB-160.
-`tests/test_no_network_capability.py` walks every package module by AST and holds **two mechanisms
-that answer different questions, so neither may be deleted in favour of the other** (CB-190), plus a
-refusal of `__import__`/`importlib.import_module`/`exec`/`eval`, which no check reading import
-statements could see.
-
-The first is an **enumeration of socket-opening module names**, keyed on the CAPABILITY rather than
-on the module name: `src/codebugs/db.py` carries `from urllib.request import pathname2url`, and `pathname2url` is a
-pure string function that opens nothing, while `import urllib.request` binds the module and hands you
-`urlopen` — so a name-keyed check would refuse the package in its present, entirely healthy state. A
-FROM-import of a network module is therefore judged name by name against a `DECLARED_EXCEPTIONS`
-table carrying a reason per row, and a plain import of one is refused outright. **Being an
-enumeration is its defining limit, and that is the whole of CB-190: a client nobody listed walks
-straight past it** (measured).
-
-The second is a **third-party import ratchet**, which is not an enumeration of what to refuse: it
-refuses by default and enumerates what is ALLOWED. Every import whose dotted name leaves both this
-package and the standard library must be named in `DECLARED_THIRD_PARTY` with a reason. **The key is
-the EXACT DOTTED NAME, never the top-level one**, and that is load-bearing twice over: a top-level
-`mcp` row would license `mcp.server.sse` and `mcp.client.sse`, so the first row of a table meant to
-stop network imports being parked would itself be a parked network capability; and it would make the
-table unable to go stale, since some `mcp` import always exists. **The package's own name is DERIVED
-from `codebugs.__name__` and may not be written as a row** — a row naming this package would lie
-about what the table declares and, being live forever, would defeat self-deletion. **Both tables are
-self-deleting** — a row naming an import that is no longer there fails — because otherwise a table
-becomes the place real imports are parked, which is the hole these mechanisms exist to close, one
-level up.
-
-**One property is declared rather than counted as covered.** The ratchet classifies the standard
-library by `sys.stdlib_module_names`, so the verdict is a function of the source text AND the
-interpreter version. On this tree nothing diverges, but **the CI matrix runs only
-`test_cli_signals.py` and `test_fsio.py` across 3.11–3.14, so this file is executed on the pinned
-interpreter alone and nothing would notice if that stopped being true.** `telnetlib`, `nntplib`,
-`asyncore`, `asynchat` and `smtpd` are kept in the enumeration precisely because the two mechanisms
-disagree about them by version — they are stdlib on the older admitted interpreters and absent on the
-newer ones, so the ratchet refuses them by itself on one half while the enumeration is the sole
-catcher on the other.
-
-**RULE, ratified 2026-08-25: if an embedding provider ever lands INSIDE this package, it is
-configurable from its first day, its default is a local option, and its binding is VISIBLE** — an
-existing way to ask the running system which provider it is currently pointed at, on the model of
-`codebugs where` and the MCP startup preflight ("a binding you cannot see is a binding you cannot
-debug", CB-11). Not a preference, and not something to be added afterwards: a provider that ships
-hardcoded acquires callers before it acquires a switch. **The rule and the gate are two halves of one
-thing — the day either table above needs a new row is the day this rule starts applying.** The
-trigger rests on the ratchet rather than on the enumeration, for a reason that does not depend on
-anyone predicting the client: **a provider arrives as a DEPENDENCY whatever network shape it has**,
-so it needs a `DECLARED_THIRD_PARTY` row by construction.
-
-**The write validates the vector, on BOTH paths, and the two kinds of check sit in different places
-on purpose (CB-174).** `store_embedding` **and** `batch_store_embeddings` — a rule expressed as one
-call site is this repository's most-repeated failure. *The vector's own unfitness* (empty,
-non-numeric, `NaN`, `inf`) is decidable from the argument, so it runs BEFORE any transaction opens: a
-refusal must not take the write lock. *Agreement with what the tracker already holds* needs a READ,
-so it is a check-then-act and lives INSIDE the same transaction as the write — outside one, two
-concurrent writers of different widths both read an empty table, both pass, and both write, building
-the exact mixed state the check exists to prevent. That is CB-24 verbatim, and `busy_timeout` cannot
-help because it serializes the writes and never touches the read before them. **A third check is easy
-to miss and is not a special case of the second: the BATCH must be homogeneous with ITSELF**, since
-in an empty tracker there is nothing to compare against and one call could otherwise create the mixed
-state in a single operation. **Placement is pinned STRUCTURALLY**, for CB-41's reason — a comparison
-made before the lock looks correct until two writers overlap, so behaviour cannot discriminate the
-defect.
-
-**ONE QUANTITY DECIDES ON BOTH SIDES, AND IT IS BYTES.** The write guard reads `length(embedding)`
-and compares byte widths, exactly as `search_similar`'s `WHERE` does; dividing by four in the guard
-would make them two rules a rounding apart, because a blob whose length is not a whole number of
-components divides to the same component count as a well-formed neighbour, so a component-wise write
-guard would ACCEPT a vector beside a row the byte-wise read guard EXCLUDES — uniform to the writer,
-mixed to the reader. `embedding_stats` reports the byte count beside the component count for the same
-reason: a report that folded them would say `mixed: False` over a table SQL treats as two
-populations.
-
-**`NaN` is validated on the write path AND in the query vector.** `struct.pack` accepts it, the row
-stores, `cosine_similarity` returns `nan`, and `nan >= min_similarity` is `False` — so the row
-VANISHES from the results with no error anywhere, and a `NaN` in the QUERY vector removes every row,
-making "nothing is similar" indistinguishable from an empty tracker. That is the silent-empty-queue
-shape (CB-19/CB-25), which this repository treats as worse than a loud failure. Validating the query
-vector is one step past the letter of CB-174 and kept deliberately: the write-side fix cannot reach a
-`NaN` that only ever exists in a caller's query.
-
-**The read-side guard is SQL, and `cosine_similarity`'s `raise` is preserved rather than removed.**
-`search_similar` folds `length(embedding) = ?` (the width BOUND, never interpolated) into its
-`WHERE`, so a foreign row never reaches the comparison — the form's precedent is
-`reconcile.live_source_clause`. The pairwise `raise` is a ratified decision: `zip()` would truncate
-the dot product while the norms stayed full, returning a plausible wrong number instead of an error.
-**The defect was never that refusal, it was the COMPOSITION** — one foreign row aborted the whole
-loop and discarded the rows already scored, in an order nothing controls. Making the `raise`
-UNREACHABLE from the search path is the fix; removing it would be a worse change. The premise —
-`length()` on a BLOB counts BYTES — is pinned as a premise test.
-
-**The cost of that guard is that excluded rows are INVISIBLE, so the visibility channel is
-`embedding_stats`, not the search.** `search_similar` returns a LIST and has nowhere to carry a count
-of what it dropped, the way `add` carries `stripped_meta_keys`. `embedding_stats` already returns a
-dict, so it reports `dimensions` (which widths are present, and how many rows each) and `mixed`, and
-**both keys are UNCONDITIONAL**, following the `attention`/`stripped_meta_keys` discipline: an empty
-list means *looked, nothing stored*, never *no such channel*. `reqs_embedding_stats` takes no input
-at all and is therefore not a privacy surface.
-
-**AND THAT CHANNEL IS NOT ENOUGH ON A UNIFORM TRACKER, WHICH IS WHERE THE FIX RE-CREATED THE VERY
-DEFECT IT REMOVES.** With every stored vector the same width — the ordinary case, and the one the
-write guard guarantees — a query of a DIFFERENT width **used to** raise loudly from
-`cosine_similarity` and, once the SQL filter was in place, **returned** `[]`: "nothing is similar"
-about a full tracker, while `embedding_stats` said `mixed: False`. So `search_similar`
-**refuses instead, on AFFIRMATIVE PROOF only** — the result is empty AND the tracker holds vectors
-AND none of them is this width. An empty tracker still answers `[]`, because there an empty answer is
-true; a mixed tracker where some rows matched never reaches the branch, so CB-174's
-degrade-instead-of-fail behaviour is preserved; and the branch keys on the WIDTH, never on the
-emptiness, so a right-width query whose status filter matched nothing is still an honest empty page.
-**The general lesson: a fix aimed at one silent-empty-queue can open another one, and only an
-adversary looking at the composition notices** — every element was correct, and the elements together
-answered a lie.
-
-**RESIDUAL, NAMED AND NOT CLOSED: once a tracker holds vectors of one width, there is no sanctioned
-way to change embedding model.** No clear-and-re-embed operation exists here, and building one with
-no caller asking for it was refused on the direct precedent — CB-44 declined to build the resolver
-seam speculatively and CB-45 built it with its first consumer. The refusal message says so itself,
-because a gate with no way out is a wall rather than a diagnostic.
-
-**Three more residuals, NAMED rather than closed, because closing each is a separate negotiated
-decision.** (1) The network gate matches a CALL SITE by the name being called, so an indirection that
-hides the name — `getattr(importlib, "import_module")(...)`, or `find_spec`/`module_from_spec`/
-`exec_module` — is not seen; closing that means tracking values rather than names, a much larger
-check, and the prose above is written to the width the gate actually holds and no wider. (2) A
-ZERO-LENGTH blob is accepted as an authoritative width, so a tracker that received
-`store_embedding(conn, id, [])` from a pre-CB-174 version now refuses every real vector, with no
-clear operation to escape. (3) The gate reads `src/codebugs/` only, so `tools/` and `tests/` are
-outside it by design.
-
-**Scope note for anyone extending this: `batch_store_embeddings` is still missing half of the
-hardening its twin received (CB-184).** A requirement that does not exist is silently counted as
-not-stored there, where `store_embedding` raises `KeyError` (CB-125). CB-174 gave the batch the
-`db.txn` it needed for the width check to be an atomic check-then-act, and deliberately left that
-counter-versus-`KeyError` contract alone — it is a behaviour change with its own test and its own
-CHANGELOG entry.
-
-→ почему именно так: `docs/claude-md-rationale/embeddings.md#cb-174-и-cb-190-вектора-и-сетевой-гейт`
-
 ## Claims module
 
 `claims.py` answers "who currently holds this entity" for findings and requirements, so parallel
-agents can refuse to duplicate each other's work. One table, `entity_claims`; mutual exclusion is a
-**partial unique index** (`entity_id` WHERE `released_at IS NULL`), so at most one live claim per
-entity is a database guarantee rather than a matter of transaction discipline. Release is a soft
-delete, so `release_reason` (`explicit` | `terminal:<status>`) is a queryable record.
+agents can refuse to duplicate each other's work. 
 
 - **Outcomes, not booleans**: `claim` → `claimed | already_mine | held_by_other | entity_terminal |
-  undetermined`; `release` → `released | not_yours | not_claimed | undetermined`. Every response is
-  built by the single `_response()` constructor and carries all fifteen `_COMMON_KEYS`.
-  `undetermined` means the database was too contended to tell — **re-issue the identical call**; the
+  undetermined`; `release` → `released | not_yours | not_claimed | undetermined`.   `undetermined` means the database was too contended to tell — **re-issue the identical call**; the
   primitive is an idempotent upsert, so a replay converges on `already_mine` and can never
   double-claim.
+
 - **Ownership is the triple** `(holder, holder_kind, holder_repo)`, compared NULL-safely. Both claim
   and release authorize on the full triple: a same-text holder of another kind or in another repo is
   a different claimant.
-- **The discriminator is `touch_count`, never a timestamp.** `utc_now()` is whole-second, so a retry
-  inside one second is indistinguishable by clock.
-- **Two layers.** `_claim_core` / `_release_core` emit statements and never open or commit a
-  transaction — that is what the terminal hook calls, since it runs inside `update_finding`'s open
-  transaction. `claim` / `release` wrap the core in `db.txn` and classify contention.
-  **Ambient-transaction invariant: every caller of the public layer must hold a connection with no
-  open transaction.** On a connection with an implicitly-opened transaction the write happens,
-  nothing commits, and the call still reports success. It is unreachable today only because
-  `server.py`'s `_conn` and every CLI handler open a fresh connection.
-- **Projection is declarative**: `EntityKind.busy_status` (`in_progress` for findings, `None` for
-  requirements — a requirement's status vocabulary has no in-progress value and its CHECK is not
-  rebuilt). A kind declaring it must satisfy P1-P4, documented on `EntityRef.set_status`.
+
 - **Exit codes are the API for shell callers**: `0` proceed, `1` error, `3` held by someone else,
   `4` already resolved, `5` contended (retry). `codebugs claims --format ids` prints bare ids and
   exits 0 on an empty list so a shell loop needs no parsing.
   **`141` was added package-wide by CB-78** and is not a claims outcome — it is documented here only
   because this is where the exit-code list lives; the **CLI** section owns it. It is `128 + SIGPIPE`,
   meaning *the reader of my stdout **or stderr** went away* (the disposition is process-wide, so
-  `codebugs bad-verb 2>&1 | head -0` yields it too), and it can come back from any verb. It is
-  **deliberately distinguishable from `1`** — that distinction is the whole reason the alternative
-  "silent exit 0" was rejected, since a `codebugs export-csv /dev/stdout | gzip > backup.gz` whose
-  `gzip` dies must never report success over a truncated backup. A `| while read` loop that `break`s
+  `codebugs bad-verb 2>&1 | head -0` yields it too), and it can come back from any verb. A `| while read` loop that `break`s
   kills the producer at 141 rather than 1; both are non-zero, so no `set -e` script changes
   behaviour. **Observable only when the reader closes without draining (any size) or un-drained
   output exceeds the 64 KB pipe buffer.**
@@ -1105,10 +439,7 @@ delete, so `release_reason` (`explicit` | `terminal:<status>`) is a queryable re
   WRITTEN* on a descriptor that was healthy at the process entry — `/dev/full`, a filesystem that
   filled while the verb ran, a wedged PTY — and it **deliberately asserts nothing about whether the
   command's effect landed**, because the write that failed is usually the line reporting a mutation
-  that has already committed. It replaces the two codes that state produced before it (`1`
-  unbuffered with a raw traceback; `120` block-buffered with "Exception ignored while flushing
-  sys.stdout"), the first of which is this package's code for **bad input** printed over a landed
-  write — the CB-15/CB-16 lie. **`141` is deliberately not reused**: there the reader is gone, here it
+  that has already committed. **`141` is deliberately not reused**: there the reader is gone, here it
   is present and the medium is full, and blurring that is what CB-78 refused. When a verb had already
   chosen its own non-zero code, `74` wins, since the caller never received the output that code
   describes. **Three limits, each measured rather than assumed.** *`EPIPE` is excluded and reports
@@ -1121,43 +452,25 @@ delete, so `release_reason` (`explicit` | `terminal:<status>`) is a queryable re
   hole this opened, and nothing is committed on that path, so it is not the CB-15/CB-16 lie. *A verb
   that CRASHES* keeps its traceback and its own code, so a still-buffered stdout can reach `120`
   there as before — trading a crash's traceback for a tidy code is the worse of the two.
+
 - **Adoption**: autosorter's `worktree-setup.sh` claims every card in the branch name (and in
   `--items`) **before** `git worktree add`, with an EXIT trap that releases them if setup aborts;
   `worktree-finish.sh` releases whatever the branch still holds. **Exactly one of those calls may be
   fatal — the setup gate.** Everything else is guarded, so a missing or contended tracker can never
   abort a finish after the merge has landed. This repo's own `tools/worktree-*.sh` follow the same
-  shape (CB-58). One detail worth carrying to any third adopter: **the fatal/guarded asymmetry is
-  about WHEN, not about importance** — setup may abort because nothing has been created yet and a
-  refusal is free, while finish runs after the merge has landed, where a false failure over tracker
-  bookkeeping is the worse outcome.
-  **Two places codebugs deliberately diverges from `FINAL-DESIGN.md` §6.2–§6.3, both because that
+  shape (CB-58).   **Two places codebugs deliberately diverges from `FINAL-DESIGN.md` §6.2–§6.3, both because that
   section was written for autosorter's script and one of its premises does not hold here.** Do not
   "fix" either back without reading this.
   1. **`--allow-duplicate` does NOT clear a `held_by_other` refusal** (design §6.2(a) has it clear
      both `3` and `4`). That flag also clears the pure-git branch guard, and this repo never deletes
      merged branches, so it is needed for *ordinary follow-up work* — one flag for both jobs would
      turn the claim gate off exactly when people are doing normal work. `CODEBUGS_SETUP_NO_CLAIM=1`
-     is the typed alternative and it builds with **no** claim rather than stealing one. Ratified by
-     the owner, 2026-08-19, against the design doc.
-  2. **Finish leaves restore ON** (design §6.3 passes `--no-restore`). The design's own text says why
-     the difference is correct: there, `[7b/9] auto-resolve-codebugs.py` has already flipped the card to `fixed`
-     from a `Fixes:` trailer, so the release is a no-op. **This repo has no auto-resolve step**, so
+     is the typed alternative and it builds with **no** claim rather than stealing one.   2. **Finish leaves restore ON** (design §6.3 passes `--no-restore`). **This repo has no auto-resolve step**, so
      the card is typically still `in_progress`, and `--no-restore` would leave every finished
      branch's card `in_progress` with no holder: CB-58's own defect, reintroduced by CB-58's fix.
      Restore is a CAS against the projected value, so it still cannot resurrect a card someone
      already closed; the operator-closed case returns `not_claimed` at exit 0 and writes nothing.
-- Deferred by design, not forgotten: `steal`, claim history queries, audit/divergence tooling,
-  retention, `expected_status`/`changed`, and `pull_next` integration.
-  See `docs/superpowers/plans/design-council-entity-claims/FINAL-DESIGN.md` §10.
 
 ## Milestones module
 
-Releases ("release/1.1") and standing streams ("stream/triage", "stream/maintenance", "stream/security") give parallel-agent work a durable bucket. `milestones.py` owns four tables (`milestones`, `milestone_items`, `milestone_audit`, `agent_capacity`) and 20 MCP tools across three phases:
-
-1. **Foundation** — milestone & item CRUD, audit log, auto-routing every new finding into `stream/triage` (or `stream/security` for `severity=critical && category.startswith("security:")`).
-2. **Triage + pull** — `triage_inbox` / `triage_dismiss` / `triage_promote`, plus `pull_next(agent_id, capacity)` which atomically claims the highest-priority eligible item for the calling agent. Concurrency is enforced by `db.txn` (CB-40 — it no longer copies `merge.py`'s raw save/restore pattern, which had the `isolation_level` commit hazard; `merge.py` does not have that pattern any more either). It refuses an ambient transaction, and returns the claimed row from the UPDATE's `RETURNING` rather than re-reading by `item_ref` after the commit (CB-39).
-3. **Close gate + branch tracking** — `mark_branch_only(item, branch)` / `mark_integrated(item, commit)` keep the release container honest. `milestone_close` refuses on unfinished, branch-only, or blocker-gated items unless `force=True` is set (with a logged reason). Streams cannot be closed.
-
-`pull_next` eligibility: item is `open`, no active blockers (skipped for `item_kind='external'`), acceptance required for `size='large'`, and large bugs in release milestones must declare `linked_frs` whose ids resolve to rows in `requirements`. Agent capacity is tracked per `(agent_id, size)` and decremented by `release_item`.
-
-For the design and adversarial-review history, see `docs/superpowers/plans/2026-05-11-milestones-streams.md` and the source spec at `../autosorter/.claude/plans/codebugs-milestones-streams-v1.md`.
+Releases ("release/1.1") and standing streams ("stream/triage", "stream/maintenance", "stream/security") give parallel-agent work a durable bucket. 

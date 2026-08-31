@@ -283,3 +283,66 @@ walk route. Both halves were in the same paragraph.
 
 **Why `_open` had to be split out at all.** `init` used to create its database *by way of* `connect`,
 so tightening the resolver broke the one caller that must create.
+
+## Что в этом файле, и чего в нём нет
+
+**Что в этом файле.** Обоснования правил из корневого `CLAUDE.md`: почему правило появилось, какой
+инцидент его породил, что показали раунды состязательного ревю, какие формы были отвергнуты и по
+какому замеру. С T-131 сюда же переехала операционная глубина — устройство сторожей и хуков,
+пределы алярмов, внутренности гейтов.
+
+**Чего в этом файле НЕТ, и это важнее.** Здесь нет ни одного правила, которое нужно знать до начала
+работы. Всё такое осталось в корневом `CLAUDE.md`, потому что этот файл не впрыскивается в сессию —
+его открывает только тот, кого сюда послали. Если ты ищешь, как завести рабочее дерево, что значит
+код отказа или что можно коммитить на `main`, — тебе не сюда, а в корень.
+
+**Кто сюда ходит.** Тот, кто правит соответствующую подсистему, — и тот, кто собирается ослабить
+правило и обязан сперва узнать, чем за него заплатили.
+
+---
+
+# Перенесено из корня юнитом T-131
+
+## Code rules / Database
+
+Standing in a directory is evidence about where you are; a named path is an assertion that can be stale, inherited by an unrelated subprocess, or mistyped — and that is where a silent second empty tracker does the damage CB-8 was filed for. **The benign half matters too**: `init_project` creates the directory *before* the database, so a Ctrl-C'd `init` leaves exactly this state, and the walk self-healing it is the right answer. **"`init_project` is the only creator" is false as a flat statement** — `connect` creates, by design. 
+
+There is no local discriminator: git reports that directory as a valid work tree too, so any "fix" would be a different guess. 
+
+That default is the whole fix**: three ways to break a tracker were known when the unit started and measurement found five more, each with its own errno, and there is no reason to think eight is the population. 
+
+Verified by running it: `in_transaction` goes `True → False` and a subsequent `ROLLBACK` finds nothing to undo. A gate that says "you hold the lock" before the lock is committed is worse than the defect being fixed.
+
+An earlier design added a `TxnAbort` sentinel for this and was rejected in review: `db.txn` deliberately swallows a failed `ROLLBACK` (correct, so cleanup never masks the real exception), which would have let a refusal-shaped result come back with the transaction still live. 
+
+Round 1 sampled it at the top of the function, before the write lock and before the injected git callback. Round 2 moved it below those — and left the stale-holder `abandoned` UPDATE between the sample and the write. Each time the lease landed **already expired**, the call returned `proceed: True`, and the next contender saw the lock reclaimable and *also* got `proceed: True`: two agents merging at once, which is the one thing the lock exists to prevent. 
+
+So an expired holder retrying got `proceed: True` from the first branch while a competitor reclaimed the lease and got `proceed: True` from the second — two agents pushing to main, defeating the singleton lock without ever racing inside it. Every existing test used a *fresh* lease, where the two branches agree. 
+
+A mechanical sweep (`grep -rn "conn.commit()"` → 43 executable sites, vs 7 `db.txn` users, then read every committing function) found **19 instances, 13 still unfixed** — in `blockers.py`, `merge.py`, `sweep.py` and three milestone modules no card had named. 
+
+The rule survives as the reason it was done that way — making the update path lenient while insert stayed strict would have created a worse, same-field inconsistency, so the seam had to move in one step rather than per-site. 
+
+`bench.import_csv` did exactly that with `date or utc_now()[:10]` and `run_id or _next_run_id(conn)`, so `date=[]`, `date={}` and `date=""` all stored today's date and reported success (measured; **the card itself got this wrong**, claiming the dict cases raised — `{}` is falsey and took the same silent path). 
+
+Nor are the remaining 23 held by it: 21 are in `findings.py`, whose single use of the validator is the import-time check over `_RESTORE_COLUMNS`, and that query is none of the 21. **This is NOT a security hole, and that was re-established rather than inherited**: all 52 sites were walked at the cut above and every interpolated expression traced to its assignment — 30 distinct ones, each a locally built clause fragment, a module constant, a literal picked by a Python conditional, a `?`-placeholder string, an integer from `len()` of a module constant, or a closed-enumeration member checked before interpolation. On the cut that matches what CB-172 must leave green — ruff `0.15.7`, `extend-select = ["S608", "RUF100"]`, over the `src/ tests/` that `worktree-finish.sh` lints, on `adcf354` — it is **56 dead markers beside those 56 `S608` hits**, 17 in `src/` and 39 in `tests/`; the same tree answers 93 when `select` REPLACES the default set instead of extending it. **The error corrected here was this paragraph's own kind** — *the tool is assumed to work although nobody ran it* — committed in the sentence that exposes it, which is why every number above names the rules enabled, the paths walked, the ruff version and the commit. Before CB-22 the comment claimed all three were guarded and only `sort_col` was, inside `order_by()`; a kind carrying `readable_cols={"(SELECT meta FROM findings)"}` passed the membership check and `field()` returned the `meta` column. 
+
+## Claims module
+
+It is
+  **deliberately distinguishable from `1`** — that distinction is the whole reason the alternative
+  "silent exit 0" was rejected, since a `codebugs export-csv /dev/stdout | gzip > backup.gz` whose
+  `gzip` dies must never report success over a truncated backup. It replaces the two codes that state produced before it (`1`
+  unbuffered with a raw traceback; `120` block-buffered with "Exception ignored while flushing
+  sys.stdout"), the first of which is this package's code for **bad input** printed over a landed
+  write — the CB-15/CB-16 lie. 
+
+One detail worth carrying to any third adopter: **the fatal/guarded asymmetry is
+  about WHEN, not about importance** — setup may abort because nothing has been created yet and a
+  refusal is free, while finish runs after the merge has landed, where a false failure over tracker
+  bookkeeping is the worse outcome.
+Ratified by
+     the owner, 2026-08-19, against the design doc.
+The design's own text says why
+     the difference is correct: there, `[7b/9] auto-resolve-codebugs.py` has already flipped the card to `fixed`
+     from a `Fixes:` trailer, so the release is a no-op. 

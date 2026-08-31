@@ -1,0 +1,35 @@
+66|S|src|0.3|0.0|Heading for db internals
+67|S|src|0.3|0.15|connect walk internals plus worktree fact
+68|S|src|0.08|0.5|CB-23 asymmetry
+69|S|src|0.15|0.4|Override precedence
+70|S|src|0.08|0.6|separate-git-dir misbinding
+71|S|src|0.08|0.25|describe_root invariant
+72|S|src|0.03|0.55|three-valued path state plus AST gate
+73|S|src|0.05|0.45|walk record-and-continue
+74|S|src|0.05|0.4|environmental errno set
+75|S|src|0.05|0.5|CB-199 narrowing plus ratchet
+76|S|src|0.3|0.0|schema convention for new module
+77|S|src|0.35|0.0|additive-or-migrate policy
+78|D|none|0.85|0.0|Parameterized queries only, security invariant for any file
+79|S|src|0.15|0.35|WAL and busy_timeout facts
+80|S|src|0.25|0.45|Never plain BEGIN, use db.txn
+81|S|src|0.06|0.45|isolation_level commit hazard
+82|S|src|0.05|0.6|Rollback-free refusal ordering
+83|S|src|0.07|0.6|Deadline in SQL
+84|S|src|0.05|0.6|Idempotency affordance
+85|S|src|0.07|0.4|Read-modify-write in one txn
+86|S|src|0.05|0.55|CB-24 population sweep
+87|S|src|0.1|0.25|RETURNING vs rowcount
+88|S|src|0.07|0.35|One assignment per column
+89|S|src|0.06|0.4|INSERT/UPDATE parity gate
+90|S|src|0.05|0.7|Severity resolution unification
+91|S|src|0.08|0.3|ORDER BY vocabulary column
+92|S|src|0.06|0.4|Vocabulary resolvers both sides
+93|S|src|0.06|0.4|is_vocabulary_filter_active semantics
+94|S|src|0.06|0.45|Write-path None-only rule
+95|S|src|0.03|0.4|Findings identity function
+96|S|src|0.12|0.35|Category normalization and mint gate
+97|S|src|0.1|0.55|Requirements have no identity function
+98|S|src|0.03|0.35|similarity.py design
+99|S|src|0.15|0.2|EntityRef.set_status boundary rule
+100|S|src|0.08|0.45|SQL identifier validation

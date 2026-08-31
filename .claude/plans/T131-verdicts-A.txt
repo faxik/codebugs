@@ -1,0 +1,33 @@
+2|D|none|1.0|0.0|Section heading naming the core workflow rule
+3|D|none|0.35|0.60|Branch/worktree rule stays, CB-50 replay is history
+4|D|none|1.0|0.02|Enforcement table: rules, mechanisms, exit codes
+5|D|none|0.30|0.62|Alarm-not-gate and exit 15 vs 13 stay
+6|D|none|0.08|0.85|ORIG_HEAD identity reasoning
+7|D|none|0.35|0.45|Operator reading of tip-not-ours
+8|D|none|0.07|0.85|EXIT trap implementation depth
+9|D|none|0.25|0.65|merge.ff=false and limits stay
+10|D|none|0.40|0.35|Candidate refs predicate
+11|D|none|0.35|0.60|Every local branch must qualify
+12|D|none|0.35|0.60|Foreign remote ref neither qualifies nor disqualifies
+13|D|none|0.70|0.20|Upstream main wins precedence
+14|D|none|0.15|0.70|Hook internals, only escape hatch and scope stay
+15|D|none|0.40|0.50|Alarm scoped to pinned baseline SHA
+16|D|none|0.25|0.65|Where the CI alarm does not hold
+17|D|none|0.30|0.60|no-renames depth
+18|D|none|0.30|0.60|Server-side protection state
+19|D|none|0.25|0.65|ci.yml runs on PRs
+20|D|none|0.28|0.68|fetch-depth, python pin, exit 14, bump command
+21|D|none|0.55|0.35|worktree-setup invocation and claim exit codes
+22|D|none|0.90|0.10|Where worktrees live
+23|D|none|1.0|0.05|Work inside the worktree
+24|D|none|0.85|0.20|Test command with --extra dev trap
+25|D|none|0.95|0.10|Integration command and no-ff rule
+26|D|none|0.35|0.60|Merge message format
+27|D|none|0.40|0.50|Re-run hint behaviour
+28|D|none|0.90|0.15|Lint gate and pinned ruff version
+29|D|none|1.0|0.05|Session end procedure
+30|D|none|0.15|0.65|What may land on main directly
+31|D|none|1.0|0.0|Releasing heading
+32|D|none|1.0|0.10|Release step one
+33|D|none|1.0|0.05|Release step two
+34|D|none|1.0|0.20|Release step three

@@ -39,3 +39,35 @@ section by section — the CB-22/CB-52 "two copies of one precedence table" shap
 **The migration cost was zero when the width rule landed.** Measured 2026-08-25 across every
 reachable tracker — codebugs 6 requirements, both autosorter trackers 1401 each — the embedded count
 is **0**, so CB-174 was a dormant breach rather than live damage.
+
+## Что в этом файле, и чего в нём нет
+
+**Что в этом файле.** Обоснования правил из корневого `CLAUDE.md`: почему правило появилось, какой
+инцидент его породил, что показали раунды состязательного ревю, какие формы были отвергнуты и по
+какому замеру. С T-131 сюда же переехала операционная глубина — устройство сторожей и хуков,
+пределы алярмов, внутренности гейтов.
+
+**Чего в этом файле НЕТ, и это важнее.** Здесь нет ни одного правила, которое нужно знать до начала
+работы. Всё такое осталось в корневом `CLAUDE.md`, потому что этот файл не впрыскивается в сессию —
+его открывает только тот, кого сюда послали. Если ты ищешь, как завести рабочее дерево, что значит
+код отказа или что можно коммитить на `main`, — тебе не сюда, а в корень.
+
+**Кто сюда ходит.** Тот, кто правит соответствующую подсистему, — и тот, кто собирается ослабить
+правило и обязан сперва узнать, чем за него заплатили.
+
+---
+
+# Перенесено из корня юнитом T-131
+
+## Embeddings
+
+That is the silent-empty-queue
+shape (CB-19/CB-25), which this repository treats as worse than a loud failure. **The defect was never that refusal, it was the COMPOSITION** — one foreign row aborted the whole
+loop and discarded the rows already scored, in an order nothing controls.
+**AND THAT CHANNEL IS NOT ENOUGH ON A UNIFORM TRACKER, WHICH IS WHERE THE FIX RE-CREATED THE VERY
+DEFECT IT REMOVES.** With every stored vector the same width — the ordinary case, and the one the
+write guard guarantees — a query of a DIFFERENT width **used to** raise loudly from
+`cosine_similarity` and, once the SQL filter was in place, **returned** `[]`: "nothing is similar"
+about a full tracker, while `embedding_stats` said `mixed: False`. **The general lesson: a fix aimed at one silent-empty-queue can open another one, and only an
+adversary looking at the composition notices** — every element was correct, and the elements together
+answered a lie.

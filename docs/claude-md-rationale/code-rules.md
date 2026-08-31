@@ -111,3 +111,46 @@ commits is 141 seconds against a suite run of about 170, so a merge arriving mid
 Tuesday.
 
 **Silence on a still tree was measured** over the full suite: 2878 tests, nothing printed.
+
+## Что в этом файле, и чего в нём нет
+
+**Что в этом файле.** Обоснования правил из корневого `CLAUDE.md`: почему правило появилось, какой
+инцидент его породил, что показали раунды состязательного ревю, какие формы были отвергнуты и по
+какому замеру. С T-131 сюда же переехала операционная глубина — устройство сторожей и хуков,
+пределы алярмов, внутренности гейтов.
+
+**Чего в этом файле НЕТ, и это важнее.** Здесь нет ни одного правила, которое нужно знать до начала
+работы. Всё такое осталось в корневом `CLAUDE.md`, потому что этот файл не впрыскивается в сессию —
+его открывает только тот, кого сюда послали. Если ты ищешь, как завести рабочее дерево, что значит
+код отказа или что можно коммитить на `main`, — тебе не сюда, а в корень.
+
+**Кто сюда ходит.** Тот, кто правит соответствующую подсистему, — и тот, кто собирается ослабить
+правило и обязан сперва узнать, чем за него заплатили.
+
+---
+
+# Перенесено из корня юнитом T-131
+
+## Code rules / Error handling
+
+Reporting that as bad input prints a tidy one-line error and exits 1 for a mutation that **already landed** — a failure-shaped signal for a successful write, the same class of lie as CB-15/CB-16. `_cmd_reqs_update` was the last asymmetry and is closed (T-57).
+
+What the split rests on is that CPython routes every environmental code to `OperationalError`, so nothing environmental is inside the arm; a test pins that a CHECK violation on `requirements` really is an `IntegrityError`, as a premise rather than an argument. **No classifier is involved, and that is better than reusing `_is_environmental`**: the exception TREE already draws this line, so reaching for a predicate would mean exporting a deliberately private one or growing a second copy of its enumeration. 
+
+## Code rules / Testing
+
+**Three things about it are load-bearing and each was measured.** *The walk is asked, never re-implemented*: a parent climb to `/` would falsely alarm on a tracker above a `.git` DIRECTORY (the walk stops there) and would MISS one reachable only by following a `.git` FILE to a linked worktree's main checkout (the walk jumps) — both are oracle rows, and a structural pin fails if the delegation is replaced. *The start point comes from the factory the `tmp_path` fixture is built on*, not from the literal `/tmp`: `--basetemp` and `TMPDIR` both move it, so a hardcoded `/tmp` would be a gate that cannot fire. It exists because the suite is re-run by an acceptor **in the main checkout**, which is exactly where other directions land their branches, while structural tests here read source files from disk, so a merge arriving mid-run is ordinary and the partial red it produces is indistinguishable from a regression. *The discriminator is the FILES, not `HEAD`*, measured: `git rev-parse` fails outright in a tree unpacked without a git directory, does not move in a worktree when `main` moves (the case that must stay silent), and cannot see an editor or a formatter writing a file nobody committed; the commit name is printed as a SIGNATURE when git answers, and its absence is never a failure. *Nothing is pruned by judgement* — `.claude/plans/` is deliberately watched, because `tests/test_exposure_matrix.py` really does read `.claude/plans/exposure-scripts/matrix.py` off the real tree, so *"the suite does not look there"* is precisely the unchecked premise the alarm exists to stop people acting on; the two prune tables hold only what is not a source of anything (git's own directory, the virtual environment, the two worktree directories, the tracker, and caches), each with the sentence saying why, and **a bare list with no reasons becomes the place inconvenient paths are hidden**. 
+
+## Code rules / MCP tool registration
+
+Without it the SDK builds each tool's argument model with pydantic's default `extra="ignore"`, so a typo'd name is dropped during validation and the tool returns a **success payload with the caller's data discarded** — while a bad *value* raises (CB-15). **`additionalProperties: false` is not an alternative**: the server never validates arguments against the JSON Schema, verified by injecting it and watching the call still succeed. 
+
+**Two alternatives were rejected for reasons worth keeping**: rewriting `fn.__doc__` is a global side effect on another module's objects, and rewriting the registered `Tool` objects afterwards reaches into the SDK's PRIVATE `_tool_manager._tools` — a worse coupling than the provisional-but-public one `install_strict_arguments` already documents. 
+
+## Code rules / CLI
+
+A dead READER on stdout otherwise makes every verb report a **committed** write as a failure — exit 1 with a `BrokenPipeError` traceback unbuffered, and exit 120 with "Exception ignored on flushing sys.stdout" block-buffered, the latter raised at interpreter shutdown where no `except` can reach it. 
+
+**The dangerous case is the newest**: on 3.14, an invalid fd 1 makes `sys.stdout` `None`, `print` is a documented no-op against `None`, and the colour probe short-circuits on `hasattr(None, "fileno")` — so every verb runs, discards its whole output and **reports success**. That is the "silent exit 0" CB-78's ratification rejected by name, reached by upgrading the interpreter rather than by changing any code here: `codebugs export-csv /dev/stdout | gzip > backup.gz` reports success over a backup that was never written. 
+
+A test that asserts only "the target got a tracker" cannot see the defect this fixed; `TestInitUnderTheTrackerRootFlag` asserts the directory that must **not** have one on every case.

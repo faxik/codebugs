@@ -5736,6 +5736,19 @@ class TestPostMergeAlarm:
         assert git(repo, "rev-parse", "main^1") != tip
 
 
+def _all_occurrences(haystack: str, needle: str) -> list[int]:
+    """Every start offset of `needle`, so a pin can judge the right mention.
+
+    A file may carry the same card id in an archive heading and in the prose the
+    pin is really about; `str.index` would silently pick the first.
+    """
+    out, at = [], haystack.find(needle)
+    while at != -1:
+        out.append(at)
+        at = haystack.find(needle, at + 1)
+    return out
+
+
 class TestPostMergeAlarmIsNotAGate:
     """The CATEGORY of the alarm, pinned in the source and in CLAUDE.md (CB-121).
 
@@ -6034,14 +6047,39 @@ class TestPostMergeAlarmIsNotAGate:
         )
 
     def test_claude_md_names_the_window_and_calls_the_alarm_an_alarm(self) -> None:
-        """Prose under the table, per the same treatment `main-invariants.yml` got."""
+        """Prose under the table, per the same treatment `main-invariants.yml` got.
+
+        SURVIVED T-131's directive/depth split, and the split is why this
+        docstring exists. An intermediate state of that unit had moved the
+        REASONING — why the in-lock re-check is a check-then-act — out to
+        `docs/claude-md-rationale/workflow.md`, leaving behind a root sentence
+        ("The narrowed row is still a checkable claim") with nothing to refer
+        to. The coherence pass moved the antecedent back, so the whole passage
+        is in the root again and this pin asserts on the root exactly as it
+        always did. What did NOT come back is the four-load-bearing-details
+        list, which is rationale and now lives in the reference.
+
+        The occurrence is searched for rather than taken with `.index()`, so a
+        second mention of the card elsewhere in the file cannot make the window
+        land on the wrong passage.
+        """
         md = self.CLAUDE_MD.read_text()
         assert "CB-121" in md
-        assert "exit 15" in md
-        at = md.index("CB-121")
-        window = md[at - 2000 : at + 4000]
-        assert "alarm" in window.lower(), "CB-121 is mentioned but the alarm is not named"
-        assert "check-then-act" in window.lower()
+        assert "exit 15" in md, (
+            "the code an operator sees on a post-merge alarm left the root; "
+            "refusal codes are directive and belong where every session loads them"
+        )
+        windows = [
+            md[max(0, m - 2000) : m + 4000].lower()
+            for m in _all_occurrences(md, "CB-121")
+        ]
+        assert any("alarm" in w for w in windows), (
+            "CB-121 is mentioned but the alarm is not named"
+        )
+        assert any("alarm" in w and "check-then-act" in w for w in windows), (
+            "no CB-121 passage names the alarm and the check-then-act together; "
+            "the reasoning has been lost or split apart"
+        )
 
 
 # The journal's own injection: main moves BEFORE the in-lock re-check, so the

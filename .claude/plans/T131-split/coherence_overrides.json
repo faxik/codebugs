@@ -1,0 +1,30 @@
+{
+ "5:4": [
+  "root",
+  "restores the antecedent for 'The narrowed row is still a checkable claim', which was left in the root with nothing to refer to"
+ ],
+ "7:0": [
+  "ref",
+  "numbered item 2 whose siblings 1,3,4 are rationale and left; an orphaned '2.' reads as a document defect, and its operational essence ('the block says in words not to re-run') is already stated in the root paragraph above"
+ ],
+ "7:1": [
+  "ref",
+  "same numbered item, second chunk"
+ ],
+ "132:2": [
+  "nested",
+  "opens with 'SIG_DFL fixes both' whose two antecedent states left the root; the 141 vocabulary an operator needs is fully carried by the Claims exit-code list"
+ ],
+ "14:35": [
+  "root",
+  "honest-scope clause qualifying the byte-boundary rule that stayed in the root; a rule whose 'no test discriminates this' caveat left reads as a wider promise than it keeps"
+ ],
+ "75:9": [
+  "nested",
+  "the 'this count is a question for the ratchet, not for this paragraph' boundary belongs with the ratchet rule, which stayed in the nested file"
+ ],
+ "134:4": [
+  "nested",
+  "not history at all — the BOTH-halves requirement of the /dev/stdout alias check, an operative part of the rule above it"
+ ]
+}
