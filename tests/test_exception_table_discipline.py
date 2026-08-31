@@ -373,7 +373,43 @@ class _Use:
 def _analyse_function(
     fn: ast.AST, table_names: set[str], registries: dict[str, set[str]]
 ) -> dict[str, _Use]:
-    """What one function body does with each table it reads."""
+    """What one function body does with each table it reads.
+
+    THE RECOGNISED SHAPES, listed because the module docstring's limit 6 sends
+    a reader here and a promise wider than its text is this file's own subject.
+
+    A **reason gate** is: the table reached through ``.items()`` / ``.values()``
+    / ``.get(...)`` / a subscript, the VALUE side bound to a name, and a string
+    predicate applied to THAT name somewhere in the same function — ``.strip()``
+    and its siblings, ``len(...)``, or ``isinstance(...)``. Binding the value is
+    what makes this precise: a self-deletion test also iterates ``.items()``, so
+    keying on the call alone would credit it with a reason gate it does not
+    have.
+
+    A **self-deletion gate** is: the table's KEYS enumerated — ``for k in T``, a
+    comprehension over ``T``, ``set(T)``/``sorted(T)``, or the key half of an
+    ``.items()`` unpacking — and one of those keys then held against something
+    that is NOT the table:
+
+    * a membership test whose LEFT is a key-bound name and whose comparator
+      denotes no table (``k not in live``). The asymmetry is deliberate: with
+      it symmetric, ``assert kept not in pruned`` — which asks the opposite
+      question — would be credited as self-deletion;
+    * ``<something not the table>.get(k)``;
+    * a set DIFFERENCE with the table on the LEFT (``(mutable | immutable) -
+      columns``). Only ``-``, and only that way round: ``set(parts) &
+      set(_PRUNED_NAMES)`` asserts that no pruned name appears in the tree,
+      which is a consequence check rather than a stale-row check, and an
+      intersection rule would have credited it.
+
+    A comparator that denotes the table itself never counts, so
+    ``[k for k in T if k not in T]`` — vacuous by construction — earns nothing.
+
+    Binding runs as its own pass BEFORE judging, so the verdict cannot depend
+    on the order statements happen to appear in: a comprehension may read a
+    name the statement above it bound, and an assertion may read a loop
+    variable bound further up.
+    """
     scope = _Scope(table_names, registries)
     uses: dict[str, _Use] = {}
 
@@ -448,13 +484,6 @@ def _analyse_function(
                 owner = scope.denotes(value.value)
                 if owner:
                     scope.bind_target(target, owner, as_value=True)
-
-    for name in scope.table_names:
-        if any(name in t for t in scope.alias.values()):
-            use(name)
-    for node in ast.walk(fn):
-        for name in scope.denotes(node):
-            use(name)
 
     # --- half one: a reason field is read and judged as text -------------
     for node in ast.walk(fn):
@@ -552,9 +581,14 @@ def _mark_exempting_continue(tables: list[Table], root: str = TESTS_DIR) -> None
     `if x in TABLE: <expression>` are NOT read as exemptions, because a
     membership answering a question is not a membership waving a case past a
     check, and widening it here pulls in every vocabulary the suite matches on
-    (`NETWORK_MODULES`, `_DML_VERBS`, `_EXEC_ATTRS`, `_OS_PATH_PRIMITIVE_TEXTS`
-    — measured: eleven of them). Two lexer vocabularies still land inside the
-    narrow rule and are declared out, by name, in `DECLARED_EXCEPTIONS`.
+    — `NETWORK_MODULES`, `_DML_VERBS`, `_EXEC_ATTRS`,
+    `_OS_PATH_PRIMITIVE_TEXTS` and their kind, which membership SELECTS FOR a
+    check rather than exempting from one. The narrow rule still catches two
+    lexer vocabularies in `tests/test_readme_surface.py`, and they are declared
+    out by name in `DECLARED_EXCEPTIONS`. No count is quoted here on purpose:
+    what that population is today is a question for `DECLARED_EXCEPTIONS` and
+    for the gate's own tests, and a number written into prose is the thing this
+    repository has repeatedly been wrong about.
     """
     names = {t.name for t in tables}
     hits: set[str] = set()
