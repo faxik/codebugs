@@ -12,8 +12,7 @@ in this file that reads as an instruction is a defect, and its place is the rule
 
 **A measurement sentence that was itself wider than its measurement (CB-190).** The opening claim
 used to end "imports anything that could open a socket", which is a claim about every socket-opener
-and not about a list. Measured against the gate's own function, `from logging.handlers import
-SocketHandler`, the same module's `HTTPHandler` and `from multiprocessing.connection import Client`
+and not about a list. Measured against the gate's own function, `from logging.handlers import SocketHandler`, the same module's `HTTPHandler` and `from multiprocessing.connection import Client`
 all returned an empty result — so the wider spelling was false in the paragraph that calls itself a
 measurement.
 
@@ -24,16 +23,11 @@ predicate matched the prefix `mcp` without the dot and swept in `mcp_types`, a s
 **How the enumeration was measured to be insufficient.** `cohere`, `ollama` and `httplib2` were green
 against it, and a planted module carrying all three left the file reporting 25 passed.
 
-**The top-level names, and a slip worth keeping.** The three foreign top-level names (`mcp`,
-`mcp_types`, `pydantic`) are foreign on every admitted version, measured on 3.11 as well as on the
-pinned interpreter. `codebugs` is the fourth top-level name the tree imports and is deliberately
+**The top-level names, and a slip worth keeping.** The three foreign top-level names (`mcp`, `mcp_types`, `pydantic`) are foreign on every admitted version, measured on 3.11 as well as on the pinned interpreter. `codebugs` is the fourth top-level name the tree imports and is deliberately
 absent from that list — it is excluded by DERIVATION rather than by foreignness, and conflating the
 two is what an earlier draft did: it said "four" and then listed three.
 
-**The version-dependent five, measured.** `telnetlib`, `nntplib`, `asyncore`, `asynchat` and `smtpd`
-are all in `sys.stdlib_module_names` on 3.11 (3.12 keeps the first two), and none is on 3.13 or 3.14.
-
-**The provider rule's trigger used to be broken (CB-190).** It named `DECLARED_EXCEPTIONS` alone, so
+**The version-dependent five, measured.** `telnetlib`, `nntplib`, `asyncore`, `asynchat` and `smtpd` are all in `sys.stdlib_module_names` on 3.11 (3.12 keeps the first two), and none is on 3.13 or 3.14. **The provider rule's trigger used to be broken (CB-190).** It named `DECLARED_EXCEPTIONS` alone, so
 a provider built on a client the enumeration never listed would have needed no row at all and the
 rule would have sat there un-armed while the provider landed.
 
