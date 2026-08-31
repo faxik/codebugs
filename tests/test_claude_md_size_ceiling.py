@@ -59,9 +59,17 @@ DEFAULT_CEILING = 8_000
 
 # path relative to the repo root -> (ceiling in bytes, why this number)
 #
-# NOTE FOR THE T-131 LANDING: the root entry below records the size BEFORE the
-# directive/depth split. It must be re-derived from the achieved size in the
-# same commit that lands the split, and the nested files must be added here.
+# THE T-131 LANDING IS NOT TRUSTED TO THIS COMMENT. The root entry below records
+# the size BEFORE the directive/depth split, so the moment that split lands the
+# file drops to roughly a fifth of it and this number becomes a ceiling with
+# nothing under it. What forces the re-derivation is not this note — a comment is
+# text no test reads — but `test_no_declared_ceiling_is_stale`, which refuses any
+# ceiling sitting more than SLACK above the file it governs. The arithmetic is
+# not close: a post-split root of ~36,000 under a ceiling of 199,123 leaves
+# ~163,000 of slack against the 4,000 allowed, so the suite goes red on the very
+# commit that lands the split and stays red until the number is re-derived.
+# Proved rather than asserted, by the post-split arm of
+# `.claude/plans/T131-ceiling-mutation-proof.py`.
 CEILINGS: dict[str, tuple[int, str]] = {
     "CLAUDE.md": (
         199_123,

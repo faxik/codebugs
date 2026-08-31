@@ -78,6 +78,18 @@ M.CEILINGS["CLAUDE.md"] = (194_000, "   ")
 results.append(fires("reason is whitespace", M.test_every_declared_ceiling_carries_a_reason))
 M.CEILINGS.clear(); M.CEILINGS.update(saved)
 
+print("M6 THE POST-SPLIT WORLD: a pre-split ceiling over a split file must be refused.")
+print("   (this is the naказ made executable — the comment in the test is not the mechanism)")
+write("docs/postsplit/CLAUDE.md", 36_149)
+git("add", "--", "docs/postsplit/CLAUDE.md")
+M.CEILINGS["docs/postsplit/CLAUDE.md"] = (199_123, "pre-split number left behind")
+results.append(fires("root at 36149 under a stale ceiling of 199123",
+                     M.test_no_declared_ceiling_is_stale))
+M.CEILINGS.clear(); M.CEILINGS.update(saved)
+git("reset", "-q", "--", "docs/postsplit/CLAUDE.md")
+os.remove(os.path.join(ROOT, "docs/postsplit/CLAUDE.md"))
+os.rmdir(os.path.join(ROOT, "docs/postsplit"))
+
 print()
 print("discovered on the clean tree:", sorted(M._discovered()))
 print(f"RESULT: {sum(results)}/{len(results)} arms behaved as designed")
