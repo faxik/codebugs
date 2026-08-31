@@ -11,7 +11,6 @@ the MCP wire golden.
 
 from __future__ import annotations
 
-import argparse
 import json
 import pathlib
 
@@ -132,26 +131,29 @@ class TestExcludedActionAttrs:
 
     @staticmethod
     def _attributes_argparse_actually_produces() -> set[str]:
-        """Every `vars(action)` key the REAL parser yields, unexcluded.
+        """Every `vars(action)` key the REAL parser yields, BEFORE exclusion.
 
-        Built from `cli.build_parser` rather than from a constructed toy
-        parser, so the world this table is judged against is the same one the
-        golden is generated from.
+        Built from `cli.build_parser` and walked exactly as
+        `cli_surface.collect_cli_surface` walks it — top-level parser, then
+        `sub.choices` — so the world this table is judged against is the one
+        the golden is generated from.
+
+        `collect_cli_surface()` itself cannot be reused here, and the reason is
+        the point rather than an omission: it returns actions ALREADY passed
+        through `_serialize_action`, which is what applies
+        `_EXCLUDED_ACTION_ATTRS`. Asking it what argparse produces would be
+        asking the exclusion whether it excludes anything — circular, and it
+        would answer "no stale rows" by construction.
         """
         from codebugs import cli
 
+        parser, sub, _commands = cli.build_parser()
         seen: set[str] = set()
-        parser, _sub, _commands = cli.build_parser()
-        stack = [parser]
-        while stack:
-            current = stack.pop()
-            for action in current._actions:
+        for action in parser._actions:
+            seen.update(vars(action))
+        for subparser in sub.choices.values():
+            for action in subparser._actions:
                 seen.update(vars(action))
-                choices = getattr(action, "choices", None)
-                if isinstance(choices, dict):
-                    stack.extend(
-                        sub for sub in choices.values() if isinstance(sub, argparse.ArgumentParser)
-                    )
         assert seen, "premise: the real parser yields at least one action attribute"
         return seen
 

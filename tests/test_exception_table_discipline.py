@@ -73,12 +73,25 @@ from __future__ import annotations
 
 import ast
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import pytest
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(TESTS_DIR)
+
+#: The tree, walked and parsed ONCE and then passed around.
+#:
+#: Every stage below used to re-derive this from a directory path, so importing
+#: this module walked and parsed all of `tests/` four times over — measured at
+#: ~1.7s, paid by every `pytest tests/` invocation at COLLECTION time, whether
+#: or not any test here is selected. The four stages run back to back inside one
+#: `import`, so there is no window in which the tree could move between them and
+#: nothing is traded away by sharing one snapshot. (This is deliberately NOT the
+#: situation `tests/test_no_network_capability.py` argues about in its own
+#: docstring: there the re-globbing spans the whole suite's runtime, where the
+#: CB-215 alarm says the tree really can move under a run.)
+Sources = list[tuple[str, ast.Module]]
 
 # Reason texts shorter than this are a declaration in form only. The bar is
 # deliberately the same one `tests/test_update_parity.py` already set for its
@@ -210,24 +223,22 @@ class Table:
     qualname: str
     name: str
     lineno: int
-    is_dict: bool
     reason_shaped: bool
     exempting_continue: bool = False
-    reads: list = field(default_factory=list)
 
     @property
     def key(self) -> tuple[str, str]:
         return (self.file, self.qualname)
 
 
-def _declared_tables(root: str = TESTS_DIR) -> list[Table]:
+def _declared_tables(sources: Sources) -> list[Table]:
     """Every container assigned at module or class level under ``tests/``.
 
     Function bodies are not descended into: see limit 1 in the module
     docstring.
     """
     tables: list[Table] = []
-    for rel, tree in _test_sources(root):
+    for rel, tree in sources:
 
         def walk(body, scope):
             for stmt in body:
@@ -261,7 +272,6 @@ def _declared_tables(root: str = TESTS_DIR) -> list[Table]:
                         qualname=".".join(scope + [name]),
                         name=name,
                         lineno=stmt.lineno,
-                        is_dict=is_dict,
                         reason_shaped=declared_str_dict or inferred,
                     )
                 )
@@ -282,6 +292,37 @@ def _declared_tables(root: str = TESTS_DIR) -> list[Table]:
 # suite, and crediting one's reason test to another is precisely how a gate
 # reports clean because it could not look.
 # --------------------------------------------------------------------------
+
+def _by_name(tables: list[Table]) -> dict[str, list[Table]]:
+    """Every declared table, indexed by its bare name."""
+    index: dict[str, list[Table]] = {}
+    for table in tables:
+        index.setdefault(table.name, []).append(table)
+    return index
+
+
+def _visible_names(rel: str, tables: list[Table], by_name: dict[str, list[Table]]) -> set[str]:
+    """The names a read inside ``rel`` may be attributed to.
+
+    A name declared in this very file, or declared exactly once in the whole
+    tree. Anything else is ambiguous and is deliberately invisible here rather
+    than guessed at.
+    """
+    local = {t.name for t in tables if t.file == rel}
+    return {name for name in by_name if name in local or len(by_name[name]) == 1}
+
+
+def _owner(name: str, rel: str, by_name: dict[str, list[Table]]) -> Table | None:
+    """The table a read of ``name`` inside ``rel`` belongs to, or ``None``.
+
+    Same-file first, then the unique declaration. ``None`` when neither
+    resolves — fail closed, because crediting one `DECLARED_EXCEPTIONS`'s
+    reason test to a namesake's is exactly how a gate reports clean about a
+    table it never looked at.
+    """
+    owners = [t for t in by_name[name] if t.file == rel] or by_name[name]
+    return owners[0] if len(owners) == 1 else None
+
 
 _VIEW_CALLS = frozenset({"set", "frozenset", "sorted", "list", "tuple"})
 _STRING_PREDICATE_METHODS = frozenset({"strip", "split", "lower", "casefold", "rstrip", "lstrip"})
@@ -534,17 +575,13 @@ def _analyse_function(
     return uses
 
 
-def _collect_uses(tables: list[Table], root: str = TESTS_DIR) -> dict[tuple[str, str], _Use]:
+def _collect_uses(tables: list[Table], sources: Sources) -> dict[tuple[str, str], _Use]:
     """Fold every test function's verdict onto the table it actually names."""
-    by_name: dict[str, list[Table]] = {}
-    for table in tables:
-        by_name.setdefault(table.name, []).append(table)
-
+    by_name = _by_name(tables)
     verdicts: dict[tuple[str, str], _Use] = {t.key: _Use() for t in tables}
-    for rel, tree in _test_sources(root):
+    for rel, tree in sources:
         registries = _registries(tree)
-        local = {t.name for t in tables if t.file == rel}
-        visible = {name for name in by_name if name in local or len(by_name[name]) == 1}
+        visible = _visible_names(rel, tables, by_name)
         if not visible:
             continue
         for node in ast.walk(tree):
@@ -553,10 +590,10 @@ def _collect_uses(tables: list[Table], root: str = TESTS_DIR) -> dict[tuple[str,
             if not node.name.startswith("test_"):
                 continue
             for name, use in _analyse_function(node, visible, registries).items():
-                owners = [t for t in by_name[name] if t.file == rel] or by_name[name]
-                if len(owners) != 1:
+                owner = _owner(name, rel, by_name)
+                if owner is None:
                     continue
-                verdict = verdicts[owners[0].key]
+                verdict = verdicts[owner.key]
                 verdict.reason_half |= use.reason_half
                 verdict.staleness_half |= use.staleness_half
     return verdicts
@@ -567,7 +604,7 @@ def _collect_uses(tables: list[Table], root: str = TESTS_DIR) -> dict[tuple[str,
 # --------------------------------------------------------------------------
 
 
-def _mark_exempting_continue(tables: list[Table], root: str = TESTS_DIR) -> None:
+def _mark_exempting_continue(tables: list[Table], sources: Sources) -> None:
     """A membership test that syntactically guards a ``continue``.
 
     This is the second recogniser, and it exists because the FIRST one cannot
@@ -592,7 +629,7 @@ def _mark_exempting_continue(tables: list[Table], root: str = TESTS_DIR) -> None
     """
     names = {t.name for t in tables}
     hits: set[str] = set()
-    for _rel, tree in _test_sources(root):
+    for _rel, tree in sources:
         for node in ast.walk(tree):
             if not isinstance(node, ast.If):
                 continue
@@ -639,7 +676,7 @@ def _is_candidate(table: Table) -> bool:
     return table.reason_shaped or table.exempting_continue
 
 
-def _read_anywhere(tables: list[Table], root: str = TESTS_DIR) -> dict[tuple[str, str], bool]:
+def _read_anywhere(tables: list[Table], sources: Sources) -> dict[tuple[str, str], bool]:
     """Whether the resolver can find ANY read of each table.
 
     A candidate nothing appears to consult is refused rather than reported
@@ -647,30 +684,27 @@ def _read_anywhere(tables: list[Table], root: str = TESTS_DIR) -> dict[tuple[str
     unused, and a gate reporting clean because it could not look is the defect
     this whole direction exists to close.
     """
-    by_name: dict[str, list[Table]] = {}
-    for table in tables:
-        by_name.setdefault(table.name, []).append(table)
+    by_name = _by_name(tables)
     seen: dict[tuple[str, str], bool] = {t.key: False for t in tables}
-    for rel, tree in _test_sources(root):
+    for rel, tree in sources:
         registries = _registries(tree)
-        local = {t.name for t in tables if t.file == rel}
-        visible = {name for name in by_name if name in local or len(by_name[name]) == 1}
-        scope = _Scope(visible, registries)
+        scope = _Scope(_visible_names(rel, tables, by_name), registries)
         for node in ast.walk(tree):
             if isinstance(node, (ast.Assign, ast.AnnAssign)):
                 continue  # the declaration itself is not a read
             for name in scope.denotes(node):
-                owners = [t for t in by_name[name] if t.file == rel] or by_name[name]
-                if len(owners) == 1:
-                    seen[owners[0].key] = True
+                owner = _owner(name, rel, by_name)
+                if owner is not None:
+                    seen[owner.key] = True
     return seen
 
 
-_TABLES = _declared_tables()
-_mark_exempting_continue(_TABLES)
+_SOURCES = _test_sources()
+_TABLES = _declared_tables(_SOURCES)
+_mark_exempting_continue(_TABLES, _SOURCES)
 _CANDIDATES = [t for t in _TABLES if _is_candidate(t)]
-_USES = _collect_uses(_TABLES)
-_READ = _read_anywhere(_TABLES)
+_USES = _collect_uses(_TABLES, _SOURCES)
+_READ = _read_anywhere(_TABLES, _SOURCES)
 _GOVERNED = [t for t in _CANDIDATES if t.key not in DECLARED_EXCEPTIONS]
 
 
@@ -778,10 +812,11 @@ def test_a_declared_non_table_is_really_declared_once(key):
 
 def _verdicts(root: str) -> dict[tuple[str, str], tuple[Table, _Use, bool]]:
     """Run the whole pipeline over an arbitrary ``tests``-shaped directory."""
-    tables = _declared_tables(root)
-    _mark_exempting_continue(tables, root)
-    uses = _collect_uses(tables, root)
-    read = _read_anywhere(tables, root)
+    sources = _test_sources(root)
+    tables = _declared_tables(sources)
+    _mark_exempting_continue(tables, sources)
+    uses = _collect_uses(tables, sources)
+    read = _read_anywhere(tables, sources)
     return {t.key: (t, uses[t.key], read[t.key]) for t in tables if _is_candidate(t)}
 
 

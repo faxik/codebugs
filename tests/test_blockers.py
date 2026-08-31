@@ -978,40 +978,16 @@ class TestActiveCountsIsTheSingleDefinition:
     # trigger fields, so its `deferred_count` now derives from the shared map.
     EXEMPT: dict[str, str] = {}
 
-    def test_every_evaluator_derives_from_the_shared_aggregation(self):
-        import ast
-        import pathlib
-        tree = ast.parse(pathlib.Path(blockers.__file__).read_text())
+    @staticmethod
+    def _evaluators() -> list[tuple[str, set[str]]]:
+        """Every function that evaluates the blocker set, with what it calls.
 
-        def called_names(node):
-            return {
-                c.func.id for c in ast.walk(node)
-                if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
-            }
-
-        offenders = []
-        evaluators = []
-        for fn in ast.walk(tree):
-            if not isinstance(fn, ast.FunctionDef):
-                continue
-            names = called_names(fn)
-            if "_get_active_blockers_by_type" not in names:
-                continue
-            evaluators.append(fn.name)
-            if fn.name in self.EXEMPT or "_active_counts" in names:
-                continue
-            offenders.append(fn.name)
-
-        # Non-vacuity: if the evaluator set is ever empty the assertion below is
-        # free, which is exactly how a ratchet stops ratcheting.
-        assert len(evaluators) >= 4, evaluators
-        assert offenders == [], (
-            f"{offenders} evaluate the blocker set without deriving from "
-            "_active_counts; add to EXEMPT with a reason, or derive from it"
-        )
-
-    def _evaluators(self):
-        """The functions the gate above judges — the world EXEMPT rows name."""
+        ONE definition, used by the gate below and by the EXEMPT staleness
+        check beside it. When these were two copies (CB-179 added the second),
+        a future change to what counts as an evaluator — widening past a bare
+        `Name` call, say — had to be made twice or the two tests would silently
+        disagree about the very population one of them exempts from the other.
+        """
         import ast
         import pathlib
 
@@ -1026,8 +1002,24 @@ class TestActiveCountsIsTheSingleDefinition:
                 if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
             }
             if "_get_active_blockers_by_type" in names:
-                found.append(fn.name)
+                found.append((fn.name, names))
         return found
+
+    def test_every_evaluator_derives_from_the_shared_aggregation(self):
+        evaluators = self._evaluators()
+        offenders = [
+            name
+            for name, names in evaluators
+            if name not in self.EXEMPT and "_active_counts" not in names
+        ]
+
+        # Non-vacuity: if the evaluator set is ever empty the assertion below is
+        # free, which is exactly how a ratchet stops ratcheting.
+        assert len(evaluators) >= 4, evaluators
+        assert offenders == [], (
+            f"{offenders} evaluate the blocker set without deriving from "
+            "_active_counts; add to EXEMPT with a reason, or derive from it"
+        )
 
     def test_every_exempt_row_carries_a_non_empty_reason(self):
         """Half one (CB-179). The table had the right SHAPE and no gates at all.
@@ -1057,7 +1049,7 @@ class TestActiveCountsIsTheSingleDefinition:
         leaving it is how the table becomes the place a real regression is
         parked under an old name.
         """
-        evaluators = self._evaluators()
+        evaluators = [name for name, _calls in self._evaluators()]
         assert len(evaluators) >= 4, evaluators  # the gate's own non-vacuity floor
         stale = [name for name in self.EXEMPT if name not in evaluators]
         assert stale == [], (

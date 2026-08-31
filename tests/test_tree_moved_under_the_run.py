@@ -546,6 +546,24 @@ class TestNothingIsPrunedByJudgement:
             for key, reason in table.items():
                 assert isinstance(reason, str) and len(reason.split()) >= 5, key
 
+    @staticmethod
+    def _tracked_paths() -> list[str]:
+        """What git says is source in this repository. One definition.
+
+        Both checks below judge a prune row against this same answer, so they
+        cannot come to disagree about what the world is.
+        """
+        tracked = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        paths = [path for path in tracked.split("\0") if path]
+        assert paths, "premise: git reports at least one tracked file in this repository"
+        return paths
+
     def test_no_pruned_entry_is_stale(self):
         """The self-deleting half, and nothing held it before CB-179.
 
@@ -565,15 +583,7 @@ class TestNothingIsPrunedByJudgement:
         acquiring tracked content — a directory becoming part of the project
         while an exclusion written for a cache still covers it.
         """
-        tracked = subprocess.run(
-            ["git", "ls-files", "-z"],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout
-        paths = [p for p in tracked.split("\0") if p]
-        assert paths, "premise: git reports at least one tracked file in this repository"
+        paths = self._tracked_paths()
 
         components = {part for path in paths for part in path.split("/")}
         # Every directory prefix git tracks something under, spelled with this
@@ -602,14 +612,7 @@ class TestNothingIsPrunedByJudgement:
         a directory the suite unmistakably reads, and the assertion is that it
         WOULD be reported stale if anyone pruned it.
         """
-        tracked = subprocess.run(
-            ["git", "ls-files", "-z"],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout
-        components = {part for path in tracked.split("\0") if path for part in path.split("/")}
+        components = {part for path in self._tracked_paths() for part in path.split("/")}
         assert "tests" in components
         assert os.path.join(".claude", "plans") not in _PRUNED_PATHS
 
