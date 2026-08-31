@@ -24,8 +24,17 @@ class EntityKind:
     Every field of this class that reaches SQL as an IDENTIFIER — ``table``,
     ``sort_col``, and each member of ``readable_cols`` — is validated in
     ``__post_init__``, so a malformed kind dies where it is declared instead of
-    inside a query. That is what lets the ``# noqa: S608`` justifications on the
-    f-string statements below be structural rather than a promise (CB-22).
+    inside a query. That is what makes the justification written beside each
+    f-string statement below structural rather than a promise (CB-22): the
+    reason those statements are safe is checkable, here, at the declaration.
+
+    The ``# noqa: S608`` markers themselves are no part of that argument, and
+    this docstring used to imply they were (CB-264). They suppress nothing:
+    ``pyproject.toml`` carries no ``[tool.ruff.lint]`` section, so ``ruff check``
+    runs its default selection, which does not include ``S608``. A marker here
+    addresses a reader and is inert to the linter — so do not add one believing
+    it is enforcement. Enforcement is the validation above, and a new field
+    destined for an f-string needs that, never a comment.
 
     Every OTHER field is unvalidated because it never becomes SQL text: it is
     either bound as a parameter, compared in Python, or used outside SQL entirely.

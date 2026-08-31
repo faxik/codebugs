@@ -3751,20 +3751,40 @@ class TestGroupingAxes:
         }
         assert by_tag["ungrouped_rows"] == report["rows_untagged"]
 
-    def test_a_control_character_in_a_meta_key_is_refused_as_input(self, conn):
-        """Adversarial review. SQLite's path is a C string, so it TRUNCATES at a
-        NUL: measured, `json_extract('{"a":"WRONG_A"}', '$.a\\0b')` answers
-        `'WRONG_A'` — the key `a\\0b` silently reads its neighbour `a`, which is
-        the dotted-key failure exactly. A LEADING NUL is worse still: the path
-        collapses to `'$.'` and SQLite raises `OperationalError`, the
-        environmental class the EMPTY key is already refused to avoid, escaping a
-        domain function that promises `ValueError` and reaching the CLI as a raw
-        traceback because `domain_errors()` classifies neither."""
-        for key in ("\x00a", "a\x00b", "a\tb", "a\nb"):
-            with pytest.raises(ValueError, match="CB-167"):
-                findings.query_findings(conn, group_by=f"meta:{key}")
-            with pytest.raises(ValueError, match="CB-167"):
-                findings.get_stats(conn, group_by=f"meta:{key}")
+    def test_a_control_character_in_a_meta_key_is_GROUPABLE(self, conn):
+        """CB-167 INVERTED this test, and the inversion is the fix.
+
+        It used to assert that a control character was REFUSED, because the key
+        was spliced into a JSON path and SQLite's path is a C string: a NUL
+        truncated the label and the key silently read its neighbour. The name is
+        now a BOUND VALUE compared by `json_each`, where a NUL is data rather
+        than a terminator, so every one of these keys groups under its own name.
+
+        The NUL case is the one that could not be reached by ANY path spelling —
+        ten were measured — so it is the discriminating row here, not a flourish.
+        """
+        for i, key in enumerate(("\x00a", "a\x00b", "a\tb", "a\nb")):
+            self._file(conn, f"CB-{i + 1}", meta={key: "V"})
+            got = findings.query_findings(conn, group_by=f"meta:{key}")
+            assert [g["group_key"] for g in got["groups"]] == ["V"], (key, got)
+            assert list(findings.get_stats(conn, group_by=f"meta:{key}")["groups"]) == ["V"]
+
+    def test_a_NUL_key_does_not_poison_its_ordinary_neighbour(self, conn):
+        """THE FINDING THAT CHANGED THE FORM, pinned in the direction that was
+        missed the first time.
+
+        Under the rejected quote-and-escape rule, `{"a\\0z": X, "a": Y}` answered
+        the path for the ORDINARY key `a` with X — SQLite decodes a label and then
+        compares it as a C string, truncating at the NUL, so the weird key shadows
+        its own prefix. Self-retrieval alone does NOT catch that: the NUL key is
+        found by its own path either way. Both directions are asserted here."""
+        self._file(conn, "CB-1", meta={"a\x00z": "FROM_NUL_KEY", "a": "FROM_PLAIN_KEY"})
+        plain = findings.query_findings(conn, group_by="meta:a")
+        assert [g["group_key"] for g in plain["groups"]] == ["FROM_PLAIN_KEY"], plain
+        nul = findings.query_findings(conn, group_by="meta:a\x00z")
+        assert [g["group_key"] for g in nul["groups"]] == ["FROM_NUL_KEY"], nul
+        assert findings.query_findings(conn, meta_key="a", meta_value="FROM_PLAIN_KEY")["total"] == 1
+        assert findings.query_findings(conn, meta_key="a", meta_value="FROM_NUL_KEY")["total"] == 0
 
     def test_the_deferred_short_circuit_keeps_the_grouped_shape(self, conn):
         """The tool description promises the four disclosure keys on EVERY
@@ -3798,8 +3818,12 @@ class TestGroupingAxes:
         for key in ("population", "ungrouped_rows", "multi_group_rows", "nonscalar_value_rows"):
             assert result[key] == 0, (key, result)
         # A bad axis must still be refused on this path rather than answered.
-        with pytest.raises(ValueError, match="CB-167"):
-            captured["query"](status="deferred", group_by="meta:a.b")
+        # CB-167 made `meta:a.b` a perfectly good axis, so the axis used here had
+        # to change; the PROPERTY under test — the short circuit validates before
+        # it answers — is unchanged, and these two are still refused.
+        for bad in ("no_such_axis", "meta:"):
+            with pytest.raises(ValueError, match="Invalid group_by"):
+                captured["query"](status="deferred", group_by=bad)
 
     def test_the_meta_axis_groups_by_a_top_level_key(self, conn):
         self._file(conn, "CB-1", meta={"found_by": "ruff"})
@@ -3826,10 +3850,12 @@ class TestGroupingAxes:
         path is bound rather than a stylistic preference: interpolated, the key
         `found'by` closes the literal and yields
         `sqlite3.OperationalError: near "by": syntax error` — a quoting break,
-        which is the doorway an injection walks through. Note the apostrophe is
-        deliberately NOT in `_META_PATH_METACHARS`: it is not path GRAMMAR, it is
-        SQL grammar, and binding is what makes it harmless, so the key is
-        accepted and answered rather than refused.
+        which is the doorway an injection walks through. The apostrophe was
+        deliberately never in the old path-metacharacter refusal list (deleted by
+        CB-167, which is why this docstring no longer names it): it is not path
+        GRAMMAR, it is SQL grammar, and BINDING is what makes it harmless — so
+        the key is accepted and answered rather than refused. CB-167 widened that
+        argument from the path to the key NAME itself, which is now bound too.
 
         The space is kept as a second case, now honestly labelled: it proves the
         key survives a character that needs no quoting, not that the path is bound.
@@ -3881,31 +3907,188 @@ class TestGroupingAxes:
         }
         assert groups == {"42", "true", "false"}
 
-    def test_a_meta_key_with_a_dot_is_refused_and_names_the_card(self, conn):
-        """SQLite reads `$.a.b` as a PATH: on `{"a.b": 1, "a": {"b": 2}}` it
-        answers 2, the nested value, not the top-level key that was asked for.
-        The two existing `meta_key` FILTERS build the path exactly that way and
-        are deliberately untouched — that asymmetry is CB-167, and the refusal
-        names it so a reader meets the debt instead of a silent wrong answer.
+    def test_a_meta_key_with_a_dot_groups_by_the_LITERAL_key(self, conn):
+        """THE TWO-SIDED PIN. A one-sided version cannot see the defect.
 
-        MUTANT this kills: dropping the refusal. Note it must NOT be replaced by
-        a test asserting path semantics — that would ratify the wrong answer."""
-        self._file(conn, "CB-1", meta={"misassigned_to_1.81": "x"})
-        with pytest.raises(ValueError, match="CB-167"):
-            findings.query_findings(conn, group_by="meta:misassigned_to_1.81")
-        with pytest.raises(ValueError, match="CB-167"):
-            findings.get_stats(conn, group_by="meta:misassigned_to_1.81")
+        SQLite reads `$.a.b` as a PATH: on `{"a.b": 1, "a": {"b": 2}}` it answers
+        2, the NESTED value, not the top-level key asked for. So it is not enough
+        that the literal key is found — the NESTED neighbour must NOT be, or a
+        mutant returning both passes. Both rows exist here and both directions are
+        asserted, on the real key from this repository's own tracker."""
+        self._file(conn, "CB-1", meta={"misassigned_to_1.81": "LITERAL"})
+        self._file(conn, "CB-2", meta={"misassigned_to_1": {"81": "NESTED"}})
+        for reader in (
+            lambda: [
+                g["group_key"]
+                for g in findings.query_findings(conn, group_by="meta:misassigned_to_1.81")[
+                    "groups"
+                ]
+            ],
+            lambda: list(findings.get_stats(conn, group_by="meta:misassigned_to_1.81")["groups"]),
+        ):
+            assert reader() == ["LITERAL"], reader()
+        hits = findings.query_findings(conn, meta_key="misassigned_to_1.81")
+        assert [f["id"] for f in hits["findings"]] == ["CB-1"], hits
+        # BOTH filter branches, per the brief: the key alone (above) and the key
+        # WITH a value. The value is a STRING deliberately — `json_each.value`
+        # hands back a number for a numeric key and `360 = '360'` is false in
+        # SQLite, so a numeric fixture would redden for a type reason that has
+        # nothing to do with the path (CB-276 owns that, and it is not fixed here).
+        pair = findings.query_findings(conn, meta_key="misassigned_to_1.81", meta_value="LITERAL")
+        assert [f["id"] for f in pair["findings"]] == ["CB-1"], pair
+        assert findings.query_findings(
+            conn, meta_key="misassigned_to_1.81", meta_value="NESTED"
+        )["total"] == 0
 
-    @pytest.mark.parametrize("key", ["a.b", "a[0]", 'q"k', "a]b"])
-    def test_every_path_metacharacter_is_refused(self, conn, key):
-        with pytest.raises(ValueError, match="CB-167"):
-            findings.query_findings(conn, group_by=f"meta:{key}")
+    @pytest.mark.parametrize("key", ["a.b", "a[0]", 'q"k', "a]b", "back\\slash", "a\\", "\\"])
+    def test_every_former_path_metacharacter_is_now_GROUPABLE(self, conn, key):
+        """CB-167 inverted this too. `back\\slash`, `a\\` and `\\` are the three
+        rows the brief's rejected escape rule needed and its earlier draft broke:
+        a name ENDING in a backslash ate its own closing quote. None of them can
+        misbehave now, because no quoting happens at all."""
+        self._file(conn, "CB-1", meta={key: "V"})
+        got = findings.query_findings(conn, group_by=f"meta:{key}")
+        assert [g["group_key"] for g in got["groups"]] == ["V"], (key, got)
+        assert findings.query_findings(conn, meta_key=key)["total"] == 1
 
     def test_an_empty_meta_key_is_refused_as_input_not_as_sqlite(self, conn):
         """`json_extract(doc, '$.')` raises OperationalError — an environmental
-        exception class out of a domain function, which no CLI arm classifies."""
+        exception class out of a domain function, which no CLI arm classifies.
+
+        CB-167 NOTE: the mechanism this refusal guarded against is gone — an empty
+        name is a perfectly good bound value and `json_each` compares it happily.
+        The refusal is kept anyway and is NOT dead weight, because `meta_key=""`
+        means "no filter" on the sibling FILTER surface by the CB-25 convention,
+        so accepting it here would give one spelling two meanings across two
+        surfaces. That asymmetry is declared rather than resolved: resolving it
+        means changing the empty-filter convention, which lives outside this card.
+        """
         with pytest.raises(ValueError):
             findings.query_findings(conn, group_by="meta:")
+
+    # --- CB-167 premise pin -----------------------------------------------
+
+    def test_premise_every_key_name_is_expressible_as_a_bound_value(self, conn):
+        """THE PREMISE PIN §4.3 REQUIRES, AND IT PINS SOMEBODY ELSE'S BEHAVIOUR.
+
+        Whether a name is expressible is a property of SQLite's comparison, not a
+        decision this package makes. The chosen mechanism binds the name as a
+        value, so the answer should be "all of them" — but that must be CHECKED
+        against the engine rather than assumed, or a SQLite upgrade would return
+        silent wrong answers instead of a red suite. This is the same shape as the
+        git and argparse premise tests elsewhere in this tree.
+
+        The corpus is the one the unit enumerated: every ASCII code in four
+        positions — including END OF NAME, where the rejected escape rule failed
+        and where a probe naturally would NOT put the character — plus non-BMP
+        characters, the empty name, and the combinations that broke earlier drafts.
+
+        TWO-SIDED BY CONSTRUCTION: every name is stored in ONE document, so a
+        lookup that returned a neighbour's value fails the equality. That is what
+        makes this pin discriminating; a per-name document would not be.
+        """
+        names: list[str] = []
+        for code in range(128):
+            c = chr(code)
+            names += [c, c + "z", "a" + c + "z", "a" + c]
+        names += ["ключ", "😀", "a😀b", "\U0001f600\U0001f601", "naïve.ключ"]
+        names += ["a.b", "a[0]", 'quo"te', "back\\slash", "a\\", "\\", 'a\\"b', "\\\\"]
+        names += ['a".b', 'a\\".b', 'a\\\\"b', "a\\u0022b", "$.a", '"a"']
+        names = list(dict.fromkeys(names))
+
+        doc = {n: i for i, n in enumerate(names)}
+        self._file(conn, "CB-1", meta=doc)
+        stored = conn.execute("SELECT meta FROM findings WHERE id='CB-1'").fetchone()["meta"]
+        assert json.loads(stored) == doc, "fixture did not store what the test believes"
+
+        broken = []
+        for n, want in doc.items():
+            rows = conn.execute(
+                "SELECT je.value FROM json_each(?) je WHERE je.key = ?", (stored, n)
+            ).fetchall()
+            if [r["value"] for r in rows] != [want]:
+                broken.append((n, n.encode("utf-8", "surrogatepass"), [r["value"] for r in rows]))
+        assert not broken, (
+            f"{len(broken)} of {len(names)} key names are no longer expressible as a bound "
+            f"value on SQLite {sqlite3.sqlite_version}; first few: {broken[:5]}"
+        )
+
+    def test_premise_a_json_path_still_cannot_express_a_NUL_bearing_key(self, conn):
+        """The OTHER half of the premise, and the reason the path form was
+        rejected rather than merely disliked.
+
+        If a future SQLite stopped truncating a path label at a NUL, the argument
+        recorded at `_META_OBJECT_GUARD` would no longer hold and somebody should
+        re-read it rather than trust a stale claim — the same job
+        `TestKnownLimits` does for the worktree harness. This asserts the defect
+        STILL reproduces; it is not asserting that we depend on it."""
+        doc = '{"a\\u0000z": "FROM_NUL_KEY", "a": "FROM_PLAIN_KEY"}'
+        got = conn.execute("SELECT json_extract(?, '$.\"a\"')", (doc,)).fetchone()[0]
+        assert got == "FROM_NUL_KEY", (
+            "SQLite no longer truncates a JSON path label at a NUL — re-read the "
+            "CB-167 rationale at `_META_OBJECT_GUARD`, it may now be out of date"
+        )
+
+    def test_a_row_whose_meta_does_not_parse_is_skipped_not_fatal(self, conn):
+        """MUTANT THIS KILLS: deleting `_META_OBJECT_GUARD` from either surface.
+
+        `json_each` RAISES on malformed JSON, so ONE hand-edited row would abort
+        the whole query — and the guard is what stops that. Written because the
+        mutant SURVIVED the first draft of these pins: the reasoning was in a
+        comment and nothing executed it.
+
+        Note this is a REPAIR, not a new promise: today's `json_extract` form
+        aborts on the same row (asserted below), so the guard makes the filter
+        strictly more robust than the code it replaces rather than papering over
+        a regression the new mechanism introduced."""
+        self._file(conn, "CB-1", meta={"k": "GOOD"})
+        self._file(conn, "CB-2", meta={"k": "ALSO_GOOD"})
+        conn.execute("UPDATE findings SET meta = ? WHERE id = 'CB-2'", ('{"k": ',))
+        conn.commit()
+
+        # the premise: the OLD mechanism really does die on this row
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute(
+                "SELECT COUNT(*) FROM findings WHERE json_extract(meta, '$.k') IS NOT NULL"
+            ).fetchone()
+
+        got = findings.query_findings(conn, meta_key="k")
+        assert [f["id"] for f in got["findings"]] == ["CB-1"], got
+        grouped = findings.query_findings(conn, group_by="meta:k")
+        assert [g["group_key"] for g in grouped["groups"]] == ["GOOD"], grouped
+        stats = findings.get_stats(conn, group_by="meta:k")
+        assert list(stats["groups"]) == ["GOOD"], stats
+        assert stats["groups"]["GOOD"]["total"] == 1, stats
+
+    def test_a_duplicated_key_yields_ONE_row_not_two(self, conn):
+        """MUTANT THIS KILLS: joining `json_each` instead of using a correlated
+        subquery with `LIMIT 1` on the grouping axis.
+
+        A JSON object may carry the same key twice — `json.dumps` cannot write
+        that, but a hand-edited or imported document can and `json_valid` accepts
+        it. Under a JOIN the finding appears TWICE, so `get_stats` counts it twice
+        and its occurrence SUM doubles while the finding count does not: one
+        group's two numbers describing different populations.
+
+        Written because this mutant SURVIVED the first draft too. The value
+        assertion also pins WHICH duplicate wins — `json_extract` returned the
+        first, and the replacement must not quietly change that."""
+        self._file(conn, "CB-1", meta={"k": "PLACEHOLDER"})
+        conn.execute(
+            "UPDATE findings SET meta = ?, occurrence_count = 7 WHERE id = 'CB-1'",
+            ('{"k": "FIRST", "other": 1, "k": "SECOND"}',),
+        )
+        conn.commit()
+        grouped = findings.query_findings(conn, group_by="meta:k")
+        assert [(g["group_key"], g["count"]) for g in grouped["groups"]] == [("FIRST", 1)], grouped
+        stats = findings.get_stats(conn, group_by="meta:k")
+        assert list(stats["groups"]) == ["FIRST"], stats
+        assert stats["groups"]["FIRST"]["total"] == 1, stats
+        # THE discriminator: under a JOIN this is 14 — the finding counted once
+        # but its occurrences counted twice, which is the defect in its most
+        # damaging form because the two numbers still look plausible side by side.
+        assert stats["groups"]["FIRST"]["occurrences"] == 7, stats
+        assert findings.query_findings(conn, meta_key="k")["total"] == 1
 
     # --- one definition, both sites ---------------------------------------
 
@@ -4031,6 +4214,11 @@ class TestGroupingAxesCliContract:
 
     @pytest.fixture
     def project(self, tmp_project, conn):
+        # CB-167 added the `d.k` / `d`->`k` pair to the EXISTING rows rather than
+        # as new ones, deliberately: several tests in this class assert the
+        # population is 3, so a fourth row would have made this fixture change
+        # break them for a reason having nothing to do with what it tests.
+        extra: tuple[dict, ...] = ({"d.k": "DOTTED"}, {"d": {"k": "NESTED"}}, {})
         for i, tags in enumerate((["a", "b"], ["a"], []), start=1):
             findings.add_finding(
                 conn,
@@ -4039,7 +4227,7 @@ class TestGroupingAxesCliContract:
                 file=f"f{i}.py",
                 description=f"d{i}",
                 tags=tags,
-                meta={"found_by": "ruff", "n": i},
+                meta={"found_by": "ruff", "n": i, **extra[i - 1]},
                 finding_id=f"CB-{i}",
             )
         conn.close()
@@ -4108,12 +4296,17 @@ class TestGroupingAxesCliContract:
         assert r.returncode == 1
         assert "Traceback" not in r.stderr
 
-    def test_a_dotted_meta_key_refuses_on_both_verbs(self, project):
-        for args in (("query", "--group-by", "meta:a.b"), ("stats", "--by", "meta:a.b")):
+    def test_a_dotted_meta_key_is_accepted_on_both_verbs(self, project):
+        """CB-167 inverted this. Both verbs used to exit 1 naming the card; the
+        grammar is decided now, so both must answer — and answer about the
+        LITERAL key, which is what the third assertion checks by requiring the
+        value stored under the dotted key rather than the nested one."""
+        for args in (("query", "--group-by", "meta:d.k"), ("stats", "--by", "meta:d.k")):
             r = self._run(project, *args)
-            assert r.returncode == 1, (args, r.stdout, r.stderr)
-            assert "CB-167" in r.stderr, (args, r.stderr)
-            assert "Traceback" not in r.stderr
+            assert r.returncode == 0, (args, r.stdout, r.stderr)
+            assert "Traceback" not in r.stderr, (args, r.stderr)
+            assert "DOTTED" in r.stdout, (args, r.stdout)
+            assert "NESTED" not in r.stdout, (args, r.stdout)
 
 
 # --- CB-196 ---------------------------------------------------------------
