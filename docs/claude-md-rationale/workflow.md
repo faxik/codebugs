@@ -249,8 +249,8 @@ pipeline on the branch and refused at the lock — the first bootstrap wall.
 `_guard_enforcement_armed` runs *before* the merge that first puts `tools/pre-merge-commit-hook.sh`
 on main, so an unconditional check would have made the commit introducing the hook unlandable by the
 harness it extends. That is why the condition had to be the monotonic one; **its three attempts are
-recorded once, under [the guards that had to be re-read fail-closed](#сторожа-читают-fail-closed),
-and are not repeated here** — the same reason the rule itself is stated at one site. The half this
+recorded once, under `#сторожа-читают-fail-closed` above, and are not repeated here** — the same
+reason the rule itself is stated at one site. The half this
 section owns is the one the bootstrap wall turns on: gating on the file EXISTING meant one
 `rm tools/pre-merge-commit-hook.sh` both dangled the installed hook (git skips a dangling hook
 silently) **and** made the guard skip its check and return 0, so the wall would have been got past

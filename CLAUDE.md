@@ -202,8 +202,8 @@ branch. That history is read with `--all` — a clone with no *local* main
 (`git clone --single-branch --branch fix/…` is enough, and `origin/main` being present does not
 help) would otherwise collapse it — **and it distinguishes an ERROR from an empty result**, failing
 closed on the error: `2>/dev/null || true` makes those identical, and `git log --all -- <path>`
-exits 128 in a `--filter=tree:0` clone whose promisor remote has gone away. **Two later paragraphs
-need this condition and neither restates it** — the T-23 one below, and the bootstrap wall at the
+exits 128 in a `--filter=tree:0` clone whose promisor remote has gone away. **Later paragraphs need
+this condition and none of them restates it** — the T-23 one below, and the bootstrap wall at the
 end of this section — because a four-review-round condition in two places is two rules one edit
 apart, which is this section's own argument about `_hook_source_known` applied to the prose that
 describes it.
