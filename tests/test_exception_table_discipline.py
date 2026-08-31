@@ -49,6 +49,22 @@ wider than its check is the defect this direction exists to close.
 5. **Whether a declared non-table really is one.** ``DECLARED_EXCEPTIONS``
    below carries the gate's own judgement calls, and it is subject to the same
    two halves as everything it exempts (`TestTheGatesOwnTable`).
+6. **A half written in a shape it does not recognise.** The two halves are
+   found by SHAPE, and the shapes are listed at `_analyse_function`: a reason
+   gate reads the table's values through ``.items()``/``.values()``/``.get()``
+   and applies a string predicate to the bound value; a self-deletion gate
+   enumerates the KEYS and holds one against something that is not the table
+   (a membership test, a ``.get`` on another mapping, or a set DIFFERENCE with
+   the table on the left). A perfectly good gate written another way — an
+   equality loop, a ``startswith`` — is reported MISSING, not accepted. That
+   direction is deliberate and it cost something real while this gate was
+   being built: the first self-deletion check written for ``_PRUNED_PATHS``
+   used ``startswith`` and was refused, so it was rewritten as a membership
+   test. A false refusal is loud and gets fixed; a false pass is the thing
+   this file exists to stop.
+7. **Whether the world a gate checks against is the RIGHT world.** The gate
+   sees that keys are held against something external. It cannot tell a real
+   oracle from a set that trivially contains every key.
 
 The recognition rule and its cost are argued at ``_is_candidate``.
 """
@@ -142,21 +158,22 @@ DECLARED_EXCEPTIONS: dict[tuple[str, str], str] = {
 # --------------------------------------------------------------------------
 
 
-def _test_sources() -> list[tuple[str, ast.Module]]:
+def _test_sources(root: str = TESTS_DIR) -> list[tuple[str, ast.Module]]:
     """Every ``.py`` file under ``tests/``, parsed, deepest paths last.
 
     ``conftest.py`` is deliberately included: two of the five tables CB-179
     found incomplete live there, and excluding a file because it holds no
     tests is exactly the unchecked premise this gate exists to refuse.
     """
+    base = os.path.dirname(os.path.abspath(root))
     out = []
-    for dirpath, dirnames, filenames in os.walk(TESTS_DIR):
+    for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
         for filename in sorted(filenames):
             if not filename.endswith(".py"):
                 continue
             path = os.path.join(dirpath, filename)
-            rel = os.path.relpath(path, REPO_ROOT).replace(os.sep, "/")
+            rel = os.path.relpath(path, base).replace(os.sep, "/")
             with open(path, encoding="utf-8") as handle:
                 source = handle.read()
             out.append((rel, ast.parse(source, filename=rel)))
@@ -203,14 +220,14 @@ class Table:
         return (self.file, self.qualname)
 
 
-def _declared_tables() -> list[Table]:
+def _declared_tables(root: str = TESTS_DIR) -> list[Table]:
     """Every container assigned at module or class level under ``tests/``.
 
     Function bodies are not descended into: see limit 1 in the module
     docstring.
     """
     tables: list[Table] = []
-    for rel, tree in _test_sources():
+    for rel, tree in _test_sources(root):
 
         def walk(body, scope):
             for stmt in body:
@@ -488,14 +505,14 @@ def _analyse_function(
     return uses
 
 
-def _collect_uses(tables: list[Table]) -> dict[tuple[str, str], _Use]:
+def _collect_uses(tables: list[Table], root: str = TESTS_DIR) -> dict[tuple[str, str], _Use]:
     """Fold every test function's verdict onto the table it actually names."""
     by_name: dict[str, list[Table]] = {}
     for table in tables:
         by_name.setdefault(table.name, []).append(table)
 
     verdicts: dict[tuple[str, str], _Use] = {t.key: _Use() for t in tables}
-    for rel, tree in _test_sources():
+    for rel, tree in _test_sources(root):
         registries = _registries(tree)
         local = {t.name for t in tables if t.file == rel}
         visible = {name for name in by_name if name in local or len(by_name[name]) == 1}
@@ -521,7 +538,7 @@ def _collect_uses(tables: list[Table]) -> dict[tuple[str, str], _Use]:
 # --------------------------------------------------------------------------
 
 
-def _mark_exempting_continue(tables: list[Table]) -> None:
+def _mark_exempting_continue(tables: list[Table], root: str = TESTS_DIR) -> None:
     """A membership test that syntactically guards a ``continue``.
 
     This is the second recogniser, and it exists because the FIRST one cannot
@@ -541,7 +558,7 @@ def _mark_exempting_continue(tables: list[Table]) -> None:
     """
     names = {t.name for t in tables}
     hits: set[str] = set()
-    for _rel, tree in _test_sources():
+    for _rel, tree in _test_sources(root):
         for node in ast.walk(tree):
             if not isinstance(node, ast.If):
                 continue
@@ -588,7 +605,7 @@ def _is_candidate(table: Table) -> bool:
     return table.reason_shaped or table.exempting_continue
 
 
-def _read_anywhere(tables: list[Table]) -> dict[tuple[str, str], bool]:
+def _read_anywhere(tables: list[Table], root: str = TESTS_DIR) -> dict[tuple[str, str], bool]:
     """Whether the resolver can find ANY read of each table.
 
     A candidate nothing appears to consult is refused rather than reported
@@ -600,7 +617,7 @@ def _read_anywhere(tables: list[Table]) -> dict[tuple[str, str], bool]:
     for table in tables:
         by_name.setdefault(table.name, []).append(table)
     seen: dict[tuple[str, str], bool] = {t.key: False for t in tables}
-    for rel, tree in _test_sources():
+    for rel, tree in _test_sources(root):
         registries = _registries(tree)
         local = {t.name for t in tables if t.file == rel}
         visible = {name for name in by_name if name in local or len(by_name[name]) == 1}
@@ -718,3 +735,155 @@ def test_a_declared_non_table_is_really_declared_once(key):
     """A key may name at most one candidate, so a row cannot cover two tables."""
     owners = [t for t in _CANDIDATES if t.key == key]
     assert len(owners) == 1, (owners, key)
+
+
+# --------------------------------------------------------------------------
+# The gate against itself.
+# --------------------------------------------------------------------------
+
+
+def _verdicts(root: str) -> dict[tuple[str, str], tuple[Table, _Use, bool]]:
+    """Run the whole pipeline over an arbitrary ``tests``-shaped directory."""
+    tables = _declared_tables(root)
+    _mark_exempting_continue(tables, root)
+    uses = _collect_uses(tables, root)
+    read = _read_anywhere(tables, root)
+    return {t.key: (t, uses[t.key], read[t.key]) for t in tables if _is_candidate(t)}
+
+
+_GOOD_TABLE = '''
+DECLARED: dict[str, str] = {"alpha": "because alpha is fine"}
+
+
+def live():
+    return ["alpha"]
+
+
+class TestIt:
+    def test_the_gate(self):
+        offenders = [x for x in live() if x not in DECLARED]
+        assert not offenders
+
+    def test_every_row_carries_a_reason(self):
+        empty = [k for k, reason in DECLARED.items() if not reason.strip()]
+        assert not empty
+
+    def test_no_row_is_stale(self):
+        stale = [k for k in DECLARED if k not in live()]
+        assert not stale
+'''
+
+
+class TestMutantOracle:
+    """A gate nothing can make fail is not a gate (CB-179 §5).
+
+    Every case below is built in a throwaway directory rather than by editing
+    the real tree, so the probe cannot leave litter behind and cannot depend
+    on what the suite happens to contain today. The CONTROL matters as much as
+    the mutants: without it, a pipeline that flagged everything would pass all
+    three mutant cases and prove nothing.
+    """
+
+    @staticmethod
+    def _plant(tmp_path, body: str, name: str = "test_planted.py") -> str:
+        root = tmp_path / "tests"
+        root.mkdir(exist_ok=True)
+        (root / name).write_text(body, encoding="utf-8")
+        return str(root)
+
+    def test_control_a_table_with_both_halves_is_accepted(self, tmp_path):
+        root = self._plant(tmp_path, _GOOD_TABLE)
+        _table, use, read = _verdicts(root)[("tests/test_planted.py", "DECLARED")]
+        assert read and use.reason_half and use.staleness_half
+
+    def test_a_reasonless_row_is_caught(self, tmp_path):
+        """A row with no reason must fail the table's OWN reason gate.
+
+        The gate here is structural — it asks whether a reason check exists —
+        so the mutation that proves the composition is the one that DELETES
+        the check, below. This case proves the other direction: the check the
+        gate demands is a real one, which fails on a real blank row.
+        """
+        body = _GOOD_TABLE.replace(
+            '{"alpha": "because alpha is fine"}', '{"alpha": "because alpha is fine", "beta": ""}'
+        ).replace('return ["alpha"]', 'return ["alpha", "beta"]')
+        namespace: dict = {}
+        exec(compile(body, "<mutant>", "exec"), namespace)  # noqa: S102
+        with pytest.raises(AssertionError):
+            namespace["TestIt"]().test_every_row_carries_a_reason()
+
+    def test_a_row_naming_something_gone_is_caught(self, tmp_path):
+        """The self-deletion half, proved the same way: a stale row must fail."""
+        body = _GOOD_TABLE.replace(
+            '{"alpha": "because alpha is fine"}',
+            '{"alpha": "because alpha is fine", "vanished": "named a thing that left"}',
+        )
+        namespace: dict = {}
+        exec(compile(body, "<mutant>", "exec"), namespace)  # noqa: S102
+        with pytest.raises(AssertionError):
+            namespace["TestIt"]().test_no_row_is_stale()
+
+    def test_a_table_that_loses_its_reason_gate_is_flagged(self, tmp_path):
+        root = self._plant(tmp_path, _GOOD_TABLE.split("    def test_every_row_carries")[0])
+        _table, use, _read = _verdicts(root)[("tests/test_planted.py", "DECLARED")]
+        assert not use.reason_half
+
+    def test_a_table_that_loses_its_self_deletion_gate_is_flagged(self, tmp_path):
+        root = self._plant(tmp_path, _GOOD_TABLE.split("    def test_no_row_is_stale")[0])
+        _table, use, _read = _verdicts(root)[("tests/test_planted.py", "DECLARED")]
+        assert use.reason_half and not use.staleness_half
+
+    def test_a_table_held_only_against_itself_is_not_credited(self, tmp_path):
+        """A key checked against the table it came from proves nothing.
+
+        `k not in DECLARED` inside a loop over `DECLARED` is vacuous by
+        construction, and a gate that accepted it would let a table declare
+        its own self-deletion out of thin air.
+        """
+        body = _GOOD_TABLE.replace("if k not in live()", "if k not in DECLARED")
+        root = self._plant(tmp_path, body)
+        _table, use, _read = _verdicts(root)[("tests/test_planted.py", "DECLARED")]
+        assert not use.staleness_half
+
+    def test_a_frozenset_with_no_reason_field_is_still_recognised(self, tmp_path):
+        """The `_EXCLUDED_ACTION_ATTRS` shape: no reasons, so no reason gate.
+
+        Recognition comes from the exempting `continue`, which is the only way
+        a table carrying no reason field can be seen at all — and seeing it is
+        the whole reason that second recogniser exists.
+        """
+        body = (
+            "SKIP = frozenset({'alpha'})\n\n\n"
+            "def walk(items):\n"
+            "    out = []\n"
+            "    for key in items:\n"
+            "        if key in SKIP:\n"
+            "            continue\n"
+            "        out.append(key)\n"
+            "    return out\n\n\n"
+            "def test_walk():\n"
+            "    assert walk(['alpha', 'beta']) == ['beta']\n"
+        )
+        root = self._plant(tmp_path, body)
+        table, use, read = _verdicts(root)[("tests/test_planted.py", "SKIP")]
+        assert table.exempting_continue and read
+        assert not use.reason_half and not use.staleness_half
+
+    def test_an_ordinary_fixture_is_not_recognised_as_a_table(self, tmp_path):
+        """The other direction: the recogniser must not sweep in everything.
+
+        A list of strings nobody tests membership against, and a dict of
+        non-string values, are not exception tables and must never reach the
+        gate — otherwise `DECLARED_EXCEPTIONS` would fill with fixtures and
+        stop being read.
+        """
+        body = (
+            "NAMES = ['alpha', 'beta']\n"
+            "COUNTS = {'alpha': 1, 'beta': 2}\n\n\n"
+            "def test_it():\n"
+            "    assert len(NAMES) == len(COUNTS)\n"
+        )
+        root = self._plant(tmp_path, body)
+        verdicts = _verdicts(root)
+        assert ("tests/test_planted.py", "NAMES") not in verdicts
+        assert ("tests/test_planted.py", "COUNTS") not in verdicts
