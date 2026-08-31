@@ -282,3 +282,47 @@ consulted them on query; and `blockers.query_blockers` had its `TRIGGER_TYPES` c
 enumeration of the filters already known, and therefore could not find `trigger_type`. That is this
 repository's recurring lesson in a new place: a rule expressed as an enumeration is the letter, and
 the letter cannot decide.
+
+---
+
+### CB-45 — the similarity extension {#cb-45-расширение-похожести}
+
+**Justifies the rule** "Similarity extension (CB-45)", `CLAUDE.md` → `## Code rules` →
+`### Database`.
+
+**How `DEFAULT_THRESHOLD = 0.7` was calibrated.** On the 3162-row autosorter corpus it collapses 102
+rows into 11 coherent families and splits the 115-row gate category into its ~10 genuinely distinct
+failure tails. The CB-45 card's proposed 0.95 was measured and REJECTED: 77 rows, and the target
+family never unifies — unifying it would be the false merge CB-43's RISK section forbids. The owner
+was notified per the letter-fix protocol.
+
+**Two findings from one Codex diff review.** The empty-category pool defect — every empty-category
+observation pooling the whole table — and, in the same round, `group_report`'s bare
+`status == "all"` sentinel test, which was replaced with a type-pinned one because of CB-25's
+`mock.ANY` trap.
+
+**The registry-read exemption was a same-day review finding**: core must not know an extension's key
+names.
+
+**What the diameter measurement is worth.** The corpus's 43-row family hides a 0.392 pair behind
+0.7-plus edges, which is why `min_pair_score` is computed over all member pairs rather than over the
+recorded edges.
+
+---
+
+### CB-60 / CB-61 — category normalization and the retro-fold {#cb-60-нормализация-категорий}
+
+**Justifies the rule** "Category spelling is normalized and MINTING a new category is gated",
+`CLAUDE.md` → `## Code rules` → `### Database`.
+
+**The measured identity fork that motivated it.** `process-improvement` versus
+`process_improvement` — two spellings of one category, hashing to two fingerprints.
+
+**A sentence that stopped being true, and how.** The bullet used to close on "deliberately left
+open" after saying the ADD path never rewrites a stored row. CB-61 built the retro-fold as a separate
+and explicit operation, so the clause was replaced rather than left to rot.
+
+**What actually happened on this tracker, and in what order.** The separation of code from decision is
+the rule, and it is also the history: the run was ratified as its own decision after the code had
+landed, and this tracker's corpus was folded once — **17 rows, no collisions, nothing unverifiable** —
+which is why it no longer carries variant spellings.
