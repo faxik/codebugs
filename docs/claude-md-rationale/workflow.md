@@ -98,3 +98,138 @@ door onto the same defect.
 
 **The non-ASCII refusal was the mirror image of a bug this repo already had**, the same default
 having once made a guard silently accept what it was there to refuse.
+
+---
+
+### CB-57 — the merge gate {#cb-57-гейт-мержа}
+
+**Justifies the rules** "The merge gate is keyed on `GITHEAD_`", "`GITHEAD_` is not always a NAME",
+"The sanctioned-type rule governs LOCAL branches" and the two limits recorded with them —
+`CLAUDE.md` → `## Workflow`.
+
+**CB-57's own prescription turned out to be wrong, verified by running it.** The card said to
+validate "the branch behind `MERGE_HEAD`" in a `pre-merge-commit` hook, and on git 2.53 that file
+does not exist on a clean merge at all.
+
+**A cross-model disagreement settled by measurement.** One reviewer asserted that `GITHEAD_` carries
+a `branch 'main' of <url>` description when the merge head comes from a pull. It does not, on this
+version — the other reviewer reproduced the raw OID, and so did I. Measured, not argued. The first
+draft therefore refused every pull, while its own comment and this section both promised pulls were
+fine.
+
+**The remote-ref rule cost two bugs in the same three lines.** Requiring all refs to qualify refused
+a real `git pull` whenever upstream had another branch cut at that commit; the
+`refs/remotes/<r>/HEAD` alias then disqualified the very pull the fallback existed for. Both were
+reproduced, and the second was caught by this repo's own test minutes after the first fix.
+
+**The trusted-ref scope was narrowed twice under review.** It first trusted **any** `<remote>/main`,
+then any **configured** remote's — at which point `git remote add junk <anything>` plus a fetch was
+still a two-command bypass. Only main's declared upstream counts now.
+
+**The local-branch rule survived three review rounds** before reaching the form recorded beside it.
+
+---
+
+### The shared predicate, and the honest scope {#общий-предикат-и-честная-область}
+
+**Justifies the rules** "Two of the three hooks share a predicate", "What this does NOT do" and
+"`install-hooks.sh` sets `merge.ff=false` before anything arming-related can abort" —
+`CLAUDE.md` → `## Workflow`.
+
+**Why the byte-identity test compares blocks verbatim.** The earlier substring test was shown
+insufficient by rewriting the merge hook as a prefix test while leaving the regex assignment in
+place, which kept it green.
+
+**Why `git subtree add` is in the bypass list.** Round-4 review landed content on main with it while
+the list did not mention it.
+
+**The paragraph that listed what the harness does NOT do was itself wrong about one entry.** Its
+first draft claimed a clean cherry-pick or revert *does* run `commit-msg`, so the plan-note naming
+rule fired on it. Measured on git 2.53: it does not. The claim was written into the very paragraph
+that exists to list what the harness cannot do, and it survived a green suite because nothing pinned
+it — a gate described better than it behaves, in the section whose subject is exactly that.
+
+**The installer ordering was reproduced in review and verified fixed by running it.** An earlier
+draft of that line read "a step that cannot fail goes first", and review pointed out that four
+fallible commands precede it, which is why the rule now states the precise claim instead.
+
+---
+
+### T-23 — naming a plan note in the commit message {#t-23-именование-заметки-плана}
+
+**Justifies the rules** "A plan note landing on main must be NAMED in the commit message" and the
+five that follow it — `CLAUDE.md` → `## Workflow`.
+
+**Why it stopped being prose.** The convention was adopted and broken again; a convention broken four
+times after adoption is this section's own opening lesson.
+
+**Neither auto-generated source was foreseen when the rule was specified.** git's default template
+would have passed every editor-based commit vacuously, and `git commit -v` would have satisfied the
+gate from its own diff.
+
+**The matcher hole, reproduced by cross-model review.** With `a b.md` and `b.md` both staged and only
+`a b.md` named, the stranger's note landed unnamed — measured: rc=0, both files committed.
+
+**The cost of refusing odd basenames was measured before it was accepted.** 0 of this repo's 94 plan
+notes carried a space or ASCII punctuation outside `[A-Za-z0-9._-]`; the convention is already ASCII
+slugs.
+
+**The bootstrap wall, for the third time.** `_guard_enforcement_armed` reads `REPO_ROOT/tools/<hook>`
+from the PRIMARY checkout and gates on whether the path has history, so adding the clause in the same
+change that introduced the source would have made that change unlandable by the harness it extends —
+and `install-hooks.sh` could not pre-arm it either, because it symlinks into main's `tools/`, where
+the file did not exist yet. So the hook landed first, armed by the installer alone, and the guard
+followed once `tools/commit-msg-hook.sh` had history on main. The paragraph this replaced said the
+opposite, for a reason that was true at the time.
+
+---
+
+### CB-135 / CB-140 — pinning the interpreter {#cb-135-закрепление-интерпретатора}
+
+**Justifies the rules** "`.python-version` is the SINGLE SOURCE for the interpreter" and the eleven
+that follow it — `CLAUDE.md` → `## Workflow`.
+
+**The incident, 2026-08-22.** A manager reported "1943 passed" from a worktree on Python 3.13.3
+while the same suite on the landed main, under the documented command, gave "1 failed, 1942 passed"
+on 3.14.4. The red was on main BEFORE the merge, and no finish could ever have seen it.
+
+**The second, unnamed variable.** The rule "never validate a worktree's changes from main", because
+`pythonpath=["src"]` resolves against the checkout you run in, is correct for its own reason — and it
+is exactly what introduced *which python*. Before the pin there were three untracked trees: main took
+the system interpreter its `.venv` was built with, a fresh worktree took uv's default (the newest
+uv-MANAGED install, which is a different thing), and `.github/workflows/ci.yml` named no version at
+all. `uv.lock` had already fixed the *dependency* versions, which is what made the interpreter the
+conspicuous remaining one — it is **not** true that everything else is nailed down, and an earlier
+draft of that sentence said so. uv's own version, the platform, and the BUILD of a given CPython all
+still vary.
+
+**Why 3.14.4 and not another version.** It is what main already ran, so landing the pin moved no
+environment and opened no window in which main was stale. The suite is green on it (1949 passed,
+measured on main after CB-134 landed) and equally green on 3.11.12, 3.12.10 and 3.13.3, so no red
+version forced the choice, and the newest stable CPython is where the tested surface should sit.
+Measured: `cpython-3.14.4-linux-x86_64-gnu` is `<download available>`, which is what makes the pin
+reachable in CI.
+
+**The UV_PYTHON clause was a cross-model review finding**; the first draft had only the existence
+check.
+
+**How uv behaves, measured.** With `.venv` at 3.13.3 and the pin at 3.14.4, a plain `uv run` printed
+"Removed virtual environment", recreated it and ran — no `uv sync` needed. The design brief had
+assumed the opposite.
+
+**Why the older fail-closed test stopped discriminating its mutant (CB-140).** The reason is NOT that
+the checks were reordered: the shape check on `wt_ver` still runs first, exactly where it always did,
+and the pin check sits further down, unchanged in position. What changed is that the pin check ALSO
+refuses an empty `wt_ver` on its own — `""` is unequal to the pin and does not extend it with a dot —
+so with the shape check neutered by a mutant, execution simply falls through to the still-present pin
+check, which independently produces the same exit 14. The test asserts only the return code, so it
+cannot tell which of the two refused: measured, a mutant turning `_interpreter_version_is_sane` into
+`return 0` left that test, and the entire 248-test harness suite, green.
+
+**The `pyproject.toml` requirement was measured.** `uv run` from a worktree missing that file
+answered with main's interpreter **and** imported `codebugs` from main's `src/`.
+
+**The phase anchor was earned in review.** A reviewer moved the call between the `git merge` and the
+echo announcing it, and the first version of the structural test stayed green.
+
+**The in-lock second assertion was also found by cross-model review.**

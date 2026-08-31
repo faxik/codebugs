@@ -109,78 +109,70 @@ off without anyone typing `--ff`.
 
 → почему именно так: `docs/claude-md-rationale/workflow.md#cb-121-четыре-несущие-детали`
 
-**The merge gate closed, and CB-57's own prescription turned out to be wrong (verified by running
-it).** The card said to validate "the branch behind `MERGE_HEAD`" in a `pre-merge-commit` hook. On
-git 2.53 **a clean merge never writes `MERGE_HEAD`** — the merge is resolved in memory, the git dir
-holds `AUTO_MERGE`, `ORIG_HEAD` and `COMMIT_EDITMSG`, and `git rev-parse MERGE_HEAD` fails outright.
-A hook keyed on that file exits 0 on every clean merge: a gate that cannot fire, which is worse than
-no gate, because the table above would then claim a rule nothing enforces. What git *does* provide
-is **`GITHEAD_<sha>=<what the caller named>`**, set per merge head — git's own record, and what the
-merge strategies themselves read. Not the commit *message*: parsing `Merge branch 'x'` is the
-name-matching heuristic CB-57 refused, and it would be blind anyway because `worktree-finish.sh`
-passes its own `-m`. `tests/…::test_premise_merge_head_is_absent_on_a_clean_merge` and
+**The merge gate is keyed on `GITHEAD_`, not on `MERGE_HEAD`.** On git 2.53 **a clean merge never
+writes `MERGE_HEAD`** — the merge is resolved in memory, the git dir holds `AUTO_MERGE`, `ORIG_HEAD`
+and `COMMIT_EDITMSG`, and `git rev-parse MERGE_HEAD` fails outright — so a hook keyed on that file
+exits 0 on every clean merge: a gate that cannot fire, which is worse than no gate, because the table
+above would then claim a rule nothing enforces. What git *does* provide is
+**`GITHEAD_<sha>=<what the caller named>`**, set per merge head, which is git's own record and what
+the merge strategies themselves read. **Not the commit *message***: parsing `Merge branch 'x'` is a
+name-matching heuristic, and it would be blind anyway because `worktree-finish.sh` passes its own
+`-m`. `tests/…::test_premise_merge_head_is_absent_on_a_clean_merge` and
 `…::test_premise_githead_env_names_the_merged_ref` pin both premises, so a git upgrade that changes
 either turns the suite red instead of silently disarming the hook.
 
-**`GITHEAD_` is not always a NAME, and assuming it was broke `git pull` — a false refusal, which is
-the worse failure.** Measured on git 2.53 against a real remote: `git merge origin/main` gives
-`GITHEAD_<sha>=origin/main`, but **`git pull` and `git merge FETCH_HEAD` give the raw OID**. The
-first draft therefore refused every pull, while its own comment and this section both promised pulls
-were fine. (One cross-model reviewer asserted `GITHEAD_` carries a `branch 'main' of <url>`
-description in that case; it does not, on this version — the other reviewer reproduced the OID, and
-so did I. Measured, not argued.) So `GITHEAD_` is used only to LEARN WHICH COMMITS are being merged;
-the decision is made from the refs that point at each of them.
+**`GITHEAD_` is not always a NAME.** Measured on git 2.53 against a real remote: `git merge
+origin/main` gives `GITHEAD_<sha>=origin/main`, but **`git pull` and `git merge FETCH_HEAD` give the
+raw OID**. So `GITHEAD_` is used only to LEARN WHICH COMMITS are being merged; **the decision is made
+from the refs that point at each of them.** Assuming it was a name refused every pull — a false
+refusal, which is the worse failure.
 
-**The rule that survived three review rounds: the sanctioned-type rule governs LOCAL branches.**
-Remote-tracking refs are *upstream's* namespace, which this repo does not name, so exactly one of them
-is consulted — main's own upstream — and only to recognise a pull. Concretely, given a merge head:
+**The sanctioned-type rule governs LOCAL branches.** Remote-tracking refs are *upstream's* namespace,
+which this repo does not name, so exactly one of them is consulted — main's own upstream — and only
+to recognise a pull. Concretely, given a merge head:
 
 - Candidates are **every ref pointing at that head**, always. There is no "judge the named ref
-  instead" branch any more; see the byte-identity note below for why that had to go.
-- **Every local branch must qualify**, because with "any qualifies" review reproduced a
-  **three-command bypass**: `git merge untyped` (refused), `git branch fix/tmp untyped`, `git commit`.
-  Git does not abort after a refusal; it leaves the merge in progress and says "use `git commit` to
-  complete the merge", routing the operator into `pre-commit`, where one typed alias at the same
-  commit laundered the whole thing.
+  instead" branch; see the byte-identity note below for why that had to go.
+- **Every local branch must qualify.** With "any qualifies" there is a three-command bypass:
+  `git merge untyped` (refused), `git branch fix/tmp untyped`, `git commit` — git does not abort
+  after a refusal, it leaves the merge in progress and routes the operator into `pre-commit`, where
+  one typed alias at the same commit launders the whole thing.
 - A **remote ref other than main's upstream `main` neither qualifies nor disqualifies.** Requiring
-  *all* refs to qualify refused a real `git pull` whenever upstream happened to have another branch cut
-  at that commit (`origin/release-1.0`), and `refs/remotes/<r>/HEAD` — the default-branch alias —
-  disqualified the very pull the fallback existed for. Both reproduced; the second was caught by this
-  repo's own test minutes after the first fix, two bugs in the same three lines.
+  *all* refs to qualify refuses a real `git pull` whenever upstream happens to have another branch
+  cut at that commit (`origin/release-1.0`), and `refs/remotes/<r>/HEAD` — the default-branch alias —
+  disqualifies the very pull the fallback exists for.
 - Upstream **`main` wins** over a non-qualifying local branch, so a stray local bookmark left at the
   commit being pulled cannot refuse the pull.
-- The trusted ref is matched **exactly** (`refs/remotes/<branch.main.remote|origin>/main`). Nothing is
-  "stripped": a blind `${rest#*/}` once collapsed `refs/remotes/junk/main` to the accepted literal
-  `main`, and the intermediate fix — trusting any *configured* remote's `main` — still left
-  `git remote add junk <anything>` plus a fetch as a two-command bypass.
+- The trusted ref is matched **exactly** (`refs/remotes/<branch.main.remote|origin>/main`). Nothing
+  is "stripped": a blind `${rest#*/}` collapses `refs/remotes/junk/main` to the accepted literal
+  `main`, and trusting any *configured* remote's `main` still leaves `git remote add junk <anything>`
+  plus a fetch as a two-command bypass.
 
-**A merge head with NO ref at all is refused, and that is a real cost, not a free win.** It is what
-catches a bare SHA or a tag, but it also refuses four legitimate-if-rare flows, verified: a one-shot
+**A merge head with NO ref at all is refused, and that is a real cost, not a free win.** It catches a
+bare SHA or a tag, but it also refuses four legitimate-if-rare flows, verified: a one-shot
 `git pull --no-rebase <URL> main`, `git merge FETCH_HEAD` with no tracking ref, a `branch.main.remote`
 set to a URL rather than a remote name, and `git merge <tag>` where no branch points at the tagged
-commit. Ordinary `git pull` against a configured remote is unaffected, which is why this is documented
-rather than fixed: closing it means trusting `.git/FETCH_HEAD`'s description text, and adding a new
-trust path with no review round left to attack it is a worse trade than a rare `--no-verify`. **Use
-`git merge --no-verify` for a one-shot pull from a URL.**
+commit. Ordinary `git pull` against a configured remote is unaffected, which is why this is
+documented rather than fixed: closing it means trusting `.git/FETCH_HEAD`'s description text, and a
+new trust path with no review round left to attack it is a worse trade than a rare `--no-verify`.
+**Use `git merge --no-verify` for a one-shot pull from a URL.**
 
 **And one limit that cannot be closed here, stated rather than papered over.** *Main's own upstream*
 `main` is **trusted** — `branch.main.remote`, defaulting to `origin` — and nothing local can prove
 what it contains or how it got there: `git update-ref refs/remotes/origin/main <any-sha>`, a mistyped
 fetch refspec, a rewritten `remote.origin.fetch` (which then re-arms on every ordinary `git fetch`),
-or simply an upstream whose `main` holds untyped work all land content here. Reproduced. There is no
-local discriminator, and refusing remote refs instead would break `git pull` — the worse failure.
-Same shape as the `--separate-git-dir` misbinding: **when a rule cannot be decided from local
-evidence, supply external metadata rather than deepening the guess.** The external metadata is
-CB-59's server-side protection — **but only the half of it that was actually enabled.** The ratified
-scope (CI limits, item 4) refuses a force-push and a deletion of `origin/main`, so upstream's history
-cannot be rewritten under you; an upstream `main` that simply *holds untyped work* — the failure mode
-named two sentences above — is untouched, because require-PR is deliberately off. That half of the
-limit therefore stays open, and `TestKnownLimits` pins that the bypass still reproduces so the day it
-stops being true someone re-reads this instead of trusting a stale claim.
+or simply an upstream whose `main` holds untyped work all land content here. There is no local
+discriminator, and refusing remote refs instead would break `git pull` — the worse failure. Same
+shape as the `--separate-git-dir` misbinding: **when a rule cannot be decided from local evidence,
+supply external metadata rather than deepening the guess.** The external metadata is CB-59's
+server-side protection — **but only the half of it that was actually enabled.** The ratified scope
+(CI limits, item 4) refuses a force-push and a deletion of `origin/main`, so upstream's history
+cannot be rewritten under you; an upstream `main` that simply *holds untyped work* is untouched,
+because require-PR is deliberately off. **That half of the limit stays open**, and `TestKnownLimits`
+pins that the bypass still reproduces, so the day it stops being true someone re-reads this instead
+of trusting a stale claim.
 
-Note the scope was narrowed twice under review. It first trusted **any** `<remote>/main`, then any
-**configured** remote's — at which point `git remote add junk <anything>` plus a fetch was still a
-two-command bypass. Only main's declared upstream counts now.
+→ почему именно так: `docs/claude-md-rationale/workflow.md#cb-57-гейт-мержа`
 
 **`MERGE_HEAD` is read fail-closed.** The conflicted-merge gate is a `while read` over that file, and
 two states make a naive loop run **zero** times, leave the refusal flag at `0`, and fall through to
@@ -220,149 +212,125 @@ goes stale.
 → почему именно так: `docs/claude-md-rationale/workflow.md#сторожа-читают-fail-closed`
 
 **A plan note landing on main must be NAMED in the commit message, and the mechanism is a
-`commit-msg` hook — NOT the pre-commit hook originally specified.** The rule this mechanises is that
-parallel sessions add files to main **by name, never by directory**: `.claude/plans/` is the one
-place they may all write, and `git add .claude/plans/` swept an UNTRACKED note belonging to another
-direction into a commit describing unrelated work. The bytes survived; the **provenance** did not.
-The convention was then adopted and broken again — a convention broken four times after adoption is
-this section's own opening lesson, so it had to stop being prose. Naming is the discriminator
-because git records nothing about *how* a path was staged: the index cannot be asked whether
+`commit-msg` hook.** The rule it mechanises is that parallel sessions add files to main **by name,
+never by directory**: `.claude/plans/` is the one place they may all write, and `git add
+.claude/plans/` sweeps an UNTRACKED note belonging to another direction into a commit describing
+unrelated work — the bytes survive, the **provenance** does not. **Naming is the discriminator
+because git records nothing about *how* a path was staged**: the index cannot be asked whether
 `git add` was given a file or a directory. What separates the two cases is the author — you cannot
 name a file you did not know was there.
 
-**The phase moved on a measurement, and the measurement is the whole argument.** On git 2.53, at
-`pre-commit` time the message being written does not exist anywhere: `$GIT_DIR/COMMIT_EDITMSG` holds
-the **PREVIOUS** commit's message, and on a clone's first commit it does not exist at all. A
+**The phase is `commit-msg` and not `pre-commit`, and the measurement is the whole argument.** On git
+2.53, at `pre-commit` time the message being written does not exist anywhere: `$GIT_DIR/COMMIT_EDITMSG`
+holds the **PREVIOUS** commit's message, and on a clone's first commit it does not exist at all. A
 pre-commit naming check is therefore not a gate that fails open — it is a gate wired to someone
 else's input, which passes a sweeping commit whose predecessor happened to name the file and refuses
-a correct one whose predecessor did not. That is worse than absent, because it looks like
+a correct one whose predecessor did not; that is worse than absent, because it looks like
 enforcement. `commit-msg` receives the final message as `$1`, after `-m`, `-F` and the editor have
-all had their say. `test_premise_pre_commit_cannot_see_the_message` pins it, so a git that changes
-the behaviour turns the suite red instead of silently justifying a move back.
+all had their say, and `test_premise_pre_commit_cannot_see_the_message` pins it.
 
-**Two auto-generated sources inside the message file would each have made this a gate that cannot
-fire, and neither was foreseen when the rule was specified.** git's default template lists the staged paths as comment lines
-(`#	new file:   .claude/plans/foo.md`), so every editor-based commit would have passed vacuously;
-and `git commit -v` appends the whole diff below the scissors line, where every hunk header names
-its file — and `git stripspace --strip-comments` does **not** remove that, because a diff is not a
-comment. So the message is truncated at the scissors **first**, then comment-stripped. The scissors
-test is `>8` and `---` on one line rather than git's exact string, because the comment character is
-configurable and anchoring on `#` would let a repo with `core.commentChar=;` keep its diff;
-over-truncating costs a loud refusal, under-truncating costs the gate. Comment stripping is
+**The message is truncated at the scissors FIRST, then comment-stripped**, because two auto-generated
+sources inside the message file would each make this a gate that cannot fire: git's default template
+lists the staged paths as comment lines (`#	new file:   .claude/plans/foo.md`), and `git commit -v`
+appends the whole diff below the scissors line, where every hunk header names its file — which
+`git stripspace --strip-comments` does **not** remove, because a diff is not a comment. **The
+scissors test is `>8` and `---` on one line rather than git's exact string**, because the comment
+character is configurable and anchoring on `#` would let a repo with `core.commentChar=;` keep its
+diff; over-truncating costs a loud refusal, under-truncating costs the gate. Comment stripping is
 delegated to `git stripspace`, which reads the same `core.commentChar` git itself will use, so the
 two cannot disagree.
 
-**Matching is by TOKEN, and a word boundary is the wrong tool.** A substring test passes on an
-ordinary case, not a contrived one: `plan.md` is a substring of `my-plan.md`, so a sweeping commit
-naming its own note launders the stranger's note sitting beside it — and the swept file is by
-construction the one nobody wrote down. A regex `\b` does not fix it either, because `-` and `.` are
-non-word characters, so `\bplan\.md\b` matches *inside* `my-plan.md`. The match must be flanked by
-a boundary: the string edge, or an ASCII byte that cannot occur in the name. Every **non-ASCII** byte
-counts as part of a name, so an ambiguous neighbour refuses rather than matches; the stated cost is
-that a filename hugged by typographic quotes or dashes (`«plan.md»`) is not recognised and needs a
-space or an ASCII quote around it. `LC_ALL=C` pins byte semantics so the verdict cannot depend on the
-committer's locale — **honest scope: that line is determinism insurance and no test discriminates
-it**, since under a UTF-8 locale codepoint-wise classification happens to agree on every case here.
+**Matching is by TOKEN, and a word boundary is the wrong tool.** `plan.md` is a substring of
+`my-plan.md`, so a sweeping commit naming its own note would launder the stranger's note beside it —
+and the swept file is by construction the one nobody wrote down. A regex `\b` does not fix it either,
+because `-` and `.` are non-word characters, so `\bplan\.md\b` matches *inside* `my-plan.md`. **The
+match must be flanked by a boundary: the string edge, or an ASCII byte that cannot occur in the
+name.** Every **non-ASCII** byte counts as part of a name, so an ambiguous neighbour refuses rather
+than matches; **the stated cost** is that a filename hugged by typographic quotes or dashes
+(`«plan.md»`) is not recognised and needs a space or an ASCII quote around it. `LC_ALL=C` pins byte
+semantics so the verdict cannot depend on the committer's locale — **honest scope: that line is
+determinism insurance and no test discriminates it**, since under a UTF-8 locale codepoint-wise
+classification happens to agree on every case here.
 
-**And the matcher decides which names it will judge, which is the same predicate and not a second
-one — cross-model review reproduced the hole that made this necessary.** A space is a boundary, so
-with `a b.md` and `b.md` both staged and only `a b.md` named, the occurrence of `b.md` INSIDE it is
-flanked by a space and the token end — two boundaries — and the stranger's note landed unnamed
-(measured: rc=0, both files committed). So a staged basename containing a space or ASCII punctuation
-outside `[A-Za-z0-9._-]` is **refused outright** rather than judged by a rule that cannot see it.
-That closes the class BY CONSTRUCTION, and the proof is two lines: if every staged basename is made
-only of name bytes, an occurrence of one strictly inside a longer one always has a name byte on at
-least one side, so it can never be flanked by two boundaries. The cost was measured before it was
-accepted — **0 of this repo's 94 plan notes carry such a character**, the convention is already ASCII
-slugs, and non-ASCII names are untouched because a non-ASCII byte is a NAME byte. The general shape
-is one this document keeps restating: a check that validates elements cannot validate their
-composition, and here the composition is *the matcher plus the set of names it is asked to match*.
+**The matcher also decides which names it will judge, which is the same predicate and not a second
+one.** A space is a boundary, so with `a b.md` and `b.md` both staged and only `a b.md` named, the
+occurrence of `b.md` INSIDE it is flanked by a space and the token end — two boundaries — and the
+stranger's note lands unnamed. **So a staged basename containing a space or ASCII punctuation outside
+`[A-Za-z0-9._-]` is REFUSED outright** rather than judged by a rule that cannot see it. That closes
+the class BY CONSTRUCTION, and the proof is two lines: if every staged basename is made only of name
+bytes, an occurrence of one strictly inside a longer one always has a name byte on at least one side,
+so it can never be flanked by two boundaries. Non-ASCII names are untouched, because a non-ASCII byte
+is a NAME byte. **The general shape: a check that validates elements cannot validate their
+composition, and here the composition is *the matcher plus the set of names it is asked to match*.**
 
 **Scope, and what it deliberately does not touch.** Only `main`, and only `.claude/plans/*.md` or
-`.claude/plans/briefs/*.html` (the second widened by CB-266 to match pre-commit-hook.sh's own
+`.claude/plans/briefs/*.html` (the second widened by CB-266 to match `pre-commit-hook.sh`'s own
 widening, on the same reasoning: `git add .claude/plans/` recursively sweeps `briefs/`, so once a
-brief can land at all, this hook's reason for existing — an untracked stranger's file losing its
-provenance — reaches it too) — on a branch there are no foreign untracked notes to sweep, so the
-rule there would be pure friction on every `wip` commit, and everything else on main is pre-commit's
-to refuse (duplicating that judgement would give one state two refusals that could drift).
-**Deletions are in scope**, because
-`git add <dir>` stages a removal too and deleting a stranger's note damages the same provenance.
-**A merge is exempt**, and the discriminator differs from `pre-merge-commit`'s in a way that would
-have inverted the rule if assumed: this section records that a clean merge writes no `MERGE_HEAD` —
-true at `pre-merge-commit` time, which runs earlier and resolves the merge in memory, but by
-`commit-msg` time git **has** written it, for clean and conflicted merges alike (measured, and
-pinned, because if a future git stops doing it every integration would be refused). It is read
-fail-closed with a count, exactly like pre-commit's arm: an empty `MERGE_HEAD` must not read as an
-exempt one. **What the exemption therefore costs, said plainly:** a *deliberate* operator can put the
-repo into a merge state (`git merge --no-commit`, or any conflicted merge), stage an unnamed note,
-and commit — the naming rule is skipped. That is not a hole this gate opened; `pre-commit`'s merge
-exemption already waves the whole staged set through on that path, which is the same evil-merge blind
-spot the CI-limits list records for `main-invariants.yml`. The gate is an accident-stopper, and a
-merge state is not something one enters by accident.
+brief can land at all, this hook's reason for existing reaches it too). On a branch there are no
+foreign untracked notes to sweep, so the rule there would be pure friction on every `wip` commit, and
+everything else on main is pre-commit's to refuse — duplicating that judgement would give one state
+two refusals that could drift. **Deletions are in scope**, because `git add <dir>` stages a removal
+too and deleting a stranger's note damages the same provenance. **A merge is exempt, and the
+discriminator differs from `pre-merge-commit`'s in a way that would invert the rule if assumed:** a
+clean merge writes no `MERGE_HEAD` at `pre-merge-commit` time, but by `commit-msg` time git **has**
+written it, for clean and conflicted merges alike (measured, and pinned, because if a future git
+stops doing it every integration would be refused). It is read fail-closed with a count, exactly like
+pre-commit's arm: an empty `MERGE_HEAD` must not read as an exempt one. **What the exemption costs,
+said plainly:** a *deliberate* operator can put the repo into a merge state (`git merge --no-commit`,
+or any conflicted merge), stage an unnamed note, and commit — the naming rule is skipped. That is not
+a hole this gate opened; `pre-commit`'s merge exemption already waves the whole staged set through on
+that path. The gate is an accident-stopper, and a merge state is not something one enters by accident.
 
-**`_guard_enforcement_armed` demands this hook too, since T-23 — and the paragraph this replaces
-said the opposite, for a reason that was true at the time.** The guard reads `REPO_ROOT/tools/<hook>`
-from the PRIMARY checkout and gates on whether the path has history, so adding the clause in the same
-change that introduced the source would have made that change unlandable by the harness it extends —
-the bootstrap wall for the third time — and `install-hooks.sh` could not pre-arm it either, because it
-symlinks into main's `tools/`, where the file did not exist yet. So the hook landed first, armed by the
-installer alone, and the guard followed once `tools/commit-msg-hook.sh` had history on main. The
-condition is the SAME monotonic one `pre-merge-commit` uses — extracted into `_hook_source_known` and
-called once per gated hook rather than copied, because a four-review-round condition in two places is
-two rules one edit apart; `test_bootstrap_condition_is_one_function_called_per_gated_hook` counts the
-call sites. A clone armed before T-23 is therefore refused at its next finish until
-`tools/install-hooks.sh` is re-run, which is correct: it really is missing a third of its enforcement.
-**What stays open:** the gate is invisible to the CI alarm, which reads paths and not messages, and
-to `--amend`: an amend that changes only the message stages nothing against HEAD, so a note already
-landed under a naming message can have that message rewritten. Both are authored acts rather than
-accidents, which is what this hook is for.
+**`_guard_enforcement_armed` demands this hook too, since T-23.** The condition is the SAME monotonic
+one `pre-merge-commit` uses — extracted into `_hook_source_known` and called once per gated hook
+rather than copied, because a four-review-round condition in two places is two rules one edit apart;
+`test_bootstrap_condition_is_one_function_called_per_gated_hook` counts the call sites. A clone armed
+before T-23 is refused at its next finish until `tools/install-hooks.sh` is re-run, which is correct:
+it really is missing a third of its enforcement. **What stays open:** the gate is invisible to the CI
+alarm, which reads paths and not messages, and to `--amend` — an amend that changes only the message
+stages nothing against HEAD, so a note already landed under a naming message can have that message
+rewritten. Both are authored acts rather than accidents, which is what this hook is for.
+
+→ почему именно так: `docs/claude-md-rationale/workflow.md#t-23-именование-заметки-плана`
 
 **Two of the three hooks share a predicate — disjoint halves, neither redundant, and they must not
-disagree.** (The third, commit-msg, shares nothing with them: it reads the message, they read refs,
-and the paragraphs above are its whole story.) A CONFLICTED merge
-never reaches `pre-merge-commit`, and neither does a merge this hook has already refused: both are
-finished with `git commit`, which fires `pre-commit`. So the predicate is duplicated **byte-identically**
-into `pre-commit-hook.sh` between `# ---8<--- SHARED MERGE-GATE PREDICATE` markers, and a test
-compares the two blocks verbatim rather than grepping for a substring — the earlier substring test
-was shown insufficient by rewriting the merge hook as a prefix test while leaving the regex
-assignment in place, which kept it green. `worktree-finish.sh` no longer passes `--no-verify` to its
-own merge: leaving it would have made the harness the single caller exempt from the gate.
+disagree.** (The third, commit-msg, shares nothing with them: it reads the message, they read refs.)
+A CONFLICTED merge never reaches `pre-merge-commit`, and neither does a merge this hook has already
+refused: both are finished with `git commit`, which fires `pre-commit`. So the predicate is
+duplicated **byte-identically** into `pre-commit-hook.sh` between `# ---8<--- SHARED MERGE-GATE
+PREDICATE` markers, and **a test compares the two blocks verbatim rather than grepping for a
+substring.** The integration merge does not pass `--no-verify`: leaving it would make the harness the
+single caller exempt from the gate.
 
 **What this does NOT do, stated plainly because the honest scope is the point.** The local half is
 CLIENT-SIDE and PER-CLONE: hooks and git config cannot be committed. A fresh clone has none of it
 until `tools/install-hooks.sh` is run — which is why `_guard_enforcement_armed` refuses to integrate
-from an unarmed clone, the one moment being unarmed can cost anything. **It checks all three hooks**
-— pre-commit unconditionally, pre-merge-commit and commit-msg once their source is KNOWN (it has history, or the file is present, or the history probe itself failed — fail closed) — so a
-clone armed before CB-57 or before T-23 is refused until `install-hooks.sh` is re-run. Even armed, all of
-these move or publish `main` without passing any hook: `git rebase`, `git am`, `git reset --hard`,
-`git push`, `core.hooksPath`, **`git subtree add`** (which commits via `commit-tree` plumbing — added
-to this list because round-4 review landed content on main with it and the list did not mention it),
-and **a CLEAN `git cherry-pick` or `git revert`**, where git's sequencer commits directly. Note the
-case split on those last two, because an earlier version of this list was half-wrong: *clean* skips
-the hook entirely, while the *conflicted* form is finished with `git commit` and **is** gated.
+from an unarmed clone, the one moment being unarmed can cost anything. **It checks all three hooks** —
+pre-commit unconditionally, pre-merge-commit and commit-msg once their source is KNOWN (it has
+history, or the file is present, or the history probe itself failed — fail closed) — so a clone armed
+before CB-57 or before T-23 is refused until `install-hooks.sh` is re-run.
 
-**That case split covers `commit-msg` too, and the first draft of this paragraph said the opposite.**
-It claimed a clean cherry-pick or revert *does* run `commit-msg`, so the plan-note naming rule fires
-on it. Measured on git 2.53: it does **not**. The sequencer commits directly and reaches **neither**
-hook, so a clean `git cherry-pick` or `git revert` lands an unnamed plan note at exit 0; only the
-*conflicted* form, finished with `git commit`, is gated. The claim was written into the very
-paragraph that exists to list what the harness does NOT do, and it survived a green suite because
-nothing pinned it — a gate described better than it behaves, in the section whose subject is exactly
-that. `tests/test_worktree_harness.py::TestGitSequencerPremises` now pins both directions, so a git
-version that starts running the hook turns the suite red instead of quietly making this paragraph
-true. A typed
-branch committed in the *primary* checkout also satisfies `pre-commit` while ignoring the worktree rule
-entirely. **Most of these are what the CI job is for** — they flatten a non-merge commit onto main's
-first-parent line, which is what `.github/workflows/main-invariants.yml` asserts against.
+**Even armed, all of these move or publish `main` without passing any hook:** `git rebase`, `git am`,
+`git reset --hard`, `git push`, `core.hooksPath`, **`git subtree add`** (which commits via
+`commit-tree` plumbing), and **a CLEAN `git cherry-pick` or `git revert`**, where git's sequencer
+commits directly. **Note the case split on those last two:** *clean* skips the hook entirely, while
+the *conflicted* form is finished with `git commit` and **is** gated. **That case split covers
+`commit-msg` too** — measured on git 2.53, a clean cherry-pick or revert reaches **neither** hook, so
+it lands an unnamed plan note at exit 0; only the conflicted form is gated.
+`tests/test_worktree_harness.py::TestGitSequencerPremises` pins both directions, so a git version
+that starts running the hook turns the suite red instead of quietly making this paragraph true. **A
+typed branch committed in the *primary* checkout** also satisfies `pre-commit` while ignoring the
+worktree rule entirely. **Most of these are what the CI job is for** — they flatten a non-merge commit
+onto main's first-parent line, which is what `.github/workflows/main-invariants.yml` asserts against.
 
-**`install-hooks.sh` sets `merge.ff=false` before anything arming-related can abort.** With it last, a
-clone missing `tools/pre-merge-commit-hook.sh` — an older main, a `git checkout <old-commit>`, the
-CB-57 bootstrap window itself — armed the pre-commit hook, printed its tick, then exited 1 at the
-merge-hook step and left `merge.ff` **unset**: the installer could skip the one mechanism no hook can
-replace. Reproduced in review, verified fixed by running it. Note the precise claim: four commands
-still precede it (sourcing the guards, resolving the repo root, resolving the hooks dir, `mkdir -p`)
-and each is fatal under `set -e`, so "a step that cannot fail goes first" — as an earlier draft of
-this line put it — is not literally true, and review said so.
+**`install-hooks.sh` sets `merge.ff=false` before anything arming-related can abort**, so a clone
+missing `tools/pre-merge-commit-hook.sh` cannot arm the pre-commit hook, exit 1 at the merge-hook
+step and leave `merge.ff` **unset** — the installer skipping the one mechanism no hook can replace.
+**The precise claim:** four commands still precede it (sourcing the guards, resolving the repo root,
+resolving the hooks dir, `mkdir -p`) and each is fatal under `set -e`, so "a step that cannot fail
+goes first" is not literally true of it.
+
+→ почему именно так: `docs/claude-md-rationale/workflow.md#общий-предикат-и-честная-область`
 
 **The CI job's own limits, because a gate described better than it behaves is the failure this
 section exists to record.**
@@ -438,106 +406,64 @@ section exists to record.**
 CI — and `_guard_interpreter_matches_main` refuses to land work the two of them did not agree on
 (CB-135).** "Single source" is a claim about what DECIDED, not merely about what is written down,
 and it needs that reading because **`UV_PYTHON` and `--python` outrank the file** (measured). So the
-guard does not stop at "the pin exists": it requires the interpreter uv actually chose to be the one
-the pin asked for, and refuses when something outranked it. Without that clause an exported
-`UV_PYTHON` made BOTH trees answer with the override, they agreed, the gate passed, and the branch
-landed a different pin that main would adopt on its next `uv run` — CB-135 rebuilt out of the very
-mechanism this section documents. Cross-model review found it; the first draft had only the
-existence check. The gate runs the suite in the WORKTREE and the work lands in MAIN; those are two
-statements, and on 2026-08-22 they came apart. A manager reported "1943 passed" from a worktree on
-3.13.3 while the same suite on the landed main, under the documented command, gave "1 failed, 1942
-passed" on 3.14.4. The red was on main BEFORE the merge and no finish could ever have seen it. The
-rule immediately above — never validate a worktree's changes from main, because `pythonpath=["src"]`
-resolves against the checkout you run in — is correct for its own reason and is exactly what
-introduced a second, unnamed variable: **which python**. Before the pin there were three untracked
-trees — main took the system interpreter its `.venv` was built with, a fresh worktree took uv's
-default (the newest uv-MANAGED install, which is a different thing), and
-`.github/workflows/ci.yml` named no version at all. `uv.lock` had already fixed the *dependency*
-versions, which is what made the interpreter the conspicuous remaining one; it is **not** true that
-everything else is nailed down, and an earlier draft of this sentence said so. uv's own version,
-the platform, and the BUILD of a given CPython all still vary, and the guard below compares a
-version STRING, so two builds of 3.14.4 read as identical to it.
+guard does not stop at "the pin exists": **it requires the interpreter uv actually chose to be the
+one the pin asked for, and refuses when something outranked it.** Without that clause an exported
+`UV_PYTHON` makes BOTH trees answer with the override, they agree, the gate passes, and the branch
+lands a different pin that main would adopt on its next `uv run` — CB-135 rebuilt out of the very
+mechanism this section documents.
 
-**The pin is `3.14.4`, full patch, and both halves of that were chosen rather than defaulted.**
-*Which version:* it is what main already runs, so landing the pin moved no environment and opened no
-window in which main was stale; the suite is green on it (1949 passed, measured on main after CB-134
-landed) and equally green on 3.11.12, 3.12.10 and 3.13.3, so no red version forced the choice and
-the newest stable CPython is where the tested surface should sit. *Full patch rather than `3.14`:*
-this unit's whole subject is making a divergent state unrepresentable, and `MAJOR.MINOR` leaves one
-representable — uv resolves it to whatever 3.14.x a given machine happens to have, so two machines
-legitimately differ. The cost is real and is the ordinary cost of a pin: it must be bumped by a
-deliberate, reviewable edit, and a machine without that exact build downloads one (measured:
-`cpython-3.14.4-linux-x86_64-gnu` is `<download available>`, which is also what makes the pin
-reachable in CI — note `uv python list` shows only the newest patch per minor, so checking
-downloadability needs `--all-versions`).
+**The pin is `3.14.4`, full patch, and the second half of that was chosen rather than defaulted.**
+`MAJOR.MINOR` leaves a divergent state representable — uv resolves it to whatever 3.14.x a machine
+happens to have, so two machines legitimately differ — and this guard's whole subject is making that
+state unrepresentable. **The cost is the ordinary cost of a pin:** it must be bumped by a deliberate,
+reviewable edit, and a machine without that exact build downloads one. Note `uv python list` shows
+only the newest patch per minor, so checking downloadability needs `--all-versions`.
 
-**`uv` rebuilds a mismatched environment by itself, and the design brief assumed the opposite.**
-Measured: with `.venv` at 3.13.3 and the pin at 3.14.4, a plain `uv run` printed "Removed virtual
-environment", recreated it and ran — no `uv sync` needed. So the pin does most of the work on its
-own and the guard is there for what it cannot reach. Two consequences worth knowing before touching
-this: `UV_PYTHON=` OUTRANKS the pin file, and a subsequent plain `uv run` snaps the tree back to the
-pin (both measured), which is why the repair command below is written with `UV_PYTHON=` and why its
-effect only has to survive until the finish completes.
+**`uv` rebuilds a mismatched environment by itself**, so the pin does most of the work and the guard
+is there for what it cannot reach. Two consequences worth knowing before touching this: `UV_PYTHON=`
+OUTRANKS the pin file, and a subsequent plain `uv run` snaps the tree back to the pin (both
+measured) — which is why the repair command below is written with `UV_PYTHON=`, and why its effect
+only has to survive until the finish completes.
 
 **What the guard compares, and why the two sides are probed differently.** The worktree side is
 `uv run --extra dev python -c <probe>` — byte for byte the launcher `[6/7]` uses for pytest, so the
 answer IS the interpreter the suite will run under, and the call syncs the worktree to the pin as a
-side effect, which is wanted on a tree we are about to test. The main side is
-`<repo_root>/.venv/bin/python` executed DIRECTLY, deliberately not through `uv run`: `uv run` in main
-would rebuild a checkout other sessions are working in, and a guard must not mutate the tree it is
-judging. It also answers the exact question the incident asked — what main ACTUALLY has, not what it
-would acquire next time somebody ran something there. `pyvenv.cfg` is not read: it describes an
+side effect, which is wanted on a tree about to be tested. The main side is
+`<repo_root>/.venv/bin/python` executed DIRECTLY, deliberately **not** through `uv run`: that would
+rebuild a checkout other sessions are working in, and **a guard must not mutate the tree it is
+judging**. It also answers the exact question the incident asked — what main ACTUALLY has, not what
+it would acquire next time somebody ran something there. `pyvenv.cfg` is not read: it describes an
 environment rather than being one.
 
-**Fail-closed, in the form of `_guard_interpreter_matches_main` itself.** No `.venv` in main, no `uv`
-on `PATH`, a non-zero rc, an empty answer, an unparseable answer — every one refuses with **exit
-14**. The version-shape check (`_interpreter_version_is_sane`) was meant to earn its keep in exactly
-one state — both probes failing with `""` on each side, which `"" == ""` would otherwise wave through
-as agreement — and `test_two_undeterminable_sides_refuse_rather_than_agree` was written to pin it.
-**That test stopped discriminating the mutant once the UV_PYTHON-outranks-the-pin check (above,
-`.python-version` bumping section) existed alongside it, and the reason is NOT that the checks got
-reordered (CB-140).** The shape check on `wt_ver` still runs first in the function, exactly where it
-always did; the pin check sits further down and is unchanged in position. What changed is that the
-pin check ALSO refuses an empty `wt_ver` on its own — `""` is unequal to the pin and does not extend
-it with a dot — so with the shape check neutered by a mutant, execution simply falls through to the
-still-present pin check, which independently produces the same **exit 14**. The test asserts only the
-return code, so it cannot tell which of the two refused: measured, a mutant turning
-`_interpreter_version_is_sane` into `return 0` left that test, and the entire 248-test harness suite,
-green. The state the PIN check alone cannot catch — where only the shape check stands between a pass
-and CB-135 recurring — is a NON-version that PREFIX-MATCHES the pin: a bare pin like `"3"` accepts
-anything spelled `"3."` + more as if it were a legitimate patch release, so a stub `"3.0"` on both
-sides clears the pin check by looking like one while still failing the strict `X.Y.Z` shape the
-sanity check demands — there the shape check is the only backstop, and neutering it is the only way
-to reach the final `wt_ver == main_ver` comparison and get exit 0.
-`test_two_prefix_matching_non_versions_refuse_rather_than_agree` is what actually holds the
-version-shape check now; the older test is kept as a premise fixture (both probes genuinely absent)
-but is no longer sufficient on its own.
+**Fail-closed.** No `.venv` in main, no `uv` on `PATH`, a non-zero rc, an empty answer, an
+unparseable answer — every one refuses with **exit 14**. The version-shape check
+(`_interpreter_version_is_sane`) earns its keep in exactly one state the pin check cannot catch: **a
+NON-version that PREFIX-MATCHES the pin.** A bare pin like `"3"` accepts anything spelled `"3."` plus
+more as if it were a legitimate patch release, so a stub `"3.0"` on both sides clears the pin check
+by looking like one while still failing the strict `X.Y.Z` shape — there the shape check is the only
+backstop. `test_two_prefix_matching_non_versions_refuse_rather_than_agree` is what holds it;
+`test_two_undeterminable_sides_refuse_rather_than_agree` is kept as a premise fixture but is **not
+sufficient on its own** (CB-140).
 
-**The guard also demands that the worktree carry its own `pyproject.toml`, and that is not
-tidiness.** `uv run` resolves a project by walking UP, and every worktree lives INSIDE the repo at
-`.worktrees/<slug>`, so a worktree missing that file resolves against MAIN's project: measured, `uv
-run` from such a directory answered with main's interpreter **and** imported `codebugs` from main's
-`src/`. The guard would then have compared main against main — an agreement that can only ever hold,
-which is a gate that cannot fire, in the change whose subject is precisely that.
+**The worktree must carry its own `pyproject.toml`, and that is not tidiness.** `uv run` resolves a
+project by walking UP, and every worktree lives INSIDE the repo at `.worktrees/<slug>`, so a worktree
+missing that file resolves against MAIN's project and the guard would compare main against main — an
+agreement that can only ever hold, which is a gate that cannot fire, in the change whose subject is
+precisely that.
 
 **Phase, and `--skip-checks`.** The call sits in `[5/7]` AFTER the forward-merge — a
-`.python-version` arriving from main must be in the tree before it is judged — and BEFORE `[6/7]`,
-so a refusal costs seconds instead of the ~70s suite run it is declaring meaningless. It is outside
-the `--skip-checks` branch: that flag skips ruff and pytest, which are CHECKS, and this is what
-decides whether running them would have meant anything. Both bounds are pinned structurally and the
-`--skip-checks` half behaviourally as well, by a class that runs the script end to end. **Anchor
-that structural test on the `git merge` and not on the echo announcing it** — review moved the call
-between the two and the first version stayed green, because "after the text that says a merge is
-coming" is not "after the merge".
+`.python-version` arriving from main must be in the tree before it is judged — and BEFORE `[6/7]`, so
+a refusal costs seconds instead of the suite run it is declaring meaningless. It is **outside** the
+`--skip-checks` branch: that flag skips ruff and pytest, which are CHECKS, and this is what decides
+whether running them would have meant anything. **Anchor the structural test on the `git merge` and
+not on the echo announcing it** — "after the text that says a merge is coming" is not "after the
+merge".
 
-**And it is asserted a SECOND time, inside the lock, because a pre-check is not an invariant at
-landing time.** main's `.venv` is gitignored, so `_guard_main_clean` cannot see it move and the
-in-lock SHA re-checks are about commits: a `UV_PYTHON=… uv sync` in main during the ~90s suite run
-would land work tested on one interpreter onto a main that now has another. That is exactly the skew
-`TESTED_MAIN` exists for, reaching main through the one piece of state neither guard watches, so it
-gets the same answer — re-assert where nothing can intervene before the merge. It is a second CALL
-rather than a stored sample (~100ms) so it cannot drift from the thing it is checking. Also found by
-cross-model review.
+**It is asserted a SECOND time, inside the lock, because a pre-check is not an invariant at landing
+time.** main's `.venv` is gitignored, so `_guard_main_clean` cannot see it move and the in-lock SHA
+re-checks are about commits: a `UV_PYTHON=… uv sync` in main during the suite run would land work
+tested on one interpreter onto a main that now has another. It is a second CALL rather than a stored
+sample (~100ms) so it cannot drift from the thing it is checking.
 
 **A shared `.venv` is refused, and the comparison is between DIRECTORIES.** Point main's `.venv` at a
 worktree's and the two sides become one environment: it can only agree, and the worktree removal at
@@ -547,25 +473,26 @@ to a single `/usr/bin/pythonX.Y`, so an interpreter-level test would refuse ever
 
 **Bumping the pin is a two-step procedure, and the guard makes the order mandatory.** A branch that
 changes `.python-version` is refused until main is brought to the NEW interpreter first —
-`(cd <repo_root> && UV_PYTHON=<new> uv sync --extra dev)`, then re-run the finish. A bare `uv sync`
-is not enough there: it re-reads main's OLD pin and puts the old interpreter straight back. The
-refusal prints that command with both versions filled in, because a gate with no way out is a wall
-rather than a diagnostic.
+`(cd <repo_root> && UV_PYTHON=<new> uv sync --extra dev)`, then re-run the finish. **A bare `uv sync`
+is not enough**: it re-reads main's OLD pin and puts the old interpreter straight back. The refusal
+prints that command with both versions filled in, because a gate with no way out is a wall rather
+than a diagnostic.
 
 **The usual bootstrap wall applies, and it is milder than CB-57's.** `worktree-finish.sh` runs from
-the REPO ROOT, so the script that lands this change is MAIN's copy — which does not yet contain the
-call. The commit introducing the guard is therefore not gated by it; the first finish AFTER it lands
-is the first gated one. Nothing special is required (unlike CB-57, no re-run of `install-hooks.sh`),
-because this guard is in the script rather than in an installed hook.
+the REPO ROOT, so the script that lands this change is MAIN's copy, which does not yet contain the
+call; the first finish AFTER it lands is the first gated one. No re-run of `install-hooks.sh` is
+needed, because this guard is in the script rather than in an installed hook.
 
 **What this does NOT do.** It is per-clone and client-side like the rest of the harness — it says
-nothing about the interpreter any other machine or CI actually used, only that these two trees
-agree. It compares a version string, so two builds of the same version with different compile-time
-options read as identical. A `.python-version` naming a build this machine cannot obtain fails at
-`uv run`, which the guard reports as undeterminable — correctly, but the message will be uv's rather
-than a diagnosis of the pin. And the pin is required to be a plain `X`, `X.Y` or `X.Y.Z`: uv also
-accepts implementation and platform requests (`pypy@3.11`, a full `cpython-…-linux-…` triple), and
-rather than guess what one of those resolves to the guard refuses and says so.
+nothing about the interpreter any other machine or CI actually used, only that these two trees agree.
+It compares a version STRING, so two builds of the same version with different compile-time options
+read as identical. A `.python-version` naming a build this machine cannot obtain fails at `uv run`,
+which the guard reports as undeterminable — correctly, but the message will be uv's rather than a
+diagnosis of the pin. And the pin is required to be a plain `X`, `X.Y` or `X.Y.Z`: uv also accepts
+implementation and platform requests (`pypy@3.11`, a full `cpython-…-linux-…` triple), and rather
+than guess what one of those resolves to the guard refuses and says so.
+
+→ почему именно так: `docs/claude-md-rationale/workflow.md#cb-135-закрепление-интерпретатора`
 
 - **Create:** `tools/worktree-setup.sh <type>/<slug> [base]`, which validates the name, refuses a
   card already carried by another branch, **claims every card the branch names through the claims
