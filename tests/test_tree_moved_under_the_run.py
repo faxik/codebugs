@@ -546,6 +546,88 @@ class TestNothingIsPrunedByJudgement:
             for key, reason in table.items():
                 assert isinstance(reason, str) and len(reason.split()) >= 5, key
 
+    @staticmethod
+    def _tracked_paths() -> list[str]:
+        """What git says is source in this repository. One definition.
+
+        Both checks below judge a prune row against this same answer, so they
+        cannot come to disagree about what the world is.
+        """
+        tracked = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        paths = [path for path in tracked.split("\0") if path]
+        assert paths, "premise: git reports at least one tracked file in this repository"
+        return paths
+
+    def test_no_pruned_entry_is_stale(self):
+        """The self-deleting half, and nothing held it before CB-179.
+
+        A prune row's whole justification is the sentence beside it: this name
+        is not a SOURCE of anything. The row must be deleted the moment that
+        stops being true, because a stale row does not merely sit there — it
+        silently narrows the alarm, and the alarm is what tells an acceptor
+        that the tree moved under a run. The world it is judged against is
+        git's own record of what this repository considers source, which is
+        stable across machines in a way "does this directory exist right now"
+        is not: `.ruff_cache` exists only after the linter has run, and
+        `.mypy_cache` may never exist at all, so keying on presence would fail
+        in CI while proving nothing.
+
+        The limit, stated rather than implied: an UNTRACKED source file under a
+        pruned name is invisible here. What this refuses is a pruned name
+        acquiring tracked content — a directory becoming part of the project
+        while an exclusion written for a cache still covers it.
+        """
+        paths = self._tracked_paths()
+
+        components = {part for path in paths for part in path.split("/")}
+        # Every directory prefix git tracks something under, spelled with this
+        # platform's separator so a `_PRUNED_PATHS` key built by
+        # `os.path.join` is compared against its own coordinate system.
+        prefixes = set()
+        for path in paths:
+            parts = path.split("/")
+            for depth in range(1, len(parts)):
+                prefixes.add(os.path.join(*parts[:depth]))
+
+        stale_names = sorted(name for name in _PRUNED_NAMES if name in components)
+        stale_paths = sorted(prefix for prefix in _PRUNED_PATHS if prefix in prefixes)
+        assert not stale_names and not stale_paths, (
+            f"pruned entries that now name tracked source: {stale_names + stale_paths}. "
+            "The reason beside each of these rows says it is not a source of "
+            "anything; git says otherwise, so the row must be DELETED rather "
+            "than left to narrow the alarm silently. These tables may only SHRINK."
+        )
+
+    def test_the_stale_check_would_actually_refuse_a_source_directory(self):
+        """Non-vacuity: the check above must be able to FAIL, and it is run here.
+
+        Every row passes today, so without this the whole test could be a
+        tautology over an empty intersection and nobody would know.
+
+        The first draft of this test asserted two facts about the check's
+        INPUTS — that git tracks something under `tests`, and that
+        `.claude/plans` is not pruned — and never ran the predicate at all.
+        That is the shape this whole direction exists to close: a check that
+        would go on passing while the thing it certifies changed underneath
+        it. So the predicate itself is run, over the real tables plus one name
+        the suite unmistakably reads, and the assertion is that it reports
+        exactly that name.
+        """
+        components = {part for path in self._tracked_paths() for part in path.split("/")}
+        planted = set(_PRUNED_NAMES) | {"tests"}
+        stale = sorted(name for name in planted if name in components)
+        assert stale == ["tests"], (
+            f"the stale predicate reported {stale} over the real prune table plus "
+            "a planted source directory — it must report the planted one and "
+            "nothing else, or it is not measuring what the test above claims"
+        )
+
     def test_the_directories_the_suite_actually_reads_are_not_pruned(self):
         """A structural pin beside the behavioural row above, for the same rule.
 

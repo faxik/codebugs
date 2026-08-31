@@ -978,29 +978,40 @@ class TestActiveCountsIsTheSingleDefinition:
     # trigger fields, so its `deferred_count` now derives from the shared map.
     EXEMPT: dict[str, str] = {}
 
-    def test_every_evaluator_derives_from_the_shared_aggregation(self):
+    @staticmethod
+    def _evaluators() -> list[tuple[str, set[str]]]:
+        """Every function that evaluates the blocker set, with what it calls.
+
+        ONE definition, used by the gate below and by the EXEMPT staleness
+        check beside it. When these were two copies (CB-179 added the second),
+        a future change to what counts as an evaluator — widening past a bare
+        `Name` call, say — had to be made twice or the two tests would silently
+        disagree about the very population one of them exempts from the other.
+        """
         import ast
         import pathlib
+
         tree = ast.parse(pathlib.Path(blockers.__file__).read_text())
-
-        def called_names(node):
-            return {
-                c.func.id for c in ast.walk(node)
-                if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
-            }
-
-        offenders = []
-        evaluators = []
+        found = []
         for fn in ast.walk(tree):
             if not isinstance(fn, ast.FunctionDef):
                 continue
-            names = called_names(fn)
-            if "_get_active_blockers_by_type" not in names:
-                continue
-            evaluators.append(fn.name)
-            if fn.name in self.EXEMPT or "_active_counts" in names:
-                continue
-            offenders.append(fn.name)
+            names = {
+                c.func.id
+                for c in ast.walk(fn)
+                if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+            }
+            if "_get_active_blockers_by_type" in names:
+                found.append((fn.name, names))
+        return found
+
+    def test_every_evaluator_derives_from_the_shared_aggregation(self):
+        evaluators = self._evaluators()
+        offenders = [
+            name
+            for name, names in evaluators
+            if name not in self.EXEMPT and "_active_counts" not in names
+        ]
 
         # Non-vacuity: if the evaluator set is ever empty the assertion below is
         # free, which is exactly how a ratchet stops ratcheting.
@@ -1008,6 +1019,42 @@ class TestActiveCountsIsTheSingleDefinition:
         assert offenders == [], (
             f"{offenders} evaluate the blocker set without deriving from "
             "_active_counts; add to EXEMPT with a reason, or derive from it"
+        )
+
+    def test_every_exempt_row_carries_a_non_empty_reason(self):
+        """Half one (CB-179). The table had the right SHAPE and no gates at all.
+
+        `dict[str, str]` says the author foresaw that a row owes a reason, and
+        nothing made him supply one. The table is empty today, which is why
+        neither half was noticed missing and precisely why the halves matter:
+        an empty table with the right shape is the prepared bed the first
+        unjustified row lands in, and this one sits under a gate whose whole
+        subject is that a check over elements cannot check their composition.
+        """
+        empty = [
+            name
+            for name, reason in self.EXEMPT.items()
+            if not isinstance(reason, str) or not reason.strip()
+        ]
+        assert empty == [], (
+            f"EXEMPT row(s) with no reason: {empty} -- a reason names why that "
+            "evaluator may re-derive rather than read the shared aggregation."
+        )
+
+    def test_no_exempt_row_is_stale(self):
+        """Half two, and the half nothing held: the table may only SHRINK.
+
+        A row naming a function that is no longer an evaluator -- renamed,
+        deleted, or no longer touching the blocker set -- exempts nothing, and
+        leaving it is how the table becomes the place a real regression is
+        parked under an old name.
+        """
+        evaluators = [name for name, _calls in self._evaluators()]
+        assert len(evaluators) >= 4, evaluators  # the gate's own non-vacuity floor
+        stale = [name for name in self.EXEMPT if name not in evaluators]
+        assert stale == [], (
+            f"EXEMPT names {stale}, which no longer evaluates the blocker set "
+            "at all -- delete the row rather than leaving a standing exemption."
         )
 
 

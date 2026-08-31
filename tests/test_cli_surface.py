@@ -16,7 +16,7 @@ import pathlib
 
 import pytest
 
-from tests.cli_surface import collect_cli_surface
+from tests.cli_surface import _EXCLUDED_ACTION_ATTRS, collect_cli_surface
 
 # A sentinel distinct from every real value a verb record's key can hold
 # (JSON scalars, lists, `None`, booleans) — used so the detail loop below can
@@ -114,6 +114,82 @@ class TestCliSurfaceGolden:
         current = collect_cli_surface()
 
         assert current == expected, _drift_message(current, expected)
+
+
+class TestExcludedActionAttrs:
+    """`_EXCLUDED_ACTION_ATTRS` carries both halves of the discipline (CB-179).
+
+    Every row of that table takes one argparse attribute out from under the
+    golden comparison, and the golden is one of the two gates on what a
+    command-line user sees. It used to be a bare `frozenset` whose entire
+    justification lived in a comment above it, so a second row could be added
+    with no reason at all and a row that had stopped exempting anything would
+    sit there forever. Neither test below implies the other: a row can name a
+    live attribute and carry no reason, and a reasoned row can name an
+    attribute argparse stopped producing two releases ago.
+    """
+
+    @staticmethod
+    def _attributes_argparse_actually_produces() -> set[str]:
+        """Every `vars(action)` key the REAL parser yields, BEFORE exclusion.
+
+        Built from `cli.build_parser` and walked exactly as
+        `cli_surface.collect_cli_surface` walks it — top-level parser, then
+        `sub.choices` — so the world this table is judged against is the one
+        the golden is generated from.
+
+        `collect_cli_surface()` itself cannot be reused here, and the reason is
+        the point rather than an omission: it returns actions ALREADY passed
+        through `_serialize_action`, which is what applies
+        `_EXCLUDED_ACTION_ATTRS`. Asking it what argparse produces would be
+        asking the exclusion whether it excludes anything — circular, and it
+        would answer "no stale rows" by construction.
+
+        Named rather than left to be discovered: `sub._choices_actions` holds
+        pseudo-actions that `collect_cli_surface` also serializes, and this
+        walk does not visit them. Measured today they contribute no attribute
+        the walk does not already see, and the direction of the gap is a FALSE
+        REFUSAL — an attribute only a pseudo-action carries would read as
+        stale — which is the loud failure rather than the silent one.
+        """
+        from codebugs import cli
+
+        parser, sub, _commands = cli.build_parser()
+        seen: set[str] = set()
+        for action in parser._actions:
+            seen.update(vars(action))
+        for subparser in sub.choices.values():
+            for action in subparser._actions:
+                seen.update(vars(action))
+        assert seen, "premise: the real parser yields at least one action attribute"
+        return seen
+
+    def test_every_excluded_attribute_carries_a_real_reason(self):
+        empty = [
+            name
+            for name, reason in _EXCLUDED_ACTION_ATTRS.items()
+            if not isinstance(reason, str) or len(reason.strip()) < 20
+        ]
+        assert empty == [], (
+            f"_EXCLUDED_ACTION_ATTRS row(s) with no real reason: {empty} — an "
+            "exclusion here removes an attribute from the snapshot that gates "
+            "the user-visible CLI, so it owes an argument, not a name."
+        )
+
+    def test_no_excluded_attribute_is_stale(self):
+        """Self-deleting: a row exempting nothing must be removed.
+
+        An attribute argparse no longer sets is not being excluded from
+        anything, and leaving the row is how a table becomes a standing licence
+        nobody re-reads.
+        """
+        produced = self._attributes_argparse_actually_produces()
+        stale = sorted(name for name in _EXCLUDED_ACTION_ATTRS if name not in produced)
+        assert stale == [], (
+            f"_EXCLUDED_ACTION_ATTRS names {stale}, which no `vars(action)` in "
+            "the real parser returns any more — delete the row. This table may "
+            "only SHRINK."
+        )
 
 
 class TestVerbActionsByIdentityAliasBoundary:

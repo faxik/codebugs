@@ -88,17 +88,27 @@ from typing import Any
 
 from codebugs import cli, db
 
-# The ONE argparse Action attribute excluded from the snapshot, and the reason
-# it is one attribute and not a curated set: `container` is a live
-# back-reference to the `_ArgumentGroup` the action was attached to, set
-# internally by argparse's own machinery (`_ActionsContainer._add_action`) —
-# it is not something a declaration can pass as a keyword to `add_argument`,
-# and its `repr` carries a memory address, so serializing it would make the
-# golden fail on every single run regardless of any real surface change (brief
-# trap #5: unstable serialization). Excluding it is a STRUCTURAL exclusion of
-# the one non-declarable, non-deterministic key `vars(action)` returns — every
-# other key, whatever argparse calls it, is captured.
-_EXCLUDED_ACTION_ATTRS = frozenset({"container"})
+# argparse Action attribute -> WHY it is excluded from the snapshot.
+#
+# The reason lives in this dict rather than in a comment, and the change from a
+# bare `frozenset` is CB-179's: a comment is text no test reads, so the table
+# had neither half of the discipline every other exception table here carries.
+# `tests/test_cli_surface.py::TestExcludedActionAttrs` now holds both — a blank
+# reason fails, and a row naming an attribute argparse no longer produces fails,
+# so this may only SHRINK.
+_EXCLUDED_ACTION_ATTRS: dict[str, str] = {
+    "container": (
+        "A live back-reference to the `_ArgumentGroup` the action was attached "
+        "to, set internally by argparse's own machinery "
+        "(`_ActionsContainer._add_action`) — it is not something a declaration "
+        "can pass as a keyword to `add_argument`, and its `repr` carries a "
+        "memory address, so serializing it would make the golden fail on every "
+        "single run regardless of any real surface change (brief trap #5: "
+        "unstable serialization). This is a STRUCTURAL exclusion of the one "
+        "non-declarable, non-deterministic key `vars(action)` returns — every "
+        "other key, whatever argparse calls it, is captured."
+    ),
+}
 
 
 class UnserializableArgumentType(Exception):
