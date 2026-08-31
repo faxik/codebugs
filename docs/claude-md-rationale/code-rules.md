@@ -153,6 +153,4 @@ A dead READER on stdout otherwise makes every verb report a **committed** write 
 
 **The dangerous case is the newest**: on 3.14, an invalid fd 1 makes `sys.stdout` `None`, `print` is a documented no-op against `None`, and the colour probe short-circuits on `hasattr(None, "fileno")` — so every verb runs, discards its whole output and **reports success**. That is the "silent exit 0" CB-78's ratification rejected by name, reached by upgrading the interpreter rather than by changing any code here: `codebugs export-csv /dev/stdout | gzip > backup.gz` reports success over a backup that was never written. 
 
-**`/dev/stdout` needs BOTH halves of the alias check**: with stdout redirected to a **file**, `realpath` yields that regular file and only the held-open-inode test catches it; with stdout on a **pipe**, `realpath` yields `/proc/<pid>/fd/pipe:[N]`, which does not exist, so `os.stat` raises `FileNotFoundError` and a stat-based classifier reads "new file to create" and tries to `mkstemp` inside `/proc`. 
-
 A test that asserts only "the target got a tracker" cannot see the defect this fixed; `TestInitUnderTheTrackerRootFlag` asserts the directory that must **not** have one on every case.

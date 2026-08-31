@@ -487,11 +487,7 @@ two cannot disagree.
 **Matching is by TOKEN, and a word boundary is the wrong tool.** `plan.md` is a substring of
 `my-plan.md`, so a sweeping commit naming its own note would launder the stranger's note beside it —
 and the swept file is by construction the one nobody wrote down. A regex `\b` does not fix it either,
-because `-` and `.` are non-word characters, so `\bplan\.md\b` matches *inside* `my-plan.md`. `LC_ALL=C` pins byte
-semantics so the verdict cannot depend on the committer's locale — **honest scope: that line is
-determinism insurance and no test discriminates it**, since under a UTF-8 locale codepoint-wise
-classification happens to agree on every case here.
-
+because `-` and `.` are non-word characters, so `\bplan\.md\b` matches *inside* `my-plan.md`.
 **The matcher also decides which names it will judge, which is the same predicate and not a second
 one.** A space is a boundary, so with `a b.md` and `b.md` both staged and only `a b.md` named, the
 occurrence of `b.md` INSIDE it is flanked by a space and the token end — two boundaries — and the

@@ -86,7 +86,11 @@ unrelated work — the bytes survive, the **provenance** does not. **The
 match must be flanked by a boundary: the string edge, or an ASCII byte that cannot occur in the
 name.** Every **non-ASCII** byte counts as part of a name, so an ambiguous neighbour refuses rather
 than matches; **the stated cost** is that a filename hugged by typographic quotes or dashes
-(`«plan.md»`) is not recognised and needs a space or an ASCII quote around it. **So a staged basename containing a space or ASCII punctuation outside
+(`«plan.md»`) is not recognised and needs a space or an ASCII quote around it. `LC_ALL=C` pins byte
+semantics so the verdict cannot depend on the committer's locale — **honest scope: that line is
+determinism insurance and no test discriminates it**, since under a UTF-8 locale codepoint-wise
+classification happens to agree on every case here.
+**So a staged basename containing a space or ASCII punctuation outside
 `[A-Za-z0-9._-]` is REFUSED outright** rather than judged by a rule that cannot see it. Non-ASCII names are untouched, because a non-ASCII byte
 is a NAME byte. **Scope, and what it deliberately does not touch.** Only `main`, and only `.claude/plans/*.md` or
 `.claude/plans/briefs/*.html` (the second widened by CB-266 to match `pre-commit-hook.sh`'s own

@@ -311,8 +311,6 @@ There is no local discriminator: git reports that directory as a valid work tree
 
 That default is the whole fix**: three ways to break a tracker were known when the unit started and measurement found five more, each with its own errno, and there is no reason to think eight is the population. 
 
-**How many helpers there are, and how many execute sites they hold, is a question for the ratchet and deliberately not for this paragraph:** both counts that once stood here were stale by the time anyone re-ran them.
-
 Verified by running it: `in_transaction` goes `True → False` and a subsequent `ROLLBACK` finds nothing to undo. A gate that says "you hold the lock" before the lock is committed is worse than the defect being fixed.
 
 An earlier design added a `TxnAbort` sentinel for this and was rejected in review: `db.txn` deliberately swallows a failed `ROLLBACK` (correct, so cleanup never masks the real exception), which would have let a refusal-shaped result come back with the transaction still live. 

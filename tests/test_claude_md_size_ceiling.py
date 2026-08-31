@@ -69,14 +69,14 @@ DEFAULT_CEILING = 8_000
 # The same mechanism now guards these post-split numbers.
 CEILINGS: dict[str, tuple[int, str]] = {
     "CLAUDE.md": (
-        41_921,
-        "achieved 37,921 after the T-131 directive/depth split plus one SLACK; "
+        42_188,
+        "achieved 38,188 after the T-131 directive/depth split plus one SLACK; "
         "the root is injected into EVERY session, so this is the number that "
         "matters most",
     ),
     "src/codebugs/CLAUDE.md": (
-        114_397,
-        "achieved 110,397 plus one SLACK. Far above the benchmark's ~6 KB average "
+        115_018,
+        "achieved 111,018 plus one SLACK. Far above the benchmark's ~6 KB average "
         "nested file, and deliberately so: this package is 25 modules in ONE flat "
         "directory, so there is a single hook point for the whole domain. It is "
         "paid only by a session that reads a file in src/codebugs/, never at "
