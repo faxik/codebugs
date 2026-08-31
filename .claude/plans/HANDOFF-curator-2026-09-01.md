@@ -5,8 +5,8 @@
 - Спека: `~/workspace-private/autosorter/.claude/plans/SPEC-planner-cascade-2026-08-19.md`
   §4–§5, §8, §13, §16.3, §17
 - Приёмщик: `~/.claude/agents/acceptor.md` + `~/.claude/skills/acceptance-check/SKILL.md` —
-  правленые копии ЖДУТ РУКИ ВЛАДЕЛЬЦА в `/home/faxik/workspace-private/codebugs/acceptor-norm-pending/`
-  (команда применения — в реестре, запись «СЛОВО ВЛАДЕЛЬЦА: ВЫПУСК…»)
+  правленые копии ЖДУТ РУКИ ВЛАДЕЛЬЦА в `/home/faxik/workspace-private/pending-codebugs/`
+  (команда применения — в реестре, запись «Поправка пути…»)
 - Память: MEMORY.md → curator-autodispatch, resume-dead-agents-by-message,
   no-direct-sql-use-mcp, smart-approve-permission-stack
 - Артефакт уровня: `.claude/plans/PAIN-REGISTRY-codebugs.md` — источник истины: Решения 1–5,
