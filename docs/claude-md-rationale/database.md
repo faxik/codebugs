@@ -246,8 +246,8 @@ was notified per the letter-fix protocol.
 **Two findings from one Codex diff review.** The empty-category pool defect — every empty-category
 observation pooling the whole table — and, in the same round, `group_report`'s bare `status == "all"` sentinel test, which was replaced with a type-pinned one because of CB-25's `mock.ANY` trap.
 
-**The registry-read exemption was a same-day review finding**: core must not know an extension's key
-names.
+**The registry-read exemption was a same-day review finding.** What it found was a hardcoded key
+name in findings, i.e. core knowing an extension's vocabulary.
 
 **What the diameter measurement is worth.** The corpus's 43-row family hides a 0.392 pair behind
 0.7-plus edges, which is why `min_pair_score` is computed over all member pairs rather than over the
