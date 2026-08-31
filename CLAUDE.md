@@ -871,188 +871,153 @@ We are migrating toward a plugin architecture in phases. Query with `reqs_query 
 ## Embeddings
 
 `embeddings.py` stores a vector per requirement and answers similarity queries over them.
-**There is no embedding provider in this package, and that is the fact every other rule here
-follows from.** The CALLER computes the vector, in its own process, and passes finished numbers as
-`embedding: list[float]`; the tools never receive the requirement's TEXT at all. Measured before
-this section was written: the only declared runtime dependency is `mcp`, no module of the package
-imports one of the socket-opening names the gate below enumerates, and the vector arrives as an
-argument. **That sentence used to end "imports anything that could open a socket", which is a claim
-about every socket-opener and not about a list** — measured against the gate's own function,
-`from logging.handlers import SocketHandler`, the same module's `HTTPHandler` and
-`from multiprocessing.connection import Client` all return an empty result, so the wider spelling
-was false in the paragraph that calls itself a measurement (CB-190).
+**There is no embedding provider in this package, and that is the fact every other rule here follows
+from.** The CALLER computes the vector, in its own process, and passes finished numbers as
+`embedding: list[float]`; the tools never receive the requirement's TEXT at all.
 
-**The safety claim is bounded to this package's own code and to the vector's route, and the bound
-is load-bearing rather than modest.** Do not write "codebugs cannot reach the network": the `mcp`
-dependency carries a network transport of its own — `server.py` says so, an HTTP mode exists and
-this project runs over stdio — and `subprocess` is used legitimately for git, which can of course
-run `curl`. What is true and checkable is **two narrower statements about this package's SOURCE
-TEXT, not one about its capability**: no module under `src/codebugs/` imports one of the
-socket-opening modules the gate ENUMERATES, and — since CB-190 — no module imports anything at all
-from outside the package and the standard library that is not DECLARED there by exact dotted name
-with a reason. The vector's own route is a third, separate claim, and it stays as it was: from the
-caller's argument into this tracker's SQLite file and nowhere else. A claim wider than its
-measurement is the defect class this direction exists to close; stating it precisely matters more
-than stating it loudly. **The bound is about naming, not about the process, and that is measured
-rather than hedged**: importing the one declared MCP name already puts BOTH SSE transports —
-`mcp.server.sse` and `mcp.client.sse` — into `sys.modules` along with most of the SDK, so what the
-ratchet buys is that the source cannot NAME a second one without a row somebody reads, never that
-the transport is absent. No module count is quoted here on purpose: the first draft quoted one,
-and it was wrong because the measuring predicate matched the prefix `mcp` without the dot and swept
-in `mcp_types`, a separate distribution — the exact confusion the gate's own table is written to
-prevent.
+**The safety claim is bounded to this package's own SOURCE TEXT and to the vector's route, and the
+bound is load-bearing rather than modest.** Do not write "codebugs cannot reach the network": the
+`mcp` dependency carries a network transport of its own — an HTTP mode exists and this project runs
+over stdio — and `subprocess` is used legitimately for git, which can of course run `curl`. What is
+true and checkable is **two narrower statements about source text, not one about capability**: no
+module under `src/codebugs/` imports one of the socket-opening modules the gate ENUMERATES, and no
+module imports anything at all from outside the package and the standard library that is not
+DECLARED by exact dotted name with a reason. The vector's own route is a third, separate claim: from
+the caller's argument into this tracker's database file and nowhere else. **The bound is about
+NAMING, not about the process**: importing the one declared MCP name already puts BOTH SSE transports
+(`mcp.server.sse`, `mcp.client.sse`) into `sys.modules` along with most of the SDK, so what the
+ratchet buys is that the source cannot NAME a second one without a row somebody reads — never that
+the transport is absent. **No module count is quoted here on purpose.** A claim wider than its
+measurement is the defect class this direction exists to close.
 
 **Those claims are held by a gate, because a safety assertion with no gate behind it is a "gate that
 cannot fire" written as prose** — the literal subject of CB-159/CB-160.
 `tests/test_no_network_capability.py` walks every package module by AST and holds **two mechanisms
-that answer different questions, so neither may be deleted in favour of the other** (CB-190), plus
-a refusal of `__import__`/`importlib.import_module`/`exec`/`eval`, which no check reading import
+that answer different questions, so neither may be deleted in favour of the other** (CB-190), plus a
+refusal of `__import__`/`importlib.import_module`/`exec`/`eval`, which no check reading import
 statements could see.
 
-The first is an **enumeration of socket-opening module names**, and it keys on the CAPABILITY
-rather than on the module name — the naive form was measured dead on arrival: `src/codebugs/db.py`
-carries `from urllib.request import pathname2url`, so a name-keyed check would refuse the package
-in its present, entirely healthy state. `pathname2url` is a pure string function that opens
-nothing; `import urllib.request` binds the module and hands you `urlopen`. So a FROM-import of a
-network module is judged name by name against a `DECLARED_EXCEPTIONS` table carrying a reason per
-row, and a plain import of one is refused outright. **Being an enumeration is its defining limit,
-and it is the whole of CB-190**: a client nobody listed walks straight past it, measured —
-`cohere`, `ollama` and `httplib2` were green against it, and a planted module carrying all three
-left the file reporting 25 passed.
+The first is an **enumeration of socket-opening module names**, keyed on the CAPABILITY rather than
+on the module name: `src/codebugs/db.py` carries `from urllib.request import pathname2url`, a pure
+string function that opens nothing, while `import urllib.request` binds the module and hands you
+`urlopen` — so a name-keyed check would refuse the package in its present, entirely healthy state. A
+FROM-import of a network module is therefore judged name by name against a `DECLARED_EXCEPTIONS`
+table carrying a reason per row, and a plain import of one is refused outright. **Being an
+enumeration is its defining limit, and that is the whole of CB-190: a client nobody listed walks
+straight past it** (measured).
 
 The second is a **third-party import ratchet**, which is not an enumeration of what to refuse: it
 refuses by default and enumerates what is ALLOWED. Every import whose dotted name leaves both this
-package and the standard library must be named in `DECLARED_THIRD_PARTY` with a reason — five rows
-today. **The key is the EXACT DOTTED NAME, never the top-level one**, and that is load-bearing
-twice over: a top-level `mcp` row would have licensed `mcp.server.sse` and `mcp.client.sse`, so the
-first row of a table meant to stop network imports being parked would itself have been a parked
-network capability; and it would have made the table unable to go stale, since some `mcp` import
-always exists. **The package's own name is DERIVED from `codebugs.__name__` and may not be written
-as a row** — a row naming this package would lie about what the table declares, and, being live
-forever, would defeat self-deletion. Both tables are **self-deleting** — a row naming an import
-that is no longer there fails — because otherwise a table becomes the place real imports are
-parked, which is the hole these mechanisms exist to close, one level up.
+package and the standard library must be named in `DECLARED_THIRD_PARTY` with a reason. **The key is
+the EXACT DOTTED NAME, never the top-level one**, and that is load-bearing twice over: a top-level
+`mcp` row would license `mcp.server.sse` and `mcp.client.sse`, so the first row of a table meant to
+stop network imports being parked would itself be a parked network capability; and it would make the
+table unable to go stale, since some `mcp` import always exists. **The package's own name is DERIVED
+from `codebugs.__name__` and may not be written as a row** — a row naming this package would lie
+about what the table declares and, being live forever, would defeat self-deletion. **Both tables are
+self-deleting** — a row naming an import that is no longer there fails — because otherwise a table
+becomes the place real imports are parked, which is the hole these mechanisms exist to close, one
+level up.
 
-**One property is new and is declared rather than counted as covered.** Before CB-190 the verdict
-was a pure function of the source text; the ratchet classifies the standard library by
-`sys.stdlib_module_names`, so it is now a function of the source text AND the interpreter version.
-On this tree nothing diverges — the **three** foreign top-level names (`mcp`, `mcp_types`,
-`pydantic`) are foreign on every admitted version, measured on 3.11 as well as on the pinned
-interpreter — but the CI matrix runs only `test_cli_signals.py` and `test_fsio.py` across
-3.11–3.14, so this file is executed on the pinned interpreter alone and nothing would notice if
-that stopped being true. `codebugs` is the fourth top-level name the tree imports and is
-deliberately absent from that list: it is excluded by DERIVATION rather than by foreignness, and
-conflating the two is what an earlier draft of this sentence did — it said "four" and then listed
-three. Relatedly, `telnetlib`,
-`nntplib`, `asyncore`, `asynchat` and `smtpd` are kept in the enumeration precisely because the two
-mechanisms disagree about them by version: measured, all five are in `sys.stdlib_module_names` on
-3.11 (3.12 keeps the first two), and none is on 3.13 or 3.14 — so the ratchet refuses them by
-itself on the newer half while the enumeration is the sole catcher on the older half.
+**One property is declared rather than counted as covered.** The ratchet classifies the standard
+library by `sys.stdlib_module_names`, so the verdict is a function of the source text AND the
+interpreter version. On this tree nothing diverges, but **the CI matrix runs only
+`test_cli_signals.py` and `test_fsio.py` across 3.11–3.14, so this file is executed on the pinned
+interpreter alone and nothing would notice if that stopped being true.** `telnetlib`, `nntplib`,
+`asyncore`, `asynchat` and `smtpd` are kept in the enumeration precisely because the two mechanisms
+disagree about them by version — they are stdlib on the older admitted interpreters and absent on the
+newer ones, so the ratchet refuses them by itself on one half while the enumeration is the sole
+catcher on the other.
 
-**RULE, ratified 2026-08-25 with the owner's task: if an embedding provider ever lands INSIDE this
-package, it is configurable from its first day, its default is a local option, and its binding is
-VISIBLE** — an existing way to ask the running system which provider it is currently pointed at, on
-the model of `codebugs where` and the MCP startup preflight ("a binding you cannot see is a binding
-you cannot debug", CB-11). Not a preference, and not something to be added afterwards: a provider
-that ships hardcoded acquires callers before it acquires a switch. **The rule and the gate are two
-halves of one thing — the day either table above needs a new row is the day this rule starts
-applying**, which is why they are written together rather than left to find each other later.
-**This used to name `DECLARED_EXCEPTIONS` alone, and that trigger was broken** (CB-190): a provider
-built on a client the enumeration never listed would have needed no row at all, so the rule would
-have sat there un-armed while the provider landed. The ratchet is what repairs it, and for a reason
-that does not depend on anyone predicting the client — **a provider arrives as a DEPENDENCY
-whatever network shape it has**, so it needs a `DECLARED_THIRD_PARTY` row by construction.
+**RULE, ratified 2026-08-25: if an embedding provider ever lands INSIDE this package, it is
+configurable from its first day, its default is a local option, and its binding is VISIBLE** — an
+existing way to ask the running system which provider it is currently pointed at, on the model of
+`codebugs where` and the MCP startup preflight ("a binding you cannot see is a binding you cannot
+debug", CB-11). Not a preference, and not something to be added afterwards: a provider that ships
+hardcoded acquires callers before it acquires a switch. **The rule and the gate are two halves of one
+thing — the day either table above needs a new row is the day this rule starts applying.** The
+trigger rests on the ratchet rather than on the enumeration, for a reason that does not depend on
+anyone predicting the client: **a provider arrives as a DEPENDENCY whatever network shape it has**,
+so it needs a `DECLARED_THIRD_PARTY` row by construction.
 
 **The write validates the vector, on BOTH paths, and the two kinds of check sit in different places
 on purpose (CB-174).** `store_embedding` **and** `batch_store_embeddings` — a rule expressed as one
 call site is this repository's most-repeated failure. *The vector's own unfitness* (empty,
-non-numeric, `NaN`, `inf`) is decidable from the argument, so it runs BEFORE any transaction opens:
-a refusal must not take the write lock, which is the reason `store_embedding` already packed its
-vector above `db.txn`. *Agreement with what the tracker already holds* needs a READ, so it is a
-check-then-act and lives INSIDE the same transaction as the write — outside one, two concurrent
-writers of different widths both read an empty table, both pass, and both write, building the exact
-mixed state the check exists to prevent. That is CB-24 verbatim, and `busy_timeout` cannot help
-because it serializes the writes and never touches the read before them; `db.txn`'s `BEGIN
-IMMEDIATE` takes the lock first. **A third check is easy to miss and is not a special case of the
-second: the BATCH must be homogeneous with ITSELF**, since in an empty tracker there is nothing to
-compare against and one call could otherwise create the mixed state in a single operation.
-Placement is pinned STRUCTURALLY, for CB-41's reason — a comparison made before the lock looks
-correct until two writers overlap, so behaviour cannot discriminate the defect.
+non-numeric, `NaN`, `inf`) is decidable from the argument, so it runs BEFORE any transaction opens: a
+refusal must not take the write lock. *Agreement with what the tracker already holds* needs a READ,
+so it is a check-then-act and lives INSIDE the same transaction as the write — outside one, two
+concurrent writers of different widths both read an empty table, both pass, and both write, building
+the exact mixed state the check exists to prevent. That is CB-24 verbatim, and `busy_timeout` cannot
+help because it serializes the writes and never touches the read before them. **A third check is easy
+to miss and is not a special case of the second: the BATCH must be homogeneous with ITSELF**, since
+in an empty tracker there is nothing to compare against and one call could otherwise create the mixed
+state in a single operation. **Placement is pinned STRUCTURALLY**, for CB-41's reason — a comparison
+made before the lock looks correct until two writers overlap, so behaviour cannot discriminate the
+defect.
 
-**ONE QUANTITY DECIDES ON BOTH SIDES, AND IT IS BYTES.** The write guard reads
-`length(embedding)` and compares byte widths, exactly as `search_similar`'s `WHERE` does; dividing
-by four in the guard would make them two rules a rounding apart, because a blob whose length is not
-a whole number of components (reachable only by writing the column directly, but reachable) divides
-to the same component count as a well-formed neighbour. A component-wise write guard would then
-ACCEPT a vector beside a row the byte-wise read guard EXCLUDES — uniform to the writer, mixed to the
-reader. `embedding_stats` reports the byte count beside the component count for the same reason: a
-report that folded them would say `mixed: False` over a table SQL treats as two populations. This
-was found by reading the change end to end as one thing rather than section by section, and it is
-the CB-22/CB-52 "two copies of one precedence table" shape in a new place.
+**ONE QUANTITY DECIDES ON BOTH SIDES, AND IT IS BYTES.** The write guard reads `length(embedding)`
+and compares byte widths, exactly as `search_similar`'s `WHERE` does; dividing by four in the guard
+would make them two rules a rounding apart, because a blob whose length is not a whole number of
+components divides to the same component count as a well-formed neighbour, so a component-wise write
+guard would ACCEPT a vector beside a row the byte-wise read guard EXCLUDES — uniform to the writer,
+mixed to the reader. `embedding_stats` reports the byte count beside the component count for the same
+reason: a report that folded them would say `mixed: False` over a table SQL treats as two
+populations.
 
-**`NaN` was the quieter half and the card did not name it.** Measured: `struct.pack` accepts it, the
-row stores, `cosine_similarity` returns `nan`, and `nan >= min_similarity` is `False` — so the row
+**`NaN` is validated on the write path AND in the query vector.** `struct.pack` accepts it, the row
+stores, `cosine_similarity` returns `nan`, and `nan >= min_similarity` is `False` — so the row
 VANISHES from the results with no error anywhere, and a `NaN` in the QUERY vector removes every row,
 making "nothing is similar" indistinguishable from an empty tracker. That is the silent-empty-queue
-shape (CB-19/CB-25), which this repository treats as worse than the loud failure the card described.
-The query vector is validated for the same reason, which is one step past the letter of CB-174 and
-kept deliberately: the write-side fix cannot reach a `NaN` that only ever exists in a caller's query.
+shape (CB-19/CB-25), which this repository treats as worse than a loud failure. Validating the query
+vector is one step past the letter of CB-174 and kept deliberately: the write-side fix cannot reach a
+`NaN` that only ever exists in a caller's query.
 
 **The read-side guard is SQL, and `cosine_similarity`'s `raise` is preserved rather than removed.**
 `search_similar` folds `length(embedding) = ?` (the width BOUND, never interpolated) into its
 `WHERE`, so a foreign row never reaches the comparison — the form's precedent is
-`reconcile.live_source_clause`, where an exclusion is likewise SQL rather than a per-row Python
-predicate. The pairwise `raise` is a ratified decision: `zip()` would truncate the dot product while
-the norms stayed full, returning a plausible wrong number instead of an error. **The defect was
-never that refusal, it was the COMPOSITION** — one foreign row aborted the whole loop and discarded
-the rows already scored, in an order nothing controls. Making the `raise` UNREACHABLE from the
-search path is the fix; removing it would be a worse change. The premise the SQL rests on —
-`length()` on a BLOB counts BYTES — is pinned as a premise test, like the git and argparse
-behaviours elsewhere in this tree.
+`reconcile.live_source_clause`. The pairwise `raise` is a ratified decision: `zip()` would truncate
+the dot product while the norms stayed full, returning a plausible wrong number instead of an error.
+**The defect was never that refusal, it was the COMPOSITION** — one foreign row aborted the whole
+loop and discarded the rows already scored, in an order nothing controls. Making the `raise`
+UNREACHABLE from the search path is the fix; removing it would be a worse change. The premise —
+`length()` on a BLOB counts BYTES — is pinned as a premise test.
 
 **The cost of that guard is that excluded rows are INVISIBLE, so the visibility channel is
-`embedding_stats`, not the search.** `search_similar` returns a LIST and has nowhere to carry a
-count of what it dropped, the way `add` carries `stripped_meta_keys`; breaking the response shape
-for it would cost more than it buys. `embedding_stats` already returns a dict, so it reports
-`dimensions` (which widths are present, and how many rows each) and `mixed`. Both keys are
-UNCONDITIONAL, following the `attention`/`stripped_meta_keys` discipline: an empty list means
-*looked, nothing stored*, never *no such channel*. `reqs_embedding_stats` takes no input at all and
-is therefore not a privacy surface — said explicitly rather than left as an omission a reader has to
-interpret.
+`embedding_stats`, not the search.** `search_similar` returns a LIST and has nowhere to carry a count
+of what it dropped, the way `add` carries `stripped_meta_keys`. `embedding_stats` already returns a
+dict, so it reports `dimensions` (which widths are present, and how many rows each) and `mixed`, and
+**both keys are UNCONDITIONAL**, following the `attention`/`stripped_meta_keys` discipline: an empty
+list means *looked, nothing stored*, never *no such channel*. `reqs_embedding_stats` takes no input
+at all and is therefore not a privacy surface.
 
 **AND THAT CHANNEL IS NOT ENOUGH ON A UNIFORM TRACKER, WHICH IS WHERE THE FIX RE-CREATED THE VERY
-DEFECT IT REMOVES.** Adversarial review measured it: with every stored vector the same width — the
-ordinary case, and the one the write guard now guarantees — a query of a DIFFERENT width used to
-raise loudly from `cosine_similarity` and, with the SQL filter in place, returned `[]`. "Nothing is
-similar" about a full tracker, and `embedding_stats` says `mixed: False`, i.e. everything is fine.
-So `search_similar` refuses instead, on AFFIRMATIVE PROOF only — the result is empty AND the tracker
-holds vectors AND none of them is this width. An empty tracker still answers `[]`, because there an
-empty answer is true; a mixed tracker where some rows matched never reaches the branch, so CB-174's
-degrade-instead-of-fail behaviour is preserved rather than undone; and the branch keys on the WIDTH,
-never on the emptiness, so a right-width query whose status filter matched nothing is still an
-honest empty page. The general lesson is the one this repository keeps paying for: **a fix aimed at
-one silent-empty-queue can open another one, and only an adversary looking at the composition
-notices** — every element here was correct, and the elements together answered a lie.
+DEFECT IT REMOVES.** With every stored vector the same width — the ordinary case, and the one the
+write guard guarantees — a query of a DIFFERENT width returns `[]` under the SQL filter: "nothing is
+similar" about a full tracker, while `embedding_stats` says `mixed: False`. So `search_similar`
+**refuses instead, on AFFIRMATIVE PROOF only** — the result is empty AND the tracker holds vectors
+AND none of them is this width. An empty tracker still answers `[]`, because there an empty answer is
+true; a mixed tracker where some rows matched never reaches the branch, so CB-174's
+degrade-instead-of-fail behaviour is preserved; and the branch keys on the WIDTH, never on the
+emptiness, so a right-width query whose status filter matched nothing is still an honest empty page.
+**The general lesson: a fix aimed at one silent-empty-queue can open another one, and only an
+adversary looking at the composition notices** — every element was correct, and the elements together
+answered a lie.
 
 **RESIDUAL, NAMED AND NOT CLOSED: once a tracker holds vectors of one width, there is no sanctioned
 way to change embedding model.** No clear-and-re-embed operation exists here, and building one with
 no caller asking for it was refused on the direct precedent — CB-44 declined to build the resolver
 seam speculatively and CB-45 built it with its first consumer. The refusal message says so itself,
-because a gate with no way out is a wall rather than a diagnostic. **Today this locks nobody in**:
-measured on 2026-08-25 across every reachable tracker — codebugs 6 requirements, both autosorter
-trackers 1401 each — the embedded count is **0**, so CB-174 was a dormant breach rather than live
-damage, and the "first vector sets the width" rule had no migration cost at the moment it landed.
+because a gate with no way out is a wall rather than a diagnostic.
 
-**Three residuals found by adversarial review and NAMED rather than closed, because closing each is
-a separate negotiated decision.** (1) The network gate matches a CALL SITE by the name being called,
-so an indirection that hides the name — `getattr(importlib, "import_module")(...)`, or
-`find_spec`/`module_from_spec`/`exec_module` — is not seen; both were reproduced, and closing them
-means tracking values rather than names, a much larger check. The prose above is written to the
-width the gate actually holds and no wider. (2) A ZERO-LENGTH blob is accepted as an authoritative
-width, so a tracker that received `store_embedding(conn, id, [])` from a pre-CB-174 version now
-refuses every real vector, with no clear operation to escape — the same residual as the model
-switch, reached by a different door, and bounded today by the measured zero population. (3) The
-gate reads `src/codebugs/` only, so `tools/` and `tests/` are outside it by design.
+**Three more residuals, NAMED rather than closed, because closing each is a separate negotiated
+decision.** (1) The network gate matches a CALL SITE by the name being called, so an indirection that
+hides the name — `getattr(importlib, "import_module")(...)`, or `find_spec`/`module_from_spec`/
+`exec_module` — is not seen; closing that means tracking values rather than names, a much larger
+check, and the prose above is written to the width the gate actually holds and no wider. (2) A
+ZERO-LENGTH blob is accepted as an authoritative width, so a tracker that received
+`store_embedding(conn, id, [])` from a pre-CB-174 version now refuses every real vector, with no
+clear operation to escape. (3) The gate reads `src/codebugs/` only, so `tools/` and `tests/` are
+outside it by design.
 
 **Scope note for anyone extending this: `batch_store_embeddings` is still missing half of the
 hardening its twin received (CB-184).** A requirement that does not exist is silently counted as
@@ -1060,6 +1025,8 @@ not-stored there, where `store_embedding` raises `KeyError` (CB-125). CB-174 gav
 `db.txn` it needed for the width check to be an atomic check-then-act, and deliberately left that
 counter-versus-`KeyError` contract alone — it is a behaviour change with its own test and its own
 CHANGELOG entry.
+
+→ почему именно так: `docs/claude-md-rationale/embeddings.md#cb-174-и-cb-190-вектора-и-сетевой-гейт`
 
 ## Claims module
 
