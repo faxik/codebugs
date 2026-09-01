@@ -16,7 +16,7 @@ Borrowed from `../autosorter` (2026-08-16), including a scaled-down port of its
 | Nothing but `.claude/plans/*.md` or `.claude/plans/briefs/*.html` is committed on main | pre-commit hook | exit 1 |
 | A plan note committed on main is NAMED in the commit message | commit-msg hook | exit 1 |
 | A cascade id added to `.claude/plans/CASCADE-IDS.md` on main is the one `tools/cascade-mint.sh` would have computed (`max+1` per family, annulled lines and mentions included) | pre-commit hook | exit 1 |
-| A merge onto main comes from a typed local branch, or from main's own upstream `main` | pre-merge-commit hook (clean merge) + pre-commit hook (conflicted merge) | exit 1 |
+| A merge onto main comes from a typed local branch (EVERY local ref at that head must qualify, not just one), or from main's own upstream `main` | pre-merge-commit hook (clean merge) + pre-commit hook (conflicted merge) | exit 1 |
 | An in-progress cherry-pick/revert marker no longer exempts a commit | pre-commit hook | exit 1 |
 | Integration never fast-forwards | `--no-ff` + `git config merge.ff false` | — |
 | One integration at a time | `flock` on `.worktrees/.integrate.lock` | exit 1 |
@@ -49,7 +49,10 @@ parent and `TESTED_HEAD` as its second. It then lets the cleanup
 finish (worktree removal, claim release) and speaks at the very end, with a loud block and `exit 15`
 — deliberately not `exit 13`, which means *nothing landed, re-run*. `exit 15` means *the merge step
 already ran and the premise is unconfirmed*, and the block says in words not to re-run: a second
-finish after a landed merge is a worse outcome than the defect being reported.
+finish after a landed merge is a worse outcome than the defect being reported. **The residual is
+stated rather than closed: the interval between `git merge` returning and the `trap` firing is two
+assignments wide, and nothing in the script can close it** — so a missing `exit 15` is NOT proof the
+merge did not land.
 
 `merge.ff=false` is the one no hook could replace: **git fires no hook on a fast-forward at all**,
 because no commit is created, so nothing can catch it after the fact. **Two precise limits:** it
@@ -82,7 +85,9 @@ or simply an upstream whose `main` holds untyped work all land content here.
 `commit-msg` hook.** The rule it mechanises is that parallel sessions add files to main **by name,
 never by directory**: `.claude/plans/` is the one place they may all write, and `git add
 .claude/plans/` sweeps an UNTRACKED note belonging to another direction into a commit describing
-unrelated work — the bytes survive, the **provenance** does not. **The
+unrelated work — the bytes survive, the **provenance** does not. **The message is truncated at the
+scissors FIRST, then comment-stripped**, or the commit template and `git commit -v` would themselves
+"name" a note they merely listed as staged. **The
 match must be flanked by a boundary: the string edge, or an ASCII byte that cannot occur in the
 name.** Every **non-ASCII** byte counts as part of a name, so an ambiguous neighbour refuses rather
 than matches; **the stated cost** is that a filename hugged by typographic quotes or dashes
@@ -96,7 +101,8 @@ is a NAME byte. **Scope, and what it deliberately does not touch.** Only `main`,
 `.claude/plans/briefs/*.html` (the second widened by CB-266 to match `pre-commit-hook.sh`'s own
 widening, on the same reasoning: `git add .claude/plans/` recursively sweeps `briefs/`, so once a
 brief can land at all, this hook's reason for existing reaches it too). **Deletions are in scope**, because `git add <dir>` stages a removal
-too and deleting a stranger's note damages the same provenance. **A merge is exempt, and the
+too and deleting a stranger's note damages the same provenance. **A merge is exempt — the marker is
+read fail-closed WITH A COUNT, so an EMPTY `MERGE_HEAD` is not exempt — and the
 discriminator differs from `pre-merge-commit`'s in a way that would invert the rule if assumed:** a
 clean merge writes no `MERGE_HEAD` at `pre-merge-commit` time, but by `commit-msg` time git **has**
 written it, for clean and conflicted merges alike (measured, and pinned, because if a future git
@@ -136,7 +142,9 @@ onto main's first-parent line, which is what `.github/workflows/main-invariants.
 **The CI job's own limits, because a gate described better than it behaves is the failure this
 section exists to record.**
 
-1. It is scoped to a **pinned baseline SHA**, since main's history predates the rule. 
+1. It is scoped to a **pinned baseline SHA**, since main's history predates the rule.
+   **Moving that baseline forward is how a violation would be laundered, so it is a deliberate,
+   reviewable edit — never the fix for a red alarm.**
 
 2. **Anything merge-shaped is invisible to it**, and `amend`/`rebase`/`reset` do **not** necessarily
    leave a non-merge commit on the first-parent line: `git commit --amend` on a *merge* stays a
@@ -215,7 +223,9 @@ missing that file resolves against MAIN's project and the guard would compare ma
 agreement that can only ever hold, which is a gate that cannot fire, in the change whose subject is
 precisely that.
 
-**Phase, and `--skip-checks`.** The call sits in `[5/7]` AFTER the forward-merge — a
+**Phase, and `--skip-checks`.** The guard runs TWICE, and the second call is not a duplicate: it
+repeats INSIDE the lock, because a pre-check is not an invariant at landing time. The first call
+sits in `[5/7]` AFTER the forward-merge — a
 `.python-version` arriving from main must be in the tree before it is judged — and BEFORE `[6/7]`, so
 a refusal costs seconds instead of the suite run it is declaring meaningless. It is **outside** the
 `--skip-checks` branch: that flag skips ruff and pytest, which are CHECKS, and this is what decides
@@ -300,7 +310,9 @@ The
   enough:** a branch that merges a SIBLING branch absorbs its commits into the range, and if the
   sibling is older — the ordinary case — date order puts it first, so the derived subject names the
   sibling's card; on that shape a range-only fix is **worse** than the `git log -1` code it replaced.
-  **A branch with no commit of its own carrying a subject is REFUSED rather than guessed** —
+  **A branch with no commit of its own carrying a subject is REFUSED rather than guessed** (and the
+  refusal tests the POPULATION, not its first line: `git commit --allow-empty-message` puts a blank
+  subject at the head, and reading that as an empty population would be a false refusal) —
   reachable when the content arrived through a merge commit, since `_guard_nonempty_diff` has already
   proved the content is real — and the derivation therefore runs at the `TESTED_MAIN`/`TESTED_HEAD`
   sample rather than under the lock, so that refusal costs nothing instead of the whole gate run.
@@ -332,6 +344,10 @@ The
   accident, and an operator typing the flag has stated an intent.
 
 → почему именно так: `docs/claude-md-rationale/workflow.md#cb-58-и-cb-116-порядок-работы`
+
+**`tests/test_worktree_harness.py` separately asserts that `worktree-finish.sh` actually CALLS each
+guard — the per-guard tests do NOT cover that wiring, and a guard can be written, tested and never
+invoked with the suite still green.**
 
 → почему именно так: `docs/claude-md-rationale/workflow.md#как-проверяется-сам-харнес`
 
@@ -401,7 +417,22 @@ rewritten the same way, expect the same one-time manual merge.
 We are migrating toward a plugin architecture in phases.
 **Current rules for new code:**
 
-- New domain modules must call `register_schema()`, `register_tool_provider()`, and `register_cli_provider()` at module level — do NOT edit `db.connect()`, `server.py`, or `cli.py`.
+**Wiring a new domain module takes three steps, and each one carries its STATUS.** The status is the
+load-bearing part: an unmarked step is what a later split of this text separates from its rule, which
+is exactly how the root and the subsystem file came to contradict each other (CB-304).
+
+1. **Required.** The module calls `register_schema()`, `register_tool_provider()` and
+   `register_cli_provider()` at module level.
+2. **Required, and temporary.** Add the module's import to the list inside `_ensure_modules_loaded()`
+   (`db.py`). Without it the module is never imported, those three calls never run, and the module
+   **silently does not exist** — nothing reports the omission. The step goes away when auto-discovery
+   lands.
+3. **Optional.** Only if the module must be runnable in ISOLATION, add its mode slug to
+   `SERVER_NAMES` (`server.py`) and to the `--mode` allowlist (`cli.py`). Skipping it costs nothing
+   under the default mode, where `get_tool_providers(mode="all")` returns every registered provider.
+
+**That slug is the ONLY sanctioned edit to `server.py` or `cli.py`, and `db.connect()` is not edited
+at all.** This list is the single copy; `src/codebugs/CLAUDE.md` points here rather than restating it.
 
 ## Embeddings
 
