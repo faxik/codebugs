@@ -34,13 +34,12 @@ Where a request contradicts itself, you are told rather than served a guess. Nam
 at the place you had not typed; it now refuses, and the message names both places and the key that
 would have won. Asking a sweep listing for archived entries with `--all` and `--archived-only` at
 once used to ignore one of the flags and hand back fewer rows than `--all` on its own would have
-given; it now refuses and says which one to drop for each of the two things you might have meant. A
-negative
-`--limit` is an error on every verb that takes one, where before it meant *no limit at all* on some
-of them and was refused on others, and each of those verbs now states the rule in its help text and
-tool description instead of leaving you to discover it by hitting it. And an empty page no longer
-claims the tracker is empty when you were the one who asked for nothing: `--limit 0` now tells you
-that no rows were requested, and how many cards actually match.
+given; it now refuses and says which one to drop for each of the two things you might have meant.
+A negative `--limit` is an error on every verb that takes one, where before it meant *no limit at
+all* on some of them and was refused on others, and each of those verbs now states the rule in its
+help text and tool description instead of leaving you to discover it by hitting it. And an empty
+page no longer claims the tracker is empty when you were the one who asked for nothing: `--limit 0`
+now tells you that no rows were requested, and how many cards actually match.
 
 The tracker also stopped misreporting its own housekeeping. Re-running `resolve-trailers` over a
 widened revision range no longer appends a note to a card that already carries it word for word,
