@@ -35,11 +35,14 @@ at the place you had not typed; it now refuses, and the message names both place
 would have won. Asking a sweep listing for archived entries with `--all` and `--archived-only` at
 once used to ignore one of the flags and hand back fewer rows than `--all` on its own would have
 given; it now refuses and says which one to drop for each of the two things you might have meant.
-A negative `--limit` is an error on every verb that takes one, where before it meant *no limit at
-all* on some of them and was refused on others, and each of those verbs now states the rule in its
-help text and tool description instead of leaving you to discover it by hitting it. And an empty
-page no longer claims the tracker is empty when you were the one who asked for nothing: `--limit 0`
-now tells you that no rows were requested, and how many cards actually match.
+A negative `--limit` is now refused by five more verbs — `recent`, `milestone-audit`, `usage`,
+`anchor-resolve` and `anchor-recapture` — where it used to mean *no limit at all*, and each of
+them now states the rule in its help text and tool description instead of leaving you to discover
+it by hitting it. It is not refused everywhere yet: a few verbs apply the limit as a slice rather
+than in SQL, where a negative value drops the tail instead of removing the bound, and that case is
+deliberately still open. And an empty page no longer claims the tracker is empty when you were the
+one who asked for nothing: `--limit 0` now tells you that no rows were requested, and how many
+cards actually match.
 
 The tracker also stopped misreporting its own housekeeping. Re-running `resolve-trailers` over a
 widened revision range no longer appends a note to a card that already carries it word for word,
@@ -109,17 +112,21 @@ on any of those, the entries below say what each of them does now.
   too many successes, too few attempts behind each one. The instrument was at its most wrong
   exactly when people were most careful, because the prescribed way to run the pre-integration
   review is to start an integration and stop it by hand. A stopped run now records the code it
-  really ended with — `130` for Ctrl-C, `143` for a `kill` — so the summary command printed inside
-  that script counts it as the failed attempt it was.
+  really ended with — `130` for Ctrl-C, `143` for a `kill`, `129` for a closed terminal and `141`
+  for a dead reader on stdout — so the summary command printed inside that script counts it as the
+  failed attempt it was.
   **Lines already in the file are left exactly as they were.** It is a record of what happened, and
   rewriting it afterwards would destroy the only evidence that the fault existed at all, so any
   figure computed over the existing lines still carries the old error and has to be read with that
-  in mind. Two further limits, both measured rather than assumed: a run ended by `kill -9`, by a
-  closed terminal, or by the machine going away is still recorded as a success or not recorded at
-  all, because only the two signals that stops have actually been seen to arrive by are handled;
-  and in the narrow window after the merge has already gone through, while the run is only tidying
-  up, a stop is now recorded as a failure although the work did land — an error in the opposite,
-  safer direction from the one being fixed.
+  in mind. The limits that remain are named here rather than left to be rediscovered, and each
+  was measured. A run ended by `kill -9` or by the machine going away leaves no line at all
+  rather than a false success, because `SIGKILL` cannot be trapped — an undercount of attempts,
+  which is the safer direction; the same is true of a failure early enough that the recording is
+  not yet armed. `SIGQUIT` is not among the signals the traps name: bash ignores it, so what dies
+  is the foreground child, and the line then carries that child's own `131`. And in the narrow
+  window after the merge has already gone through, while the run is only tidying up, a stop is
+  recorded as a failure although the work did land — an error in the opposite, safer direction
+  from the one being fixed.
 
 ### Changed
 
@@ -227,7 +234,7 @@ on any of those, the entries below say what each of them does now.
   described. If you were passing both, pass the one you actually wanted. The command-line help
   never mentioned the suppression at all, and now says the two cannot be combined (CB-217).
 
-- A negative `--limit` is now an error on **every** verb that has one, not just on the three that
+- A negative `--limit` is now an error on **five more** verbs, not just on the three that
   learned it last release. `recent`, `milestone-audit`, `usage`, `anchor-resolve` and
   `anchor-recapture` used to accept `--limit -1` and hand you the whole table at exit 0 — SQLite
   reads a negative limit as *no limit* — so `codebugs query --limit -1` refused while
@@ -235,6 +242,11 @@ on any of those, the entries below say what each of them does now.
   answering the same argument the opposite way. All of them now refuse with the same one-line
   message and exit 1. Zero still means zero rows, and omitting the flag still takes each verb's own
   default; `--limit -1`, which used to hand back the whole table, now refuses (CB-208).
+  **What is deliberately still open, said rather than left to be discovered:** a verb that applies
+  its limit as a slice instead of in SQL does not refuse a negative value — `triage-inbox` is the
+  one you can reach from the command line — and there a negative drops the TAIL rather than
+  removing the bound, which is not even the behaviour the refusal above is about. That class is
+  pinned as a known gap by this package's own suite, not overlooked.
 - Each of those verbs' `--help` and MCP tool description now states the contract it enforces,
   rather than leaving the reader to discover the refusal by hitting it.
 - An empty page no longer claims the tracker is empty when you were the one who asked for nothing.
