@@ -6974,6 +6974,16 @@ class TestCheckArmsReportAVanishedWorktree:
             on_pytest='echo "the pytest arm was spawned after the tree vanished" >&2; exit 1',
         )
 
+        # THE CLAIM THE REPORT MAKES ABOUT THE WORLD, sampled before the run so
+        # it can be checked after it. The honest block does not only name a
+        # cause, it PROMISES an outcome — "Nothing of this run landed" — and
+        # nothing else in this class looks at whether that is true. A rework
+        # that moved the check phase behind the merge would leave every other
+        # assertion here green and turn that sentence into a lie, which is the
+        # very class of defect this card exists to close: a report that
+        # misdescribes what happened.
+        main_before = git(armed["repo"], "rev-parse", "main")
+
         r = self._finish(armed)
 
         # THE ARM WITNESS, and here it carries the whole "the cd failed" claim:
@@ -6987,6 +6997,14 @@ class TestCheckArmsReportAVanishedWorktree:
         assert f"pytest {self.GONE}" in r.stdout, r.stdout[-3000:]
         assert self.GONE_EXONERATES in r.stdout, r.stdout[-3000:]
         assert f"pytest {self.OLD_LIE}" not in r.stdout, r.stdout[-3000:]
+
+        # The promise, checked against the world rather than against the text.
+        assert git(armed["repo"], "rev-parse", "main") == main_before, (
+            "the report says nothing of this run landed, but main moved",
+            main_before,
+            git(armed["repo"], "rev-parse", "main"),
+            r.stdout[-3000:],
+        )
 
     def test_a_worktree_removed_under_the_ruff_arm_is_reported_not_blamed(
         self, armed: dict
@@ -7010,6 +7028,16 @@ class TestCheckArmsReportAVanishedWorktree:
             on_pytest='echo "the pytest arm ran after ruff refused" >&2; exit 1',
         )
 
+        # THE CLAIM THE REPORT MAKES ABOUT THE WORLD, sampled before the run so
+        # it can be checked after it. The honest block does not only name a
+        # cause, it PROMISES an outcome — "Nothing of this run landed" — and
+        # nothing else in this class looks at whether that is true. A rework
+        # that moved the check phase behind the merge would leave every other
+        # assertion here green and turn that sentence into a lie, which is the
+        # very class of defect this card exists to close: a report that
+        # misdescribes what happened.
+        main_before = git(armed["repo"], "rev-parse", "main")
+
         r = self._finish(armed)
 
         # `_report_check_failure` exits, so the pytest arm must never be
@@ -7024,6 +7052,14 @@ class TestCheckArmsReportAVanishedWorktree:
         assert f"ruff check {self.GONE}" in r.stdout, r.stdout[-3000:]
         assert self.GONE_EXONERATES in r.stdout, r.stdout[-3000:]
         assert f"ruff check {self.OLD_LIE}" not in r.stdout, r.stdout[-3000:]
+
+        # The promise, checked against the world rather than against the text.
+        assert git(armed["repo"], "rev-parse", "main") == main_before, (
+            "the report says nothing of this run landed, but main moved",
+            main_before,
+            git(armed["repo"], "rev-parse", "main"),
+            r.stdout[-3000:],
+        )
 
     # THE THREE STATES THAT ARE NOT A PROVEN DISAPPEARANCE, kept as one table
     # because they are one contract and not three scenarios. `_worktree_is_
@@ -7061,14 +7097,35 @@ class TestCheckArmsReportAVanishedWorktree:
 
     @staticmethod
     def _assert_premise(wt: Path, premise: str) -> None:
-        """The state was BUILT, not assumed — checked before the verdict."""
-        if premise == "still_there":
-            assert wt.is_dir(), "the fixture destroyed the worktree it was meant to keep"
-        elif premise == "dangling_symlink":
-            assert wt.is_symlink(), "the fixture did not leave a symlink behind"
-            assert not wt.exists(), "the symlink resolves, so it is not dangling"
-        else:
-            assert wt.parent.is_file(), "the fixture did not replace the parent with a file"
+        """The state was BUILT, not assumed — checked before the verdict.
+
+        FAIL-CLOSED ON AN UNKNOWN LABEL, and inside this class that is not a
+        stylistic preference. A catch-all `else` would hand a NEW row of
+        NOT_PROVEN_GONE the last branch's check, and the refusal would then
+        name the wrong cause — the exact family this direction tracks, and an
+        absurd one to reintroduce inside a unit whose whole subject is that a
+        refusal must report the reason it actually had.
+        """
+        checks = {
+            "still_there": lambda: [
+                (wt.is_dir(), "the fixture destroyed the worktree it was meant to keep"),
+            ],
+            "dangling_symlink": lambda: [
+                (wt.is_symlink(), "the fixture did not leave a symlink behind"),
+                (not wt.exists(), "the symlink resolves, so it is not dangling"),
+            ],
+            "parent_is_not_a_directory": lambda: [
+                (wt.parent.is_file(), "the fixture did not replace the parent with a file"),
+            ],
+        }
+        if premise not in checks:
+            raise AssertionError(
+                f"unknown premise {premise!r}: a row was added to NOT_PROVEN_GONE without a "
+                f"check of its own, so this run would have judged it by another row's state. "
+                f"Known premises: {sorted(checks)}"
+            )
+        for held, why in checks[premise]():
+            assert held, why
 
     @pytest.mark.parametrize("on_pytest, premise", NOT_PROVEN_GONE)
     def test_only_a_proven_disappearance_earns_the_honest_report(
