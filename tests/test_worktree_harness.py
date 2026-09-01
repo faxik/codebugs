@@ -7091,11 +7091,14 @@ class TestCheckArmsReportAVanishedWorktree:
         SYMLINK where the worktree was, reach two other branches of the same
         function and are false for the superuser as well.
 
-        Note what the last two states really are: the worktree is not merely
-        unexaminable, it is genuinely gone — and the script still declines to
-        say so, because it cannot PROVE it. That is the declared cost written
-        into the function's own comment, and asserting on it here is what keeps
-        the cost declared rather than drifting.
+        The last two rows are unprovable for DIFFERENT reasons, and collapsing
+        them would lose the point. Under the dangling symlink the directory is
+        genuinely gone but the NAME still resolves as a link, so nothing has
+        been proved absent. Under the replaced parent nothing can be looked up
+        at all. In both the worktree really is gone, and in both the script
+        still declines to say so — the declared cost written into the
+        function's own comment, and asserting on it here is what keeps the cost
+        declared rather than drifting.
         """
         wt = self._branch(armed)
         calls = self._uv(armed, on_ruff="exit 0", on_pytest=on_pytest)
