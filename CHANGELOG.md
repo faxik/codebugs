@@ -64,10 +64,10 @@ vector goes into this tracker's own local database and nowhere else.
 This is 0.3.0 and not 0.2.3 because some of it deliberately breaks what used to work. Three calls
 that used to succeed in silence now exit with an error: a code location contradicted by a `meta`
 key beside it, a sweep listing asked for archived entries two contradictory ways at once, and a
-negative `--limit`. Two more still answer, but the entries below flag them as breaking all the
-same: a dotted `meta_key` no longer descends into nested structures, and a `--limit` you type
-beside a list of ids is no longer raised to fit the list. If you were relying on any of those, the
-entries below say what each of them does now.
+negative `--limit`. Two more still answer, but their entries spell out what a caller who relied on
+the old behaviour has to change: a dotted `meta_key` no longer descends into nested structures, and
+a `--limit` you type beside a list of ids is no longer raised to fit the list. If you were relying
+on any of those, the entries below say what each of them does now.
 
 ### Fixed
 
@@ -234,7 +234,7 @@ entries below say what each of them does now.
   `codebugs recent --since … --limit -1` printed everything, two neighbouring verbs over one table
   answering the same argument the opposite way. All of them now refuse with the same one-line
   message and exit 1. Zero still means zero rows, and omitting the flag still takes each verb's own
-  default, so nothing that worked before stops working (CB-208).
+  default; `--limit -1`, which used to hand back the whole table, now refuses (CB-208).
 - Each of those verbs' `--help` and MCP tool description now states the contract it enforces,
   rather than leaving the reader to discover the refusal by hitting it.
 - An empty page no longer claims the tracker is empty when you were the one who asked for nothing.
