@@ -6,6 +6,72 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-09-01
+
+This release is about the tracker answering the question you asked. In a handful of places it used
+to answer a different one instead — and report success while doing it — and each of those now
+either gives you your answer or refuses outright.
+
+The `meta` filter is the clearest case. A key you type is now compared as a literal top-level key,
+so every character in it means itself: a card filed under `misassigned_to_1.81` comes back when you
+ask for it, where it used to return nothing at all, in the shape of a successful empty answer — the
+worst kind, because an empty queue looks exactly like a correctly filtered one. The dot in that key
+was being read as *descend into*, which is why the card was invisible, and, in the other direction,
+why a key spelled `loc.skipped` reached into a nested structure nobody had declared as a feature.
+That traversal is gone, with no replacement for nested lookup yet. Around it the same filter
+picked up three smaller corrections: keys containing punctuation are no longer refused on the
+grouping axis, one row whose `meta` will not parse as JSON no longer takes the whole query down
+with it, and a key whose stored value is `null` now counts as present, because existence is what
+that filter says it tests.
+
+A row limit you actually type is now the limit you get. Asking for cards by id used to raise your
+limit to the number of ids you had named, so `--limit 0` printed a card and `--limit 1` beside two
+ids printed both. The number you type now wins, and omitting it still returns every id you asked
+for, however many that is.
+
+Where a request contradicts itself, you are told rather than served a guess. Naming a line with
+`-l` and then contradicting it with a `line` or `site` key inside `--meta` used to anchor the card
+at the place you had not typed; it now refuses, and the message names both places and the key that
+would have won. Asking a sweep listing for archived entries with `--all` and `--archived-only` at
+once used to ignore one of the flags and hand back fewer rows than `--all` on its own would have
+given; it now refuses and says which one to drop for each of the two things you might have meant.
+A negative `--limit` is now refused by five more verbs — `recent`, `milestone-audit`, `usage`,
+`anchor-resolve` and `anchor-recapture` — where it used to mean *no limit at all*, and each of
+them now states the rule in its help text and tool description instead of leaving you to discover
+it by hitting it. It is not refused everywhere yet: a few verbs apply the limit as a slice rather
+than in SQL, where a negative value drops the tail instead of removing the bound, and that case is
+deliberately still open. And an empty page no longer claims the tracker is empty when you were the
+one who asked for nothing: `--limit 0` now tells you that no rows were requested, and how many
+cards actually match.
+
+The tracker also stopped misreporting its own housekeeping. Re-running `resolve-trailers` over a
+widened revision range no longer appends a note to a card that already carries it word for word,
+and no longer moves that card's date for having been swept a second time; cards left alone this way
+are named in the output and counted separately in the run's closing summary, because a run that
+quietly does nothing looks just like one that did the work. Separately, the log this repository
+keeps of its own integration attempts stopped writing an interrupted run down as a successful one,
+so the figure people read off it — how many attempts one integration costs — stops flattering us
+from here on. Lines already in that file are left exactly as they were, so a figure computed over
+them still carries the old error.
+
+The safety note on the embedding tools has been brought back to what is actually checked. It used
+to promise that no network capability could be imported into the package; the check behind that
+promise worked from a list of module names somebody had written down, so a client nobody had listed
+passed it without a murmur. In its place stand two narrower statements, both mechanically enforced:
+this package's own source imports none of the socket-opening modules that list knows about, and it
+imports nothing at all from outside the package and the standard library unless that exact import
+is declared, by name, with a written reason. The promise that matters to you is untouched — you
+compute the embedding vector yourself, the tools never receive your requirement's text, and the
+vector goes into this tracker's own local database and nowhere else.
+
+This is 0.3.0 and not 0.2.3 because some of it deliberately breaks what used to work. Three calls
+that used to succeed in silence now exit with an error: a code location contradicted by a `meta`
+key beside it, a sweep listing asked for archived entries two contradictory ways at once, and a
+negative `--limit`. Two more still answer, but their entries spell out what a caller who relied on
+the old behaviour has to change: a dotted `meta_key` no longer descends into nested structures, and
+a `--limit` you type beside a list of ids is no longer raised to fit the list. If you were relying
+on any of those, the entries below say what each of them does now.
+
 ### Fixed
 
 - **`meta_key` now means the literal top-level key you typed, on both the filter and the grouping
@@ -37,6 +103,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   be reported as absent. Note the grouping axis deliberately still treats a `null` value as
   ungrouped, because there is no rankable value there to group on — the two surfaces answer
   different questions and now say so.
+- **The record of how integrations go no longer counts an interrupted run as a successful one.**
+  `tools/worktree-finish.sh` writes one line per integration attempt into
+  `.worktrees/landing-attempts.log`, and the figure people read off that file — how many attempts
+  one successful integration costs — was flattering us. A run that was stopped, by Ctrl-C or by a
+  `kill`, rather than ending on its own, was written down with exit code `0`, and `0` is the code
+  that means *this one went through*. Every interrupted run was therefore counted as a success:
+  too many successes, too few attempts behind each one. The instrument was at its most wrong
+  exactly when people were most careful, because the prescribed way to run the pre-integration
+  review is to start an integration and stop it by hand. A stopped run now records the code it
+  really ended with — `130` for Ctrl-C, `143` for a `kill`, `129` for a closed terminal and `141`
+  for a dead reader on stdout — so the summary command printed inside that script counts it as the
+  failed attempt it was.
+  **Lines already in the file are left exactly as they were.** It is a record of what happened, and
+  rewriting it afterwards would destroy the only evidence that the fault existed at all, so any
+  figure computed over the existing lines still carries the old error and has to be read with that
+  in mind. The limits that remain are named here rather than left to be rediscovered, and each
+  was measured. A run ended by `kill -9` or by the machine going away leaves no line at all
+  rather than a false success, because `SIGKILL` cannot be trapped — an undercount of attempts,
+  which is the safer direction; the same is true of a failure early enough that the recording is
+  not yet armed. `SIGQUIT` is not among the signals the traps name: bash ignores it, so what dies
+  is the foreground child, and the line then carries that child's own `131`. And in the narrow
+  window after the merge has already gone through, while the run is only tidying up, a stop is
+  recorded as a failure although the work did land — an error in the opposite, safer direction
+  from the one being fixed.
 
 ### Changed
 
@@ -144,14 +234,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   described. If you were passing both, pass the one you actually wanted. The command-line help
   never mentioned the suppression at all, and now says the two cannot be combined (CB-217).
 
-- A negative `--limit` is now an error on **every** verb that has one, not just on the three that
+- A negative `--limit` is now an error on **five more** verbs, not just on the three that
   learned it last release. `recent`, `milestone-audit`, `usage`, `anchor-resolve` and
   `anchor-recapture` used to accept `--limit -1` and hand you the whole table at exit 0 — SQLite
   reads a negative limit as *no limit* — so `codebugs query --limit -1` refused while
   `codebugs recent --since … --limit -1` printed everything, two neighbouring verbs over one table
   answering the same argument the opposite way. All of them now refuse with the same one-line
   message and exit 1. Zero still means zero rows, and omitting the flag still takes each verb's own
-  default, so nothing that worked before stops working (CB-208).
+  default; `--limit -1`, which used to hand back the whole table, now refuses (CB-208).
+  **What is deliberately still open, said rather than left to be discovered:** a verb that applies
+  its limit as a slice instead of in SQL does not refuse a negative value — `triage-inbox` is the
+  one you can reach from the command line — and there a negative drops the TAIL rather than
+  removing the bound, which is not even the behaviour the refusal above is about. That class is
+  pinned as a known gap by this package's own suite, not overlooked.
 - Each of those verbs' `--help` and MCP tool description now states the contract it enforces,
   rather than leaving the reader to discover the refusal by hitting it.
 - An empty page no longer claims the tracker is empty when you were the one who asked for nothing.
@@ -159,28 +254,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   about the corpus, where the true statement was about the request — and now prints
   `(limit was 0, so no rows were requested — N finding(s) match)`. Same for `reqs-query` and
   `sweep-next`. A genuinely empty result is unchanged, to the byte (CB-210).
-
-### Fixed
-- **The record of how integrations go no longer counts an interrupted run as a successful one.**
-  `tools/worktree-finish.sh` writes one line per integration attempt into
-  `.worktrees/landing-attempts.log`, and the figure people read off that file — how many attempts
-  one successful integration costs — was flattering us. A run that was stopped, by Ctrl-C or by a
-  `kill`, rather than ending on its own, was written down with exit code `0`, and `0` is the code
-  that means *this one went through*. Every interrupted run was therefore counted as a success:
-  too many successes, too few attempts behind each one. The instrument was at its most wrong
-  exactly when people were most careful, because the prescribed way to run the pre-integration
-  review is to start an integration and stop it by hand. A stopped run now records the code it
-  really ended with — `130` for Ctrl-C, `143` for a `kill` — so the summary command printed inside
-  that script counts it as the failed attempt it was.
-  **Lines already in the file are left exactly as they were.** It is a record of what happened, and
-  rewriting it afterwards would destroy the only evidence that the fault existed at all, so any
-  figure computed over the existing lines still carries the old error and has to be read with that
-  in mind. Two further limits, both measured rather than assumed: a run ended by `kill -9`, by a
-  closed terminal, or by the machine going away is still recorded as a success or not recorded at
-  all, because only the two signals that stops have actually been seen to arrive by are handled;
-  and in the narrow window after the merge has already gone through, while the run is only tidying
-  up, a stop is now recorded as a failure although the work did land — an error in the opposite,
-  safer direction from the one being fixed.
 
 ## [0.2.2] — 2026-08-27
 
