@@ -7044,6 +7044,15 @@ class TestCheckArmsReportAVanishedWorktree:
     NOT_PROVEN_GONE = [
         ("exit 1", "still_there"),
         ('rm -rf "$WT"; ln -s "$WT.never-existed" "$WT"; exit 1', "dangling_symlink"),
+        # This row leans on something OUTSIDE its own subject, and saying so
+        # is cheaper than the day it bites: the parent it replaces is
+        # `.worktrees/`, which also houses the integration lock and the landing
+        # journal. It survives only because `_journal_record` wraps its write
+        # in `{ … } >/dev/null 2>&1 || true` and returns 0, so a broken journal
+        # cannot rewrite the exit status this row asserts on (measured), and
+        # because the finish lock is held on an already-open descriptor. A
+        # future change that writes into `.worktrees/` unguarded would redden
+        # this row for a reason that has nothing to do with the predicate.
         (
             'PARENT="$(dirname -- "$WT")"; rm -rf "$WT"; rm -rf "$PARENT"; : > "$PARENT"; exit 1',
             "parent_is_not_a_directory",
