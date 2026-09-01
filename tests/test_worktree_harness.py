@@ -6826,7 +6826,19 @@ class TestCheckArmsReportAVanishedWorktree:
     # negative assertions cannot drift from the positive ones — an honest text
     # that COEXISTS with the old lie leaves the card's harm in place, and that
     # is the one thing a "does the new text appear" test would never notice.
-    GONE = "could not run: THE WORKTREE DIRECTORY IS GONE."
+    # THE SHORT NEEDLE IS THE NAMED ONE, and the long form is COMPOSED from it
+    # rather than typed again. That direction is load-bearing for a negative
+    # assertion, where it is the opposite of the positive case: a LONGER needle
+    # forbids LESS, so spelling the absence check with the full sentence would
+    # quietly weaken it. Composing keeps one source of truth without paying
+    # that price.
+    GONE_MARK = "THE WORKTREE DIRECTORY IS GONE"
+    GONE = f"could not run: {GONE_MARK}."
+    # The second line of the same block, asserted POSITIVELY by the two tests
+    # that expect it and negatively by the one that must not see it — which is
+    # what keeps it honest: a constant nothing asserts positively can drift to
+    # stale wording and go on passing every absence check for ever.
+    GONE_EXONERATES = "This is NOT a failure of the branch."
     OLD_LIE = "failed — fix in the worktree, then re-run."
 
     def _branch(self, armed: dict) -> Path:
@@ -6888,7 +6900,6 @@ class TestCheckArmsReportAVanishedWorktree:
         shim.write_text(
             "#!/usr/bin/env bash\n"
             f'WT="{armed["repo"] / ".worktrees" / self.SLUG}"\n'
-            'PARENT="$(dirname -- "$WT")"\n'
             f'printf "%s\\n" "$*" >> "{calls}"\n'
             'case " $* " in\n'
             f'    *" ruff "*) {on_ruff} ;;\n'
@@ -6955,6 +6966,7 @@ class TestCheckArmsReportAVanishedWorktree:
 
         assert r.returncode == 17, (r.returncode, r.stdout[-3000:])
         assert f"pytest {self.GONE}" in r.stdout, r.stdout[-3000:]
+        assert self.GONE_EXONERATES in r.stdout, r.stdout[-3000:]
         assert f"pytest {self.OLD_LIE}" not in r.stdout, r.stdout[-3000:]
 
     def test_a_worktree_removed_under_the_ruff_arm_is_reported_not_blamed(
@@ -6987,6 +6999,7 @@ class TestCheckArmsReportAVanishedWorktree:
 
         assert r.returncode == 17, (r.returncode, r.stdout[-3000:])
         assert f"ruff check {self.GONE}" in r.stdout, r.stdout[-3000:]
+        assert self.GONE_EXONERATES in r.stdout, r.stdout[-3000:]
         assert f"ruff check {self.OLD_LIE}" not in r.stdout, r.stdout[-3000:]
 
     def test_an_undetermined_answer_prints_the_ordinary_failure_not_a_disappearance(
@@ -7022,7 +7035,10 @@ class TestCheckArmsReportAVanishedWorktree:
         calls = self._uv(
             armed,
             on_ruff="exit 0",
-            on_pytest='rm -rf "$WT"; rm -rf "$PARENT"; : > "$PARENT"; exit 1',
+            on_pytest=(
+                'PARENT="$(dirname -- "$WT")"; '
+                'rm -rf "$WT"; rm -rf "$PARENT"; : > "$PARENT"; exit 1'
+            ),
         )
 
         r = self._finish(armed)
@@ -7036,5 +7052,5 @@ class TestCheckArmsReportAVanishedWorktree:
         # tell the two branches of `_report_check_failure` apart).
         assert r.returncode == 1, (r.returncode, r.stdout[-3000:])
         assert f"pytest {self.OLD_LIE}" in r.stdout, r.stdout[-3000:]
-        assert "THE WORKTREE DIRECTORY IS GONE" not in r.stdout, r.stdout[-3000:]
-        assert "This is NOT a failure of the branch" not in r.stdout, r.stdout[-3000:]
+        assert self.GONE_MARK not in r.stdout, r.stdout[-3000:]
+        assert self.GONE_EXONERATES not in r.stdout, r.stdout[-3000:]
