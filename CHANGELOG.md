@@ -18,7 +18,7 @@ ask for it, where it used to return nothing at all, in the shape of a successful
 worst kind, because an empty queue looks exactly like a correctly filtered one. The dot in that key
 was being read as *descend into*, which is why the card was invisible, and, in the other direction,
 why a key spelled `loc.skipped` reached into a nested structure nobody had declared as a feature.
-That traversal is gone, with no replacement for nested lookup yet. Around it the same surface
+That traversal is gone, with no replacement for nested lookup yet. Around it the same filter
 picked up three smaller corrections: keys containing punctuation are no longer refused on the
 grouping axis, one row whose `meta` will not parse as JSON no longer takes the whole query down
 with it, and a key whose stored value is `null` now counts as present, because existence is what
@@ -33,8 +33,9 @@ Where a request contradicts itself, you are told rather than served a guess. Nam
 `-l` and then contradicting it with a `line` or `site` key inside `--meta` used to anchor the card
 at the place you had not typed; it now refuses, and the message names both places and the key that
 would have won. Asking a sweep listing for archived entries with `--all` and `--archived-only` at
-once used to ignore one of the flags and hand back fewer rows than either flag alone would have; it
-now refuses and says which one to drop for each of the two things you might have meant. A negative
+once used to ignore one of the flags and hand back fewer rows than `--all` on its own would have
+given; it now refuses and says which one to drop for each of the two things you might have meant. A
+negative
 `--limit` is an error on every verb that takes one, where before it meant *no limit at all* on some
 of them and was refused on others, and each of those verbs now states the rule in its help text and
 tool description instead of leaving you to discover it by hitting it. And an empty page no longer
@@ -44,10 +45,12 @@ that no rows were requested, and how many cards actually match.
 The tracker also stopped misreporting its own housekeeping. Re-running `resolve-trailers` over a
 widened revision range no longer appends a note to a card that already carries it word for word,
 and no longer moves that card's date for having been swept a second time; cards left alone this way
-are named in the output and counted in their own column, because a run that quietly does nothing
-looks just like one that did the work. Separately, the log this repository keeps of its own
-integration attempts stopped writing an interrupted run down as a successful one, so the figure
-people read off it — how many attempts one integration costs — no longer flatters us.
+are named in the output and counted separately in the run's closing summary, because a run that
+quietly does nothing looks just like one that did the work. Separately, the log this repository
+keeps of its own integration attempts stopped writing an interrupted run down as a successful one,
+so the figure people read off it — how many attempts one integration costs — stops flattering us
+from here on. Lines already in that file are left exactly as they were, so a figure computed over
+them still carries the old error.
 
 The safety note on the embedding tools has been brought back to what is actually checked. It used
 to promise that no network capability could be imported into the package; the check behind that
@@ -62,10 +65,10 @@ vector goes into this tracker's own local database and nowhere else.
 This is 0.3.0 and not 0.2.3 because some of it deliberately breaks what used to work. Three calls
 that used to succeed in silence now exit with an error: a code location contradicted by a `meta`
 key beside it, a sweep listing asked for archived entries two contradictory ways at once, and a
-negative `--limit`. Two more still answer, but not the way they did: a dotted `meta_key` no longer
-descends into nested structures, and a `--limit` you type beside a list of ids is no longer raised
-to fit the list. If you were relying on any of those, the entries below spell out what changes for
-you.
+negative `--limit`. Two more still answer, but the entries below flag them as breaking all the
+same: a dotted `meta_key` no longer descends into nested structures, and a `--limit` you type
+beside a list of ids is no longer raised to fit the list. If you were relying on any of those, the
+entries below say what each of them does now.
 
 ### Fixed
 
