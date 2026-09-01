@@ -6819,11 +6819,13 @@ class TestCheckArmsReportAVanishedWorktree:
     SLUG = "fix-cb-285-arm"
     BRANCH = "fix/cb-285-arm"
 
-    # The honest report, and the two false lines it replaced. Kept as data
-    # rather than inlined so the negative assertions cannot drift from the
-    # positive ones — a honest text that COEXISTS with the old lie leaves the
-    # card's harm in place, which is the one thing a "does the new text appear"
-    # test would never notice.
+    # The honest report, and the false line it replaced. Both are TEMPLATES the
+    # script fills with the failing arm's name, which is why neither carries
+    # one: the arm is prepended at the assertion, so a test cannot accidentally
+    # assert the other arm's text. Kept as data rather than inlined so the
+    # negative assertions cannot drift from the positive ones — an honest text
+    # that COEXISTS with the old lie leaves the card's harm in place, and that
+    # is the one thing a "does the new text appear" test would never notice.
     GONE = "could not run: THE WORKTREE DIRECTORY IS GONE."
     OLD_LIE = "failed — fix in the worktree, then re-run."
 
@@ -6940,8 +6942,13 @@ class TestCheckArmsReportAVanishedWorktree:
 
         r = self._finish(armed)
 
-        # The arm witness first: without it the next three assertions could all
-        # hold while the run actually refused in the ruff arm.
+        # THE ARM WITNESS, and its job here is narrower than in the ruff test
+        # below — said precisely, because overclaiming a check is the habit
+        # this card exists to break. The honest text NAMES its arm, so a
+        # refusal in the ruff arm could not masquerade as this one. What the
+        # witness adds is that the ruff arm was really EXECUTED, and executed
+        # first: a printed "clean" line says the script reached that echo, not
+        # that anything ran.
         assert self._arms(calls) == ["ruff", "pytest"], (self._arms(calls), r.stdout[-3000:])
         assert "✓ ruff check clean" in r.stdout, r.stdout[-3000:]
         assert not wt.exists(), "the fixture did not remove the worktree"
