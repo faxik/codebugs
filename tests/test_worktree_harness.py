@@ -6845,10 +6845,12 @@ class TestCheckArmsReportAVanishedWorktree:
     def _uv(self, armed: dict, *, on_ruff: str, on_pytest: str) -> Path:
         """Put a `uv` on PATH that answers all three shapes a finish invokes.
 
-        A finish shells out to `uv` in exactly three shapes and no more —
-        measured on this tree with `grep -n '\\buv\\b' tools/*.sh`, not assumed:
-        the interpreter probe at [5/7] (`_guard_interpreter_matches_main`), the
-        ruff arm at [6/7], and the pytest arm right after it.
+        A finish shells out to `uv` at exactly three call sites, and they are
+        named rather than counted: `_guard_interpreter_matches_main`'s probe at
+        [5/7], and the ruff and pytest arms of [6/7]. The other `uv` calls under
+        tools/ belong to worktree-setup.sh, which a finish never runs — so a
+        grep of the directory is not the measurement, and is not what this shim
+        rests on.
 
         THE PROBE IS FORWARDED TO MAIN'S OWN INTERPRETER, so the guard compares
         that interpreter with itself and agrees. That guard is not this class's
@@ -6871,8 +6873,11 @@ class TestCheckArmsReportAVanishedWorktree:
         fixture, never inherited from the environment.
 
         An unrecognised shape exits 99 rather than falling through to a real
-        `uv`, because a fixture that quietly adapts to the machine it runs on is
-        this card's own defect wearing fixture clothes.
+        `uv`. That is what the three-call-site claim actually rests on: a fourth
+        one appearing later fails these tests loudly, instead of quietly
+        reaching whatever `uv` the developer's machine happens to have — a
+        fixture that adapts to the machine it runs on is this card's own defect
+        wearing fixture clothes.
         """
         calls = Path(armed["bin"]) / "uv-calls.log"
         main_python = Path(armed["repo"]) / ".venv" / "bin" / "python"
