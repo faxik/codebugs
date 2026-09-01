@@ -6781,3 +6781,248 @@ class TestWorktreeFinishLock:
         again = self._finish(armed, self.SPELLING_FULL)
         assert again.returncode == 9, (again.returncode, again.stdout[-2000:])
         assert "ALREADY RUNNING" not in again.stdout, again.stdout[-2000:]
+
+
+# ---------------------------------------------------------------------------
+# CB-285: half (b) of CB-187 — what the CHECK ARMS say when the worktree they
+# were about to check has vanished under them.
+#
+# CB-187 landed in two halves and only one of them was tested. Half (a), the
+# non-blocking per-worktree lock and its exit 16, is TestWorktreeFinishLock
+# above. Half (b) — exit 17, and a report that names a vanished directory
+# instead of blaming the branch — landed with no test of any kind. That is not
+# merely a reporting gap: the card's own subject is that the FALSE DIAGNOSIS
+# costs more than the race it comes from, because a person spent real time
+# reconstructing the cause from directory mtimes and then filed a card with the
+# wrong diagnosis. Code no test can turn red is code whose ABSENCE is
+# indistinguishable from its health.
+#
+# WHY EVERY TEST HERE RUNS THE SCRIPT, AND WHY NONE PASSES --skip-checks. Both
+# arms live inside the else-branch of `if [[ "${SKIP_CHECKS}" == true ]]`, so
+# the flag every other end-to-end class in this file passes for speed would
+# skip the entire subject. Structural reading is barred for the reason this
+# file already records for CB-116 — it "cannot tell a derivation that is
+# written correctly from one that produces the right string" — and here it
+# would be worse than useless: worktree-finish.sh QUOTES the old false line
+# inside the comment explaining why it was removed, so a grep for that text
+# finds the prose and reports the defect present in a tree that is fixed.
+#
+# THE THREE-VALUED QUESTION IS THE POINT. `_worktree_is_provably_gone` answers
+# with two values a question that has three — there, gone, and COULD NOT LOOK —
+# and collapses the last into the first deliberately, so the honest message is
+# printed only on affirmative proof. Reading it as two-valued (a bare
+# `[[ ! -d ]]` on the path itself) inverts the diagnosis: a directory that is
+# present but could not be seen would be declared gone, and a real suite
+# failure would then be excused as "not your fault". Exactly one test below
+# discriminates that, and it is the reason the class is three tests and not two.
+class TestCheckArmsReportAVanishedWorktree:
+    SLUG = "fix-cb-285-arm"
+    BRANCH = "fix/cb-285-arm"
+
+    # The honest report, and the two false lines it replaced. Kept as data
+    # rather than inlined so the negative assertions cannot drift from the
+    # positive ones — a honest text that COEXISTS with the old lie leaves the
+    # card's harm in place, which is the one thing a "does the new text appear"
+    # test would never notice.
+    GONE = "could not run: THE WORKTREE DIRECTORY IS GONE."
+    OLD_LIE = "failed — fix in the worktree, then re-run."
+
+    def _branch(self, armed: dict) -> Path:
+        """A branch with one commit of its own, cut from main's tip.
+
+        One commit is what [3/7]'s `_guard_nonempty_diff` needs; cutting from
+        the tip keeps [4/7] and [5/7] no-ops, so the only phase these tests
+        traverse with any behaviour of its own is the one under test.
+        """
+        repo = armed["repo"]
+        wt = repo / ".worktrees" / self.SLUG
+        git(repo, "worktree", "add", "-q", "-b", self.BRANCH, str(wt), "main")
+        (wt / "feature.txt").write_text("work\n")
+        git(wt, "add", "feature.txt")
+        git(wt, "commit", "--no-verify", "-m", "fix(cb-285): the branch's own work")
+        return wt
+
+    def _uv(self, armed: dict, *, on_ruff: str, on_pytest: str) -> Path:
+        """Put a `uv` on PATH that answers all three shapes a finish invokes.
+
+        A finish shells out to `uv` in exactly three shapes and no more —
+        measured on this tree with `grep -n '\\buv\\b' tools/*.sh`, not assumed:
+        the interpreter probe at [5/7] (`_guard_interpreter_matches_main`), the
+        ruff arm at [6/7], and the pytest arm right after it.
+
+        THE PROBE IS FORWARDED TO MAIN'S OWN INTERPRETER, so the guard compares
+        that interpreter with itself and agrees. That guard is not this class's
+        subject; it merely stands between the fixture and the phase that is,
+        and a real `uv run` in the worktree would add a venv build to every
+        test here for nothing.
+
+        THE `uv` SHIM THIS FILE ALREADY CARRIES CANNOT BE REUSED, and the
+        reason is an ordering fact rather than a preference: TestWorktreeFinishLock
+        installs a `uv` that exits 1 UNCONDITIONALLY, and the interpreter probe
+        runs BEFORE both arms, so every test here would measure exit 14 at
+        [5/7] and never reach the arms at all.
+
+        THE ARMS ARE ALSO WHERE THE FIXTURE STOPS INHERITING THE DEVELOPER'S
+        MACHINE. The armed fixture's project declares `dev = []`, so a real
+        `uv run --extra dev ruff` fails to spawn ruff — unless the developer
+        happens to have one on PATH, in which case the ruff arm passes and the
+        test silently measures a different arm than it says it does. Both arms
+        are answered by this shim for that reason: the outcome is pinned in the
+        fixture, never inherited from the environment.
+
+        An unrecognised shape exits 99 rather than falling through to a real
+        `uv`, because a fixture that quietly adapts to the machine it runs on is
+        this card's own defect wearing fixture clothes.
+        """
+        calls = Path(armed["bin"]) / "uv-calls.log"
+        main_python = Path(armed["repo"]) / ".venv" / "bin" / "python"
+        assert main_python.is_file(), main_python
+        shim = Path(armed["bin"]) / "uv"
+        shim.write_text(
+            "#!/usr/bin/env bash\n"
+            f'WT="{armed["repo"] / ".worktrees" / self.SLUG}"\n'
+            'PARENT="$(dirname -- "$WT")"\n'
+            f'printf "%s\\n" "$*" >> "{calls}"\n'
+            'case " $* " in\n'
+            f'    *" ruff "*) {on_ruff} ;;\n'
+            f'    *" pytest "*) {on_pytest} ;;\n'
+            f'    *" -c "*) exec "{main_python}" -c "${{@: -1}}" ;;\n'
+            "esac\n"
+            'echo "FIXTURE DRIFT: unrecognised uv invocation: $*" >&2\n'
+            "exit 99\n"
+        )
+        shim.chmod(0o755)
+        assert shim.is_file() and os.access(shim, os.X_OK), shim
+        return calls
+
+    @staticmethod
+    def _arms(calls: Path) -> list[str]:
+        """Which [6/7] arms the script actually invoked, in order.
+
+        THIS IS THE ARM WITNESS, and without it the class is much weaker than
+        it looks: the two arms report through ONE function, so a fixture that
+        breaks early enough to fail the ruff arm makes the pytest test go green
+        while measuring the ruff arm. The log is written by the shim BEFORE it
+        dispatches, so it records an invocation even when that invocation then
+        destroys the tree.
+        """
+        if not calls.exists():
+            return []
+        arms = []
+        for line in calls.read_text().splitlines():
+            padded = f" {line} "
+            if " ruff " in padded:
+                arms.append("ruff")
+            elif " pytest " in padded:
+                arms.append("pytest")
+        return arms
+
+    def _finish(self, armed: dict) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(armed["repo"] / "tools" / "worktree-finish.sh"), self.SLUG],
+            cwd=str(armed["repo"]),
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": f"{armed['bin']}{os.pathsep}{os.environ['PATH']}"},
+        )
+
+    def test_a_worktree_removed_under_the_pytest_arm_is_reported_not_blamed(
+        self, armed: dict
+    ) -> None:
+        """The card's own scenario: the arm it named, end to end."""
+        wt = self._branch(armed)
+        calls = self._uv(armed, on_ruff="exit 0", on_pytest='rm -rf "$WT"; exit 1')
+
+        r = self._finish(armed)
+
+        # The arm witness first: without it the next three assertions could all
+        # hold while the run actually refused in the ruff arm.
+        assert self._arms(calls) == ["ruff", "pytest"], (self._arms(calls), r.stdout[-3000:])
+        assert "✓ ruff check clean" in r.stdout, r.stdout[-3000:]
+        assert not wt.exists(), "the fixture did not remove the worktree"
+
+        assert r.returncode == 17, (r.returncode, r.stdout[-3000:])
+        assert f"pytest {self.GONE}" in r.stdout, r.stdout[-3000:]
+        assert f"pytest {self.OLD_LIE}" not in r.stdout, r.stdout[-3000:]
+
+    def test_a_worktree_removed_under_the_ruff_arm_is_reported_not_blamed(
+        self, armed: dict
+    ) -> None:
+        """THE ARM THE CARD DID NOT NAME, which is why this test exists.
+
+        CB-187 was reported against pytest. The ruff arm has the identical
+        shape and reports through the identical function, and fixing only the
+        arm somebody enumerated is this repository's most-repeated defect — so
+        the arm nobody enumerated gets its own oracle rather than inheriting
+        the other's.
+        """
+        wt = self._branch(armed)
+        calls = self._uv(
+            armed,
+            on_ruff='rm -rf "$WT"; exit 1',
+            on_pytest='echo "the pytest arm ran after ruff refused" >&2; exit 1',
+        )
+
+        r = self._finish(armed)
+
+        # `_report_check_failure` exits, so the pytest arm must never be
+        # reached. The call log proves that positively — the shim records every
+        # invocation before dispatching — where the absence of a line in stdout
+        # would only be consistent with it.
+        assert self._arms(calls) == ["ruff"], (self._arms(calls), r.stdout[-3000:])
+        assert "✓ ruff check clean" not in r.stdout, r.stdout[-3000:]
+        assert not wt.exists(), "the fixture did not remove the worktree"
+
+        assert r.returncode == 17, (r.returncode, r.stdout[-3000:])
+        assert f"ruff check {self.GONE}" in r.stdout, r.stdout[-3000:]
+        assert f"ruff check {self.OLD_LIE}" not in r.stdout, r.stdout[-3000:]
+
+    def test_an_undetermined_answer_prints_the_ordinary_failure_not_a_disappearance(
+        self, armed: dict
+    ) -> None:
+        """COULD NOT LOOK must read as an ordinary failure, never as GONE.
+
+        This is the test the whole card turns on. `_worktree_is_provably_gone`
+        composes its primitives so an unprovable case degrades to the OLD
+        message — erring toward the false accusation the card is about rather
+        than toward a false exoneration, which is the worse of the two because
+        it tells a person their red suite was not their fault.
+
+        THE STATE IS BUILT WITHOUT TOUCHING PERMISSIONS, and that is not
+        incidental. The obvious way to make the parent unexaminable is to clear
+        its execute bit, which reaches the guard's SECOND line; but that
+        condition is true for every path under the superuser account, and the
+        `skipif(os.geteuid() == 0)` idiom this repository already uses five
+        times over would then delete this very test from any run that builds as
+        root — the one test that discriminates the card's central claim,
+        vanishing silently exactly where nobody would look for it. Replacing
+        the parent with a REGULAR FILE reaches the guard's FIRST line instead,
+        and a regular file is not a directory for the superuser either.
+
+        Note what this state really is: the worktree is not merely
+        unexaminable, it is genuinely gone — and the script still declines to
+        say so, because it cannot PROVE it. That is the declared cost written
+        into the function's own comment, and asserting on it here is what keeps
+        the cost declared rather than drifting.
+        """
+        wt = self._branch(armed)
+        parent = wt.parent
+        calls = self._uv(
+            armed,
+            on_ruff="exit 0",
+            on_pytest='rm -rf "$WT"; rm -rf "$PARENT"; : > "$PARENT"; exit 1',
+        )
+
+        r = self._finish(armed)
+
+        assert self._arms(calls) == ["ruff", "pytest"], (self._arms(calls), r.stdout[-3000:])
+        assert parent.is_file(), "the fixture did not replace the parent with a file"
+
+        # THE CODE, not only the text (a mutant printing the right message and
+        # exiting 17 must still go red), and the text, not only the code (exit
+        # 1 is also what an ordinary failure returns, so the code alone cannot
+        # tell the two branches of `_report_check_failure` apart).
+        assert r.returncode == 1, (r.returncode, r.stdout[-3000:])
+        assert f"pytest {self.OLD_LIE}" in r.stdout, r.stdout[-3000:]
+        assert "THE WORKTREE DIRECTORY IS GONE" not in r.stdout, r.stdout[-3000:]
+        assert "This is NOT a failure of the branch" not in r.stdout, r.stdout[-3000:]
