@@ -6819,13 +6819,6 @@ class TestCheckArmsReportAVanishedWorktree:
     SLUG = "fix-cb-285-arm"
     BRANCH = "fix/cb-285-arm"
 
-    # The honest report, and the false line it replaced. Both are TEMPLATES the
-    # script fills with the failing arm's name, which is why neither carries
-    # one: the arm is prepended at the assertion, so a test cannot accidentally
-    # assert the other arm's text. Kept as data rather than inlined so the
-    # negative assertions cannot drift from the positive ones — an honest text
-    # that COEXISTS with the old lie leaves the card's harm in place, and that
-    # is the one thing a "does the new text appear" test would never notice.
     # THE SHORT NEEDLE IS THE NAMED ONE, and the long form is COMPOSED from it
     # rather than typed again. That direction is load-bearing for a negative
     # assertion, where it is the opposite of the positive case: a LONGER needle
@@ -6835,7 +6828,7 @@ class TestCheckArmsReportAVanishedWorktree:
     GONE_MARK = "THE WORKTREE DIRECTORY IS GONE"
     GONE = f"could not run: {GONE_MARK}."
     # The second line of the same block, asserted POSITIVELY by the two tests
-    # that expect it and negatively by the one that must not see it — which is
+    # that expect it and negatively by the ones that must not see it — which is
     # what keeps it honest: a constant nothing asserts positively can drift to
     # stale wording and go on passing every absence check for ever.
     GONE_EXONERATES = "This is NOT a failure of the branch."
@@ -6873,25 +6866,31 @@ class TestCheckArmsReportAVanishedWorktree:
         test here for nothing.
 
         THE `uv` SHIM THIS FILE ALREADY CARRIES CANNOT BE REUSED, and the
-        reason is an ordering fact rather than a preference: TestWorktreeFinishLock
-        installs a `uv` that exits 1 UNCONDITIONALLY, and the interpreter probe
-        runs BEFORE both arms, so every test here would measure exit 14 at
-        [5/7] and never reach the arms at all.
+        reason is an ordering fact rather than a preference:
+        TestWorktreeFinishLock installs a `uv` that exits 1 UNCONDITIONALLY,
+        and the interpreter probe runs BEFORE both arms, so every test here
+        would measure exit 14 at [5/7] and never reach the arms at all.
 
-        THE ARMS ARE ALSO WHERE THE FIXTURE STOPS INHERITING THE DEVELOPER'S
-        MACHINE. The armed fixture's project declares `dev = []`, so a real
-        `uv run --extra dev ruff` fails to spawn ruff — unless the developer
-        happens to have one on PATH, in which case the ruff arm passes and the
-        test silently measures a different arm than it says it does. Both arms
-        are answered by this shim for that reason: the outcome is pinned in the
-        fixture, never inherited from the environment.
+        BOTH ARMS ARE ANSWERED HERE BECAUSE THE REAL ONES CANNOT REACH THE
+        OUTCOMES THESE TESTS NEED, and the measurement says something sharper
+        than "the fixture has no ruff". The armed fixture's repo carries tools/
+        and a pyproject and nothing else — no `src/`, no `tests/` — so
+        `uv run --extra dev ruff check src/ tests/` FAILS in that tree either
+        way: it exits 2 with "Failed to spawn: `ruff`" when no ruff is
+        reachable, and exits 1 with "E902 No such file or directory" when a
+        real one is on the developer's PATH (both measured, 2026-09-01). The
+        arm therefore cannot pass on its own under any PATH, so the pytest arm
+        is unreachable without help — and, separately, a real ruff could never
+        make a directory disappear, which is the event the ruff test has to
+        create. Pinning both arms here is what makes the outcome a property of
+        the fixture instead of a property of the machine.
 
-        An unrecognised shape exits 99 rather than falling through to a real
-        `uv`. That is what the three-call-site claim actually rests on: a fourth
-        one appearing later fails these tests loudly, instead of quietly
-        reaching whatever `uv` the developer's machine happens to have — a
-        fixture that adapts to the machine it runs on is this card's own defect
-        wearing fixture clothes.
+        An unrecognised shape exits 99 and says FIXTURE DRIFT on stderr. That
+        is what the three-call-site claim actually rests on, and `_finish`
+        asserts on that stderr so the claim is checked rather than merely
+        printed: a fourth call site appearing later fails these tests loudly,
+        instead of quietly reaching whatever `uv` the developer's machine
+        happens to have.
         """
         calls = Path(armed["bin"]) / "uv-calls.log"
         main_python = Path(armed["repo"]) / ".venv" / "bin" / "python"
@@ -6915,14 +6914,18 @@ class TestCheckArmsReportAVanishedWorktree:
 
     @staticmethod
     def _arms(calls: Path) -> list[str]:
-        """Which [6/7] arms the script actually invoked, in order.
+        """Which [6/7] arms actually reached `uv`, in order.
 
-        THIS IS THE ARM WITNESS, and without it the class is much weaker than
-        it looks: the two arms report through ONE function, so a fixture that
-        breaks early enough to fail the ruff arm makes the pytest test go green
-        while measuring the ruff arm. The log is written by the shim BEFORE it
-        dispatches, so it records an invocation even when that invocation then
-        destroys the tree.
+        THIS IS THE ARM WITNESS, and what it is worth differs per test, so it
+        is stated per test rather than claimed once here. Read literally it
+        answers one question only: which arms got as far as spawning `uv`.
+        That is not the same as which arm FAILED — an arm whose `cd` fails
+        never spawns anything and still reports — and it is not the same as
+        what stdout says, since a printed line proves the script reached an
+        echo, not that a command ran.
+
+        The log is written by the shim BEFORE it dispatches, so an invocation
+        is recorded even when that invocation then destroys the tree.
         """
         if not calls.exists():
             return []
@@ -6936,31 +6939,47 @@ class TestCheckArmsReportAVanishedWorktree:
         return arms
 
     def _finish(self, armed: dict) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
+        r = subprocess.run(
             [str(armed["repo"] / "tools" / "worktree-finish.sh"), self.SLUG],
             cwd=str(armed["repo"]),
             capture_output=True,
             text=True,
             env={**os.environ, "PATH": f"{armed['bin']}{os.pathsep}{os.environ['PATH']}"},
         )
+        # The shim's own alarm, checked rather than merely printed — see `_uv`.
+        assert "FIXTURE DRIFT" not in r.stderr, r.stderr[-2000:]
+        return r
 
-    def test_a_worktree_removed_under_the_pytest_arm_is_reported_not_blamed(
+    def test_a_worktree_gone_before_the_pytest_arm_is_reported_not_blamed(
         self, armed: dict
     ) -> None:
-        """The card's own scenario: the arm it named, end to end."""
+        """The card's own scenario, through the mechanism the script names.
+
+        `worktree-finish.sh` describes the failure it is defending against as
+        "a `(cd "${WORKTREE_PATH}" && …)` subshell whose `cd` fails when the
+        directory is gone", so that is what this test builds: the ruff arm
+        succeeds and takes the directory with it, and the pytest arm then never
+        starts at all. It is the real race — another finish of the same
+        worktree landing and running its ordinary cleanup between two arms.
+
+        The sibling test below covers the OTHER way into the same report, where
+        the directory is already gone and the command itself returns non-zero.
+        Between them the two entry paths of `_report_check_failure` are both
+        exercised; either alone would leave one untested.
+        """
         wt = self._branch(armed)
-        calls = self._uv(armed, on_ruff="exit 0", on_pytest='rm -rf "$WT"; exit 1')
+        calls = self._uv(
+            armed,
+            on_ruff='rm -rf "$WT"; exit 0',
+            on_pytest='echo "the pytest arm was spawned after the tree vanished" >&2; exit 1',
+        )
 
         r = self._finish(armed)
 
-        # THE ARM WITNESS, and its job here is narrower than in the ruff test
-        # below — said precisely, because overclaiming a check is the habit
-        # this card exists to break. The honest text NAMES its arm, so a
-        # refusal in the ruff arm could not masquerade as this one. What the
-        # witness adds is that the ruff arm was really EXECUTED, and executed
-        # first: a printed "clean" line says the script reached that echo, not
-        # that anything ran.
-        assert self._arms(calls) == ["ruff", "pytest"], (self._arms(calls), r.stdout[-3000:])
+        # THE ARM WITNESS, and here it carries the whole "the cd failed" claim:
+        # the pytest arm never reached `uv`, so the non-zero status the script
+        # acted on came from the failed `cd` and not from a command's exit code.
+        assert self._arms(calls) == ["ruff"], (self._arms(calls), r.stdout[-3000:])
         assert "✓ ruff check clean" in r.stdout, r.stdout[-3000:]
         assert not wt.exists(), "the fixture did not remove the worktree"
 
@@ -6979,6 +6998,10 @@ class TestCheckArmsReportAVanishedWorktree:
         arm somebody enumerated is this repository's most-repeated defect — so
         the arm nobody enumerated gets its own oracle rather than inheriting
         the other's.
+
+        It also covers the second entry path: here `cd` succeeds, the command
+        runs with the directory already gone, and the non-zero comes back from
+        the command itself.
         """
         wt = self._branch(armed)
         calls = self._uv(
@@ -7002,49 +7025,76 @@ class TestCheckArmsReportAVanishedWorktree:
         assert self.GONE_EXONERATES in r.stdout, r.stdout[-3000:]
         assert f"ruff check {self.OLD_LIE}" not in r.stdout, r.stdout[-3000:]
 
-    def test_an_undetermined_answer_prints_the_ordinary_failure_not_a_disappearance(
-        self, armed: dict
+    # THE THREE STATES THAT ARE NOT A PROVEN DISAPPEARANCE, kept as one table
+    # because they are one contract and not three scenarios. `_worktree_is_
+    # provably_gone` answers a THREE-valued question with two values, and the
+    # collapse is deliberate: anything short of affirmative proof degrades to
+    # the ordinary message. A test per hand-picked scenario would have covered
+    # whichever states somebody happened to enumerate — which is the defect
+    # this card is about, in oracle form — so the parameters walk the function's
+    # own branches instead.
+    #
+    # ONE BRANCH IS DELIBERATELY ABSENT, and saying so is the point of writing
+    # this down: `[[ -x "${parent}" ]]` cannot be reached without clearing an
+    # execute bit, and that condition is simply never true for the superuser,
+    # so any test of it would have to carry `skipif(os.geteuid() == 0)` and
+    # would then delete itself from every build that runs as root. An
+    # uncovered branch named out loud is worth more than a test that vanishes
+    # where nobody looks.
+    NOT_PROVEN_GONE = [
+        ("exit 1", "still_there"),
+        ('rm -rf "$WT"; ln -s "$WT.never-existed" "$WT"; exit 1', "dangling_symlink"),
+        (
+            'PARENT="$(dirname -- "$WT")"; rm -rf "$WT"; rm -rf "$PARENT"; : > "$PARENT"; exit 1',
+            "parent_is_not_a_directory",
+        ),
+    ]
+
+    @staticmethod
+    def _assert_premise(wt: Path, premise: str) -> None:
+        """The state was BUILT, not assumed — checked before the verdict."""
+        if premise == "still_there":
+            assert wt.is_dir(), "the fixture destroyed the worktree it was meant to keep"
+        elif premise == "dangling_symlink":
+            assert wt.is_symlink(), "the fixture did not leave a symlink behind"
+            assert not wt.exists(), "the symlink resolves, so it is not dangling"
+        else:
+            assert wt.parent.is_file(), "the fixture did not replace the parent with a file"
+
+    @pytest.mark.parametrize("on_pytest, premise", NOT_PROVEN_GONE)
+    def test_only_a_proven_disappearance_earns_the_honest_report(
+        self, armed: dict, on_pytest: str, premise: str
     ) -> None:
-        """COULD NOT LOOK must read as an ordinary failure, never as GONE.
+        """Everything short of proof reads as an ordinary failure.
 
-        This is the test the whole card turns on. `_worktree_is_provably_gone`
-        composes its primitives so an unprovable case degrades to the OLD
-        message — erring toward the false accusation the card is about rather
-        than toward a false exoneration, which is the worse of the two because
-        it tells a person their red suite was not their fault.
+        This is what the whole card turns on. Getting it backwards would
+        rebuild the defect with the sign flipped: a run that could not look
+        would announce a disappearance, and a genuinely red suite would be
+        excused as "not your fault" — a false exoneration, which the script's
+        own comment calls worse than the false accusation this card is about.
+        The `still_there` row is the expensive one to lose: its regression
+        would fire on EVERY ordinary red check, not on a rare race.
 
-        THE STATE IS BUILT WITHOUT TOUCHING PERMISSIONS, and that is not
-        incidental. The obvious way to make the parent unexaminable is to clear
-        its execute bit, which reaches the guard's SECOND line; but that
-        condition is true for every path under the superuser account, and the
-        `skipif(os.geteuid() == 0)` idiom this repository already uses five
-        times over would then delete this very test from any run that builds as
-        root — the one test that discriminates the card's central claim,
-        vanishing silently exactly where nobody would look for it. Replacing
-        the parent with a REGULAR FILE reaches the guard's FIRST line instead,
-        and a regular file is not a directory for the superuser either.
+        THE STATES ARE BUILT WITHOUT TOUCHING PERMISSIONS. The obvious way to
+        make a path unexaminable is to clear an execute bit, and it is exactly
+        the way that cannot be used here — see the note on the table above.
+        Replacing the parent with a REGULAR FILE, or leaving a DANGLING
+        SYMLINK where the worktree was, reach two other branches of the same
+        function and are false for the superuser as well.
 
-        Note what this state really is: the worktree is not merely
+        Note what the last two states really are: the worktree is not merely
         unexaminable, it is genuinely gone — and the script still declines to
         say so, because it cannot PROVE it. That is the declared cost written
         into the function's own comment, and asserting on it here is what keeps
         the cost declared rather than drifting.
         """
         wt = self._branch(armed)
-        parent = wt.parent
-        calls = self._uv(
-            armed,
-            on_ruff="exit 0",
-            on_pytest=(
-                'PARENT="$(dirname -- "$WT")"; '
-                'rm -rf "$WT"; rm -rf "$PARENT"; : > "$PARENT"; exit 1'
-            ),
-        )
+        calls = self._uv(armed, on_ruff="exit 0", on_pytest=on_pytest)
 
         r = self._finish(armed)
 
         assert self._arms(calls) == ["ruff", "pytest"], (self._arms(calls), r.stdout[-3000:])
-        assert parent.is_file(), "the fixture did not replace the parent with a file"
+        self._assert_premise(wt, premise)
 
         # THE CODE, not only the text (a mutant printing the right message and
         # exiting 17 must still go red), and the text, not only the code (exit
