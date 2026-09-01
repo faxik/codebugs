@@ -236,9 +236,11 @@ The root `CLAUDE.md` is loaded in every session; this file is loaded only once y
 
 ## Architecture migration (in progress)
 
-- Add the new module import to `_ensure_modules_loaded()` in `db.py` (temporary, until auto-discovery).
-
-- Add the new module's mode slug to `SERVER_NAMES` (`server.py`) and to the `--mode` allowlist (`cli.py`) so it can be loaded in isolation.
+- **The three wiring steps and their statuses — which is required, which is required-but-temporary,
+  which is optional — live in the ROOT `CLAUDE.md` under this same heading, and are deliberately NOT
+  repeated here.** One copy, because two copies of this procedure drifting apart is precisely what
+  CB-304 was: the root forbade editing `server.py`/`cli.py` while this file instructed it, and both
+  files reach a session that is adding a module.
 
 - Prefer self-contained modules that register themselves over central wiring.
 
