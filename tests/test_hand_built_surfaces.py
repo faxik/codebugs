@@ -133,6 +133,32 @@ class TestTheGuardFires:
             asyncio.run(mcp.call_tool("query", {}))
         assert "CB-311" in str(refusal.value)
 
+    def test_one_hand_added_tool_on_an_OTHERWISE_correct_server_is_caught(self):
+        """What the PER-TOOL half is for, and it needed its own case.
+
+        The two gap tests above are both caught by the SERVER half, because both
+        build a bare server — so removing the per-tool half entirely would leave
+        them green and the half would be untested. This is the shape only the
+        per-tool half sees: a server assembled correctly, carrying correctly
+        registered tools, with ONE further tool added by hand afterwards. The
+        correct tools must still work; the hand-added one must be refused.
+        """
+        mcp = MCPServer("cb311-mixed")
+        findings.register_tools(server.build_registrar(mcp), _factory())
+
+        def smuggled() -> dict:
+            """Added by hand onto an otherwise correct server."""
+
+        mcp.add_tool(smuggled, name="cb311_smuggled")
+
+        with pytest.raises(AssertionError) as refusal:
+            asyncio.run(mcp.call_tool("cb311_smuggled", {}))
+        assert "CB-311" in str(refusal.value)
+
+        with pytest.raises(BaseException) as raised:
+            asyncio.run(mcp.call_tool("query", {}))
+        assert "CB-311" not in str(raised.value), "the correctly built tools must still work"
+
     def test_a_correct_re_registration_clears_a_stale_record(self):
         """A record that outlives the violation refuses correct code.
 
