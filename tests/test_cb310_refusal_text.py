@@ -147,7 +147,11 @@ class TestTheClientReceivesTheReason:
         ambient-state fixture resets the override before every test, which is
         what makes setting it here safe rather than a leak into the next file.
         """
-        empty = tmp_path / "no-tracker-here"
+        # The directory name is deliberately CONTENT-FREE. A first draft called
+        # it `no-tracker-here`, and the reason assertion below then read the
+        # words out of its own fixture path instead of out of the diagnostic —
+        # green whatever the server said. Cross-model review caught it.
+        empty = tmp_path / "elsewhere"
         empty.mkdir()
         monkeypatch.setattr(db, "_tracker_root_override", str(empty))
 
@@ -155,9 +159,11 @@ class TestTheClientReceivesTheReason:
         is_error, text = call_over_the_wire(built, "get", {"finding_id": "CB-1"})
         assert is_error is True
         assert str(empty) in text, text
-        # The reason, not merely the path: a client must be able to tell "there
-        # is no tracker where I am pointed" from "the server is dead".
-        assert "no" in text.lower() and "codebugs" in text.lower(), text
+        # The reason and the way out, not merely the path: a client must be able
+        # to tell "there is no tracker where I am pointed" from "the server is
+        # dead", and the second is what the owner concluded from the bare line.
+        assert "has no .codebugs/" in text, text
+        assert "codebugs init" in text, text
 
     def test_an_unwritable_tracker_reaches_the_client(self, tracker):
         """`db.TrackerUnwritableError` — the sibling refusal, raised from `db._open`.
@@ -240,10 +246,14 @@ class TestTheGateIsTwoSided:
         def body():
             raise RuntimeError("INTERNAL-MARKER")
 
+        # `pytest.raises(RuntimeError)` is already the whole assertion:
+        # `ToolError` descends from `MCPServerError`, not from `RuntimeError`,
+        # so it could never satisfy this catch. A companion
+        # `assert not isinstance(caught.value, ToolError)` stood here and was
+        # removed — an assertion that cannot fail reads as coverage and is not.
         wrapped = server._refusal_reaches_the_client(body)
         with pytest.raises(RuntimeError) as caught:
             wrapped()
-        assert not isinstance(caught.value, ToolError)
         assert str(caught.value) == "INTERNAL-MARKER"
 
     def test_a_post_commit_serialization_failure_is_not_a_refusal(self):
@@ -265,10 +275,12 @@ class TestTheGateIsTwoSided:
         def decode_failure():
             raise json.JSONDecodeError("POST-COMMIT-MARKER", "{}", 0)
 
+        # Same reason as the test above: `ToolError` is not a `ValueError`, so
+        # catching `json.JSONDecodeError` already excludes it, and the extra
+        # `isinstance` companion that stood here was removed rather than kept.
         wrapped = server._refusal_reaches_the_client(decode_failure)
-        with pytest.raises(json.JSONDecodeError) as caught:
+        with pytest.raises(json.JSONDecodeError):
             wrapped()
-        assert not isinstance(caught.value, ToolError)
 
         def plain_value_error():
             raise ValueError("INPUT-MARKER")

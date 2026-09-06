@@ -141,10 +141,12 @@ class TestCodemergeIntrospectionTools:
         an unknown status is refused through the MCP path exactly as it is
         from the CLI, rather than silently returning the whole table.
 
-        The domain `ValueError` propagates as a `ToolError` raised out of
-        `call_tool` (CLAUDE.md's Error handling: MCP tools let exceptions
-        propagate) -- it is not a `CallToolResult(isError=True)` a caller
-        gets back to inspect, which is the same pipeline behavior
+        The domain `ValueError` reaches `call_tool`'s caller as a `ToolError`
+        -- since CB-310 because `server.build_registrar`'s adapter translates
+        it, not because the SDK carries an arbitrary exception's text, which
+        `mcp` 2.1.1 stopped doing. It is still not a
+        `CallToolResult(isError=True)` a caller gets back to inspect on this
+        in-process path, which is the same pipeline behavior
         `test_merge.py::TestMcpAbandon` already pins for `codemerge_abandon`."""
         mcp = self._mcp(conn)
         with pytest.raises(ToolError, match="Invalid status"):
