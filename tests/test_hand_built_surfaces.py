@@ -30,6 +30,24 @@ from codebugs import findings, server
 from tests import conftest
 
 
+def _live_sites() -> set[str]:
+    """Every `<file>::<function>` the test tree currently contains.
+
+    The staleness half compares a ROW against this, rather than taking the row
+    apart and checking the pieces: a check built on the pieces cannot be seen to
+    hold the KEY against the live tree — by `tests/test_exception_table_discipline.py`,
+    which measured exactly that and refused this file's first draft — and, more to
+    the point, a row whose file and function both exist but never sat together
+    would have passed it.
+    """
+    sites: set[str] = set()
+    for path in sorted(Path(conftest._TESTS_DIR).rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                sites.add(f"{path.name}::{node.name}")
+    return sites
+
+
 def _factory():
     @contextmanager
     def factory():
@@ -91,20 +109,8 @@ class TestTheAllowanceTableIsDisciplined:
         )
 
     def test_no_row_names_a_place_that_no_longer_exists(self):
-        stale = []
-        for site in conftest._HAND_BUILT_SURFACES_ALLOWED:
-            filename, _, function = site.partition("::")
-            path = Path(conftest._TESTS_DIR) / filename
-            if not path.exists():
-                stale.append(site)
-                continue
-            names = {
-                node.name
-                for node in ast.walk(ast.parse(path.read_text()))
-                if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
-            }
-            if function not in names:
-                stale.append(site)
+        live = _live_sites()
+        stale = [site for site in conftest._HAND_BUILT_SURFACES_ALLOWED if site not in live]
         assert not stale, (
             f"stale allowance row(s): {stale} -- the place they license is gone, so the row "
             "now licenses nothing and hides the next one that appears under the same name."
