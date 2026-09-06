@@ -10,7 +10,9 @@ Every inhabitant answers the same question in a different place: WHAT DID THIS
 RUN ACTUALLY JUDGE? The first two are a test that NAMES one state and gets
 another, because `db.connect()` resolves against ambient state the test never
 declared. The third is the same question asked of the SOURCE TREE instead of the
-tracker, and it is an alarm rather than a guard, for the reason given at it.
+tracker, and it is an alarm rather than a guard, for the reason given at it. The
+fourth asks it of the MCP SURFACE: a test that builds the surface by hand is
+judging a server the product never produces.
 
 FIRST: neutralize an ambient tracker DECLARATION. `CODEBUGS_ROOT` redirects
 every `db.connect()` in this process *and* in any subprocess that inherits the
@@ -32,6 +34,17 @@ main checkout while other branches land on `main`, so a red can be a verdict on
 a file the run never started with. That is not something a test file can hold
 for itself: no single test knows what the tree looked like before it started.
 
+FOURTH: refuse a call into a tool that was registered on a BARE `MCPServer`,
+bypassing `server.build_registrar` (CB-311). CB-310 measured this failure in ten
+tests at once: each built its own server, each therefore measured a surface
+`_build_server` never produces, and all ten stayed green against a defect that
+was live on the shipped one. A test file cannot hold this for itself — the file
+that needs the guard is precisely the file whose author did not know it applied
+— and the failure is silent, since a hand-built surface answers every call
+happily and merely answers about the wrong object. See the guard below for why
+it keys on the production registrar OBJECT in the live call stack rather than on
+how the registration is spelled.
+
 A per-file fixture would have to be remembered by every test module added later,
 and the cost of forgetting is silent destruction of the developer's own data, or
 a thousand failures pointing at code that is fine — exactly the kind of rule
@@ -41,9 +54,12 @@ variable themselves *after* the first fixture has run.
 
 import os
 import subprocess
+import sys
+import weakref
 from pathlib import Path
 
 import pytest
+from mcp.server.mcpserver import MCPServer
 
 from codebugs import db
 
@@ -545,3 +561,140 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     report = _tree_moved_report(changes, head_before, _head_signature(), unexamined)
     for line in report.splitlines():
         terminalreporter.write_line(line)
+
+
+# --- CB-311: a test that CALLS a tool must have built the surface for real ----
+#
+# WHAT IT REFUSES. Registering tools on a bare `MCPServer` and then calling one
+# through `call_tool`. That server carries bodies which never passed through
+# `_RefusalsReachTheClient`, so every question the test then asks is answered by
+# an object `server._build_server` does not produce.
+#
+# WHY IT KEYS ON AN OBJECT IN THE LIVE STACK, NOT ON HOW THE CALL IS WRITTEN. A
+# guard that grepped for `MCPServer(` or for `build_registrar` would be the
+# defect this repository has paid for repeatedly — an instrument that inspects
+# SPELLING finds spelling, and any new way of writing the same construction
+# walks past it. `_RefusalsReachTheClient.tool` calls the inner registrar
+# synchronously, so at the moment `MCPServer.tool` runs, a registration that
+# went through the production stack HAS a frame whose `self` is that adapter,
+# and one that did not HAS NOT. The question asked is therefore "did this
+# registration actually run through the production object", answered by looking
+# at what is running.
+#
+# WHY IT FIRES AT `call_tool` AND NOT AT REGISTRATION. Building a bare server is
+# LEGITIMATE and three places do it deliberately: `test_boundary.py` inspects
+# un-normalized descriptions (the bare object IS its subject), `test_findings.py`
+# enumerates tool names, and `test_add_lines_surface.py` uses a stand-in that is
+# not an `MCPServer` at all. What none of them does is CALL a tool — and calling
+# is exactly the act that claims "this is the boundary the client meets". Keying
+# on the claim rather than on the construction is what lets the three stay legal
+# with no exception rows at all, which is better than three rows that would have
+# to be maintained.
+#
+# WHAT IT DOES NOT DO, said plainly: it is per-TOOL, so a server built through
+# `build_registrar` that then has one further tool registered on it by hand is
+# caught for that tool only — which is right — but a surface assembled by some
+# future third route this suite does not use would be invisible. And it observes
+# the RUN, so a hand-built surface that is never called is never reported.
+
+_HAND_BUILT_SURFACES_ALLOWED: dict[str, str] = {
+    # site -> why this place may call a tool on a hand-registered surface.
+    # EMPTY TODAY, and that is a measurement rather than an oversight: the three
+    # legitimate bare-server places named above do not reach `call_tool`, so
+    # nothing needs licensing. A row here must carry a real reason —
+    # `tests/test_hand_built_surfaces.py` refuses an empty one and refuses a row
+    # naming a place that no longer exists, on the CB-179 discipline.
+}
+
+
+def _production_wrapper_codes() -> frozenset:
+    """The code objects `_refusal_reaches_the_client` produces, both branches.
+
+    THE FIRST ATTEMPT WALKED THE CALL STACK looking for a frame whose `self` is
+    a `_RefusalsReachTheClient`, and it was WRONG — measured, 41 false refusals
+    on servers built correctly. The adapter's inner closure captures only
+    `inner`, never `self`, so by the time `MCPServer.tool` actually runs there is
+    no such frame to find. Keeping it would have been a guard that refuses the
+    thing it exists to require.
+
+    What the production stack leaves behind instead is the OBJECT it produces:
+    every body it registers has been replaced by `_refusal_reaches_the_client`'s
+    `wrapper`, so comparing the registered function's `__code__` against the two
+    code objects that decorator can emit answers "did this body come through the
+    production build" directly, about the artifact rather than about the route.
+    A hand-registered body is the domain module's own function and matches
+    neither.
+    """
+    from codebugs import server as _server
+
+    def probe() -> dict:
+        """probe."""
+
+    async def async_probe() -> dict:
+        """probe."""
+
+    return frozenset(
+        {
+            _server._refusal_reaches_the_client(probe).__code__,
+            _server._refusal_reaches_the_client(async_probe).__code__,
+        }
+    )
+
+
+def hand_built_registration_site(frame) -> str:
+    """The test-owned frame that registered a tool, as `<file>::<function>`."""
+    while frame is not None:
+        filename = frame.f_code.co_filename
+        if filename.startswith(_TESTS_DIR) and not filename.endswith("conftest.py"):
+            return f"{Path(filename).name}::{frame.f_code.co_name}"
+        frame = frame.f_back
+    return "<outside the test tree>"
+
+
+def hand_built_surface_refusal(tool: str, site: str) -> str:
+    return (
+        f"CB-311: {site} called the tool {tool!r} on a surface it registered by hand.\n"
+        "Those tools never went through `server.build_registrar`, so this call is "
+        "measuring a server `server._build_server` never produces — the exact shape "
+        "CB-310 found in ten tests at once, all green against a live defect.\n"
+        "Fix: `mod.register_tools(server.build_registrar(mcp), factory)`.\n"
+        "If this place genuinely needs the bare object AND a call, add a row to "
+        "`_HAND_BUILT_SURFACES_ALLOWED` in tests/conftest.py naming the reason."
+    )
+
+
+_TESTS_DIR = str(Path(__file__).resolve().parent)
+_HAND_BUILT: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_PRODUCTION_WRAPPER_CODES = _production_wrapper_codes()
+_REAL_TOOL = MCPServer.tool
+_REAL_CALL_TOOL = MCPServer.call_tool
+
+
+def _tool_recording_who_registered(self, *args, **kwargs):
+    decorator = _REAL_TOOL(self, *args, **kwargs)
+
+    def register(fn):
+        if getattr(fn, "__code__", None) not in _PRODUCTION_WRAPPER_CODES:
+            declared = kwargs.get("name") or (
+                args[0] if args and isinstance(args[0], str) else None
+            )
+            name = declared or getattr(fn, "__name__", "?")
+            _HAND_BUILT.setdefault(self, {})[name] = hand_built_registration_site(sys._getframe(1))
+        return decorator(fn)
+
+    return register
+
+
+async def _call_tool_refusing_a_hand_built_surface(self, name, *args, **kwargs):
+    site = _HAND_BUILT.get(self, {}).get(name)
+    if site is not None and site not in _HAND_BUILT_SURFACES_ALLOWED:
+        raise AssertionError(hand_built_surface_refusal(name, site))
+    return await _REAL_CALL_TOOL(self, name, *args, **kwargs)
+
+
+# Installed at IMPORT rather than in a session fixture: a module-level
+# registration in some future test file would run during collection, before any
+# fixture, and the guard would then be blind to exactly the construction it
+# exists to see.
+MCPServer.tool = _tool_recording_who_registered
+MCPServer.call_tool = _call_tool_refusing_a_hand_built_surface

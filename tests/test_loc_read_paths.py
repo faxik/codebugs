@@ -26,6 +26,14 @@ harness ``tests/test_cb107_mcp_surface.py`` uses) rather than a stub, because
 what they pin is that the wrapper FORWARDS its flag: a body that hardcoded the
 value would satisfy every stub-level signature check and still ignore the
 caller (CB-157, measured on a sibling unit the same day).
+
+That sentence was TRUE OF THE STUB AND FALSE OF THE BUILD until CB-311: the
+pipeline was real, but the server was assembled here by hand instead of through
+``server.build_registrar``, so the tools it carried had never passed the
+production registration stack. Text and mechanism had diverged, which is the
+same defect one level up from the one this file's subject is — and the reason
+`tests/conftest.py` now REFUSES a call into a hand-registered tool rather than
+leaving the next such helper to be found by reading.
 """
 
 from __future__ import annotations
@@ -40,7 +48,7 @@ from contextlib import contextmanager
 import pytest
 from mcp.server.mcpserver import MCPServer
 
-from codebugs import db, findings, loc
+from codebugs import db, findings, loc, server
 
 
 def _git(cwd, *args):
@@ -886,9 +894,18 @@ def _mcp(root):
         finally:
             conn.close()
 
-    server = MCPServer("t")
-    findings.register_tools(server, factory)
-    return server
+    # Production registration stack, not the bare server (CB-310, CB-311). This
+    # helper used to call `findings.register_tools(server, factory)` on a bare
+    # `MCPServer`, which is a SECOND definition of the production stack: the
+    # tools registered on it never passed through `_RefusalsReachTheClient`, so
+    # the surface measured here was one `_build_server` never produces. It cost
+    # nothing while this file asserts only flag forwarding — but the first
+    # assertion about a refusal's text would have passed green over a surface
+    # the product does not ship, which is exactly the shape CB-310 found in ten
+    # tests at once.
+    mcp = MCPServer("t")
+    findings.register_tools(server.build_registrar(mcp), factory)
+    return mcp
 
 
 def _call(server, name, **arguments):
