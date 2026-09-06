@@ -480,6 +480,25 @@ if [[ -n "${STATUS}" ]]; then
     echo "  Committing: ${COMMIT_MSG}"
     git -C "${WORKTREE_PATH}" add -A
     _guard_leaked_repr "${WORKTREE_PATH}" || exit $?
+    # SHOW WHAT IS BEING COMMITTED, AS CONTENT (CB-284). The status printed
+    # above is a list of NAMES, and a name cannot distinguish a leftover debug
+    # probe from the legitimate edit of the very same file: on 2026-08-31 a
+    # session died mid-mutation and left a broken line beside real tests, and
+    # this phase would have shown it as ` M tools/worktree-finish.sh` — exactly
+    # what the unit was supposed to be editing anyway. The evidence was printed
+    # at an altitude that cannot tell the two apart, so it is printed here at
+    # one that can. Nothing is refused and no control flow changes; the only
+    # path this reaches is the one that is about to commit for you.
+    #
+    # Read from the INDEX rather than the working tree, which is why this sits
+    # after `add -A`: an abandoned probe is frequently an UNTRACKED file, and
+    # `git diff` alone cannot see one until it is staged.
+    #
+    # No cap, no flag, no elision — deliberately. Any of those would hand the
+    # decision about what deserves to be seen back to the script, which is the
+    # defect above with a threshold bolted on.
+    echo "  What is being committed:"
+    git -C "${WORKTREE_PATH}" diff --cached --stat -p | sed 's/^/    /'
     git -C "${WORKTREE_PATH}" commit --no-verify -m "${COMMIT_MSG}"
     echo "  ✓ Committed"
 else

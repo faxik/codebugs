@@ -3902,6 +3902,137 @@ def armed(repo: Path, tmp_path: Path) -> dict:
     return {"repo": repo, "bin": bin_dir}
 
 
+class TestDirtyWorktreeIsCommittedAsContent:
+    """Phase [1/7] shows WHAT it commits, not merely which files (CB-284).
+
+    The finish script commits a dirty worktree for you when — and only when — a
+    commit message was given. Until CB-284 the only thing it printed first was
+    `git status --short`, a list of NAMES, and a name cannot distinguish a
+    leftover debug probe from the legitimate edit of the same file. On
+    2026-08-31 a session died mid-mutation and left a broken assertion beside
+    real tests; the list would have read ` M tools/worktree-finish.sh`, which is
+    exactly what that unit was supposed to be editing. The evidence was printed
+    at an altitude that cannot tell a mutant from the work.
+
+    BEHAVIOURAL, and end to end, because the structural tests in this file
+    cannot see this: `TestGuardsAreActuallyInvoked` reads the script as text, so
+    a print that exists in the source but never executes — on the wrong side of
+    the message check, or outside the dirty branch — passes it. Nothing else in
+    this suite has ever run the script with a DIRTY worktree at all, so the
+    whole auto-commit half of this phase was unexercised before these four.
+
+    Affordable only because `--skip-checks` exists, exactly as for the CB-116
+    class below: it disables ruff and pytest, never the safety guards, so the
+    phase these tests traverse is the real one.
+    """
+
+    BRANCH = "fix/cb-284-probe"
+    SLUG = "fix-cb-284-probe"
+    # A one-line edit to a file the branch legitimately owns — the shape of the
+    # 2026-08-31 case, deliberately not the easier new-file case.
+    LEFTOVER_LINE = "assert 1 == 2  # LEFTOVER_MUTATION_PROBE"
+    UNTRACKED_LINE = "raise SystemExit('UNTRACKED_LEFTOVER_PROBE')"
+    OWNED_FILE = "tests/test_thing.py"
+    HEADER = "What is being committed:"
+
+    def _branch(self, armed: dict) -> Path:
+        """A branch with one honest commit of its own, worktree left clean."""
+        repo = armed["repo"]
+        wt = repo / ".worktrees" / self.SLUG
+        git(repo, "worktree", "add", "-q", "-b", self.BRANCH, str(wt), "main")
+        (wt / "tests").mkdir()
+        (wt / self.OWNED_FILE).write_text("def test_ok():\n    assert True\n")
+        git(wt, "add", self.OWNED_FILE)
+        git(wt, "commit", "--no-verify", "-m", "test(cb-284): the branch's own legitimate work")
+        return wt
+
+    def _leave_edit_behind(self, wt: Path) -> None:
+        """Uncommitted one-line change inside the file the branch owns."""
+        path = wt / self.OWNED_FILE
+        path.write_text(path.read_text().replace("assert True", self.LEFTOVER_LINE))
+
+    def _finish(self, armed: dict, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(armed["repo"] / "tools" / "worktree-finish.sh"), self.SLUG, *args],
+            cwd=str(armed["repo"]),
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": f"{armed['bin']}{os.pathsep}{os.environ['PATH']}"},
+        )
+
+    def test_a_leftover_edit_is_printed_as_the_changed_text(self, armed: dict) -> None:
+        """The card's own case: the modified LINE has to be readable.
+
+        Asserting on the line rather than on the filename is the whole point —
+        the filename was already printed before this fix and told nobody
+        anything, because the branch was entitled to touch that file.
+        """
+        wt = self._branch(armed)
+        self._leave_edit_behind(wt)
+        result = self._finish(armed, "chore: whatever the operator typed", "--skip-checks")
+        assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
+        assert self.LEFTOVER_LINE in result.stdout, (
+            "the auto-commit printed no trace of the text it committed:\n"
+            + result.stdout[-3000:]
+        )
+
+    def test_a_leftover_untracked_file_is_printed_as_content_too(self, armed: dict) -> None:
+        """The other half, and the reason the print reads the INDEX.
+
+        `git status --short` marks an untracked file `??` and a plain `git diff`
+        cannot see it at all, so a print taken before `git add -A` would show
+        this case as a bare name — the very failure being fixed, half-fixed.
+
+        The probe is placed under `tests/` rather than at the repo root because
+        `_guard_untracked_scratch_at_root` refuses a stray top-level `.py`
+        outright (exit 4). At the root the harness never reaches this print;
+        one directory down — where the 2026-08-31 leftover actually was — it
+        commits, so this is the case that needs the content shown.
+        """
+        wt = self._branch(armed)
+        (wt / "tests" / "left_over_probe.py").write_text(self.UNTRACKED_LINE + "\n")
+        result = self._finish(armed, "chore: whatever the operator typed", "--skip-checks")
+        assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
+        assert self.UNTRACKED_LINE in result.stdout, (
+            "an untracked leftover was committed with only its name shown:\n"
+            + result.stdout[-3000:]
+        )
+
+    def test_a_dirty_tree_with_no_message_is_still_refused_untouched(self, armed: dict) -> None:
+        """The refusal that already existed must not have been weakened.
+
+        CB-284's card claimed the script commits any dirty tree silently; it
+        does not, and this pins the half that was already right. The absent
+        content is the second assertion and it is about PLACEMENT: the print
+        belongs after the message check, so a run that refuses stays as terse as
+        it always was, while the names — the useful thing when nothing is
+        committed — are still there.
+        """
+        wt = self._branch(armed)
+        self._leave_edit_behind(wt)
+        result = self._finish(armed, "--skip-checks")
+        assert result.returncode == 1, result.stdout[-3000:] + result.stderr[-3000:]
+        assert "Uncommitted changes and no commit message given" in result.stdout
+        assert self.OWNED_FILE in result.stdout, "the file names stopped being printed"
+        assert self.LEFTOVER_LINE not in result.stdout, (
+            "content was printed on the path that commits nothing:\n" + result.stdout[-3000:]
+        )
+
+    def test_a_clean_worktree_prints_no_diff_at_all(self, armed: dict) -> None:
+        """The branch that commits nothing must not have grown output.
+
+        Guards the other placement mistake: a print outside the `if` would run
+        on every finish, and the overwhelming majority of finishes arrive clean.
+        """
+        self._branch(armed)
+        result = self._finish(armed, "--skip-checks")
+        assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
+        assert "✓ Clean" in result.stdout
+        assert self.HEADER not in result.stdout, (
+            "the auto-commit print ran on a clean tree:\n" + result.stdout[-3000:]
+        )
+
+
 class TestMergeSubjectDerivation:
     """Run `worktree-finish.sh` for real and read the subject it lands (CB-116).
 
