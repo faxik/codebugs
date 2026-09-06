@@ -195,6 +195,17 @@ def _instantiate(cls: type[BaseException]) -> BaseException:
 # ---------------------------------------------------------------------------
 
 
+#: The probe verb's own prefix, and it must NOT be `cli.main`'s outer arm's.
+#: Both CLI arms end in one stderr line and exit 1, so an outcome of "refused"
+#: alone cannot say WHICH arm caught it — and the two arms are the whole reason
+#: the table distinguishes `input` from `tracker`. With the probe printing a
+#: prefix the outer arm never prints, the arm becomes readable from the output,
+#: and a mutant that folds every refusal into the inner arm turns red here
+#: instead of only in someone else's end-to-end test.
+_INNER_ARM_PREFIX = "cb311-inner-arm: "
+_OUTER_ARM_PREFIX = "codebugs: "
+
+
 @contextlib.contextmanager
 def _probe_verb(exc: BaseException):
     """A CLI verb that raises `exc` the way every real handler raises: inside
@@ -205,7 +216,7 @@ def _probe_verb(exc: BaseException):
         parser.set_defaults(command="cb311-raise")
 
         def handler(_args):
-            with cli.domain_errors(prefix="codebugs: "):
+            with cli.domain_errors(prefix=_INNER_ARM_PREFIX):
                 raise exc
 
         commands["cb311-raise"] = handler
@@ -343,8 +354,22 @@ class TestBothSurfacesFollowTheTable:
             f"{name}: the CLI boundary {outcome} where refusals.CLASSIFICATION says "
             f"{_expected(cls)}."
         )
-        if outcome == "refused":
-            assert _MARKER in err and "Traceback" not in err
+        if outcome != "refused":
+            return
+        assert _MARKER in err and "Traceback" not in err
+        # WHICH ARM CAUGHT IT, not merely that something did. `input` is what the
+        # domain call raises about its arguments and is caught around that call;
+        # `tracker` is raised while opening or creating the tracker and passes
+        # straight through that region to `cli.main`'s outer arm. Asserting only
+        # "refused" collapses the two, and the table's whole reason for having
+        # two refusal kinds goes unchecked.
+        expected_prefix = (
+            _INNER_ARM_PREFIX if refusals.kind_of(cls) == refusals.INPUT else _OUTER_ARM_PREFIX
+        )
+        assert err.strip().startswith(expected_prefix), (
+            f"{name}: expected the {refusals.kind_of(cls)} arm (prefix {expected_prefix!r}), "
+            f"got {err.strip()[:60]!r}"
+        )
 
     def test_the_mcp_boundary(self, name):
         cls = POPULATION[name]
