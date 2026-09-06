@@ -28,7 +28,12 @@ def domain_errors(*, prefix: str = ""):
       mutation that already committed, which CB-86 names as the same lie as
       CB-15/CB-16. So it is re-raised, unchanged, and reaches the user as a
       loud traceback — the discriminator `tests/test_bench.py` pins between a
-      post-commit failure and an input error.
+      post-commit failure and an input error. **The post-commit case is what
+      DECIDED this arm, not the whole of what reaches it**: `findings._bump_row`
+      raises the same class on malformed stored meta BEFORE any write, landing
+      nothing. The classification is right either way — a corrupted row is a
+      broken tracker rather than a caller's bad argument — but the reason is
+      narrower than "it always means the write landed".
     - Plain ``ValueError`` / ``KeyError`` are genuine bad input (an unknown
       vocabulary value, a missing id) and print one line to stderr, then
       ``sys.exit(1)``.

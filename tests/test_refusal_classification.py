@@ -76,6 +76,14 @@ from codebugs import cli, db, refusals, server
 # check and find false gets the guard deleted as redundant, so it is corrected
 # rather than left standing.
 #
+# AND YES, THIS DUPLICATES THE TABLE'S COMPOSITION ON PURPOSE. A later review
+# read that as evidence the single source is not single. It is the opposite: an
+# oracle written down INDEPENDENTLY is the only kind that can disagree with what
+# it checks. Derive this from `refusals.CLASSIFICATION` and it becomes the table
+# compared with itself — a tautology that passes whatever the table says, which
+# is the first risk any reviewer names about tests like these. The duplication
+# is the mechanism, not a leak.
+#
 # ADDING a row is the case nothing else sees. Put `TypeError: Classified(INPUT,
 # ...)` in the table and both surfaces start handing a person the text of every
 # `TypeError`; the behavioural checks below take their expectation from that same

@@ -43,9 +43,11 @@ that needs the guard is precisely the file whose author did not know it applied
 — and the failure is silent, since a hand-built surface answers every call
 happily and merely answers about the wrong object. It lets a call through only
 when the SERVER carries the production build's adapter pair AND the TOOL's body
-carries the production decorator; see the guard below for why both halves are
-needed and why each is recognised by an OBJECT rather than by how the
-registration is spelled.
+carries the production decorator — which catches every hand assembly this suite
+could produce by ACCIDENT, and is not proof of provenance against an author who
+sets out to defeat it. The guard below states that threat model, names the
+bypasses that exist, and says why each half is recognised by an OBJECT rather
+than by how the registration is spelled.
 
 A per-file fixture would have to be remembered by every test module added later,
 and the cost of forgetting is silent destruction of the developer's own data, or
@@ -621,27 +623,43 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 # future third route this suite does not use would be invisible. And it observes
 # the RUN, so a hand-built surface that is never called is never reported.
 #
-# WHERE IT CAN STILL FAIL SILENTLY — and the list is short BECAUSE the verdict
-# stopped depending on bookkeeping. A THIRD round of review found that it did:
-# a branch that cleared a tool's record when the same name was registered again
-# "correctly" turned the guard off outright, since `ToolManager.add_tool` does
-# NOT replace an existing name — it logs and returns the incumbent, so the hand
-# body stayed and the note was erased. Measured: zero of ten tools carried a
-# production body afterwards, and the call went through. Records are now
-# evidence for the MESSAGE only; the verdict reads the body the server stores.
+# THE THREAT MODEL, STATED BEFORE THE GUARANTEE, because the guarantee is only
+# true inside it. THIS GUARD IS AIMED AT THE HONEST AUTHOR who does not know the
+# rule — which is the case CB-310 actually measured: ten tests built the surface
+# by hand, nobody was being clever, and all ten were green against a live
+# defect. It is NOT proof of provenance, and it cannot be: a test harness is
+# edited by the same person it would have to outwit. Three bypasses are known
+# and each needs deliberate construction — call the production build, discard
+# its result and keep the mark while assembling half a stack by hand; attach a
+# production code object onto some other callable; replace the tool manager.
+# They are named rather than closed, because closing them is a different unit
+# with a different price.
 #
-# What remains: the guard reads `_tool_manager._tools`, so an SDK that renamed
-# that attribute would make every lookup miss. That direction is LOUD, not
-# silent — the lookup returning nothing means "unknown tool", and the SDK then
-# refuses the call itself. The genuinely silent direction is narrower: a future
-# SDK that stored something other than the registered function under `.fn`
-# would make production bodies unrecognisable, and that fails toward REFUSING
-# correct code rather than admitting wrong code.
+# WHAT THE TWO HALVES ACTUALLY ESTABLISH, at their real width. The server mark
+# says the production ADAPTER PAIR was constructed around this server — not
+# that `_build_server` ran, which also loops over providers and installs two
+# middlewares. The body check says the stored function carries the code object
+# the production decorator emits — a MARK, not a proof of origin. Together they
+# refuse every hand assembly this suite could produce by accident, and that is
+# the claim.
 #
-# Every OTHER way this breaks is loud: renaming `_refusal_reaches_the_client`
-# fails the import and reddens the whole suite, and a third branch in that
-# wrapper (or its removal from `build_registrar`) makes correctly built tools
-# start getting refused.
+# ONE RESIDUAL HAS A PLAUSIBLY ACCIDENTAL SHAPE and is therefore named on its
+# own: a test that builds ONE provider through `build_registrar` and a second
+# through the outer adapter alone. The bodies still carry the refusal
+# translation, so CB-310's own subject is unharmed; what is lost is description
+# normalization. That one is left open deliberately.
+#
+# WHERE IT FAILS SILENTLY. An SDK that stored something other than the
+# registered function under `.fn` would make production bodies unrecognisable —
+# and that fails toward REFUSING correct code, which is the safe direction. An
+# SDK that RENAMED the registry is NOT the loud case an earlier version of this
+# comment claimed: it would rename it on its own call path too, so the call
+# would run and the body would be whatever was registered. That is exactly why
+# an unreadable registry now REFUSES instead of falling through.
+#
+# Renaming `_refusal_reaches_the_client` fails the import and reddens the whole
+# suite; a third branch in that wrapper, or its removal from `build_registrar`,
+# makes correctly built tools start getting refused. Both are loud.
 #
 # WHAT IT DELIBERATELY DOES NOT COVER: assertions about the SHAPE of the surface
 # — tool names, descriptions, argument schemas — which a bare server answers just
@@ -701,6 +719,17 @@ def hand_built_registration_site(frame) -> str:
             return f"{Path(filename).name}::{frame.f_code.co_name}"
         frame = frame.f_back
     return "<outside the test tree>"
+
+
+def undeterminable_surface_refusal(tool: str) -> str:
+    return (
+        f"CB-311: could not determine how the surface carrying {tool!r} was built.\n"
+        "The guard reads the SDK's tool registry to see which body a call will run, and that "
+        "registry was not readable — most likely the SDK moved or renamed it.\n"
+        "This refuses rather than admits, because a guard that passes when blind is not a "
+        "guard. Repair `_call_tool_refusing_a_hand_built_surface` in tests/conftest.py "
+        "against the SDK's current shape."
+    )
 
 
 def hand_built_surface_refusal(tool: str, site: str) -> str:
@@ -763,7 +792,17 @@ def _mark_fully_built(self, registrar, *args, **kwargs):
     """
     result = _REAL_REFUSALS_INIT(self, registrar, *args, **kwargs)
     if isinstance(registrar, _server._NormalizedDescriptions):
-        _FULLY_BUILT.add(registrar._server)
+        try:
+            _FULLY_BUILT.add(registrar._server)
+        except TypeError:
+            # An unhashable server (a subclass setting `__hash__ = None`, or a
+            # stand-in) cannot be marked. Swallowing that is the SAFE direction
+            # and is deliberate: an unmarked server is REFUSED at its first
+            # call, so the failure is a loud refusal on a legitimate build
+            # rather than a silent admission of an illegitimate one. None exists
+            # in this suite today; the arm is here so the shape is decided
+            # rather than discovered.
+            pass
     return result
 
 
@@ -790,10 +829,21 @@ async def _call_tool_refusing_a_hand_built_surface(self, name, *args, **kwargs):
     adapter's `__init__`. Bookkeeping was the alternative, and bookkeeping is
     what produced the hole.
     """
-    stored = getattr(self, "_tool_manager", None)
-    tool = getattr(stored, "_tools", {}).get(name) if stored is not None else None
+    registry = getattr(getattr(self, "_tool_manager", None), "_tools", None)
+    if not isinstance(registry, dict):
+        # UNREADABLE REGISTRY IS NOT AN ABSENT NAME, and conflating the two is
+        # how the first version of this failed OPEN: `getattr(..., {})` turned
+        # "I cannot see the registry" into "no such tool" and let the call
+        # through with nothing checked. Every gate in this repository refuses
+        # when it cannot tell — an empty answer, an unparseable answer, a
+        # missing interpreter — and a guard that admits on blindness is the one
+        # shape none of them takes.
+        raise AssertionError(undeterminable_surface_refusal(name))
+    tool = registry.get(name)
     if tool is None:
-        # Unknown tool: let the SDK give its own answer rather than inventing one.
+        # A readable registry that does not hold this NAME is a different thing
+        # and is legitimate: the test asked for a tool that does not exist, and
+        # the SDK's own "unknown tool" is the right answer, not ours.
         return await _REAL_CALL_TOOL(self, name, *args, **kwargs)
     body_is_production = (
         getattr(getattr(tool, "fn", None), "__code__", None) in _PRODUCTION_WRAPPER_CODES

@@ -106,12 +106,20 @@ def call_over_the_wire(built: MCPServer, name: str, arguments: dict) -> tuple[bo
 
 
 class TestTheClientReceivesTheReason:
-    """Every class in the accepted classification, over the real client boundary.
+    """FOUR classes of the accepted classification, over the real client boundary.
 
-    The classification is `server._EXPECTED_REFUSALS`, and it is not authored
-    there: `ValueError`/`KeyError` come from `cli.domain_errors`' definition of
-    bad input, and the two typed `RuntimeError` subclasses come from `db.py`,
-    where they exist precisely to carry a text addressed to a person.
+    NOT every class, and the difference is CB-311's: the classification now
+    lives in `refusals.CLASSIFICATION`, one table both surfaces derive from, and
+    it names more classes than the four exercised here. This file predates that
+    and keeps the four it was written for — the ones whose text a client was
+    measured to lose — because widening it would duplicate the per-class sweep
+    `tests/test_refusal_classification.py` already drives across both
+    boundaries. What this file uniquely covers is the REAL CLIENT SESSION, which
+    that sweep does not use.
+
+    The sentence this replaces said the classification was authored in
+    `cli.domain_errors` and `db.py`. That was true before CB-311 and is not now:
+    those two spelled it inline, which is exactly what the table replaced.
     """
 
     def test_an_unknown_vocabulary_value_names_itself(self, tracker):

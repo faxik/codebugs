@@ -267,7 +267,11 @@ def _refusal_reaches_the_client(fn: Any) -> Any:
     (CB-16/CB-86). Presenting that to a client as an anticipated refusal is
     exactly the lie CB-15/CB-16 forbid, so it is re-raised FIRST and stays a
     crash. Collapsing the two arms does not merely lose a distinction, it
-    inverts the report on a mutation that already committed.
+    inverts the report on a mutation that already committed. **That committed
+    case is what decided the arm rather than everything that reaches it** —
+    `findings._bump_row` raises the same class before any write — and the
+    classification holds either way, because a corrupted row is a broken tracker
+    rather than a caller's bad argument.
 
     THE GATE IS TWO-SIDED. Anything outside `_EXPECTED_REFUSALS` is left
     untouched, so it still reaches the client as `Error executing tool <name>`

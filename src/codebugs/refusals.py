@@ -6,9 +6,14 @@ directory — and their text is written FOR A PERSON, so both surfaces show it.
 (Not necessarily as ONE LINE: three refusals in `findings.py` carry a newline in
 their own message, and over MCP the text travels as a `ToolError` message where
 "line" means nothing at all.) Everything else means *I broke*, and the two
-surfaces then diverge in a way worth stating: over MCP the text is withheld and
-stays in the server's log, because an unexpected exception's message can carry
-another caller's data, while on the COMMAND LINE the traceback goes to the
+surfaces then diverge in a way worth stating: over MCP the text is INTENDED to be
+withheld and to stay in the server's log, because an unexpected exception's
+message can carry another caller's data. **Whether it actually is withheld
+depends on the SDK version, and `pyproject.toml` admits two that differ**: under
+`mcp` 2.1.1 a crash reaches the client as a text-less error, while under 2.0.0
+the SDK appends any exception's text to its own message and the withholding does
+not happen at all. That is measured, and `tests/test_cb310_refusal_text.py` says
+the same about its own wire tests. Meanwhile on the COMMAND LINE the traceback goes to the
 process that ran the command — which already sees the output and the exit code,
 so the traceback discloses nothing it could not obtain anyway, and is the more
 useful answer. (That caller is often a script or an agent rather than a person,

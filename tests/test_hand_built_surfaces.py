@@ -156,9 +156,51 @@ class TestTheGuardFires:
             asyncio.run(mcp.call_tool("cb311_smuggled", {}))
         assert "CB-311" in str(refusal.value)
 
+        # DISCRIMINATING, not merely "some exception". Asserting only that the
+        # marker is absent would be satisfied by any unrelated failure raised
+        # before the body — including one caused by the guard itself in some
+        # future edit. The connection factory's own message proves the call
+        # reached the tool body, which is the thing being claimed.
         with pytest.raises(BaseException) as raised:
             asyncio.run(mcp.call_tool("query", {}))
         assert "CB-311" not in str(raised.value), "the correctly built tools must still work"
+        assert "no connection is ever needed" in str(raised.value), (
+            "the call must reach the tool body, not fail somewhere before it"
+        )
+
+    def test_an_unreadable_registry_REFUSES_rather_than_admitting(self):
+        """Fail-closed on blindness, which the first version got backwards.
+
+        The guard reads the SDK's registry to see which body a call will run.
+        When that read fails it cannot tell a production surface from a hand
+        one — and the earlier code turned exactly that into "no such tool" and
+        let the call through with nothing checked. Every gate in this repository
+        refuses when it cannot tell; this one now does too.
+        """
+        mcp = MCPServer("cb311-blind")
+        findings.register_tools(server.build_registrar(mcp), _factory())
+        mcp._tool_manager._tools = None  # what an SDK rename looks like from here
+        with pytest.raises(AssertionError) as refusal:
+            asyncio.run(mcp.call_tool("query", {}))
+        assert "CB-311" in str(refusal.value)
+        assert "could not determine" in str(refusal.value)
+
+    def test_a_marked_server_carrying_a_hand_body_is_still_refused(self):
+        """The COMPOSITION neither half covers alone.
+
+        The other cases pin "mark present, body hand-built" and "no mark, body
+        production" separately. This one is the state a bypass actually reaches:
+        the server carries the production mark AND the stored body is a hand
+        one. Both halves must be consulted for this to be refused — reading
+        either alone admits it.
+        """
+        mcp = MCPServer("cb311-marked-but-hand")
+        server.build_registrar(mcp)  # marks the server, registers nothing
+        findings.register_tools(mcp, _factory())  # hand registration onto it
+        assert mcp in conftest._FULLY_BUILT, "premise: the server carries the mark"
+        with pytest.raises(AssertionError) as refusal:
+            asyncio.run(mcp.call_tool("query", {}))
+        assert "CB-311" in str(refusal.value)
 
     def test_re_registering_correctly_does_NOT_launder_a_hand_built_surface(self):
         """The shape a previous round of this guard got WRONG, kept as a pin.
