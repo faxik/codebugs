@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **When the tracker refuses something over MCP, you now get the reason instead of one blank
+  line.** On a recent version of the MCP library, every refusal this server makes — "no tracker
+  in this directory", "no such card", "that is not a valid status" — reached your client as the
+  single line `Error executing tool <name>`, with the actual reason left behind in a server log
+  nobody reads. The message was indistinguishable from a broken server, and it was mistaken for
+  one: the natural response is to reconnect a server that was working perfectly and was simply
+  pointed at a directory with no tracker in it. Refusals now carry their text to you on every
+  library version this package accepts.
+
+  Only refusals the tracker anticipated are opened up this way. An unexpected internal failure
+  still shows you the short line and keeps its details in the server log, deliberately — those
+  details can contain another caller's data, and one of them means something specific and
+  dangerous: your write DID land and only the reply could not be assembled. That case must not
+  arrive dressed as "bad input", because "bad input" reads as "nothing happened".
+
+  If you installed this server with `pipx`, note that reinstalling is what puts the fix in front
+  of your client — the installed copy is built separately from this repository's checkout.
+
+- **The test suite now also runs against the newest MCP library version this package accepts, not
+  only the pinned one.** The tests that would have caught the defect above already existed and
+  were already loud; nothing anywhere ran them on the version people actually end up installing,
+  so they passed forever while the shipped server misbehaved.
+
 ## [0.3.0] — 2026-09-01
 
 This release is about the tracker answering the question you asked. In a handful of places it used

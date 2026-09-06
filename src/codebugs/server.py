@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import functools
+import inspect
+import json
 import re
 import sys
 import time
@@ -11,6 +14,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.shared.exceptions import MCPError
 from mcp_types import INVALID_PARAMS, CallToolResult
 
@@ -219,6 +223,187 @@ class _NormalizedDescriptions:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._server, name)
+
+
+# The exception classes this package raises to say "I understood you and I am
+# refusing you", as opposed to "I broke".
+#
+# ITS MEMBERSHIP IS TAKEN FROM TWO DECISIONS ALREADY MADE — AND IT IS A THIRD
+# LIST, WHICH IS SAID PLAINLY BECAUSE A FIRST DRAFT CLAIMED IT WAS "DERIVED"
+# AND TWO INDEPENDENT REVIEWERS CALLED THAT AN OVERCLAIM. The sources are
+# `cli.domain_errors` (`ValueError`, `KeyError` — the CLI boundary's own
+# definition of bad input) and `db.py`'s named refusals, whose whole purpose is
+# a text addressed to a person. But nothing imports either: `cli.domain_errors`
+# spells its pair inline in an `except` clause, so there is no constant to
+# share, and no test compares the three lists.
+#
+# WHERE THE THREE DISAGREE TODAY, MEASURED: `cli.main`'s own outer arm catches
+# THREE `db` classes — `DatabaseNotFoundError`, `TrackerUnwritableError` and
+# `TrackerExistsError` — and this tuple carries the first two. That is not an
+# omission with a live cost: `TrackerExistsError` (and its subclass
+# `WorktreeTrackerError`) is raised only from `db.init_project`, and `init` is
+# one of the two CLI-only verbs with no MCP tool at all, so the class cannot
+# reach this wrapper. **What is missing is the enforcement, not the member**: no
+# gate says "every named refusal reachable from an MCP tool is in this tuple",
+# so a future module exposing `init` over MCP would reopen CB-310 for exactly
+# that one refusal, silently. Named here as a residual rather than closed,
+# because widening the tuple is a change to a ratified boundary.
+_EXPECTED_REFUSALS: tuple[type[BaseException], ...] = (
+    ValueError,
+    KeyError,
+    db.DatabaseNotFoundError,
+    db.TrackerUnwritableError,
+)
+
+
+def _refusal_reaches_the_client(fn: Any) -> Any:
+    """Wrap one tool body so an EXPECTED refusal keeps its text on the wire (CB-310).
+
+    WHY THIS EXISTS. From `mcp` 2.1.1 the SDK hands the client the message of a
+    `ToolError` and of nothing else: every other exception is treated as a
+    crash, the client receives the bare line `Error executing tool <name>`, and
+    the reason stays in the server's log, which no client reads. Measured on
+    both admitted versions, through a real client session as well as through
+    `MCPServer.call_tool`: under 2.0.0 every exception's text survived, so this
+    package's refusals — raised as ordinary `ValueError`/`KeyError`/typed
+    `RuntimeError` subclasses — reached clients correctly by accident of the
+    older SDK's behaviour. `pyproject.toml` admits `mcp>=2.0.0,<3`, so the text
+    has to be MADE to survive rather than left to whichever version an
+    installer happened to resolve.
+
+    ORDER IS THE RULE, NOT A DETAIL, AND IT IS `cli.domain_errors`' ORDER.
+    `json.JSONDecodeError` IS a `ValueError`, and here it means the write
+    already landed and only the serialization of the RETURN VALUE then failed
+    (CB-16/CB-86). Presenting that to a client as an anticipated refusal is
+    exactly the lie CB-15/CB-16 forbid, so it is re-raised FIRST and stays a
+    crash. Collapsing the two arms does not merely lose a distinction, it
+    inverts the report on a mutation that already committed.
+
+    THE GATE IS TWO-SIDED. Anything outside `_EXPECTED_REFUSALS` is left
+    untouched, so it still reaches the client as `Error executing tool <name>`
+    with the traceback in the server's log. A one-sided translation would look
+    like the fix and would put arbitrary internal text — another caller's data
+    included — on the wire.
+
+    WHY THERE IS NO EXPLICIT SIGNATURE COPY, WHICH IS THE OPPOSITE OF WHAT THE
+    FIRST DRAFT DID. `surfacegen.build_tool` sets `__signature__` on the
+    callables it emits, and its own comment records that this attribute — not
+    `__annotations__` — is what the SDK reads to build a tool's argument model,
+    so the thirteen generated tools are the likeliest place for a wrapper to go
+    silently wrong. `functools.wraps` looks as if it would miss that:
+    `__signature__` is in neither `WRAPPER_ASSIGNMENTS` nor the documentation.
+    It does not miss it. `WRAPPER_UPDATES` is `('__dict__',)`, `__signature__`
+    on a function lives in that `__dict__`, and the update therefore carries it
+    across — measured, and then measured again as a MUTANT: three lines
+    copying it by hand were removed and nothing anywhere went red, on either
+    SDK version, because they had never done anything. The proof that the
+    schemas survived is the wire golden `tests/golden/mcp_schema.json`, which
+    since CB-310 is collected through `build_registrar` and so genuinely
+    compares 83 post-wrapper schemas against the checked-in snapshot.
+
+    THE ASYNC BRANCH IS NOT SPECULATION, IT IS THE ONLY CORRECT SHAPE. No tool
+    in this package is a coroutine function today (measured). A single
+    synchronous wrapper over one would return the coroutine object without
+    awaiting it, so the `except` arms would never run and the wrapper would
+    silently protect nothing — the failure would be invisible rather than
+    loud, which is why the branch is here rather than deferred to the day
+    somebody writes an async tool.
+    """
+    if inspect.iscoroutinefunction(fn):
+
+        @functools.wraps(fn)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return await fn(*args, **kwargs)
+            except json.JSONDecodeError:
+                raise
+            except _EXPECTED_REFUSALS as exc:
+                raise ToolError(str(exc)) from exc
+
+    else:
+
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return fn(*args, **kwargs)
+            except json.JSONDecodeError:
+                raise
+            except _EXPECTED_REFUSALS as exc:
+                raise ToolError(str(exc)) from exc
+
+    return wrapper
+
+
+class _RefusalsReachTheClient:
+    """Registration-time adapter: every tool body goes through `_refusal_reaches_the_client`.
+
+    WHY A SECOND ADAPTER RATHER THAN A BRANCH IN `_NormalizedDescriptions`.
+    That class states its own contract — "the adapter normalizes and does not
+    decide" — and deciding which exceptions a client is allowed to read is
+    policy, not normalization. A class that quietly starts doing both lies with
+    its name, and its docstring becomes the next reader's wrong premise.
+
+    WHY REGISTRATION AND NOT `server.middleware`. `_handle_call_tool` catches a
+    tool body's exception BEFORE any middleware sees it — the finding
+    `install_usage_tracking`'s docstring records, measured by reading the SDK —
+    so by the time a middleware runs, an anticipated refusal and a crash are
+    both a `CallToolResult` carrying the SDK's own text and are no longer
+    distinguishable. The registration point is the only place that still holds
+    the exception object itself.
+
+    WHY IT COVERS THE WHOLE SURFACE. `_build_server` hands ONE registrar object
+    to every provider, and `surfacegen.emit_tools` calls `mcp.tool()(fn)` on
+    that same object for the generated surface, so wrapping the registrar
+    reaches every registered tool instead of a list somebody maintains by hand.
+    `tests/test_cb310_refusal_text.py` asserts that by comparing the SET of
+    wrapped names against the live catalogue, because a count would pass while
+    naming the wrong thirteen.
+
+    The one-method surface and the `__getattr__` fallback follow
+    `_NormalizedDescriptions` deliberately: two adapters standing in the same
+    place should not differ in shape for no reason.
+    """
+
+    def __init__(self, registrar: Any) -> None:
+        self._registrar = registrar
+
+    def tool(self, *args: Any, **kwargs: Any) -> Any:
+        inner = self._registrar.tool(*args, **kwargs)
+
+        def register(fn: Any) -> Any:
+            return inner(_refusal_reaches_the_client(fn))
+
+        return register
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._registrar, name)
+
+
+def build_registrar(server_obj: MCPServer) -> Any:
+    """The object every tool provider is registered through. ONE definition (CB-310).
+
+    PUBLIC ON PURPOSE, AND THE REASON IS A DEFECT THIS UNIT MEASURED RATHER
+    THAN GUESSED AT. Ten tests in this suite assert what the MCP surface does
+    with a refusal, and every one of them built its own bare `MCPServer` and
+    called `register_tools` on it directly — so they were measuring a server
+    object `_build_server` never produces. The fix for CB-310 landed in
+    `_build_server` and all ten stayed RED under `mcp` 2.1.1, which is how the
+    divergence surfaced: a test that constructs the surface by hand cannot tell
+    you anything about the surface that ships.
+
+    `tests/test_sweep_surface.py`'s helper even carried the docstring "a server
+    built through the path `server.py` actually uses" while wrapping only
+    `_NormalizedDescriptions` — true when it was written and quietly false
+    afterwards. A hand-copied construction sequence is a second definition of
+    the production stack, and two definitions drift; this function is the one
+    definition both sides now name.
+
+    It deliberately returns the registrar rather than a finished server:
+    `_build_server` still owns the mode filter, the provider loop and the two
+    middlewares, and a test that wants a single provider must be able to
+    register just that one.
+    """
+    return _RefusalsReachTheClient(_NormalizedDescriptions(server_obj))
 
 
 @contextmanager
@@ -635,10 +820,14 @@ def _build_server(mode: str, conn_factory=None) -> MCPServer:
     # json_response flag; it only ever applied to streamable-http, and we run stdio.
     server_obj = MCPServer(SERVER_NAMES[mode], instructions=INSTRUCTIONS)
 
-    # Wrapped, so what clients receive does not depend on which interpreter
-    # built the server (CB-73). The adapter is registration-time only; the real
-    # server object is what runs and what install_strict_arguments inspects.
-    registrar = _NormalizedDescriptions(server_obj)
+    # Wrapped twice, for two things a client receives that must not depend on
+    # the environment the server happens to run in. `_NormalizedDescriptions`
+    # (CB-73) makes a tool's DESCRIPTION independent of the interpreter that
+    # built the server; `_RefusalsReachTheClient` (CB-310) makes a refusal's
+    # REASON independent of which `mcp` version the installer resolved. Both are
+    # registration-time only; the real server object is what runs and what
+    # install_strict_arguments inspects.
+    registrar = build_registrar(server_obj)
     for provider in db.get_tool_providers(mode=mode):
         provider.register_fn(registrar, conn_factory)
 

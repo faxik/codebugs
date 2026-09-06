@@ -422,6 +422,17 @@ DECLARED_THIRD_PARTY: dict[str, str] = {
         "The `mcp` 2.x SDK is the package's single declared runtime "
         "dependency (pyproject.toml), and server.py exists to run against it."
     ),
+    "mcp.server.mcpserver.exceptions.ToolError": (
+        "CB-310: the SDK's type for a tool failure the tool ANTICIPATED. From "
+        "`mcp` 2.1.1 it is the only exception whose message the SDK puts in "
+        "front of the client; everything else is treated as a crash and the "
+        "client receives the bare line `Error executing tool <name>`. "
+        "server.py's registration-time adapter raises it so this package's own "
+        "refusals keep their reason on the wire under every version "
+        "pyproject.toml admits. Declared by its EXACT dotted name for the "
+        "reason the docstring above gives: a bare `mcp` row would license the "
+        "SSE transports this table exists to keep out."
+    ),
     "mcp.shared.exceptions.MCPError": (
         "CB-190: the SDK's protocol-error type, raised by server.py's strict "
         "argument middleware so a bad `tools/call` fails as a protocol error "

@@ -55,9 +55,14 @@ def tracker():
 
 
 def _server_with_middleware(tracker, mode="findings"):
+    # `server.build_registrar` and not a hand-copied construction sequence
+    # (CB-310): a helper that registers straight onto the bare `MCPServer`
+    # measures a surface `_build_server` never produces, and under `mcp` 2.1.1
+    # that difference is exactly the one this suite exists to catch.
     mcp = MCPServer("codebugs")
+    registrar = server.build_registrar(mcp)
     for provider in db.get_tool_providers(mode=mode):
-        provider.register_fn(mcp, tracker)
+        provider.register_fn(registrar, tracker)
     server.install_strict_arguments(mcp)
     return mcp, mcp.middleware[-1]
 
@@ -736,13 +741,29 @@ class TestInterpreterIndependentDescriptions:
         `server.run()` loop) — so this is now a TWO-step structural check:
         `main()` actually calls `_build_server`, and `_build_server` is where
         the registrar wiring this test exists to pin now lives.
+
+        CB-310 added a THIRD step and moved the composition itself out of the
+        text: `_build_server` now names `build_registrar`, and what that
+        function COMPOSES is checked by building one and looking at it, not by
+        matching a class name in source. The two halves answer different
+        questions and neither replaces the other — "is the registrar reached
+        from `main`" is a wiring question that can only be read, while "does the
+        registrar carry both adapters" is a property of the object and is
+        better asked of the object.
         """
         main_src = inspect.getsource(server.main)
         assert "_build_server(args.mode)" in main_src, main_src
 
         build_src = inspect.getsource(server._build_server)
-        assert "_NormalizedDescriptions(server_obj)" in build_src, build_src
+        assert "build_registrar(server_obj)" in build_src, build_src
         assert "provider.register_fn(registrar, conn_factory)" in build_src, build_src
+
+        # Both adapters, in the order `build_registrar` documents: the refusal
+        # translation is OUTERMOST, so the description normalizer still sees the
+        # `__doc__` `functools.wraps` carried across.
+        registrar = server.build_registrar(MCPServer("wiring-probe"))
+        assert isinstance(registrar, server._RefusalsReachTheClient), registrar
+        assert isinstance(registrar._registrar, server._NormalizedDescriptions), registrar
 
     def test_the_normalizer_has_exactly_one_definition(self):
         """The gate and the server must not be able to disagree about what
