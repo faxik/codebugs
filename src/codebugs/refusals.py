@@ -2,9 +2,12 @@
 
 WHAT THE RULE IS, IN WORDS. Some failures mean *I understood you and I am
 refusing you* — an unknown vocabulary value, a missing card, no tracker in this
-directory — and their text is written FOR A PERSON, so both surfaces show it.
-Everything else means *I broke*, and its text stays in the log, because an
-unexpected exception's message can carry another caller's data.
+directory — and their text is written FOR A PERSON, so both surfaces show it as
+one line. Everything else means *I broke*, and the two surfaces then diverge in
+a way worth stating: over MCP the text is withheld and stays in the server's log,
+because an unexpected exception's message can carry another caller's data, while
+on the COMMAND LINE the traceback is printed to the person who typed the command
+— there is no other caller to protect, and the traceback is the useful answer.
 
 WHY IT IS A MODULE RATHER THAN THREE `except` CLAUSES. Before this file the one
 rule was spelled out by ENUMERATION in three places that nothing compared:
@@ -106,19 +109,25 @@ CLASSIFICATION: dict[type[BaseException], Classified] = {
     ),
     json.JSONDecodeError: Classified(
         CRASH,
-        "A ValueError SUBCLASS that must NOT be read as bad input: it is reached while "
-        "serializing the response of a write that ALREADY COMMITTED, from a row with "
-        "corrupted stored meta/tags (CB-16/CB-86). Reporting a committed mutation as a "
-        "tidy input error is the lie those cards name, so it keeps its traceback.",
+        "A ValueError SUBCLASS that must NOT be read as bad input. The case that decided it "
+        "is corrupted stored meta/tags met while serializing the response of a write that "
+        "ALREADY COMMITTED (CB-16/CB-86) — reporting a committed mutation as a tidy input "
+        "error is the lie those cards name. It is NOT universally post-commit: "
+        "`findings._bump_row` raises it on malformed stored meta BEFORE any write, landing "
+        "nothing. The classification is the same either way, because a corrupted row is a "
+        "broken tracker rather than a caller's bad argument, and a traceback is the useful "
+        "answer to it — but the reason is stated at the width it actually holds.",
     ),
     surfacegen.DeclarationError: Classified(
         INPUT,
-        "A ValueError subclass raised while a tool or CLI declaration is BUILT, i.e. at "
-        "registration time, never from inside a call — so no boundary can observe it today. "
-        "Named rather than left to inherit, because this table forbids silent inheritance; "
-        "classified as it behaves TODAY, since re-deciding whether a developer-facing "
-        "declaration error should be a crash would change a ratified boundary, which "
-        "CB-311 explicitly does not do.",
+        "A ValueError subclass raised while a tool or CLI declaration is BUILT — at "
+        "registration time, never from inside a call — so NO boundary observes it today and "
+        "its kind decides nothing about running behaviour. It is named rather than left to "
+        "inherit, because this table forbids silent inheritance, and it takes the kind its "
+        "base class already gives it, which is the state before CB-311 and after. Read that "
+        "as 'not re-decided' rather than as an endorsement: whether a declaration error "
+        "SHOULD be a crash is a real question, its own subject, and answering it here would "
+        "move a ratified boundary CB-311 is explicitly not moving.",
     ),
     db.DatabaseNotFoundError: Classified(
         TRACKER,

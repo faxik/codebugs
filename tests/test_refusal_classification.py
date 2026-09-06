@@ -112,6 +112,14 @@ def _declared_exception_classes() -> dict[str, type[BaseException]]:
     is what makes it "declared here" rather than "imported here", and it is also
     what gives the table its self-deletion — a class that is renamed or removed
     stops being found, and the row naming it fails.
+
+    WHAT IT DOES NOT SEE, at the width it actually holds: it reads each module's
+    top-level namespace, so a class declared INSIDE another class, or one that
+    exists only as an element of a container, is invisible to it. Neither shape
+    occurs in this package today (that is why the enumeration is honest now),
+    and closing it would mean walking the AST rather than the namespace. Named
+    rather than left implied, because "every exception class in the package" is
+    the sentence a reader will carry away otherwise.
     """
     found: dict[str, type[BaseException]] = {}
     modules = [codebugs]
