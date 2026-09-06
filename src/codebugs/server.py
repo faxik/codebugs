@@ -269,14 +269,21 @@ def _refusal_reaches_the_client(fn: Any) -> Any:
     like the fix and would put arbitrary internal text — another caller's data
     included — on the wire.
 
-    WHY THE SIGNATURE IS COPIED EXPLICITLY. `surfacegen.build_tool` sets
-    `__signature__` on the callables it emits, and its own comment records that
-    this attribute is what the SDK reads to build a tool's argument model;
-    `functools.wraps` does not copy it. `inspect.signature` would find it
-    through `__wrapped__`, but a reader of the attribute would not, and the
-    thirteen generated tools are the likeliest place for this wrapper to go
-    silently wrong. The wire golden `tests/golden/mcp_schema.json` is what
-    proves it did not.
+    WHY THERE IS NO EXPLICIT SIGNATURE COPY, WHICH IS THE OPPOSITE OF WHAT THE
+    FIRST DRAFT DID. `surfacegen.build_tool` sets `__signature__` on the
+    callables it emits, and its own comment records that this attribute — not
+    `__annotations__` — is what the SDK reads to build a tool's argument model,
+    so the thirteen generated tools are the likeliest place for a wrapper to go
+    silently wrong. `functools.wraps` looks as if it would miss that:
+    `__signature__` is in neither `WRAPPER_ASSIGNMENTS` nor the documentation.
+    It does not miss it. `WRAPPER_UPDATES` is `('__dict__',)`, `__signature__`
+    on a function lives in that `__dict__`, and the update therefore carries it
+    across — measured, and then measured again as a MUTANT: three lines
+    copying it by hand were removed and nothing anywhere went red, on either
+    SDK version, because they had never done anything. The proof that the
+    schemas survived is the wire golden `tests/golden/mcp_schema.json`, which
+    since CB-310 is collected through `build_registrar` and so genuinely
+    compares 83 post-wrapper schemas against the checked-in snapshot.
 
     THE ASYNC BRANCH IS NOT SPECULATION, IT IS THE ONLY CORRECT SHAPE. No tool
     in this package is a coroutine function today (measured). A single
@@ -308,9 +315,6 @@ def _refusal_reaches_the_client(fn: Any) -> Any:
             except _EXPECTED_REFUSALS as exc:
                 raise ToolError(str(exc)) from exc
 
-    signature = getattr(fn, "__signature__", None)
-    if signature is not None:
-        wrapper.__signature__ = signature
     return wrapper
 
 
