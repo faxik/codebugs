@@ -487,8 +487,9 @@ if [[ -n "${STATUS}" ]]; then
     # this phase would have shown it as ` M tools/worktree-finish.sh` — exactly
     # what the unit was supposed to be editing anyway. The evidence was printed
     # at an altitude that cannot tell the two apart, so it is printed here at
-    # one that can. Nothing is refused and no control flow changes; the only
-    # path this reaches is the one that is about to commit for you.
+    # one that can. It refuses nothing and adds no branch — the honest scope,
+    # since this file cares: under `set -euo pipefail` a FAILING `git diff`
+    # would now end the run here, i.e. BEFORE the commit rather than after it.
     #
     # Read from the INDEX rather than the working tree, which is why this sits
     # after `add -A`: an abandoned probe is frequently an UNTRACKED file, and
@@ -496,9 +497,13 @@ if [[ -n "${STATUS}" ]]; then
     #
     # No cap, no flag, no elision — deliberately. Any of those would hand the
     # decision about what deserves to be seen back to the script, which is the
-    # defect above with a threshold bolted on.
+    # defect above with a threshold bolted on. `--stat` is left off for the
+    # same reason rather than for brevity: `git status --short` above already
+    # names the set, and a piped `--stat` ABBREVIATES a long path to `.../tail`
+    # — the only rendering here from which a name can arrive incomplete, inside
+    # the very change whose subject is that names do not suffice.
     echo "  What is being committed:"
-    git -C "${WORKTREE_PATH}" diff --cached --stat -p | sed 's/^/    /'
+    git -C "${WORKTREE_PATH}" diff --cached -p | sed 's/^/    /'
     git -C "${WORKTREE_PATH}" commit --no-verify -m "${COMMIT_MSG}"
     echo "  ✓ Committed"
 else

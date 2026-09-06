@@ -3905,14 +3905,11 @@ def armed(repo: Path, tmp_path: Path) -> dict:
 class TestDirtyWorktreeIsCommittedAsContent:
     """Phase [1/7] shows WHAT it commits, not merely which files (CB-284).
 
-    The finish script commits a dirty worktree for you when — and only when — a
-    commit message was given. Until CB-284 the only thing it printed first was
-    `git status --short`, a list of NAMES, and a name cannot distinguish a
-    leftover debug probe from the legitimate edit of the same file. On
-    2026-08-31 a session died mid-mutation and left a broken assertion beside
-    real tests; the list would have read ` M tools/worktree-finish.sh`, which is
-    exactly what that unit was supposed to be editing. The evidence was printed
-    at an altitude that cannot tell a mutant from the work.
+    The script auto-commits a dirty worktree only when a commit message was
+    given, and until CB-284 it printed nothing but names first. Why that is not
+    enough — and the 2026-08-31 incident it cost — is written once, at the print
+    itself in `tools/worktree-finish.sh`; it is not restated here, because two
+    copies of one explanation drift apart on the first edit of either.
 
     BEHAVIOURAL, and end to end, because the structural tests in this file
     cannot see this: `TestGuardsAreActuallyInvoked` reads the script as text, so
@@ -3934,6 +3931,7 @@ class TestDirtyWorktreeIsCommittedAsContent:
     UNTRACKED_LINE = "raise SystemExit('UNTRACKED_LEFTOVER_PROBE')"
     OWNED_FILE = "tests/test_thing.py"
     HEADER = "What is being committed:"
+    MSG = "chore: whatever the operator typed"
 
     def _branch(self, armed: dict) -> Path:
         """A branch with one honest commit of its own, worktree left clean."""
@@ -3952,8 +3950,18 @@ class TestDirtyWorktreeIsCommittedAsContent:
         path.write_text(path.read_text().replace("assert True", self.LEFTOVER_LINE))
 
     def _finish(self, armed: dict, *args: str) -> subprocess.CompletedProcess[str]:
+        """`--skip-checks` is baked in, as in the CB-116 class below.
+
+        It disables ruff and pytest only, never a safety guard, so phase [1/7]
+        — the whole subject here — runs exactly as it does in earnest.
+        """
         return subprocess.run(
-            [str(armed["repo"] / "tools" / "worktree-finish.sh"), self.SLUG, *args],
+            [
+                str(armed["repo"] / "tools" / "worktree-finish.sh"),
+                self.SLUG,
+                *args,
+                "--skip-checks",
+            ],
             cwd=str(armed["repo"]),
             capture_output=True,
             text=True,
@@ -3969,7 +3977,7 @@ class TestDirtyWorktreeIsCommittedAsContent:
         """
         wt = self._branch(armed)
         self._leave_edit_behind(wt)
-        result = self._finish(armed, "chore: whatever the operator typed", "--skip-checks")
+        result = self._finish(armed, self.MSG)
         assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
         assert self.LEFTOVER_LINE in result.stdout, (
             "the auto-commit printed no trace of the text it committed:\n"
@@ -3991,7 +3999,7 @@ class TestDirtyWorktreeIsCommittedAsContent:
         """
         wt = self._branch(armed)
         (wt / "tests" / "left_over_probe.py").write_text(self.UNTRACKED_LINE + "\n")
-        result = self._finish(armed, "chore: whatever the operator typed", "--skip-checks")
+        result = self._finish(armed, self.MSG)
         assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
         assert self.UNTRACKED_LINE in result.stdout, (
             "an untracked leftover was committed with only its name shown:\n"
@@ -4010,7 +4018,7 @@ class TestDirtyWorktreeIsCommittedAsContent:
         """
         wt = self._branch(armed)
         self._leave_edit_behind(wt)
-        result = self._finish(armed, "--skip-checks")
+        result = self._finish(armed)
         assert result.returncode == 1, result.stdout[-3000:] + result.stderr[-3000:]
         assert "Uncommitted changes and no commit message given" in result.stdout
         assert self.OWNED_FILE in result.stdout, "the file names stopped being printed"
@@ -4033,7 +4041,7 @@ class TestDirtyWorktreeIsCommittedAsContent:
         on every finish, and the overwhelming majority of finishes arrive clean.
         """
         self._branch(armed)
-        result = self._finish(armed, "--skip-checks")
+        result = self._finish(armed)
         assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
         assert "✓ Clean" in result.stdout
         assert self.HEADER not in result.stdout, (
