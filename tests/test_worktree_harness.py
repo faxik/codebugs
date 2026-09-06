@@ -3930,13 +3930,18 @@ class TestDirtyWorktreeIsCommittedAsContent:
 
     BRANCH = "fix/cb-284-probe"
     SLUG = "fix-cb-284-probe"
-    # A one-line edit to a file the branch legitimately owns — the shape of the
-    # 2026-08-31 case, deliberately not the easier new-file case.
-    LEFTOVER_LINE = "assert 1 == 2  # LEFTOVER_MUTATION_PROBE"
-    UNTRACKED_LINE = "raise SystemExit('UNTRACKED_LEFTOVER_PROBE')"
     OWNED_FILE = "tests/test_thing.py"
+    UNTRACKED_FILE = "tests/left_over_probe.py"
     HEADER = "What is being committed:"
     MSG = "chore: whatever the operator typed"
+    # THREE distinguishable lines rather than one, and that is an ORACLE, not
+    # decoration. Cross-model review broke the single-marker version three ways
+    # and it stayed green each time; the marker sets answer the second of them.
+    # A print truncated to `| tail -1` still emits the last line of a one-line
+    # patch, so one marker cannot tell a whole patch from a clipped one — and
+    # clipping is precisely what this change is forbidden to do.
+    LEFTOVER_MARKS = ("LEFTOVER_ALPHA", "LEFTOVER_BETA", "LEFTOVER_GAMMA")
+    UNTRACKED_MARKS = ("UNTRACKED_ALPHA", "UNTRACKED_BETA", "UNTRACKED_GAMMA")
 
     def _branch(self, armed: dict) -> Path:
         """A branch with one honest commit of its own, worktree left clean."""
@@ -3949,17 +3954,41 @@ class TestDirtyWorktreeIsCommittedAsContent:
         git(wt, "commit", "--no-verify", "-m", "test(cb-284): the branch's own legitimate work")
         return wt
 
-    def _leave_edit_behind(self, wt: Path) -> None:
-        """Uncommitted one-line change inside the file the branch owns."""
-        path = wt / self.OWNED_FILE
-        path.write_text(path.read_text().replace("assert True", self.LEFTOVER_LINE))
+    def _tip(self, armed: dict) -> str:
+        """The branch ref — readable after the worktree has been removed.
 
-    def _finish(self, armed: dict, *args: str) -> subprocess.CompletedProcess[str]:
+        Asserting on the REF rather than on the worktree is what makes the
+        commit checkable at all: a successful finish deletes the worktree, so
+        anything the test wants to know about the commit must be asked of the
+        repository afterwards.
+        """
+        return git(armed["repo"], "rev-parse", self.BRANCH)
+
+    def _leave_edit_behind(self, wt: Path) -> None:
+        """Uncommitted multi-line change inside the file the branch owns.
+
+        The shape of the 2026-08-31 case — an edit to a file the branch is
+        entitled to touch — deliberately not the easier new-file case.
+        """
+        path = wt / self.OWNED_FILE
+        body = "\n".join(f"    assert 1 == 2  # {mark}" for mark in self.LEFTOVER_MARKS)
+        path.write_text(path.read_text().replace("    assert True", body))
+
+    def _leave_untracked_behind(self, wt: Path) -> None:
+        (wt / self.UNTRACKED_FILE).write_text(
+            "".join(f"raise SystemExit('{mark}')\n" for mark in self.UNTRACKED_MARKS)
+        )
+
+    def _finish(
+        self, armed: dict, *args: str, env_extra: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
         """`--skip-checks` is baked in, as in the CB-116 class below.
 
         It disables ruff and pytest only, never a safety guard, so phase [1/7]
         — the whole subject here — runs exactly as it does in earnest.
         """
+        env = {**os.environ, "PATH": f"{armed['bin']}{os.pathsep}{os.environ['PATH']}"}
+        env.update(env_extra or {})
         return subprocess.run(
             [
                 str(armed["repo"] / "tools" / "worktree-finish.sh"),
@@ -3970,26 +3999,50 @@ class TestDirtyWorktreeIsCommittedAsContent:
             cwd=str(armed["repo"]),
             capture_output=True,
             text=True,
-            env={**os.environ, "PATH": f"{armed['bin']}{os.pathsep}{os.environ['PATH']}"},
+            env=env,
         )
 
-    def test_a_leftover_edit_is_printed_as_the_changed_text(self, armed: dict) -> None:
-        """The card's own case: the modified LINE has to be readable.
+    def _assert_committed_and_shown(
+        self, armed: dict, before: str, path: str, marks: tuple[str, ...], result
+    ) -> None:
+        """Both halves of the claim, because either alone is satisfiable alone.
 
-        Asserting on the line rather than on the filename is the whole point —
+        The first draft of these tests asserted a return code and ONE substring
+        in stdout, and cross-model review showed that this passes with the
+        `git commit` line DELETED from the script: the header still prints, the
+        branch's honest commit still merges, and the leftover is discarded with
+        no more than a warning as the worktree is removed. A test for a print
+        must therefore ask the repository what was COMMITTED, not the terminal
+        what was said — otherwise it measures the spelling of the evidence, and
+        this whole card is about evidence that only looked like evidence.
+        """
+        assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
+        assert self._tip(armed) != before, (
+            "the branch tip never moved — the dirty tree was not committed at all"
+        )
+        landed = git(armed["repo"], "show", f"{self.BRANCH}:{path}")
+        for mark in marks:
+            assert mark in landed, f"{mark} never reached the commit"
+            assert mark in result.stdout, (
+                f"{mark} was committed but never shown:\n" + result.stdout[-3000:]
+            )
+
+    def test_a_leftover_edit_is_committed_and_shown_in_full(self, armed: dict) -> None:
+        """The card's own case: the modified LINES have to be readable.
+
+        Asserting on the lines rather than on the filename is the whole point —
         the filename was already printed before this fix and told nobody
         anything, because the branch was entitled to touch that file.
         """
         wt = self._branch(armed)
+        before = self._tip(armed)
         self._leave_edit_behind(wt)
         result = self._finish(armed, self.MSG)
-        assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
-        assert self.LEFTOVER_LINE in result.stdout, (
-            "the auto-commit printed no trace of the text it committed:\n"
-            + result.stdout[-3000:]
+        self._assert_committed_and_shown(
+            armed, before, self.OWNED_FILE, self.LEFTOVER_MARKS, result
         )
 
-    def test_a_leftover_untracked_file_is_printed_as_content_too(self, armed: dict) -> None:
+    def test_a_leftover_untracked_file_is_committed_and_shown_in_full(self, armed: dict) -> None:
         """The other half, and the reason the print reads the INDEX.
 
         `git status --short` marks an untracked file `??` and a plain `git diff`
@@ -4003,13 +4056,39 @@ class TestDirtyWorktreeIsCommittedAsContent:
         commits, so this is the case that needs the content shown.
         """
         wt = self._branch(armed)
-        (wt / "tests" / "left_over_probe.py").write_text(self.UNTRACKED_LINE + "\n")
+        before = self._tip(armed)
+        self._leave_untracked_behind(wt)
         result = self._finish(armed, self.MSG)
-        assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
-        assert self.UNTRACKED_LINE in result.stdout, (
-            "an untracked leftover was committed with only its name shown:\n"
-            + result.stdout[-3000:]
+        self._assert_committed_and_shown(
+            armed, before, self.UNTRACKED_FILE, self.UNTRACKED_MARKS, result
         )
+
+    def test_a_failing_print_stops_the_run_before_the_commit(self, armed: dict) -> None:
+        """ORDER, and the one prose claim in the script that nothing checked.
+
+        That the print precedes the commit cannot be read off two strings in
+        stdout — a version committing first and printing `git show -p HEAD`
+        afterwards produces the same text, and cross-model review used exactly
+        that to break the earlier draft. So the order is asked of an effect
+        instead: make the print itself FAIL, and the commit must not exist.
+
+        `GIT_EXTERNAL_DIFF` pointing at a failing program is the narrowest lever
+        available — measured, it makes a patch-producing `git diff` exit 128 and
+        leaves `--name-only` and blob reads (i.e. every earlier guard) at 0. The
+        script runs under `set -euo pipefail`, so the pipeline's failure ends
+        the run where it stands. That is also the only test of the honest-scope
+        sentence the print's own comment makes about `pipefail`: prose in a
+        comment is not a check, and this makes it one.
+        """
+        wt = self._branch(armed)
+        before = self._tip(armed)
+        self._leave_edit_behind(wt)
+        result = self._finish(armed, self.MSG, env_extra={"GIT_EXTERNAL_DIFF": "/bin/false"})
+        assert result.returncode != 0, result.stdout[-3000:] + result.stderr[-3000:]
+        assert self._tip(armed) == before, (
+            "the commit happened even though the print that must precede it failed"
+        )
+        assert "✓ Committed" not in result.stdout, result.stdout[-3000:]
 
     def test_a_dirty_tree_with_no_message_is_still_refused_untouched(self, armed: dict) -> None:
         """The refusal that already existed must not have been weakened.
@@ -4022,14 +4101,20 @@ class TestDirtyWorktreeIsCommittedAsContent:
         committed — are still there.
         """
         wt = self._branch(armed)
+        before = self._tip(armed)
         self._leave_edit_behind(wt)
         result = self._finish(armed)
         assert result.returncode == 1, result.stdout[-3000:] + result.stderr[-3000:]
         assert "Uncommitted changes and no commit message given" in result.stdout
         assert self.OWNED_FILE in result.stdout, "the file names stopped being printed"
-        assert self.LEFTOVER_LINE not in result.stdout, (
-            "content was printed on the path that commits nothing:\n" + result.stdout[-3000:]
-        )
+        # "Commits nothing" is asserted as a FACT about the repository, for the
+        # same reason the success tests are: a refusal that printed the right
+        # sentence while committing anyway would satisfy every string here.
+        assert self._tip(armed) == before, "the refusal path committed something"
+        for mark in self.LEFTOVER_MARKS:
+            assert mark not in result.stdout, (
+                "content was printed on the path that commits nothing:\n" + result.stdout[-3000:]
+            )
         # The header is asserted SEPARATELY from the content, and that is not
         # belt-and-braces: hoisted above the message check the print would run
         # BEFORE `git add -A`, where `--cached` is empty, so a content-only
