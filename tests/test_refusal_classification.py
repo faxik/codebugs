@@ -132,6 +132,12 @@ def _population() -> dict[str, type[BaseException]]:
     return population
 
 
+#: Computed once. `_population()` walks the package and imports every submodule, and it is
+#: read by the parametrize decorator AND by each of the three methods it parametrizes — 31
+#: identical walks per run, measured at ~0.25 ms each once the modules are in `sys.modules`.
+POPULATION: dict[str, type[BaseException]] = _population()
+
+
 def _instantiate(cls: type[BaseException]) -> BaseException:
     """One instance of `cls` whose text is `_MARKER`, for ANY class in the population.
 
@@ -301,10 +307,10 @@ class TestTheTableIsDisciplined:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", sorted(_population()))
+@pytest.mark.parametrize("name", sorted(POPULATION))
 class TestBothSurfacesFollowTheTable:
     def test_the_cli_boundary(self, name, monkeypatch, capsys):
-        cls = _population()[name]
+        cls = POPULATION[name]
         exc = _instantiate(cls)
         outcome, err = cli_outcome(exc, monkeypatch, capsys)
         assert outcome == _expected(cls), (
@@ -315,7 +321,7 @@ class TestBothSurfacesFollowTheTable:
             assert _MARKER in err and "Traceback" not in err
 
     def test_the_mcp_boundary(self, name):
-        cls = _population()[name]
+        cls = POPULATION[name]
         exc = _instantiate(cls)
         outcome = mcp_outcome(exc)
         assert outcome == _expected(cls), (
@@ -323,15 +329,16 @@ class TestBothSurfacesFollowTheTable:
             f"{_expected(cls)}."
         )
 
-    def test_the_two_surfaces_never_disagree(self, name, monkeypatch, capsys):
-        """The property in its own right: whatever the table says, the two
-        surfaces must say the SAME thing about every class. A mutant that edits
-        one surface's derivation turns this red even where the table's own
-        prediction is somehow satisfied."""
-        cls = _population()[name]
-        cli_side, _ = cli_outcome(_instantiate(cls), monkeypatch, capsys)
-        mcp_side = mcp_outcome(_instantiate(cls))
-        assert cli_side == mcp_side, f"{name}: CLI {cli_side}, MCP {mcp_side}"
+    # THE THIRD TEST THAT USED TO STAND HERE IS GONE, AND WHY IS WORTH A NOTE.
+    # It asserted "the two surfaces never disagree" by driving BOTH boundaries a
+    # second time and comparing them to each other, and its docstring claimed it
+    # could catch a mutant the two tests above somehow satisfy. That claim was
+    # false by transitivity: both tests above compare their surface against the
+    # SAME independently computed `_expected(cls)`, so two values equal to one
+    # third value cannot differ. The simplify pass could construct no case where
+    # it fired alone, so it bought a doubled run of both boundaries for every
+    # class and nothing else — and a comment asserting a guarantee it does not
+    # hold is the overclaim this repository keeps paying for.
 
 
 class TestTheArcOrderIsPreservedAndDiscriminates:
