@@ -3907,9 +3907,14 @@ class TestDirtyWorktreeIsCommittedAsContent:
 
     The script auto-commits a dirty worktree only when a commit message was
     given, and until CB-284 it printed nothing but names first. Why that is not
-    enough — and the 2026-08-31 incident it cost — is written once, at the print
-    itself in `tools/worktree-finish.sh`; it is not restated here, because two
-    copies of one explanation drift apart on the first edit of either.
+    enough — and the 2026-08-31 incident it cost, where the leftover was a
+    reverted line of PRODUCTION code that would have landed with ruff and this
+    whole suite GREEN — is written once, at the print itself in
+    `tools/worktree-finish.sh`. It is not restated here: two copies of one
+    explanation drift apart on the first edit of either, and the first draft of
+    this docstring had already drifted, calling the leftover a broken assertion.
+    A broken assertion is the case [6/7] refuses; the real one is the case
+    nothing refuses, which is why the print exists at all.
 
     BEHAVIOURAL, and end to end, because the structural tests in this file
     cannot see this: `TestGuardsAreActuallyInvoked` reads the script as text, so

@@ -482,26 +482,46 @@ if [[ -n "${STATUS}" ]]; then
     _guard_leaked_repr "${WORKTREE_PATH}" || exit $?
     # SHOW WHAT IS BEING COMMITTED, AS CONTENT (CB-284). The status printed
     # above is a list of NAMES, and a name cannot distinguish a leftover debug
-    # probe from the legitimate edit of the very same file: on 2026-08-31 a
-    # session died mid-mutation and left a broken line beside real tests, and
-    # this phase would have shown it as ` M tools/worktree-finish.sh` — exactly
-    # what the unit was supposed to be editing anyway. The evidence was printed
-    # at an altitude that cannot tell the two apart, so it is printed here at
-    # one that can. It refuses nothing and adds no branch — the honest scope,
-    # since this file cares: under `set -euo pipefail` a FAILING `git diff`
-    # would now end the run here, i.e. BEFORE the commit rather than after it.
+    # probe from the legitimate edit of the very same file. On 2026-08-31 a
+    # session died mid-mutation: it had committed its fix, then reverted a
+    # PRODUCTION line of this very script to watch a test go red, and never came
+    # back. The names would have read ` M tools/worktree-finish.sh` — exactly
+    # what that unit was supposed to be editing — and since the test that
+    # discriminated the mutant was the one it had not finished writing, the
+    # mutant would have landed with ruff and the whole suite GREEN. A human
+    # reading the uncommitted diff is what caught it; this print is that habit
+    # moved into the tool.
+    #
+    # AN ALARM, NOT A GATE, and the honest scope has two halves. It refuses
+    # nothing, so the window it buys is [2/7]-[6/7] — minutes — and only while
+    # somebody is watching a terminal; run unattended, which is the ordinary
+    # case here and the one that produced CB-284, it is read after the merge and
+    # serves the revert rather than the prevention. And no gate is available for
+    # this class: [6/7] already refuses a leftover that reddens ruff or the
+    # suite, so what remains is by construction the leftover that passes both,
+    # which has no signature to match on — enumerate its spellings and you
+    # rebuild CB-83, recorded in tools/_guards.sh.
     #
     # Read from the INDEX rather than the working tree, which is why this sits
     # after `add -A`: an abandoned probe is frequently an UNTRACKED file, and
-    # `git diff` alone cannot see one until it is staged.
+    # `git diff` alone cannot see one until it is staged. The neighbouring half
+    # is deliberately left alone: [3/7] still prints NAMES, over the strictly
+    # larger set the merge will carry, so a mutant the dead session had already
+    # COMMITTED is invisible here. This covers what is committed FOR you, which
+    # is the only content that reaches main having been read by nobody.
     #
-    # No cap, no flag, no elision — deliberately. Any of those would hand the
-    # decision about what deserves to be seen back to the script, which is the
-    # defect above with a threshold bolted on. `--stat` is left off for the
-    # same reason rather than for brevity: `git status --short` above already
-    # names the set, and a piped `--stat` ABBREVIATES a long path to `.../tail`
-    # — the only rendering here from which a name can arrive incomplete, inside
-    # the very change whose subject is that names do not suffice.
+    # No cap, no flag, no elision — deliberately, and the cost is real rather
+    # than absent: a large stray file swept up by `add -A` is printed whole. Any
+    # cap would hand the decision about what deserves to be seen back to the
+    # script, which is the defect above with a threshold bolted on. `--stat` is
+    # left off for that reason and not for brevity: `git status --short` above
+    # already names the set, and a piped `--stat` ABBREVIATES a long path to
+    # `.../tail` — the one rendering here from which a name can arrive
+    # incomplete, inside the change whose subject is that names do not suffice.
+    #
+    # Under `set -euo pipefail` a FAILING `git diff` ends the run HERE, before
+    # the commit rather than after it. That is the wanted direction — refusing
+    # to commit what it could not show beats committing it unshown.
     echo "  What is being committed:"
     git -C "${WORKTREE_PATH}" diff --cached -p | sed 's/^/    /'
     git -C "${WORKTREE_PATH}" commit --no-verify -m "${COMMIT_MSG}"
