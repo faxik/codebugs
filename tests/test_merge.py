@@ -7,7 +7,7 @@ import threading
 
 import pytest
 
-from codebugs import db, merge
+from codebugs import db, merge, server
 from codebugs.types import utc_now
 
 
@@ -1239,8 +1239,10 @@ class TestTheMcpSurfaceCanCloseASession:
             # tracker the next call has to see.
             yield conn
 
+        # Registered through `server.build_registrar`, the production stack, and
+        # not onto the bare server: see that function's docstring (CB-310).
         mcp = MCPServer("codemerge-test")
-        merge.register_tools(mcp, factory)
+        merge.register_tools(server.build_registrar(mcp), factory)
         return mcp
 
     @staticmethod
@@ -1341,10 +1343,15 @@ class TestTheMcpSurfaceCanCloseASession:
         merge.merge(conn, "D", expected_main_head="H0", current_main_head_fn=lambda: "H0")
         merge.finish(conn, "D", success=True)
 
-        # The SDK wraps a tool body's exception in ToolError, which is the
-        # documented contract ("MCP tools let exceptions propagate to the MCP
-        # server's built-in error handling"). What matters is that the REASON
-        # survives the wrapping and reaches the client.
+        # WHO does the wrapping changed under this test's feet, and the old
+        # comment here — "the SDK wraps a tool body's exception in ToolError" —
+        # was true only of `mcp` 2.0.0. From 2.1.1 the SDK shows a client the
+        # message of a `ToolError` and of nothing else, so a bare `ValueError`
+        # arrives as `Error executing tool <name>` with the reason discarded,
+        # and this test went red. `server.build_registrar`'s adapter is what
+        # raises the `ToolError` now (CB-310). What the test asserts is
+        # unchanged and is the only thing that ever mattered: the REASON
+        # survives to the surface.
         from mcp.server.mcpserver.exceptions import ToolError
 
         with pytest.raises(ToolError, match="cannot be abandoned"):

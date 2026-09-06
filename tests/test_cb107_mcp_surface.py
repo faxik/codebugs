@@ -29,7 +29,7 @@ import pytest
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from codebugs import db, findings, merge, milestones, reqs, sweep
+from codebugs import db, findings, merge, milestones, reqs, server, sweep
 
 
 def _call(mcp, name, **arguments):
@@ -58,8 +58,9 @@ class TestCodemergeIntrospectionTools:
             # connection, matching test_merge.py's own harness.
             yield conn
 
+        # Production registration stack, not the bare server (CB-310).
         mcp = MCPServer("cb107-merge-test")
-        merge.register_tools(mcp, factory)
+        merge.register_tools(server.build_registrar(mcp), factory)
         return mcp
 
     def test_response_shapes_discriminate_a_wrong_function_call(self, conn):
@@ -140,10 +141,12 @@ class TestCodemergeIntrospectionTools:
         an unknown status is refused through the MCP path exactly as it is
         from the CLI, rather than silently returning the whole table.
 
-        The domain `ValueError` propagates as a `ToolError` raised out of
-        `call_tool` (CLAUDE.md's Error handling: MCP tools let exceptions
-        propagate) -- it is not a `CallToolResult(isError=True)` a caller
-        gets back to inspect, which is the same pipeline behavior
+        The domain `ValueError` reaches `call_tool`'s caller as a `ToolError`
+        -- since CB-310 because `server.build_registrar`'s adapter translates
+        it, not because the SDK carries an arbitrary exception's text, which
+        `mcp` 2.1.1 stopped doing. It is still not a
+        `CallToolResult(isError=True)` a caller gets back to inspect on this
+        in-process path, which is the same pipeline behavior
         `test_merge.py::TestMcpAbandon` already pins for `codemerge_abandon`."""
         mcp = self._mcp(conn)
         with pytest.raises(ToolError, match="Invalid status"):
@@ -190,8 +193,9 @@ class TestMilestoneReconcileTool:
         def factory():
             return _Closing(db.connect(project_dir=root))
 
+        # Production registration stack, not the bare server (CB-310).
         mcp = MCPServer("cb107-milestones-test")
-        milestones.register_tools(mcp, factory)
+        milestones.register_tools(server.build_registrar(mcp), factory)
         return mcp
 
     @staticmethod
@@ -331,8 +335,9 @@ class TestNegativeRowLimitAtTheMcpBoundary:
         def factory():
             yield conn
 
+        # Production registration stack, not the bare server (CB-310).
         mcp = MCPServer(name)
-        register(mcp, factory)
+        register(server.build_registrar(mcp), factory)
         return mcp
 
     @pytest.fixture

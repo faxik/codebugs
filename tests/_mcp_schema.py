@@ -29,7 +29,7 @@ from codebugs import db
 # snapshot a record of what actually goes on the wire, so a tool that passes its
 # own `description=` lands in the golden UNNORMALIZED and CB-156's gate in
 # `tests/test_boundary.py` names it.
-from codebugs.server import _NormalizedDescriptions
+from codebugs.server import build_registrar
 
 # Re-exported, not called here — and BOTH of them are load-bearing as names.
 # `tests/test_boundary.py` asserts the golden is dedent-stable with
@@ -82,11 +82,16 @@ def collect_tool_schemas(providers=None) -> list[dict[str, Any]]:
             # the topology is out of scope here; the cost is stated rather than
             # justified away.
             server = MCPServer(provider.name)
-            # Through the adapter, exactly as `server.main` does — never onto the
-            # bare server with a normalization pass bolted on afterwards. See the
-            # import comment: doing it by hand is what made this snapshot a
-            # reconstruction of the wire instead of a record of it (CB-164).
-            provider.register_fn(_NormalizedDescriptions(server), _conn)
+            # Through the production registrar, exactly as `server.main` does —
+            # never onto the bare server with a normalization pass bolted on
+            # afterwards. See the import comment: doing it by hand is what made
+            # this snapshot a reconstruction of the wire instead of a record of
+            # it (CB-164). It names `build_registrar` rather than one adapter
+            # class since CB-310, which is what makes this golden a genuine
+            # check that a second adapter left all 83 schemas alone — a
+            # hand-listed adapter would simply have gone on snapshotting the
+            # stack of the day it was written.
+            provider.register_fn(build_registrar(server), _conn)
             for t in await server.list_tools():
                 all_tools.append(
                     {

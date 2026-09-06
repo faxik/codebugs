@@ -111,3 +111,66 @@ jobs:
         run: >-
           uv run --python ${{ matrix.python }} --extra dev
           python -m pytest tests/test_cli_signals.py tests/test_fsio.py -q
+
+  # ---------------------------------------------------------------------------
+  # THE `tests` JOB ABOVE RUNS ONE `mcp` VERSION — THE LOCKED ONE — AND NOBODY
+  # RUNS THE OTHER ONE THE RANGE ADMITS. That is CB-310, and it is not a gap in
+  # coverage but a gate that cannot fire: ten tests in this suite already assert
+  # that a refusal's reason reaches the MCP surface, and under `mcp` 2.1.1 all
+  # ten were RED (measured: 10 failed, 3368 passed) while every local run and
+  # every CI run stayed green on the locked 2.0.0. The oracle existed and was
+  # loud; there was simply nothing anywhere that ran it on the version users
+  # actually get.
+  #
+  # HOW USERS GET THE OTHER VERSION, since that is what makes this job worth its
+  # four minutes rather than a hypothetical: `pipx` resolves dependencies itself
+  # and does not read `uv.lock`, so an install of this package picks the newest
+  # `mcp` satisfying `pyproject.toml`. That is how 2.1.1 reached the owner's
+  # installed server while the lockfile still said 2.0.0.
+  #
+  # WHY `uv lock --upgrade-package mcp` AND NOT A PINNED VERSION STRING. The job
+  # must run the NEWEST version the declared range admits, and a hardcoded
+  # `mcp==2.1.1` goes stale the day the SDK releases again — at which point this
+  # job would go on testing a version nobody runs, which is the very defect it
+  # exists to close, rebuilt inside its own fix. `uv lock --upgrade-package mcp`
+  # re-resolves that ONE dependency against `pyproject.toml`'s own
+  # `mcp>=2.0.0,<3` and writes the answer into the checkout's lockfile, which is
+  # thrown away with the runner. Measured locally: it moved `mcp` 2.0.0 -> 2.1.1
+  # and `mcp-types` 2.0.0 -> 2.1.1, and named no version anywhere.
+  #
+  # WHY THE WHOLE SUITE AND NOT THE TEN TESTS. The ten are today's symptom, and
+  # a job scoped to them is an enumeration: it would be blind to the eleventh
+  # test that starts depending on SDK behaviour tomorrow. Unlike the `contracts`
+  # matrix above — four interpreters, where the whole suite four times over
+  # would buy coverage nobody asked for — this is ONE extra run of a suite that
+  # takes about four minutes.
+  #
+  # HONEST SCOPE: this checks the newest version at the moment the job runs. It
+  # says nothing about a version released between two pushes, and nothing about
+  # what any particular user's installer resolved. Building the installed server
+  # from the lockfile is the other half of the answer and is a separate unit.
+  newest-sdk:
+    name: newest mcp in the declared range
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Same requirement as the `tests` job and for the same reason: this
+          # runs the whole suite, and exactly one test in it reads this
+          # repository's real history. See that job's comment (CB-139).
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Interpreter (from .python-version)
+        run: uv python install && uv run python -V
+
+      - name: Resolve the newest mcp the dependency range admits
+        run: |
+          uv lock --upgrade-package mcp
+          uv run --extra dev python -c "import importlib.metadata as m; print('mcp', m.version('mcp'))"
+
+      - name: Tests
+        run: uv run --extra dev python -m pytest tests/ -q
