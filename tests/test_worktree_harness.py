@@ -4017,6 +4017,14 @@ class TestDirtyWorktreeIsCommittedAsContent:
         assert self.LEFTOVER_LINE not in result.stdout, (
             "content was printed on the path that commits nothing:\n" + result.stdout[-3000:]
         )
+        # The header is asserted SEPARATELY from the content, and that is not
+        # belt-and-braces: hoisted above the message check the print would run
+        # BEFORE `git add -A`, where `--cached` is empty, so a content-only
+        # assertion stays green against a print that has moved to the wrong side
+        # of the refusal. Measured as mutation M3, not assumed.
+        assert self.HEADER not in result.stdout, (
+            "the auto-commit print ran on a path that commits nothing:\n" + result.stdout[-3000:]
+        )
 
     def test_a_clean_worktree_prints_no_diff_at_all(self, armed: dict) -> None:
         """The branch that commits nothing must not have grown output.

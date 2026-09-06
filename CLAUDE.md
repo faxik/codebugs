@@ -296,10 +296,13 @@ The
   is why `tests/dump_schema.py` must be run with `PYTHONPATH=src`.
 
 - **Integrate with `tools/worktree-finish.sh <slug> ['commit msg'] [--merge-msg '…']`.** It commits
-  any dirty state, runs the guards, forward-merges main *into the worktree* so conflicts surface in
-  safe space, runs `ruff check` and the full suite there against the combined tree, then merges onto
-  main with `--no-ff` under the lock and removes the worktree. The merge commit is what makes a
-  card's whole iteration recoverable as one unit; a fast-forward scatters it. **Never delete the
+  a dirty worktree ONLY when the commit message was given, printing the staged patch first so the
+  evidence is content rather than a list of filenames; a dirty tree with no message is refused with
+  exit 1 and nothing is committed (CB-284). Then it runs the guards, forward-merges main *into the
+  worktree* so conflicts surface in safe space, runs `ruff check` and the full suite there against
+  the combined tree, then merges onto main with `--no-ff` under the lock and removes the worktree.
+  The merge commit is what makes a card's whole iteration recoverable as one unit; a fast-forward
+  scatters it. **Never delete the
   branch** — no merged branch has ever been deleted here, and that is the record; the script removes
   the worktree only.
 
