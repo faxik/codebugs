@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.tools.base import Tool
 
 from codebugs import findings, server
 from tests import conftest
@@ -159,21 +160,50 @@ class TestTheGuardFires:
             asyncio.run(mcp.call_tool("query", {}))
         assert "CB-311" not in str(raised.value), "the correctly built tools must still work"
 
-    def test_a_correct_re_registration_clears_a_stale_record(self):
-        """A record that outlives the violation refuses correct code.
+    def test_re_registering_correctly_does_NOT_launder_a_hand_built_surface(self):
+        """The shape a previous round of this guard got WRONG, kept as a pin.
 
-        Register by hand, then register the same name properly: the call must go
-        through. Otherwise a helper fixed mid-file keeps failing on a tool that
-        is now built right, and a guard that refuses correct code gets deleted
-        by the first person it inconveniences.
+        Registering by hand and then "correctly" under the same names LOOKS like
+        a repair and is not one: `ToolManager.add_tool` does not replace a tool
+        whose name it already holds — it logs and returns the incumbent — so the
+        server still runs the hand-built bodies. A guard that cleared its record
+        on the second registration therefore turned itself off, and the call
+        went into the hand body with nothing said. Measured on this tree: zero
+        of the ten tools carried a production body afterwards.
+
+        The refusal must survive the false repair, which it does now only
+        because the verdict reads the stored body rather than a record.
         """
-        mcp = MCPServer("cb311-restale")
+        mcp = MCPServer("cb311-relaunder")
         findings.register_tools(mcp, _factory())
         findings.register_tools(server.build_registrar(mcp), _factory())
-        with pytest.raises(BaseException) as raised:
+
+        stored = mcp._tool_manager._tools["query"].fn
+        assert stored.__code__ not in conftest._PRODUCTION_WRAPPER_CODES, (
+            "premise of this test: the SDK kept the hand-registered body"
+        )
+        with pytest.raises(AssertionError) as refusal:
             asyncio.run(mcp.call_tool("query", {}))
-        assert "CB-311" not in str(raised.value)
-        assert "no connection is ever needed" in str(raised.value)
+        assert "CB-311" in str(refusal.value)
+
+    def test_a_tool_smuggled_in_through_the_CONSTRUCTOR_is_caught(self):
+        """`MCPServer(tools=[…])` fills the registry without calling `add_tool`.
+
+        The constructor hands its list straight to the tool manager, so no
+        registration hook of any kind observes it. The guard catches it anyway,
+        because the verdict is taken from the stored body at call time rather
+        than from what registration recorded — which is the whole reason that
+        design was chosen over bookkeeping.
+        """
+
+        def smuggled() -> dict:
+            """Placed in the registry by the constructor."""
+
+        mcp = MCPServer("cb311-ctor", tools=[Tool.from_function(smuggled, name="cb311_ctor")])
+        server.build_registrar(mcp)
+        with pytest.raises(AssertionError) as refusal:
+            asyncio.run(mcp.call_tool("cb311_ctor", {}))
+        assert "CB-311" in str(refusal.value)
 
     def test_a_production_built_surface_is_not_refused(self):
         """The other half: a guard that refused everything would also 'fire'.

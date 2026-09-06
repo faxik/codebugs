@@ -2,12 +2,17 @@
 
 WHAT THE RULE IS, IN WORDS. Some failures mean *I understood you and I am
 refusing you* — an unknown vocabulary value, a missing card, no tracker in this
-directory — and their text is written FOR A PERSON, so both surfaces show it as
-one line. Everything else means *I broke*, and the two surfaces then diverge in
-a way worth stating: over MCP the text is withheld and stays in the server's log,
-because an unexpected exception's message can carry another caller's data, while
-on the COMMAND LINE the traceback is printed to the person who typed the command
-— there is no other caller to protect, and the traceback is the useful answer.
+directory — and their text is written FOR A PERSON, so both surfaces show it.
+(Not necessarily as ONE LINE: three refusals in `findings.py` carry a newline in
+their own message, and over MCP the text travels as a `ToolError` message where
+"line" means nothing at all.) Everything else means *I broke*, and the two
+surfaces then diverge in a way worth stating: over MCP the text is withheld and
+stays in the server's log, because an unexpected exception's message can carry
+another caller's data, while on the COMMAND LINE the traceback goes to the
+process that ran the command — which already sees the output and the exit code,
+so the traceback discloses nothing it could not obtain anyway, and is the more
+useful answer. (That caller is often a script or an agent rather than a person,
+which is why the reason is put this way rather than as "no one else to protect".)
 
 WHY IT IS A MODULE RATHER THAN THREE `except` CLAUSES. Before this file the one
 rule was spelled out by ENUMERATION in three places that nothing compared:

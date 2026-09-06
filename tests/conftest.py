@@ -63,7 +63,7 @@ from pathlib import Path
 import pytest
 from mcp.server.mcpserver import MCPServer
 
-from codebugs import db
+from codebugs import db, server as _server
 
 
 @pytest.fixture(autouse=True)
@@ -621,18 +621,22 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 # future third route this suite does not use would be invisible. And it observes
 # the RUN, so a hand-built surface that is never called is never reported.
 #
-# WHERE IT CAN STILL FAIL SILENTLY. Recording a per-tool violation needs the
-# tool's NAME, and the name is worked out here the way the SDK works it out —
-# the `name` keyword, else a leading string positional, else `fn.__name__`. That
-# is a SECOND COPY of the SDK's own rule, and if the SDK ever derives names
-# differently the recorded key stops matching the name `call_tool` is given and
-# that ONE tool's record is missed. **This is a narrowed statement, not the
-# earlier claim that it is the only silent direction** — that claim was made in
-# the first round and disproved by the two routes named at the top of this
-# comment. It is narrow now for a structural reason: the server half of the
-# check does not depend on names at all, so a missed name still leaves a
-# hand-built SERVER refused; only a tool hand-added onto an otherwise correctly
-# built server could slip.
+# WHERE IT CAN STILL FAIL SILENTLY — and the list is short BECAUSE the verdict
+# stopped depending on bookkeeping. A THIRD round of review found that it did:
+# a branch that cleared a tool's record when the same name was registered again
+# "correctly" turned the guard off outright, since `ToolManager.add_tool` does
+# NOT replace an existing name — it logs and returns the incumbent, so the hand
+# body stayed and the note was erased. Measured: zero of ten tools carried a
+# production body afterwards, and the call went through. Records are now
+# evidence for the MESSAGE only; the verdict reads the body the server stores.
+#
+# What remains: the guard reads `_tool_manager._tools`, so an SDK that renamed
+# that attribute would make every lookup miss. That direction is LOUD, not
+# silent — the lookup returning nothing means "unknown tool", and the SDK then
+# refuses the call itself. The genuinely silent direction is narrower: a future
+# SDK that stored something other than the registered function under `.fn`
+# would make production bodies unrecognisable, and that fails toward REFUSING
+# correct code rather than admitting wrong code.
 #
 # Every OTHER way this breaks is loud: renaming `_refusal_reaches_the_client`
 # fails the import and reddens the whole suite, and a third branch in that
@@ -657,13 +661,6 @@ _HAND_BUILT_SURFACES_ALLOWED: dict[str, str] = {
 }
 
 
-def _production_adapter():
-    """The outer adapter class `server.build_registrar` composes."""
-    from codebugs import server as _server
-
-    return _server._RefusalsReachTheClient
-
-
 def _production_wrapper_codes() -> frozenset:
     """The code objects `_refusal_reaches_the_client` produces, both branches.
 
@@ -682,8 +679,6 @@ def _production_wrapper_codes() -> frozenset:
     A hand-registered body is the domain module's own function and matches
     neither.
     """
-    from codebugs import server as _server
-
     def probe() -> dict:
         """probe."""
 
@@ -735,27 +730,27 @@ _REAL_CALL_TOOL = MCPServer.call_tool
 
 
 def _add_tool_recording_who_registered(self, fn, name=None, *args, **kwargs):
-    """The ONE registration point, and that is a fact about the SDK, not a guess.
+    """Where a hand registration's PLACE is learned — not where the verdict is made.
 
     `MCPServer.tool`'s decorator body calls `self.add_tool(fn, name=…, …)`, so
-    every registration — decorator or direct — arrives here. The first round of
-    this guard wrapped `.tool()` instead and was blind to a direct `add_tool`;
-    wrapping BOTH then double-counted, because the decorator routes through this
-    one. Watching only this point is therefore both more complete and simpler,
-    and it removes the second copy of the SDK's naming rule: the name is
-    `name or fn.__name__`, exactly what the manager itself records.
+    every registration made through a METHOD arrives here. That is a fact about
+    the SDK rather than a guess — and it is deliberately not stated as "the one
+    registration point", because it is not: `MCPServer(tools=[…])` hands its
+    list straight to the tool manager, which fills its own registry without
+    calling this at all. **Nothing here would see that, and nothing here needs
+    to** — the verdict is taken at call time from the body the server actually
+    stores, so a tool nobody recorded is judged exactly like one that was.
+
+    What this records is the SITE, for the refusal text and for the allowance
+    table's key. The name is `name or fn.__name__`, which is what
+    `Tool.from_function` itself computes, so the record keys the same way the
+    manager does.
     """
-    if getattr(fn, "__code__", None) in _PRODUCTION_WRAPPER_CODES:
-        # A correct re-registration under a name previously registered by hand
-        # CLEARS the record. Without this a helper fixed mid-file keeps failing
-        # on a tool that is now built right, and a guard whose stale bookkeeping
-        # refuses correct code is a guard someone deletes.
-        _HAND_BUILT.get(self, {}).pop(name or getattr(fn, "__name__", "?"), None)
-    else:
-        _HAND_BUILT.setdefault(self, {})[name or getattr(fn, "__name__", "?")] = (
-            hand_built_registration_site(sys._getframe(1))
-        )
-    return _REAL_ADD_TOOL(self, fn, name, *args, **kwargs)
+    site = hand_built_registration_site(sys._getframe(1))
+    result = _REAL_ADD_TOOL(self, fn, name, *args, **kwargs)
+    if getattr(fn, "__code__", None) not in _PRODUCTION_WRAPPER_CODES:
+        _HAND_BUILT.setdefault(self, {})[name or getattr(fn, "__name__", "?")] = site
+    return result
 
 
 def _mark_fully_built(self, registrar, *args, **kwargs):
@@ -766,8 +761,6 @@ def _mark_fully_built(self, registrar, *args, **kwargs):
     server attribute is what carries the mark, because that is the object
     `call_tool` is later invoked on.
     """
-    from codebugs import server as _server
-
     result = _REAL_REFUSALS_INIT(self, registrar, *args, **kwargs)
     if isinstance(registrar, _server._NormalizedDescriptions):
         _FULLY_BUILT.add(registrar._server)
@@ -775,11 +768,42 @@ def _mark_fully_built(self, registrar, *args, **kwargs):
 
 
 async def _call_tool_refusing_a_hand_built_surface(self, name, *args, **kwargs):
-    site = _HAND_BUILT.get(self, {}).get(name)
-    if site is None and self not in _FULLY_BUILT:
-        site = hand_built_registration_site(sys._getframe(1))
-    if site is not None and site not in _HAND_BUILT_SURFACES_ALLOWED:
-        raise AssertionError(hand_built_surface_refusal(name, site))
+    """The verdict is read from the LIVE ARTEFACT, never from bookkeeping.
+
+    A first version asked its own records ("was a violation noted for this
+    name?") and that was WRONG, measured: `ToolManager.add_tool` does NOT
+    replace a tool registered under a name it already holds — it logs and
+    returns the incumbent — so registering by hand and then "correctly" under
+    the same name leaves the HAND body in the server while a record-clearing
+    branch erased the note. Two lines turned the guard off completely, and the
+    test written beside them enshrined the bypass as correct.
+
+    So the question asked here is about the object the server will actually
+    run: does the body stored under this name carry the production decorator,
+    and was this server assembled by the production build. Records survive only
+    to say WHERE a hand registration happened, for the refusal text and for the
+    allowance table's key — they can no longer decide anything.
+
+    Reaching into `_tool_manager` is reaching into the SDK's internals, and that
+    is deliberate here: `src/codebugs/server.py` forbids it for PRODUCT code,
+    while this harness already replaces two of the SDK's methods and one
+    adapter's `__init__`. Bookkeeping was the alternative, and bookkeeping is
+    what produced the hole.
+    """
+    stored = getattr(self, "_tool_manager", None)
+    tool = getattr(stored, "_tools", {}).get(name) if stored is not None else None
+    if tool is None:
+        # Unknown tool: let the SDK give its own answer rather than inventing one.
+        return await _REAL_CALL_TOOL(self, name, *args, **kwargs)
+    body_is_production = (
+        getattr(getattr(tool, "fn", None), "__code__", None) in _PRODUCTION_WRAPPER_CODES
+    )
+    if not body_is_production or self not in _FULLY_BUILT:
+        site = _HAND_BUILT.get(self, {}).get(name) or hand_built_registration_site(
+            sys._getframe(1)
+        )
+        if site not in _HAND_BUILT_SURFACES_ALLOWED:
+            raise AssertionError(hand_built_surface_refusal(name, site))
     return await _REAL_CALL_TOOL(self, name, *args, **kwargs)
 
 
@@ -787,7 +811,7 @@ async def _call_tool_refusing_a_hand_built_surface(self, name, *args, **kwargs):
 # registration in some future test file would run during collection, before any
 # fixture, and the guard would then be blind to exactly the construction it
 # exists to see.
-_REAL_REFUSALS_INIT = _production_adapter().__init__
-_production_adapter().__init__ = _mark_fully_built
+_REAL_REFUSALS_INIT = _server._RefusalsReachTheClient.__init__
+_server._RefusalsReachTheClient.__init__ = _mark_fully_built
 MCPServer.add_tool = _add_tool_recording_who_registered
 MCPServer.call_tool = _call_tool_refusing_a_hand_built_surface
