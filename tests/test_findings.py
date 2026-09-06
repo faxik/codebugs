@@ -14,7 +14,7 @@ import threading
 
 import pytest
 
-from codebugs import db, findings, types
+from codebugs import db, findings, server, types
 from codebugs.types import (
     FINDING_STATUSES,
     FINDING_TERMINAL,
@@ -4447,8 +4447,9 @@ class TestQueryFindingsRowLimit:
         def factory():
             yield conn
 
+        # Production registration stack, not the bare server (CB-310).
         mcp = MCPServer("cb196-deferred")
-        findings.register_tools(mcp, factory)
+        findings.register_tools(server.build_registrar(mcp), factory)
         with pytest.raises(ToolError, match="must not be negative"):
             asyncio.run(mcp.call_tool("query", {"status": "deferred", "limit": -1}))
 

@@ -29,7 +29,7 @@ import pytest
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from codebugs import db, findings, merge, milestones, reqs, sweep
+from codebugs import db, findings, merge, milestones, reqs, server, sweep
 
 
 def _call(mcp, name, **arguments):
@@ -58,8 +58,9 @@ class TestCodemergeIntrospectionTools:
             # connection, matching test_merge.py's own harness.
             yield conn
 
+        # Production registration stack, not the bare server (CB-310).
         mcp = MCPServer("cb107-merge-test")
-        merge.register_tools(mcp, factory)
+        merge.register_tools(server.build_registrar(mcp), factory)
         return mcp
 
     def test_response_shapes_discriminate_a_wrong_function_call(self, conn):
@@ -190,8 +191,9 @@ class TestMilestoneReconcileTool:
         def factory():
             return _Closing(db.connect(project_dir=root))
 
+        # Production registration stack, not the bare server (CB-310).
         mcp = MCPServer("cb107-milestones-test")
-        milestones.register_tools(mcp, factory)
+        milestones.register_tools(server.build_registrar(mcp), factory)
         return mcp
 
     @staticmethod
@@ -331,8 +333,9 @@ class TestNegativeRowLimitAtTheMcpBoundary:
         def factory():
             yield conn
 
+        # Production registration stack, not the bare server (CB-310).
         mcp = MCPServer(name)
-        register(mcp, factory)
+        register(server.build_registrar(mcp), factory)
         return mcp
 
     @pytest.fixture

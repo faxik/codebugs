@@ -7,7 +7,7 @@ import threading
 
 import pytest
 
-from codebugs import db, merge
+from codebugs import db, merge, server
 from codebugs.types import utc_now
 
 
@@ -1239,8 +1239,10 @@ class TestTheMcpSurfaceCanCloseASession:
             # tracker the next call has to see.
             yield conn
 
+        # Registered through `server.build_registrar`, the production stack, and
+        # not onto the bare server: see that function's docstring (CB-310).
         mcp = MCPServer("codemerge-test")
-        merge.register_tools(mcp, factory)
+        merge.register_tools(server.build_registrar(mcp), factory)
         return mcp
 
     @staticmethod

@@ -109,9 +109,16 @@ class _Closing:
 
 
 def build_server(conn_factory, declarations=None):
-    """A server built through the path `server.py` actually uses."""
+    """A server built through the path `server.py` actually uses.
+
+    That sentence used to be a hand-copied construction sequence — one adapter,
+    `_NormalizedDescriptions` — and it stopped being true the moment
+    `_build_server` grew a second one (CB-310). It now names
+    `server.build_registrar`, the single definition of the production stack, so
+    the docstring cannot go stale again without the function changing.
+    """
     raw = MCPServer("codebugs")
-    adapter = server._NormalizedDescriptions(raw)
+    adapter = server.build_registrar(raw)
     if declarations is None:
         sweep.register_tools(adapter, conn_factory)
     else:

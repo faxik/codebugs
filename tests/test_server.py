@@ -55,9 +55,14 @@ def tracker():
 
 
 def _server_with_middleware(tracker, mode="findings"):
+    # `server.build_registrar` and not a hand-copied construction sequence
+    # (CB-310): a helper that registers straight onto the bare `MCPServer`
+    # measures a surface `_build_server` never produces, and under `mcp` 2.1.1
+    # that difference is exactly the one this suite exists to catch.
     mcp = MCPServer("codebugs")
+    registrar = server.build_registrar(mcp)
     for provider in db.get_tool_providers(mode=mode):
-        provider.register_fn(mcp, tracker)
+        provider.register_fn(registrar, tracker)
     server.install_strict_arguments(mcp)
     return mcp, mcp.middleware[-1]
 

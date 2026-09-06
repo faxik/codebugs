@@ -13,7 +13,7 @@ import threading
 
 import pytest
 
-from codebugs import db, reqs
+from codebugs import db, reqs, server
 from codebugs.types import DEFAULT_ROW_LIMIT, utc_now
 
 
@@ -1371,8 +1371,9 @@ class TestQueryRequirementsRowLimit:
         def factory():
             yield conn
 
+        # Production registration stack, not the bare server (CB-310).
         mcp = MCPServer("cb196-reqs-deferred")
-        reqs.register_tools(mcp, factory)
+        reqs.register_tools(server.build_registrar(mcp), factory)
         with pytest.raises(ToolError, match="must not be negative"):
             asyncio.run(mcp.call_tool("reqs_query", {"status": "deferred", "limit": -1}))
 

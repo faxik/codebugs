@@ -33,7 +33,7 @@ import sys
 
 import pytest
 
-from codebugs import db, findings
+from codebugs import db, findings, server
 from codebugs.types import normalize_category, utc_now
 
 VARIANT = "Process Improvement"
@@ -792,8 +792,9 @@ class TestMcpMergeSurface:
             finally:
                 c.close()
 
+        # Production registration stack, not the bare server (CB-310).
         mcp = MCPServer("cb222-cb223-fold-test")
-        findings.register_tools(mcp, factory)
+        findings.register_tools(server.build_registrar(mcp), factory)
         return mcp
 
     @staticmethod
