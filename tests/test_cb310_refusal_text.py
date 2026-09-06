@@ -415,6 +415,15 @@ class TestTheNewestSdkJobExists:
     or, spelled the other way round, would go green over a job that really had
     been pinned. Stripping is whole-line only, matching
     `tests/test_worktree_harness.py`'s own convention.
+
+    AND THE COST OF FOLLOWING THAT CONVENTION BY HAND IS NAMED RATHER THAN
+    HIDDEN: `_job` below is the THIRD copy in this suite of "slice one job's
+    body out of `ci.yml` by two-space indentation". `test_worktree_harness.py`
+    already carries two, each a local function inside a different test method,
+    so there was nothing importable to call. Lifting one shared helper out of
+    that file is the right repair and is deliberately NOT done here — it would
+    rewrite two tests belonging to the worktree harness, a different subject
+    with a different owner.
     """
 
     WORKFLOW = pathlib.Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"

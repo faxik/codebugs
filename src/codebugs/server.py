@@ -226,12 +226,28 @@ class _NormalizedDescriptions:
 
 
 # The exception classes this package raises to say "I understood you and I am
-# refusing you", as opposed to "I broke". The membership is DERIVED from two
-# decisions already taken elsewhere rather than authored here a third time:
-# `cli.domain_errors` fixes the first half (`ValueError`, `KeyError`) as the
-# CLI boundary's own definition of bad input, and `db.py` declares the second
-# half as named refusals whose whole purpose is a text addressed to a person.
-# A third list would be one drift away from disagreeing with both.
+# refusing you", as opposed to "I broke".
+#
+# ITS MEMBERSHIP IS TAKEN FROM TWO DECISIONS ALREADY MADE — AND IT IS A THIRD
+# LIST, WHICH IS SAID PLAINLY BECAUSE A FIRST DRAFT CLAIMED IT WAS "DERIVED"
+# AND TWO INDEPENDENT REVIEWERS CALLED THAT AN OVERCLAIM. The sources are
+# `cli.domain_errors` (`ValueError`, `KeyError` — the CLI boundary's own
+# definition of bad input) and `db.py`'s named refusals, whose whole purpose is
+# a text addressed to a person. But nothing imports either: `cli.domain_errors`
+# spells its pair inline in an `except` clause, so there is no constant to
+# share, and no test compares the three lists.
+#
+# WHERE THE THREE DISAGREE TODAY, MEASURED: `cli.main`'s own outer arm catches
+# THREE `db` classes — `DatabaseNotFoundError`, `TrackerUnwritableError` and
+# `TrackerExistsError` — and this tuple carries the first two. That is not an
+# omission with a live cost: `TrackerExistsError` (and its subclass
+# `WorktreeTrackerError`) is raised only from `db.init_project`, and `init` is
+# one of the two CLI-only verbs with no MCP tool at all, so the class cannot
+# reach this wrapper. **What is missing is the enforcement, not the member**: no
+# gate says "every named refusal reachable from an MCP tool is in this tuple",
+# so a future module exposing `init` over MCP would reopen CB-310 for exactly
+# that one refusal, silently. Named here as a residual rather than closed,
+# because widening the tuple is a change to a ratified boundary.
 _EXPECTED_REFUSALS: tuple[type[BaseException], ...] = (
     ValueError,
     KeyError,

@@ -4,10 +4,12 @@ WHY THIS FILE EXISTS SEPARATELY FROM `tests/test_bench.py`. That file is the
 FLOOR and stays untouched: it reaches the tools as raw functions through a
 `FakeMCP` that discards its kwargs, and only two of the four ever get called. It
 proves the domain behaviour and it proves nothing about what a client sees. Here
-the server is built the way `server.py` builds it — `_NormalizedDescriptions`
-around the registrar, `install_strict_arguments` after registration — and the
+the server is built the way `server.py` builds it — `server.build_registrar`
+around the bare server, `install_strict_arguments` after registration — and the
 parser is built the way `cli.py` builds it, so what is asserted is the surface
-itself.
+itself. That first clause used to NAME one adapter class, and naming it is how
+the sentence went stale when a second adapter arrived (CB-310); it names the
+composer now, which cannot.
 
 WHAT IS DELIBERATELY NOT HERE. No residency rule and no acceptance bar: BT-6's
 seven behavioural bars were each shown takeable without doing the work, and the
@@ -72,7 +74,11 @@ def build_server(conn_factory, declarations=None):
     copy of the surface without touching the module-level one.
     """
     raw = MCPServer("codebugs")
-    adapter = server._NormalizedDescriptions(raw)
+    # `server.build_registrar`, not a hand-copied adapter chain: the docstring
+    # above claims this is the path `server.py` uses, and that claim went stale
+    # the moment `_build_server` grew a second adapter (CB-310). One definition
+    # is what keeps the sentence true.
+    adapter = server.build_registrar(raw)
     if declarations is None:
         bench.register_tools(adapter, conn_factory)
     else:
@@ -445,7 +451,7 @@ class TestGeneratorRefusesMalformedDeclarations:
         clone[1]["mcp"]["name"] = clone[0]["mcp"]["name"]
         raw = MCPServer("codebugs")
         with pytest.raises(surfacegen.DeclarationError):
-            surfacegen.emit_tools(server._NormalizedDescriptions(raw), tracker, clone)
+            surfacegen.emit_tools(server.build_registrar(raw), tracker, clone)
         assert asyncio.run(raw.list_tools()) == []
 
     def test_a_duplicate_verb_name_is_refused_before_anything_registers(self):
