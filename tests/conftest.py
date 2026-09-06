@@ -41,9 +41,11 @@ tests at once: each built its own server, each therefore measured a surface
 was live on the shipped one. A test file cannot hold this for itself — the file
 that needs the guard is precisely the file whose author did not know it applied
 — and the failure is silent, since a hand-built surface answers every call
-happily and merely answers about the wrong object. See the guard below for why
-it keys on the production registrar OBJECT in the live call stack rather than on
-how the registration is spelled.
+happily and merely answers about the wrong object. It lets a call through only
+when the SERVER carries the production build's adapter pair AND the TOOL's body
+carries the production decorator; see the guard below for why both halves are
+needed and why each is recognised by an OBJECT rather than by how the
+registration is spelled.
 
 A per-file fixture would have to be remembered by every test module added later,
 and the cost of forgetting is silent destruction of the developer's own data, or
@@ -570,16 +572,38 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 # `_RefusalsReachTheClient`, so every question the test then asks is answered by
 # an object `server._build_server` does not produce.
 #
-# WHY IT KEYS ON AN OBJECT IN THE LIVE STACK, NOT ON HOW THE CALL IS WRITTEN. A
-# guard that grepped for `MCPServer(` or for `build_registrar` would be the
-# defect this repository has paid for repeatedly — an instrument that inspects
-# SPELLING finds spelling, and any new way of writing the same construction
-# walks past it. `_RefusalsReachTheClient.tool` calls the inner registrar
-# synchronously, so at the moment `MCPServer.tool` runs, a registration that
-# went through the production stack HAS a frame whose `self` is that adapter,
-# and one that did not HAS NOT. The question asked is therefore "did this
-# registration actually run through the production object", answered by looking
-# at what is running.
+# WHAT IT CHECKS, IN TWO PARTS, AND WHY ONE PART WAS NOT ENOUGH. A call is let
+# through only when BOTH hold: the SERVER was assembled by the full production
+# build, and the TOOL's body went through production registration. The first
+# round of this guard checked only the second, and a cross-model review of that
+# round found two ways past it, both reproduced here before being fixed:
+#
+#   * `MCPServer.add_tool` is a PUBLIC method that puts a tool straight into the
+#     server's manager without going through `.tool()` at all, so nothing was
+#     recorded and the call sailed through. (The product never uses it — every
+#     registration in `src/` goes through `.tool()` — so any use of it is by
+#     definition hand assembly.)
+#   * `build_registrar` composes TWO adapters, and a test that wraps only the
+#     outer one gets bodies carrying an allowed code object while description
+#     normalization — the other half of what ships — is absent.
+#
+# WHY IT KEYS ON OBJECTS, NOT ON HOW THE CALL IS WRITTEN. A guard that grepped
+# for `MCPServer(` or for `build_registrar` would be the defect this repository
+# has paid for repeatedly — an instrument that inspects SPELLING finds spelling.
+# So the server half is recognised by the ADAPTER PAIR the production build
+# constructs: the outer adapter's `__init__` is observed, and the server is
+# marked only when the object handed to it is the inner adapter. That is
+# independent of how the caller spelled the build — deliberately, because
+# `tests/_mcp_schema.py` imports `build_registrar` by name, so patching the
+# module attribute would have missed it and refused a correctly built surface.
+# The tool half compares the registered body's CODE OBJECT against the two the
+# production decorator emits.
+#
+# AN EARLIER ATTEMPT WALKED THE CALL STACK for a frame whose `self` was the
+# adapter, and it was WRONG — measured, 41 false refusals on correctly built
+# servers, because the adapter's inner closure captures only `inner` and never
+# `self`. It is recorded here because a discarded mechanism that is not written
+# down gets re-proposed.
 #
 # WHY IT FIRES AT `call_tool` AND NOT AT REGISTRATION. Building a bare server is
 # LEGITIMATE and three places do it deliberately: `test_boundary.py` inspects
@@ -597,16 +621,23 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 # future third route this suite does not use would be invisible. And it observes
 # the RUN, so a hand-built surface that is never called is never reported.
 #
-# THE ONE DIRECTION IN WHICH IT FAILS SILENTLY, named because every other one is
-# loud. Recording a violation needs the tool's NAME, and the name is worked out
-# here the way the SDK works it out — the `name` keyword, else a leading string
-# positional, else `fn.__name__`. That is a SECOND COPY of the SDK's own rule.
-# If the SDK ever derives names differently, the recorded key stops matching the
-# name `call_tool` is given, the lookup misses, and a hand-built surface sails
-# through. Every OTHER way this breaks is loud: renaming
-# `_refusal_reaches_the_client` fails the import and reddens the whole suite, and
-# a third branch in that wrapper (or its removal from `build_registrar`) makes
-# correctly built tools start getting refused.
+# WHERE IT CAN STILL FAIL SILENTLY. Recording a per-tool violation needs the
+# tool's NAME, and the name is worked out here the way the SDK works it out —
+# the `name` keyword, else a leading string positional, else `fn.__name__`. That
+# is a SECOND COPY of the SDK's own rule, and if the SDK ever derives names
+# differently the recorded key stops matching the name `call_tool` is given and
+# that ONE tool's record is missed. **This is a narrowed statement, not the
+# earlier claim that it is the only silent direction** — that claim was made in
+# the first round and disproved by the two routes named at the top of this
+# comment. It is narrow now for a structural reason: the server half of the
+# check does not depend on names at all, so a missed name still leaves a
+# hand-built SERVER refused; only a tool hand-added onto an otherwise correctly
+# built server could slip.
+#
+# Every OTHER way this breaks is loud: renaming `_refusal_reaches_the_client`
+# fails the import and reddens the whole suite, and a third branch in that
+# wrapper (or its removal from `build_registrar`) makes correctly built tools
+# start getting refused.
 #
 # WHAT IT DELIBERATELY DOES NOT COVER: assertions about the SHAPE of the surface
 # — tool names, descriptions, argument schemas — which a bare server answers just
@@ -624,6 +655,13 @@ _HAND_BUILT_SURFACES_ALLOWED: dict[str, str] = {
     # `tests/test_hand_built_surfaces.py` refuses an empty one and refuses a row
     # naming a place that no longer exists, on the CB-179 discipline.
 }
+
+
+def _production_adapter():
+    """The outer adapter class `server.build_registrar` composes."""
+    from codebugs import server as _server
+
+    return _server._RefusalsReachTheClient
 
 
 def _production_wrapper_codes() -> frozenset:
@@ -690,28 +728,56 @@ def hand_built_surface_refusal(tool: str, site: str) -> str:
 
 _TESTS_DIR = str(Path(__file__).resolve().parent)
 _HAND_BUILT: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_FULLY_BUILT: "weakref.WeakSet" = weakref.WeakSet()
 _PRODUCTION_WRAPPER_CODES = _production_wrapper_codes()
-_REAL_TOOL = MCPServer.tool
+_REAL_ADD_TOOL = MCPServer.add_tool
 _REAL_CALL_TOOL = MCPServer.call_tool
 
 
-def _tool_recording_who_registered(self, *args, **kwargs):
-    decorator = _REAL_TOOL(self, *args, **kwargs)
+def _add_tool_recording_who_registered(self, fn, name=None, *args, **kwargs):
+    """The ONE registration point, and that is a fact about the SDK, not a guess.
 
-    def register(fn):
-        if getattr(fn, "__code__", None) not in _PRODUCTION_WRAPPER_CODES:
-            declared = kwargs.get("name") or (
-                args[0] if args and isinstance(args[0], str) else None
-            )
-            name = declared or getattr(fn, "__name__", "?")
-            _HAND_BUILT.setdefault(self, {})[name] = hand_built_registration_site(sys._getframe(1))
-        return decorator(fn)
+    `MCPServer.tool`'s decorator body calls `self.add_tool(fn, name=…, …)`, so
+    every registration — decorator or direct — arrives here. The first round of
+    this guard wrapped `.tool()` instead and was blind to a direct `add_tool`;
+    wrapping BOTH then double-counted, because the decorator routes through this
+    one. Watching only this point is therefore both more complete and simpler,
+    and it removes the second copy of the SDK's naming rule: the name is
+    `name or fn.__name__`, exactly what the manager itself records.
+    """
+    if getattr(fn, "__code__", None) in _PRODUCTION_WRAPPER_CODES:
+        # A correct re-registration under a name previously registered by hand
+        # CLEARS the record. Without this a helper fixed mid-file keeps failing
+        # on a tool that is now built right, and a guard whose stale bookkeeping
+        # refuses correct code is a guard someone deletes.
+        _HAND_BUILT.get(self, {}).pop(name or getattr(fn, "__name__", "?"), None)
+    else:
+        _HAND_BUILT.setdefault(self, {})[name or getattr(fn, "__name__", "?")] = (
+            hand_built_registration_site(sys._getframe(1))
+        )
+    return _REAL_ADD_TOOL(self, fn, name, *args, **kwargs)
 
-    return register
+
+def _mark_fully_built(self, registrar, *args, **kwargs):
+    """Observe the production build: the OUTER adapter wrapping the INNER one.
+
+    Marking on the outer adapter alone would accept half a build — the review
+    that found that gap is named in the comment above. The inner adapter's
+    server attribute is what carries the mark, because that is the object
+    `call_tool` is later invoked on.
+    """
+    from codebugs import server as _server
+
+    result = _REAL_REFUSALS_INIT(self, registrar, *args, **kwargs)
+    if isinstance(registrar, _server._NormalizedDescriptions):
+        _FULLY_BUILT.add(registrar._server)
+    return result
 
 
 async def _call_tool_refusing_a_hand_built_surface(self, name, *args, **kwargs):
     site = _HAND_BUILT.get(self, {}).get(name)
+    if site is None and self not in _FULLY_BUILT:
+        site = hand_built_registration_site(sys._getframe(1))
     if site is not None and site not in _HAND_BUILT_SURFACES_ALLOWED:
         raise AssertionError(hand_built_surface_refusal(name, site))
     return await _REAL_CALL_TOOL(self, name, *args, **kwargs)
@@ -721,5 +787,7 @@ async def _call_tool_refusing_a_hand_built_surface(self, name, *args, **kwargs):
 # registration in some future test file would run during collection, before any
 # fixture, and the guard would then be blind to exactly the construction it
 # exists to see.
-MCPServer.tool = _tool_recording_who_registered
+_REAL_REFUSALS_INIT = _production_adapter().__init__
+_production_adapter().__init__ = _mark_fully_built
+MCPServer.add_tool = _add_tool_recording_who_registered
 MCPServer.call_tool = _call_tool_refusing_a_hand_built_surface

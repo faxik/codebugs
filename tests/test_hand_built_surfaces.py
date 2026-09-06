@@ -99,6 +99,56 @@ class TestTheGuardFires:
         assert "CB-311" in str(refusal.value)
         assert "'cb311_named_probe'" in str(refusal.value)
 
+    def test_a_tool_added_through_the_public_add_tool_is_caught(self):
+        """GAP ONE, found by cross-model review and reproduced before fixing.
+
+        `add_tool` is a PUBLIC method that registers without going through the
+        decorator at all. The first version of this guard wrapped the decorator,
+        so a test taking this route left no record and its call sailed through —
+        the exact scenario the guard exists to forbid, reached by a documented
+        API rather than by anything exotic.
+        """
+        mcp = MCPServer("cb311-add-tool")
+
+        def probe() -> dict:
+            """Registered through the public add_tool."""
+
+        mcp.add_tool(probe, name="cb311_added_probe")
+        with pytest.raises(AssertionError) as refusal:
+            asyncio.run(mcp.call_tool("cb311_added_probe", {}))
+        assert "CB-311" in str(refusal.value)
+
+    def test_half_the_production_build_is_caught(self):
+        """GAP TWO: `build_registrar` composes TWO adapters.
+
+        Wrapping only the outer one gives bodies that carry the production
+        decorator — so the per-tool half of the check is satisfied — while
+        description normalization, the other half of what ships, is absent. The
+        server half is what catches it, which is why the guard needs both.
+        """
+        mcp = MCPServer("cb311-half-build")
+        half = server._RefusalsReachTheClient(mcp)
+        findings.register_tools(half, _factory())
+        with pytest.raises(AssertionError) as refusal:
+            asyncio.run(mcp.call_tool("query", {}))
+        assert "CB-311" in str(refusal.value)
+
+    def test_a_correct_re_registration_clears_a_stale_record(self):
+        """A record that outlives the violation refuses correct code.
+
+        Register by hand, then register the same name properly: the call must go
+        through. Otherwise a helper fixed mid-file keeps failing on a tool that
+        is now built right, and a guard that refuses correct code gets deleted
+        by the first person it inconveniences.
+        """
+        mcp = MCPServer("cb311-restale")
+        findings.register_tools(mcp, _factory())
+        findings.register_tools(server.build_registrar(mcp), _factory())
+        with pytest.raises(BaseException) as raised:
+            asyncio.run(mcp.call_tool("query", {}))
+        assert "CB-311" not in str(raised.value)
+        assert "no connection is ever needed" in str(raised.value)
+
     def test_a_production_built_surface_is_not_refused(self):
         """The other half: a guard that refused everything would also 'fire'.
 
