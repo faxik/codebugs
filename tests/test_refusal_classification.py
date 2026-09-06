@@ -61,11 +61,28 @@ from codebugs import cli, db, refusals, server
 
 # ---------------------------------------------------------------------------
 # The ratified composition. This is NOT a second source of behaviour — nothing
-# in `src/` reads it. It is the RATCHET: `refusals.CLASSIFICATION` decides what
-# the surfaces do, and a table that also supplied its own expectation could
-# never disagree with itself, so removing a row would narrow both surfaces in
-# step and every behavioural check below would still pass. Changing this dict is
-# a deliberate, reviewable act — which is what "a ratified boundary" means.
+# in `src/` reads it. It is the RATCHET, and WHAT IT ACTUALLY CATCHES IS A ROW
+# BEING ADDED, not a row being removed.
+#
+# THE FIRST VERSION OF THIS COMMENT SAID "removing a row would narrow both
+# surfaces silently", AND THAT WAS THE WEAKEST CASE RATHER THAN THE REAL ONE —
+# the simplify pass went through all eight rows and found every deletion caught
+# by something else: dropping `ValueError` or `json.JSONDecodeError` empties
+# `CRASHES_INSIDE_REFUSALS` and reddens the arc-order test below; dropping
+# `DeclarationError` or `WorktreeTrackerError` reddens the inheritance guard;
+# dropping `KeyError`/`DatabaseNotFoundError`/`TrackerUnwritableError` reddens
+# `tests/test_cb310_refusal_text.py`; dropping `TrackerExistsError` reddens
+# `tests/test_db_infra.py`'s clean-refusal test. A justification a reader can
+# check and find false gets the guard deleted as redundant, so it is corrected
+# rather than left standing.
+#
+# ADDING a row is the case nothing else sees. Put `TypeError: Classified(INPUT,
+# ...)` in the table and both surfaces start handing a person the text of every
+# `TypeError`; the behavioural checks below take their expectation from that same
+# table and agree, the inheritance guard is satisfied (every package class is
+# still named), and `test_cb310_refusal_text.py` only probes widening for
+# `RuntimeError`. This dict is what turns red. Changing it is a deliberate,
+# reviewable act — which is what "a ratified boundary" means.
 # ---------------------------------------------------------------------------
 RATIFIED: dict[str, str] = {
     "ValueError": refusals.INPUT,
@@ -121,14 +138,17 @@ def _population() -> dict[str, type[BaseException]]:
     not tell that apart.
     """
     population = _declared_exception_classes()
-    population.update(
-        {
-            _fqn(ValueError): ValueError,
-            _fqn(KeyError): KeyError,
-            _fqn(json.JSONDecodeError): json.JSONDecodeError,
-            _fqn(RuntimeError): RuntimeError,
-        }
-    )
+    # DERIVED from the table, not listed beside it. A foreign class named by the
+    # table — `json.JSONDecodeError` today, `TypeError` or `OSError` tomorrow —
+    # changes what both surfaces do, so it must be driven through both. Listing
+    # the foreign classes by hand left exactly that hole: a row could be added,
+    # ratified in RATIFIED, alter the product, and never be exercised once.
+    population.update({_fqn(cls): cls for cls in refusals.CLASSIFICATION})
+    # `RuntimeError` is the control and is added SEPARATELY because it must stay
+    # OUT of the table: two tracker refusals descend from it, so a wrapper that
+    # widened to `RuntimeError` would translate everything, and a population
+    # without it could not tell that apart.
+    population[_fqn(RuntimeError)] = RuntimeError
     return population
 
 
@@ -153,9 +173,15 @@ def _instantiate(cls: type[BaseException]) -> BaseException:
     not satisfy its class's own invariants. Classification reads the TYPE and
     the TEXT, both of which are exactly right, and nothing downstream of a
     boundary arm inspects the object further.
+
+    A SPECIAL CASE FOR `json.JSONDecodeError` USED TO STAND HERE and is gone:
+    the fallback handles it (measured — its three-argument constructor rejects a
+    lone string, the fallback runs, and the result is a real `JSONDecodeError`
+    whose `str()` is the marker). Keeping it meant the ONE class this file's
+    arc-order test turns on took a private path, so the general one was never
+    exercised on a class that needs it — a special case layered on the very
+    mechanism built to make special cases unnecessary.
     """
-    if issubclass(cls, json.JSONDecodeError):
-        return cls(_MARKER, "{not json", 1)
     try:
         return cls(_MARKER)
     except BaseException:  # noqa: BLE001 - a validating constructor is legitimate

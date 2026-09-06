@@ -596,6 +596,25 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 # caught for that tool only — which is right — but a surface assembled by some
 # future third route this suite does not use would be invisible. And it observes
 # the RUN, so a hand-built surface that is never called is never reported.
+#
+# THE ONE DIRECTION IN WHICH IT FAILS SILENTLY, named because every other one is
+# loud. Recording a violation needs the tool's NAME, and the name is worked out
+# here the way the SDK works it out — the `name` keyword, else a leading string
+# positional, else `fn.__name__`. That is a SECOND COPY of the SDK's own rule.
+# If the SDK ever derives names differently, the recorded key stops matching the
+# name `call_tool` is given, the lookup misses, and a hand-built surface sails
+# through. Every OTHER way this breaks is loud: renaming
+# `_refusal_reaches_the_client` fails the import and reddens the whole suite, and
+# a third branch in that wrapper (or its removal from `build_registrar`) makes
+# correctly built tools start getting refused.
+#
+# WHAT IT DELIBERATELY DOES NOT COVER: assertions about the SHAPE of the surface
+# — tool names, descriptions, argument schemas — which a bare server answers just
+# as happily and just as wrongly. Those are legitimately checked without ever
+# calling a tool (`test_boundary.py`, `test_findings.py`), so this guard cannot
+# see them, and widening it to registration would refuse those three legitimate
+# places. The mechanism for that class already exists and is separate: the wire
+# golden in `tests/_mcp_schema.py`, which IS collected through `build_registrar`.
 
 _HAND_BUILT_SURFACES_ALLOWED: dict[str, str] = {
     # site -> why this place may call a tool on a hand-registered surface.
@@ -654,10 +673,16 @@ def hand_built_registration_site(frame) -> str:
 def hand_built_surface_refusal(tool: str, site: str) -> str:
     return (
         f"CB-311: {site} called the tool {tool!r} on a surface it registered by hand.\n"
-        "Those tools never went through `server.build_registrar`, so this call is "
-        "measuring a server `server._build_server` never produces — the exact shape "
-        "CB-310 found in ten tests at once, all green against a live defect.\n"
-        "Fix: `mod.register_tools(server.build_registrar(mcp), factory)`.\n"
+        "Those tools never went through `server.build_registrar`, so their bodies carry "
+        "none of the production registration stack — the exact shape CB-310 found in ten "
+        "tests at once, all green against a live defect.\n"
+        "Fix: `mod.register_tools(server.build_registrar(mcp), factory)`. Note what that "
+        "does and does not buy: it gives the registration adapters, NOT the two "
+        "middlewares `_build_server` installs on top (strict arguments, usage tracking), "
+        "so a test about those must build the server the way `server.py` does.\n"
+        "If this fires on a tool you DID register through `build_registrar`, the "
+        "production wrapper changed and `_production_wrapper_codes` is what needs fixing, "
+        "not your test.\n"
         "If this place genuinely needs the bare object AND a call, add a row to "
         "`_HAND_BUILT_SURFACES_ALLOWED` in tests/conftest.py naming the reason."
     )

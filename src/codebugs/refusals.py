@@ -26,6 +26,20 @@ package class that would otherwise inherit a classification, and the guard
 REFUSES a package exception class that is a subclass of a named refusal and is
 not itself named. `db.WorktreeTrackerError` is exactly such a row.
 
+**THE EXACT WIDTH OF THAT GUARANTEE, BECAUSE THE SENTENCE ABOVE IS TRUE OF THE
+TABLE AND NOT OF THE BOUNDARIES.** `kind_of` reads the table by exact class. The
+boundaries apply it as `except <tuple>`, and Python's `except` matches by
+INHERITANCE — so the promise holds over the classes this PACKAGE declares (the
+guard walks them and refuses an unnamed subclass), and it does NOT hold over
+foreign subclasses of a named refusal. `UnicodeDecodeError` and `binascii.Error`
+are subclasses of `ValueError` in the standard library; if either reached a
+boundary today it would be shown to a person as an understandable refusal
+without any row deciding that. That residual is NAMED rather than closed: making
+it false would mean catching broadly and dispatching on `kind_of(type(exc))`,
+which changes what both boundaries catch — a ratified boundary, and a different
+negotiation from CB-311's. `CRASHES_INSIDE_REFUSALS` is the one compensation
+that exists, and it only covers classes the table names.
+
 THE THREE KINDS, AND WHY REFUSALS ARE SPLIT IN TWO. `crash` is the fail-closed
 default. The two refusal kinds are not two mechanisms — both end as one line on
 stderr and exit 1 at the CLI, and as a `ToolError` carrying the text over MCP —

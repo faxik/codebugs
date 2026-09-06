@@ -81,6 +81,24 @@ class TestTheGuardFires:
             message
         ), message
 
+    def test_a_tool_registered_under_an_EXPLICIT_name_is_caught_too(self):
+        """The name is reconstructed the way the SDK reconstructs it, and that
+        reconstruction is a SECOND COPY of the SDK's rule — the guard's one
+        silent failure direction. Both registration shapes must therefore be
+        exercised: every other test here registers through `register_tools`,
+        which uses `@mcp.tool()` with no name at all, so a reconstruction that
+        handled only that shape would look fully tested."""
+        mcp = MCPServer("cb311-explicit-name")
+
+        def probe() -> dict:
+            """A hand-registered tool named explicitly."""
+
+        mcp.tool(name="cb311_named_probe")(probe)
+        with pytest.raises(AssertionError) as refusal:
+            asyncio.run(mcp.call_tool("cb311_named_probe", {}))
+        assert "CB-311" in str(refusal.value)
+        assert "'cb311_named_probe'" in str(refusal.value)
+
     def test_a_production_built_surface_is_not_refused(self):
         """The other half: a guard that refused everything would also 'fire'.
 
