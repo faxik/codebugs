@@ -55,9 +55,6 @@ from mcp.shared.memory import create_client_server_memory_streams
 
 from codebugs import db, server, usage
 
-NO_TRACKER_TOOL = "get"
-NO_TRACKER_ARGS = {"finding_id": "CB-1"}
-
 
 @pytest.fixture
 def tracker(tmp_path):
@@ -155,7 +152,7 @@ class TestTheClientReceivesTheReason:
         monkeypatch.setattr(db, "_tracker_root_override", str(empty))
 
         built = server._build_server("findings")
-        is_error, text = call_over_the_wire(built, NO_TRACKER_TOOL, NO_TRACKER_ARGS)
+        is_error, text = call_over_the_wire(built, "get", {"finding_id": "CB-1"})
         assert is_error is True
         assert str(empty) in text, text
         # The reason, not merely the path: a client must be able to tell "there
@@ -280,6 +277,25 @@ class TestTheGateIsTwoSided:
         with pytest.raises(ToolError) as translated:
             wrapped_input()
         assert "INPUT-MARKER" in str(translated.value)
+
+    def test_an_async_tool_body_is_translated_too(self):
+        """The coroutine branch, which no tool in this package exercises today.
+
+        It is here rather than deferred because the failure it forecloses is
+        SILENT: a single synchronous wrapper over a coroutine function returns
+        the coroutine object without awaiting it, the `except` arms never run,
+        and the wrapper protects nothing while looking exactly like a wrapper
+        that does. An untested branch guarding an invisible failure is worse
+        than no branch, so the branch and this test arrive together.
+        """
+
+        async def body():
+            raise ValueError("ASYNC-MARKER")
+
+        wrapped = server._refusal_reaches_the_client(body)
+        with pytest.raises(ToolError) as caught:
+            asyncio.run(wrapped())
+        assert "ASYNC-MARKER" in str(caught.value)
 
     def test_a_successful_call_is_untouched(self):
         """The wrapper is transparent when nothing is raised — the boring half, stated."""
