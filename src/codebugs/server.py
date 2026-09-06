@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import functools
 import inspect
-import json
 import re
 import sys
 import time
@@ -18,7 +17,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.shared.exceptions import MCPError
 from mcp_types import INVALID_PARAMS, CallToolResult
 
-from codebugs import db, usage
+from codebugs import db, refusals, usage
 
 
 def dedent_docstring(doc: str) -> str:
@@ -228,32 +227,23 @@ class _NormalizedDescriptions:
 # The exception classes this package raises to say "I understood you and I am
 # refusing you", as opposed to "I broke".
 #
-# ITS MEMBERSHIP IS TAKEN FROM TWO DECISIONS ALREADY MADE — AND IT IS A THIRD
-# LIST, WHICH IS SAID PLAINLY BECAUSE A FIRST DRAFT CLAIMED IT WAS "DERIVED"
-# AND TWO INDEPENDENT REVIEWERS CALLED THAT AN OVERCLAIM. The sources are
-# `cli.domain_errors` (`ValueError`, `KeyError` — the CLI boundary's own
-# definition of bad input) and `db.py`'s named refusals, whose whole purpose is
-# a text addressed to a person. But nothing imports either: `cli.domain_errors`
-# spells its pair inline in an `except` clause, so there is no constant to
-# share, and no test compares the three lists.
+# IT IS NO LONGER A LIST — IT IS DERIVED, AND THE WORD IS NOW EARNED (CB-311).
+# It used to be a THIRD enumeration of one rule, and the comment that stood here
+# said so plainly, because a first draft's claim of "derived" was an overclaim
+# two reviewers rejected: `cli.domain_errors` spelled `(ValueError, KeyError)`
+# inline in an `except` clause, `cli.main` spelled three `db` classes in another,
+# this tuple spelled four, and no test compared them. They agreed by COINCIDENCE
+# — `db.TrackerExistsError` sat in the CLI's arm and not in this one, harmless
+# only because `init` has no MCP tool — and CB-310's own residual named the gap:
+# "what is missing is the enforcement, not the member".
 #
-# WHERE THE THREE DISAGREE TODAY, MEASURED: `cli.main`'s own outer arm catches
-# THREE `db` classes — `DatabaseNotFoundError`, `TrackerUnwritableError` and
-# `TrackerExistsError` — and this tuple carries the first two. That is not an
-# omission with a live cost: `TrackerExistsError` (and its subclass
-# `WorktreeTrackerError`) is raised only from `db.init_project`, and `init` is
-# one of the two CLI-only verbs with no MCP tool at all, so the class cannot
-# reach this wrapper. **What is missing is the enforcement, not the member**: no
-# gate says "every named refusal reachable from an MCP tool is in this tuple",
-# so a future module exposing `init` over MCP would reopen CB-310 for exactly
-# that one refusal, silently. Named here as a residual rather than closed,
-# because widening the tuple is a change to a ratified boundary.
-_EXPECTED_REFUSALS: tuple[type[BaseException], ...] = (
-    ValueError,
-    KeyError,
-    db.DatabaseNotFoundError,
-    db.TrackerUnwritableError,
-)
+# `refusals.CLASSIFICATION` is that missing single source, `refusals.py`'s
+# docstring carries the rule, and `tests/test_refusal_classification.py` is the
+# enforcement: it drives BOTH real boundaries, class by class, and refuses a
+# disagreement. Widening the classification is still a change to a ratified
+# boundary — but it is now ONE edit that both surfaces follow, rather than three
+# that must be remembered together.
+_EXPECTED_REFUSALS: tuple[type[BaseException], ...] = refusals.EXPECTED_REFUSALS
 
 
 def _refusal_reaches_the_client(fn: Any) -> Any:
@@ -315,7 +305,7 @@ def _refusal_reaches_the_client(fn: Any) -> Any:
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
             try:
                 return await fn(*args, **kwargs)
-            except json.JSONDecodeError:
+            except refusals.CRASHES_INSIDE_REFUSALS:
                 raise
             except _EXPECTED_REFUSALS as exc:
                 raise ToolError(str(exc)) from exc
@@ -326,7 +316,7 @@ def _refusal_reaches_the_client(fn: Any) -> Any:
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             try:
                 return fn(*args, **kwargs)
-            except json.JSONDecodeError:
+            except refusals.CRASHES_INSIDE_REFUSALS:
                 raise
             except _EXPECTED_REFUSALS as exc:
                 raise ToolError(str(exc)) from exc
