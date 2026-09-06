@@ -63,8 +63,6 @@ INPUT = "input"
 TRACKER = "tracker"
 CRASH = "crash"
 
-REFUSAL_KINDS: tuple[str, ...] = (INPUT, TRACKER)
-
 
 @dataclass(frozen=True)
 class Classified:
