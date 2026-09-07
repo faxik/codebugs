@@ -134,9 +134,14 @@ class TestAddRequirement:
         the text now survives on both surfaces. The behavioural detail lives in
         `tests/test_cb316_reqs_add_refusals.py`; what is pinned here is the class
         this long-standing test is about.
+
+        The identifier is QUOTED in the message (`{req_id!r}`, the form
+        `types._resolve` already uses), because identifiers are unconstrained
+        and one carrying a newline otherwise forges a second output line out of
+        a message the CHANGELOG promises as one.
         """
         reqs.add_requirement(conn, req_id="FR-001", description="first")
-        with pytest.raises(ValueError, match="FR-001 already exists"):
+        with pytest.raises(ValueError, match=r"'FR-001' already exists"):
             reqs.add_requirement(conn, req_id="FR-001", description="second")
 
     def test_tags_and_meta(self, conn):

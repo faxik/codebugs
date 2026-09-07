@@ -141,13 +141,48 @@ def add_requirement(
     the exact JSON strings this call just serialized two lines below, never a
     previously-stored value another writer could have left malformed.
 
-    Raises ``ValueError`` when the table refuses the row (CB-316) — see
-    ``_constraint_refusal`` for what the message may and may not claim. Before
-    that the ``sqlite3.IntegrityError`` travelled to the caller unchanged, and
-    since ``refusals.CLASSIFICATION`` does not name that foreign class it was
+    Raises ``ValueError`` when the table refuses the row (CB-316). Before that
+    the ``sqlite3.IntegrityError`` travelled to the caller unchanged, and since
+    ``refusals.CLASSIFICATION`` does not name that foreign class it was
     classified as a CRASH: on the command line a full traceback, and over MCP —
     measured under ``mcp`` 2.1.1, the version the owner runs — the bare line
     ``Error executing tool reqs_add`` with the reason stripped entirely.
+
+    A DUPLICATE IDENTIFIER IS PROVED, NEVER INFERRED, AND THAT IS WHAT
+    ``ON CONFLICT(id) DO NOTHING`` BUYS. The obvious alternative — catch the
+    ``IntegrityError`` and read its result code — was built first and is wrong,
+    because the code names the KIND of constraint and never the TABLE. Measured:
+    a ``BEFORE INSERT`` trigger whose own INSERT collides with ANOTHER table's
+    primary key arrives here as ``SQLITE_CONSTRAINT_PRIMARYKEY`` with the text
+    ``UNIQUE constraint failed: audit.id`` — so the code-reading answered
+    "requirement FR-new already exists" about a row that is not in this table at
+    all. With a targeted conflict clause the question is answered by the
+    database instead: a zero-row ``RETURNING`` is affirmative proof that the
+    conflict was on ``id``, and there is no other way to reach it. The shipped
+    schema carries no triggers (measured), so nothing about the old code was
+    observable — what was wrong was the CLAIM, and a claim wider than its
+    measurement is worth closing structurally rather than narrowing in prose.
+
+    EVERY OTHER CONSTRAINT STILL RAISES, AND THE MESSAGE THEN CLAIMS NOTHING
+    ABOUT WHICH. ``DO NOTHING`` suppresses only the named conflict target
+    (measured: a ``NOT NULL`` violation still raises), so ``description``,
+    ``section``, ``source`` and ``test_coverage`` — all ``NOT NULL``, all
+    reachable by a library caller — land in the arm below. That arm names the
+    requirement and says the table refused it, and stops there.
+
+    THE DATABASE'S OWN WORDS DO NOT TRAVEL WITH IT. ``RAISE(ABORT, '…')`` in a
+    trigger puts arbitrary author-supplied text into that exception, and under
+    ``mcp`` 2.1.1 such text used to be withheld from the client precisely
+    because an unexpected exception's message can carry another caller's data
+    (the reasoning is in ``refusals.py``'s header). Translating the class into a
+    refusal must not smuggle the text past that. The original stays on the
+    ``__cause__`` chain, so a library caller still reads it in the traceback —
+    which is the only audience that can reach these constraints today.
+
+    THE CATCH IS ``IntegrityError`` AND NOT ``sqlite3.Error``. That is CB-99's
+    ratified boundary, thirty lines below in this file: the wider tree includes
+    the environmental failures, and calling a full disk "bad input" is strictly
+    worse than the traceback CB-86 removes, because a traceback is loud.
     """
     priority = resolve_priority(priority)
     status = resolve_requirement_status(status)
@@ -159,6 +194,7 @@ def add_requirement(
                 """INSERT INTO requirements (id, section, description, priority, status,
                    source, test_coverage, tags, meta, created_at, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO NOTHING
                    RETURNING *""",
                 (
                     req_id, section, description, priority, status,
@@ -166,65 +202,14 @@ def add_requirement(
                     json.dumps(meta or {}), now, now,
                 ),
             ).fetchone()
+            if row is None:
+                raise ValueError(f"requirement {req_id!r} already exists")
             result = db.row_to_dict(row)
     except sqlite3.IntegrityError as exc:
-        # OUTSIDE the `with`, so `db.txn` has already rolled back by the time the
-        # refusal is built: nothing of this call is left half-written, and the
-        # message is composed over a settled database rather than an open one.
-        raise ValueError(_constraint_refusal(req_id, exc)) from exc
+        raise ValueError(
+            f"requirement {req_id!r} was refused by the requirements table's constraints"
+        ) from exc
     return result
-
-
-def _constraint_refusal(req_id: str, exc: sqlite3.IntegrityError) -> str:
-    """The person-facing text for a row the requirements table refused (CB-316).
-
-    WHY A MESSAGE IS CHOSEN AT ALL, RATHER THAN ONE SENTENCE FOR EVERY CASE.
-    ``PRIMARY KEY`` is not the only constraint this INSERT can violate:
-    ``description``, ``section``, ``source`` and ``test_coverage`` are all
-    ``NOT NULL``, and ``add_requirement`` is a public domain function, so a
-    library caller reaches them (measured — ``description=None`` raises with
-    ``sqlite_errorname == 'SQLITE_CONSTRAINT_NOTNULL'``). Answering *"requirement
-    FR-1 already exists"* there would be a LIE dressed as a refusal, about a row
-    that is not in the table at all. Neither surface reaches those columns today
-    — the CLI declares ``-d`` required and substitutes ``""`` for every optional
-    string, and the MCP SDK's own argument validation refuses ``None`` against
-    ``description: str`` before the body runs — but a message must be true of the
-    function it belongs to, not of the callers that happen to exist.
-
-    HOW THIS DIFFERS FROM WHAT CB-99 FORBADE, BECAUSE THE NEXT READER WILL
-    OTHERWISE READ IT AS A VIOLATION. CB-99 is thirty lines below in this same
-    file, and it ratified: do NOT enumerate sqlite result codes, because review
-    measured such a list wrong in both directions. That decision is about
-    CLASSIFYING a failure — deciding whether it means *this row is malformed* or
-    *the environment broke* — and it stands here untouched: the classification is
-    still made by the exception TREE, ``sqlite3.IntegrityError``, whose whole
-    membership is "this ROW violates the table's constraints". The code is read
-    only to CHOOSE BETWEEN TWO TRUE SENTENCES, which is the same split ``db.py``
-    already draws for ``SQLITE_CANTOPEN`` ("for message selection only", CB-86).
-
-    And the direction of failure is what makes that split safe rather than a
-    loophole: a code this function does not recognise — a future constraint, an
-    absent attribute, a build that spells it differently — falls through to the
-    weaker sentence, which is true of EVERY member of ``IntegrityError``. A
-    mis-read code costs precision, never truth; there is no input for which this
-    invents a duplicate that does not exist.
-
-    THE FALLBACK CARRIES THE DATABASE'S OWN WORDS, AND THAT IS DELIBERATE.
-    ``NOT NULL constraint failed: requirements.description`` names the column,
-    which is the whole content of the answer to someone who has just hit it.
-    What CB-310 objected to was a raw library string arriving as the WHOLE
-    message, unframed and classified as a crash; here it is quoted inside a
-    sentence that says what happened and about which requirement.
-
-    HONEST SCOPE ON ONE ARM. The ``getattr`` default is insurance and no test
-    discriminates it: ``sqlite_errorname`` exists on ``sqlite3.Error`` from
-    Python 3.11, which is the floor ``requires-python`` declares. The FALLBACK
-    ITSELF is a live path, reached by every ``NOT NULL`` violation and covered
-    by ``tests/test_cb316_reqs_add_refusals.py``.
-    """
-    if getattr(exc, "sqlite_errorname", "") == "SQLITE_CONSTRAINT_PRIMARYKEY":
-        return f"requirement {req_id} already exists"
-    return f"requirement {req_id} was refused by the requirements table's constraints: {exc}"
 
 
 def batch_add_requirements(
@@ -1074,6 +1059,18 @@ def register_cli(sub, commands) -> None:
         # the call and was therefore skipped on EVERY failing path — harmless
         # only because the process then died with the traceback, and no longer
         # true at all once `domain_errors` starts exiting deliberately.
+        #
+        # THE `print` IS OUTSIDE THE WRAPPER, AND THAT PLACEMENT IS THE RULE
+        # RATHER THAN A PREFERENCE. `UnicodeEncodeError` is a `ValueError`
+        # subclass, so with the print INSIDE, a failure to encode this line —
+        # raised AFTER the write committed and the transaction closed — was
+        # caught by the input-refusal arm and reported as one tidy line at
+        # exit 1. Measured: `PYTHONIOENCODING=ascii codebugs reqs-add Ж-1 -d x`
+        # left `Ж-1` in the tracker while the command claimed failure. That is
+        # the CB-15/CB-16 lie CLAUDE.md's error-handling section forbids by
+        # name — "bad input" reads as "nothing happened". Outside the wrapper
+        # the same failure is a traceback, which is the correct answer to a
+        # committed write whose report could not be delivered.
         conn = db.connect()
         try:
             tags = [t.strip() for t in args.tags.split(",")] if args.tags else []
@@ -1084,7 +1081,7 @@ def register_cli(sub, commands) -> None:
                     status=args.status or "planned", source=args.source or "",
                     test_coverage=args.test_coverage or "", tags=tags,
                 )
-                print(f"Added: {result['id']}")
+            print(f"Added: {result['id']}")
         finally:
             conn.close()
 
