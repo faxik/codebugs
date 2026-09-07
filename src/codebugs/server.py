@@ -15,7 +15,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.shared.exceptions import MCPError
-from mcp_types import INVALID_PARAMS, CallToolResult
+from mcp_types import INVALID_PARAMS, CallToolResult, TextContent
 
 from codebugs import db, refusals, usage
 
@@ -455,6 +455,240 @@ def install_strict_arguments(server: MCPServer) -> None:
     server.middleware.append(reject_unknown_arguments)
 
 
+def _missing_arguments_text(tool: str, missing: list[str], declared: list[str]) -> str:
+    """The words this package says when a required argument was not supplied (CB-326).
+
+    WHAT THE TEXT MUST CARRY, AND WHY EACH PART IS THERE. The foreign text this
+    replaces named the FIELD and the KIND of trouble, and that was its entire
+    useful content; a fix that removed the third party's branding at the cost of
+    the field name would be a regression wearing a fix's clothes. So the missing
+    names come first. The full required set follows because the client that got
+    one name wrong is the client most likely to get the next one wrong too, and
+    it is free to state.
+
+    THE LAST SENTENCE CLAIMS EXACTLY WHAT IS TRUE AND NOT ONE WORD MORE, and the
+    narrowing is a correction rather than a style choice. It first read "the tool
+    did not run and nothing was written" — and the second half was FALSE:
+    `install_usage_tracking` records a row in `tool_calls` for this very call,
+    which `tests/test_cb326_required_arguments.py`'s placement oracle proves by
+    asserting that row exists. A refusal that overstates what did not happen is
+    the same class of lie as CB-15/CB-16's success-shaped failure, merely
+    pointing the other way, so the sentence now speaks only of the TOOL BODY,
+    which genuinely never runs.
+
+    BOTH LISTS ARE SORTED, following `install_strict_arguments`' own `Accepted:`
+    list. A set difference has no order of its own, and a message whose word
+    order depends on dict iteration is a message two runs can disagree about.
+    """
+    return (
+        f"Missing required argument(s) for tool {tool!r}: {', '.join(missing)}. "
+        f"Required: {', '.join(declared)}. "
+        "The tool body did not run."
+    )
+
+
+def _with_missing_arguments_text(
+    result: Any, tool: str, missing: list[str], declared: list[str]
+) -> Any:
+    """Put this package's words into the SDK's OWN error envelope (CB-326).
+
+    WHY THE ENVELOPE IS BORROWED RATHER THAN BUILT, which is this function's
+    whole reason to exist and was learned the expensive way. The first version of
+    this layer assembled a result by hand — a dict carrying `content` and
+    `isError`, the shape observed travelling through `server.middleware`. That
+    observation was real and the conclusion drawn from it was wrong: what a
+    middleware SEES is what the SDK's serializer has already PRODUCED, which is
+    not the same question as what is valid to hand back. Measured through a real
+    client session (`tests/manual/probe_cb326_protocol_and_arguments.py`): under
+    a session opened with `discover()` the current protocol revision requires a
+    `resultType` field, so the hand-built result was rejected by the CLIENT's own
+    validator and the call RAISED instead of returning. That changes the channel
+    a refusal arrives through — the one thing this card must not do.
+
+    So the SDK builds the envelope, always, and this replaces only the `content`
+    inside it. `resultType`, `_meta` and anything a future revision adds travel
+    through untouched, because they are never this package's to invent. The two
+    shapes handled are the two `install_usage_tracking` already reads, for the
+    same reason it reads both — and the TYPED one is insurance rather than a live
+    path: what a middleware meets on both admitted SDK versions is the plain
+    dict, measured. It is kept because a layer narrower than its sibling would
+    silently stop replacing anything the day a future SDK passes the modelled
+    result, and silently is the operative word — the validation library's wording
+    would simply reappear on the wire with every test still green.
+
+    IT REWRITES ONLY AN ERROR-SHAPED RESULT, and a non-error one is returned
+    untouched. That branch is unreachable today — a call with a missing required
+    field cannot succeed — and it is written this way deliberately: if it ever
+    becomes reachable, the failure is that a client sees the truth instead of
+    this package's guess about it.
+    """
+    text = _missing_arguments_text(tool, missing, declared)
+    if isinstance(result, Mapping) and result.get("isError"):
+        replaced = dict(result)
+        replaced["content"] = [{"type": "text", "text": text}]
+        return replaced
+    if isinstance(result, CallToolResult) and result.is_error:
+        return result.model_copy(update={"content": [TextContent(type="text", text=text)]})
+    return result
+
+
+def install_required_arguments(server: MCPServer) -> None:
+    """Answer a `tools/call` that OMITS a required argument in this package's own words (CB-326).
+
+    WHY THIS EXISTS. Before it, a client that left out a required field received
+    the text of the SDK's validation library verbatim — its phrasing, the name of
+    an internal model (`addArguments`), and a link to its documentation site —
+    while every other refusal this project makes speaks the project's own words.
+    Measured through a real client session on both admitted SDK versions, and
+    byte-identical on the two. It is not a rare path: this tracker's own usage
+    table records `add` refusing about a ninth of its calls, the highest share of
+    any core tool, and a missing required field is the commonest shape of it.
+
+    DECIDE BEFORE THE CALL, REPLACE AFTER IT, AND THE SPLIT IS THE WHOLE DESIGN.
+    The set of missing names is computed BEFORE `call_next`, from the tool's own
+    declared schema. The call then proceeds normally, and only the WORDS in the
+    result the SDK returns are replaced — see `_with_missing_arguments_text` for
+    why the envelope is never built here. Deciding early is what makes the
+    replacement safe: a non-empty missing set means the SDK's schema validation is
+    certain to refuse, so nothing has to be inferred from the refusal's text.
+
+    A FIRST ATTEMPT GOT THIS BACKWARDS AND THE REASONING IS KEPT SO IT IS NOT
+    REPEATED. It refused early, returning its own result and never calling
+    through, on the argument that a rewrite could not tell a schema refusal from a
+    DOMAIN refusal — the two arrive in the identical shape — without matching the
+    validation library's text. The premise about the shapes is true; the
+    conclusion does not follow, because the discriminator never had to come from
+    the result at all. It is the missing set, and it is known before the call is
+    made.
+
+    WHY ONLY *MISSING* ARGUMENTS, STATED AS A BOUNDARY RATHER THAN LEFT AS A GAP.
+    A missing name is decidable exactly from the tool's declared `required` list —
+    a membership test, with no second opinion about types anywhere in it. A wrong
+    TYPE is not: deciding it here would mean writing a second schema validator
+    beside the real one, and two validators drift. The drift's failure mode is the
+    expensive direction — this layer refusing a value the tool would have
+    accepted — so the type case deliberately falls through and still answers in
+    the library's words.
+
+    THAT BOUNDARY HAS A PRECEDENCE RULE, AND IT IS STATED BECAUSE IT IS OBSERVABLE.
+    When a call BOTH omits one required field AND mistypes another, the answer
+    names the omission and says nothing about the type: the replacement swaps the
+    content whole rather than appending to it, and appending would leave the
+    foreign text in place, failing this card's own headline test. So "a wrong type
+    falls through" holds precisely when nothing is missing. The cost is named
+    rather than absorbed: before this layer a client saw both faults at once and
+    fixed them in one pass, and now learns of the second on its next call — one
+    extra round trip in a rare shape, accepted against the alternative of this
+    package holding a second opinion about types. `src/codebugs/CLAUDE.md` carries
+    the narrowed sentence, and `tests/test_cb326_required_arguments.py` pins both
+    halves — the precedence and the fall-through — from this side.
+
+    PLACEMENT IS NOT A DETAIL, AND IT IS WHY THIS IS A SECOND MIDDLEWARE RATHER
+    THAN A BRANCH INSIDE `install_strict_arguments`. The two checks need OPPOSITE
+    positions relative to `install_usage_tracking`, so one function could not hold
+    both. An unknown argument NAME is refused OUTSIDE usage tracking and
+    deliberately goes uncounted (see that function's docstring: a client's
+    spelling mistake is not a tool's health). A missing required field is counted
+    TODAY, because the SDK catches it deep inside, behind the usage layer —
+    measured, one call, `add: calls=1 failures=1`. Installing this layer outside
+    usage tracking would silently stop counting those calls, and the evidence that
+    justified this card in the first place was read out of that very table. So it
+    is installed INNERMOST, and the count is unchanged.
+
+    IT ALSO KEEPS THE ANSWER A RESULT RATHER THAN A PROTOCOL ERROR, WHICH IS THE
+    ONE LINE THIS CARD MUST NOT CROSS. `install_strict_arguments` raises
+    `MCPError`, so a client library RAISES on an unknown argument name; the
+    validation failure has always come back as a returned result, and client code
+    is written accordingly. Merging the two channels would change how every caller
+    must handle this, and buys nothing — the card is about the words, not the
+    channel. **The line was crossed once, by accident, which is why it is
+    stated this firmly:** the hand-built result described in
+    `_with_missing_arguments_text` was rejected by the client's own validator
+    under a `discover()` session, so the refusal arrived as a raised exception
+    instead of a returned result — the exact forbidden change, produced by a
+    layer whose author believed he was leaving the channel alone.
+
+    THE SDK COUPLING LIVES HERE, BESIDE ITS TWO SIBLINGS, for the reason their
+    docstrings already give: `MCPServer.middleware` is public but documented as
+    provisional, and one file holding every use of it is what keeps three layers
+    from drifting apart on what the SDK hands them. The catalogue is cached
+    lazily and separately from `install_strict_arguments`' own cache — one extra
+    `list_tools()` on the first tool call of a server's life. Sharing one cache
+    would mean changing that function's signature, and the accepted trade is a
+    one-off cost against touching a layer this unit was told to leave alone.
+
+    THE GUARD CLAUSE BELOW IS ALSO A DELIBERATE COPY, and for a DIFFERENT reason
+    than the cache — said separately because a reader who saw only the cache
+    argument would reasonably think this one had simply been missed. The four
+    lines testing `ctx.method` and the shape of `ctx.params` are identical to
+    `install_strict_arguments`', and a third variant sits in
+    `install_usage_tracking`. Extracting them would edit the BODY of two layers
+    this unit was told not to touch, to save four lines whose drift a shared
+    helper would not actually prevent: all three read the same `ctx` the SDK
+    hands them, so the day that shape changes, all three break together whether
+    or not they share code. The duplication costs re-reading, not correctness.
+    """
+    required: dict[str, list[str]] = {}
+
+    async def refuse_missing_required_arguments(ctx: Any, call_next: Any) -> Any:
+        tool = ""
+        missing: list[str] = []
+        declared: list[str] = []
+        if ctx.method == "tools/call" and isinstance(ctx.params, Mapping):
+            name = ctx.params.get("name")
+            arguments = ctx.params.get("arguments")
+            # A call with NO arguments at all OMITS this field; the client
+            # library sends nothing rather than an empty object, so the two are
+            # different bytes on the wire while meaning the same thing — nothing
+            # was supplied. An absent field is therefore read as an empty
+            # mapping. Reading it as "not a mapping" and falling through is what
+            # left the COMMONEST shape of this defect unfixed through the card's
+            # first landing attempt: `add` with no arguments still answered in
+            # the validation library's words, under both protocol revisions.
+            # Anything else that is not a mapping still falls through, because
+            # a malformed `arguments` is the protocol layer's to refuse.
+            if arguments is None:
+                arguments = {}
+            if isinstance(name, str) and isinstance(arguments, Mapping):
+                if not required:
+                    for known in await server.list_tools():
+                        required[known.name] = sorted(known.input_schema.get("required") or ())
+                # Two different reasons to leave `missing` empty, both landing
+                # here. A tool name absent from the catalogue is not ours to
+                # answer — the SDK's own "Unknown tool" stays authoritative,
+                # exactly as in `install_strict_arguments`. A KNOWN tool that
+                # declares no required arguments has nothing to check.
+                #
+                # THAT FIRST CLAIM HOLDS UNDER A CONDITION, AND THE CONDITION IS
+                # NAMED RATHER THAN ASSUMED: the catalogue is complete before the
+                # server begins serving. It is cached on first use and never
+                # refreshed, so a tool REGISTERED later is invisible to this
+                # layer (it simply goes unchecked, which is safe), while a tool
+                # REMOVED later would still be found here — and this layer would
+                # then replace the SDK's rightful "Unknown tool" with its own
+                # "missing required argument". `_build_server` registers every
+                # provider before the server runs and nothing removes a tool
+                # afterwards, so neither case is reachable today. The identical
+                # staleness sits in `install_strict_arguments`' own cache; making
+                # it false is one question about both layers, not this card's.
+                declared = required.get(name) or []
+                missing = [field for field in declared if field not in arguments]
+                tool = name
+
+        # ALWAYS call through, even when this layer already knows the call will
+        # be refused. The refusal still comes from the SDK's schema validation,
+        # exactly as before; what changes is only the WORDS inside the envelope
+        # the SDK returns. Returning early instead — which this layer used to do
+        # — meant inventing the envelope, and an invented envelope is valid only
+        # against the protocol revision its author happened to measure.
+        result = await call_next(ctx)
+        if not missing:
+            return result
+        return _with_missing_arguments_text(result, tool, missing, declared)
+
+    server.middleware.append(refuse_missing_required_arguments)
+
+
 def install_usage_tracking(server: MCPServer, conn_factory: db.ConnFactory) -> None:
     """Record every `tools/call` this server completes, for `codebugs usage` (release-b, DIR-1).
 
@@ -490,9 +724,14 @@ def install_usage_tracking(server: MCPServer, conn_factory: db.ConnFactory) -> N
     same rule stated from the storage side.
 
     ORDERING, AND THE COMPOSITION THIS PROJECT'S OWN CLAUDE.md CALLS OUT: this
-    is registered in `main()` AFTER `install_strict_arguments`, so on
+    is registered in `_build_server` AFTER `install_strict_arguments`, so on
     `server.middleware` (outermost-first, per `MCPServer.middleware`'s own
-    docstring) strict-arguments sits OUTER and this sits INNER. `reject_unknown_arguments`
+    docstring) strict-arguments sits OUTER and this sits INSIDE IT. Inside it,
+    but NOT innermost, and the difference started mattering with CB-326:
+    `install_required_arguments` is registered after this one and therefore sits
+    inside THIS one — deliberately, so that a missing-required refusal keeps
+    being counted here, exactly as it was when the SDK caught it deeper still.
+    `reject_unknown_arguments`
     raises `MCPError` BEFORE ever calling ITS OWN `call_next` when an argument
     name is unknown — so this middleware's `__call__` is never invoked at all
     for such a call, and a refused-for-bad-arguments call is NOT counted here.
@@ -833,6 +1072,14 @@ def _build_server(mode: str, conn_factory=None) -> MCPServer:
     # deliberate choice, not an accident of call order. See
     # `install_usage_tracking`'s docstring for why.
     install_usage_tracking(server_obj, conn_factory)
+    # AFTER usage tracking, so on `server.middleware` (outermost-first) this is
+    # the INNERMOST of the three — and that position is load-bearing rather than
+    # incidental (CB-326). A missing required argument is counted in `tool_calls`
+    # today, because the SDK catches it deeper still; refusing it OUTSIDE the
+    # usage layer would silently stop counting those calls. Note the ordering
+    # requirement is the exact OPPOSITE of strict-arguments' above, which is why
+    # these are two middlewares and not one function with two branches.
+    install_required_arguments(server_obj)
 
     return server_obj
 

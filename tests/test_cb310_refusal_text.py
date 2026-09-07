@@ -75,7 +75,13 @@ def tracker(tmp_path):
     return project, _conn
 
 
-def call_over_the_wire(built: MCPServer, name: str, arguments: dict) -> tuple[bool, str]:
+def call_over_the_wire(
+    built: MCPServer,
+    name: str,
+    arguments: dict | None = None,
+    *,
+    protocol: str = "initialize",
+) -> tuple[bool, str]:
     """Drive `built` through a REAL client session and return `(is_error, text)`.
 
     Not `MCPServer.call_tool`: that is the in-process entry the ten existing
@@ -84,6 +90,22 @@ def call_over_the_wire(built: MCPServer, name: str, arguments: dict) -> tuple[bo
     `MCPServer.run_stdio_async` does — the public class exposes no way to serve
     an arbitrary stream pair, and speaking over real stdio instead would add a
     process boundary without adding a single assertion this cannot make.
+
+    `protocol` SELECTS THE HANDSHAKE, AND IT IS AN AXIS THIS HELPER USED TO HIDE
+    (CB-326). `initialize()` negotiates the OLDER protocol revision; `discover()`
+    negotiates the CURRENT one, whose `CallToolResult` carries a REQUIRED
+    `resultType` field the older one does not. A tool result assembled by hand is
+    therefore valid under one handshake and rejected by the client's own
+    validator under the other — so a helper that could only speak the older one
+    let a whole class of defect pass unseen, and did: CB-326's first landing
+    attempt returned a hand-built result that crashed every `discover()` client.
+    The default stays `initialize()` so the callers written before this keep
+    measuring exactly what they measured.
+
+    `arguments=None` means the field is OMITTED from the request rather than sent
+    empty, which is what the client library does when a tool is called with no
+    arguments at all — a distinct wire shape from `{}`, and one a server must not
+    confuse with it.
     """
 
     async def go() -> tuple[bool, str]:
@@ -98,7 +120,10 @@ def call_over_the_wire(built: MCPServer, name: str, arguments: dict) -> tuple[bo
 
                 task_group.start_soon(serve)
                 async with ClientSession(client_read, client_write) as session:
-                    await session.initialize()
+                    if protocol == "discover":
+                        await session.discover()
+                    else:
+                        await session.initialize()
                     result = await session.call_tool(name, arguments)
             return bool(result.is_error), (result.content[0].text if result.content else "")
 

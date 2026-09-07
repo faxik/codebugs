@@ -1,0 +1,65 @@
+# снимок договора об ошибках на границе проверки аргументов (CB-326)
+# mcp=2.1.1 pydantic=2.12.5 python=3.14.4
+#
+mcp  init/ok_add                is_error=False shape=result    foreign=-
+     init/ok_add                text={ /   "id": "<CB-N>", /   "severity": "low", /   "category": "x", /   "file": "y", /   "status": "open", /   "description": "z", /   "source": "claude", /   "tags": [], /   "meta": { /     "category_minted": true, /     "loc": { /       "v": 2, /       "skipped": "no_grammar", /       "sites_dropped": 0 /     } /   }, /   "reported_at_commit": "<SHA>", /   "reported_at_ref": null, /   "created_at": "<TS>", /   "updated_at": "<TS>", /   "fingerprint": "auto:v1:567a648207b52b5108eb64cb246c1b20", /   "occurrence_count": 1, /   "last_seen_at": "<TS>", /   "was_new": true, /   "dedup_action": "created", /   "attention": [], /   "stripped_meta_keys": [], /   "stripped_description_tail": false / }
+mcp  init/missing_required      is_error=True  shape=text      foreign=ссылка-на-чужой-сайт,формулировка-чужой-библиотеки,имя-внутренней-модели
+     init/missing_required      text=Error executing tool add: 1 validation error for addArguments / severity /   Field required [type=missing, input_value={'category': 'x', 'file': 'y', 'description': 'z'}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing
+mcp  init/missing_two           is_error=True  shape=text      foreign=ссылка-на-чужой-сайт,формулировка-чужой-библиотеки,имя-внутренней-модели
+     init/missing_two           text=Error executing tool add: 2 validation errors for addArguments / severity /   Field required [type=missing, input_value={'category': 'x', 'description': 'z'}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing / file /   Field required [type=missing, input_value={'category': 'x', 'description': 'z'}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing
+mcp  init/no_arguments          is_error=True  shape=text      foreign=ссылка-на-чужой-сайт,формулировка-чужой-библиотеки,имя-внутренней-модели
+     init/no_arguments          text=Error executing tool add: 4 validation errors for addArguments / severity /   Field required [type=missing, input_value={}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing / category /   Field required [type=missing, input_value={}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing / file /   Field required [type=missing, input_value={}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing / description /   Field required [type=missing, input_value={}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing
+mcp  init/empty_arguments       is_error=True  shape=text      foreign=ссылка-на-чужой-сайт,формулировка-чужой-библиотеки,имя-внутренней-модели
+     init/empty_arguments       text=Error executing tool add: 4 validation errors for addArguments / severity /   Field required [type=missing, input_value={}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing / category /   Field required [type=missing, input_value={}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing / file /   Field required [type=missing, input_value={}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing / description /   Field required [type=missing, input_value={}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing
+mcp  init/missing_plus_wrong_type is_error=True  shape=text      foreign=ссылка-на-чужой-сайт,формулировка-чужой-библиотеки,имя-внутренней-модели
+     init/missing_plus_wrong_type text=Error executing tool add: 2 validation errors for addArguments / severity /   Input should be a valid string [type=string_type, input_value=5, input_type=int] /     For further information visit https://errors.pydantic.dev/2.12/v/string_type / description /   Field required [type=missing, input_value={'category': 'x', 'file': 'y', 'severity': 5}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing
+mcp  init/wrong_type            is_error=True  shape=text      foreign=ссылка-на-чужой-сайт,формулировка-чужой-библиотеки,имя-внутренней-модели
+     init/wrong_type            text=Error executing tool add: 1 validation error for addArguments / severity /   Input should be a valid string [type=string_type, input_value=5, input_type=int] /     For further information visit https://errors.pydantic.dev/2.12/v/string_type
+mcp  init/undeclared_arg        is_error=True  shape=protocol  foreign=-
+     init/undeclared_arg        text=[protocol-error] Unknown argument(s) for tool 'add': bogus. Accepted: category, description, file, fingerprint, lines, meta, new_category, reported_at_commit, reported_at_ref, severity, source, tags. Refused rather than ignored — a dropped argument would otherwise look like a successful write.
+mcp  init/domain_refusal        is_error=True  shape=text      foreign=-
+     init/domain_refusal        text=Error executing tool update: Invalid finding status: 'bogus'
+mcp  init/unknown_tool          is_error=True  shape=text      foreign=-
+     init/unknown_tool          text=Unknown tool: no_such_tool
+mcp  init/missing_tracker       is_error=True  shape=text      foreign=-
+     init/missing_tracker       text=Error executing tool add: no .codebugs/ in <TMP>/elsewhere-wire; check the path, or run `codebugs init <TMP>/elsewhere-wire` to create a tracker there
+mcp  disc/ok_add                is_error=False shape=result    foreign=-
+     disc/ok_add                text={ /   "id": "<CB-N>", /   "severity": "low", /   "category": "x", /   "file": "y", /   "status": "open", /   "description": "z", /   "source": "claude", /   "tags": [], /   "meta": { /     "category_minted": true, /     "loc": { /       "v": 2, /       "skipped": "no_grammar", /       "sites_dropped": 0 /     }, /     "occurrences": [ /       { /         "at": "<TS>", /         "severity": "low", /         "category": "x", /         "file": "y", /         "description": "z", /         "source": "claude", /         "tags": [], /         "reported_at_commit": "<SHA>", /         "reported_at_ref": null /       } /     ] /   }, /   "reported_at_commit": "<SHA>", /   "reported_at_ref": null, /   "created_at": "<TS>", /   "updated_at": "<TS>", /   "fingerprint": "auto:v1:567a648207b52b5108eb64cb246c1b20", /   "occurrence_count": 2, /   "last_seen_at": "<TS>", /   "was_new": false, /   "dedup_action": "bumped", /   "attention": [], /   "stripped_meta_keys": [], /   "stripped_description_tail": false / }
+mcp  disc/missing_required      is_error=True  shape=text      foreign=ссылка-на-чужой-сайт,формулировка-чужой-библиотеки,имя-внутренней-модели
+     disc/missing_required      text=Error executing tool add: 1 validation error for addArguments / severity /   Field required [type=missing, input_value={'category': 'x', 'file': 'y', 'description': 'z'}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing
+mcp  disc/missing_two           is_error=True  shape=text      foreign=ссылка-на-чужой-сайт,формулировка-чужой-библиотеки,имя-внутренней-модели
+     disc/missing_two           text=Error executing tool add: 2 validation errors for addArguments / severity /   Field required [type=missing, input_value={'category': 'x', 'description': 'z'}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing / file /   Field required [type=missing, input_value={'category': 'x', 'description': 'z'}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing
+mcp  disc/no_arguments          is_error=True  shape=text      foreign=ссылка-на-чужой-сайт,формулировка-чужой-библиотеки,имя-внутренней-модели
+     disc/no_arguments          text=Error executing tool add: 4 validation errors for addArguments / severity /   Field required [type=missing, input_value={}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing / category /   Field required [type=missing, input_value={}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing / file /   Field required [type=missing, input_value={}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing / description /   Field required [type=missing, input_value={}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing
+mcp  disc/empty_arguments       is_error=True  shape=text      foreign=ссылка-на-чужой-сайт,формулировка-чужой-библиотеки,имя-внутренней-модели
+     disc/empty_arguments       text=Error executing tool add: 4 validation errors for addArguments / severity /   Field required [type=missing, input_value={}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing / category /   Field required [type=missing, input_value={}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing / file /   Field required [type=missing, input_value={}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing / description /   Field required [type=missing, input_value={}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing
+mcp  disc/missing_plus_wrong_type is_error=True  shape=text      foreign=ссылка-на-чужой-сайт,формулировка-чужой-библиотеки,имя-внутренней-модели
+     disc/missing_plus_wrong_type text=Error executing tool add: 2 validation errors for addArguments / severity /   Input should be a valid string [type=string_type, input_value=5, input_type=int] /     For further information visit https://errors.pydantic.dev/2.12/v/string_type / description /   Field required [type=missing, input_value={'category': 'x', 'file': 'y', 'severity': 5}, input_type=dict] /     For further information visit https://errors.pydantic.dev/2.12/v/missing
+mcp  disc/wrong_type            is_error=True  shape=text      foreign=ссылка-на-чужой-сайт,формулировка-чужой-библиотеки,имя-внутренней-модели
+     disc/wrong_type            text=Error executing tool add: 1 validation error for addArguments / severity /   Input should be a valid string [type=string_type, input_value=5, input_type=int] /     For further information visit https://errors.pydantic.dev/2.12/v/string_type
+mcp  disc/undeclared_arg        is_error=True  shape=protocol  foreign=-
+     disc/undeclared_arg        text=[protocol-error] Unknown argument(s) for tool 'add': bogus. Accepted: category, description, file, fingerprint, lines, meta, new_category, reported_at_commit, reported_at_ref, severity, source, tags. Refused rather than ignored — a dropped argument would otherwise look like a successful write.
+mcp  disc/domain_refusal        is_error=True  shape=text      foreign=-
+     disc/domain_refusal        text=Error executing tool update: Invalid finding status: 'bogus'
+mcp  disc/unknown_tool          is_error=True  shape=text      foreign=-
+     disc/unknown_tool          text=Unknown tool: no_such_tool
+mcp  disc/missing_tracker       is_error=True  shape=text      foreign=-
+     disc/missing_tracker       text=Error executing tool add: no .codebugs/ in <TMP>/elsewhere-wire; check the path, or run `codebugs init <TMP>/elsewhere-wire` to create a tracker there
+#
+use  ok_add           add: calls=1 failures=0
+use  missing_required add: calls=1 failures=1
+use  missing_two      add: calls=1 failures=1
+use  no_arguments     add: calls=1 failures=1
+use  empty_arguments  add: calls=1 failures=1
+use  missing_plus_wrong_type add: calls=1 failures=1
+use  wrong_type       add: calls=1 failures=1
+use  undeclared_arg   не посчитан
+use  domain_refusal   update: calls=1 failures=1
+use  unknown_tool     no_such_tool: calls=1 failures=1
+use  missing_tracker  <учёт недоступен: DatabaseNotFoundError>
+#
+cli  ok_add           rc=1 shape=one-line    last=category 'x' does not exist in this tracker (this tracker has no categories yet); pass new_category=True to mint it deliberately
+cli  missing_required rc=2 shape=multi-line  last=codebugs add: error: the following arguments are required: -s/--severity
+cli  undeclared_arg   rc=2 shape=multi-line  last=codebugs: error: unrecognized arguments: --bogus
+cli  bad_severity     rc=1 shape=one-line    last=Invalid severity: 'bogus'
+cli  domain_refusal   rc=1 shape=one-line    last=Invalid finding status: 'bogus'
