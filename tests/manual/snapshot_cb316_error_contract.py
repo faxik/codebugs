@@ -41,20 +41,21 @@
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import os
+import pathlib
 import re
 import subprocess
 import sys
 import tempfile
 
-import anyio
-from mcp.client.session import ClientSession
 from mcp.server.mcpserver import MCPServer
-from mcp.shared.memory import create_client_server_memory_streams
 
 from codebugs import db, server
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from test_cb310_refusal_text import call_over_the_wire  # noqa: E402
 
 
 # --- общее ---------------------------------------------------------------
@@ -84,7 +85,6 @@ def _normalize(text: str, root: str) -> str:
     расхождение утонуло бы в шуме.
     """
     out = text.replace(os.path.realpath(root), "<TMP>").replace(root, "<TMP>")
-    out = out.replace(os.path.realpath(tempfile.gettempdir()), "<TMPDIR>")
     return _TIMESTAMP.sub("<TS>", out)
 
 
@@ -133,37 +133,27 @@ def _cli_snapshot() -> list[str]:
 
 
 def _over_the_wire(built: MCPServer, name: str, arguments: dict) -> tuple[bool, str]:
-    """Прогнать вызов через НАСТОЯЩУЮ клиентскую сессию — та же техника, что в
-    `tests/test_cb310_refusal_text.py::call_over_the_wire`: внутрипроцессный
-    `MCPServer.call_tool` поднимает исключение, а клиент читает результат, и
-    обещание этого пакета дано именно второй форме.
+    """Прогон через настоящую клиентскую сессию — заимствован, а не переписан.
+
+    Вся асинхронная обвязка живёт в `tests/test_cb310_refusal_text.py`, откуда
+    она сюда и импортируется (образец такого заимствования из ручного скрипта —
+    `tests/manual/measure_cb157_forwarding.py`). Копировать её было нельзя: она
+    дважды обращается к `built._lowlevel_server`, то есть к внутренности чужой
+    библиотеки, две допущенные версии которой в этом проекте уже ведут себя
+    по-разному, — и при её поломке копия в наборе тестов покраснела бы на
+    ближайшем прогоне, а копия здесь молчала бы, потому что этот скрипт
+    запускают руками и ровно в ту минуту, когда им хотят ДОКАЗАТЬ, что починка
+    сработала.
+
+    Здесь добавлено ровно одно: перехват ошибки УРОВНЯ ПРОТОКОЛА. Незаявленное
+    имя аргумента отбивает промежуточный слой `server.install_strict_arguments`,
+    и клиент получает не результат вызова, а отказ протокола — отдельная форма
+    ответа, которую снимок обязан различать, а не падать на ней.
     """
-
-    async def go() -> tuple[bool, str]:
-        async with create_client_server_memory_streams() as (client_streams, server_streams):
-            client_read, client_write = client_streams
-            server_read, server_write = server_streams
-            options = built._lowlevel_server.create_initialization_options()
-            async with anyio.create_task_group() as task_group:
-
-                async def serve() -> None:
-                    await built._lowlevel_server.run(server_read, server_write, options)
-
-                task_group.start_soon(serve)
-                async with ClientSession(client_read, client_write) as session:
-                    await session.initialize()
-                    result = await session.call_tool(name, arguments)
-            return bool(result.is_error), (result.content[0].text if result.content else "")
-
     try:
-        return asyncio.run(go())
-    except BaseException as exc:  # noqa: BLE001
-        # Незаявленное имя аргумента отбивает промежуточный слой
-        # `server.install_strict_arguments`, и клиент получает не результат
-        # вызова, а ОШИБКУ ПРОТОКОЛА. Это отдельная форма ответа, и снимок
-        # обязан её различать, а не падать на ней.
-        message = _first_message(exc)
-        return True, f"[protocol-error] {message}"
+        return call_over_the_wire(built, name, arguments)
+    except BaseException as exc:  # noqa: BLE001 - форма ответа и есть предмет
+        return True, f"[protocol-error] {_first_message(exc)}"
 
 
 def _first_message(exc: BaseException) -> str:
@@ -197,12 +187,7 @@ class _Capturing:
 
 
 def _raised_class(factory, arguments: dict) -> str:
-    """КЛАСС исключения, выходящего из тела инструмента через адаптер CB-310.
-
-    От версии SDK не зависит, поэтому именно эта колонка различает настоящую
-    починку и совпадение под `mcp` 2.0.0, где SDK приписывает текст любого
-    исключения к своему сообщению.
-    """
+    """Класс исключения, выходящего из тела инструмента; зачем — см. шапку модуля."""
     from codebugs import reqs
 
     sink = _Capturing()

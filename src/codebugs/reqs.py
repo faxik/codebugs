@@ -1067,12 +1067,7 @@ def register_cli(sub, commands) -> None:
     def _cmd_reqs_add(args: argparse.Namespace) -> None:
         from codebugs.cli import domain_errors
 
-        # Routed through the shared wrapper, exactly like `_cmd_reqs_update` and
-        # the other neighbours in this file (CB-316). Without it this handler
-        # caught nothing at all, which CLAUDE.md's Error-handling section calls a
-        # violation of the same rule as catching in the WRONG ORDER: an unknown
-        # `--priority` printed a raw traceback here while `reqs-update` printed
-        # one sentence for the identical bad value.
+        # Through the shared wrapper, like `_cmd_reqs_update` below (CB-316).
         #
         # `try/finally` around the whole region rather than `close()` after the
         # call, and the reason is exact rather than hygienic: `close()` sat below

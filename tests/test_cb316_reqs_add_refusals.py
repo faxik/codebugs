@@ -72,6 +72,15 @@ class TestADuplicateIdIsARefusalAndNotACrash:
     """
 
     def test_the_second_write_of_one_id_raises_a_refusal(self, conn):
+        """ПОГЛОЩЕНА следующей проверкой, и это сказано вслух, а не обойдено.
+
+        Ни один член `refusals.INPUT_REFUSALS` не является и не может стать
+        потомком `sqlite3.Error`, поэтому зелёная следующая проверка делает эту
+        зелёной автоматически. Она оставлена потому, что говорит о дефекте на
+        языке самой карточки — «чужой пакету класс вышел наружу», — и потому,
+        что на непочиненном дереве краснела; поглощение не то же, что
+        бессодержательность.
+        """
         reqs.add_requirement(conn, req_id="FR-1", description="первое")
         with pytest.raises(Exception) as caught:  # noqa: PT011 - класс и есть предмет
             reqs.add_requirement(conn, req_id="FR-1", description="второе")
@@ -143,7 +152,6 @@ class TestTheMessageNeverClaimsMoreThanIsKnown:
             reqs.add_requirement(conn, req_id="FR-НОВЫЙ", description=None)
         text = str(caught.value)
         assert "FR-НОВЫЙ" in text, text
-        assert text.strip(), "отказ без слов — это та же потеря текста, только ближе"
 
 
 class TestTheCommandLineSurface:
@@ -178,24 +186,33 @@ class TestTheCommandLineSurface:
         lines = [ln for ln in second.stderr.splitlines() if ln.strip()]
         assert len(lines) == 1, second.stderr
 
-    def test_an_unknown_priority_prints_one_line_and_no_traceback(self, tmp_project):
+    @pytest.mark.parametrize(
+        "req_id, flag, marker",
+        [
+            ("FR-2", "--priority", "Invalid priority"),
+            ("FR-3", "--status", "Invalid requirement status"),
+        ],
+        ids=["priority", "status"],
+    )
+    def test_an_unknown_vocabulary_value_prints_one_line(self, tmp_project, req_id, flag, marker):
         """Половина (б). Механизм здесь — отсутствующая обёртка, а НЕ ограничение
-        ``CHECK`` в схеме: резолвер ``types.resolve_priority`` вызывается первой
-        же строкой тела ``add_requirement`` и отбивает недопустимое значение
-        раньше, чем что-либо доходит до SQL.
+        ``CHECK`` в схеме: резолверы ``types.resolve_priority`` и
+        ``types.resolve_requirement_status`` вызываются первыми же строками тела
+        ``add_requirement`` и отбивают недопустимое значение раньше, чем
+        что-либо доходит до SQL.
+
+        Параметризовано, а не скопировано: в первой редакции это были два
+        почти одинаковых тела, и второе по недосмотру потеряло утверждение о
+        единственной строке вывода — имя обещало «одна строка», а проверялось
+        это только в первом. Один набор утверждений над обоими случаями делает
+        такую потерю невыразимой.
         """
-        r = self._run(tmp_project, "reqs-add", "FR-2", "-d", "x", "--priority", "bogus")
+        r = self._run(tmp_project, "reqs-add", req_id, "-d", "x", flag, "bogus")
         assert r.returncode == 1, r.stderr
         assert "Traceback" not in r.stderr, r.stderr
-        assert "Invalid priority" in r.stderr, r.stderr
+        assert marker in r.stderr, r.stderr
         lines = [ln for ln in r.stderr.splitlines() if ln.strip()]
         assert len(lines) == 1, r.stderr
-
-    def test_an_unknown_status_prints_one_line_and_no_traceback(self, tmp_project):
-        r = self._run(tmp_project, "reqs-add", "FR-3", "-d", "x", "--status", "bogus")
-        assert r.returncode == 1, r.stderr
-        assert "Traceback" not in r.stderr, r.stderr
-        assert "Invalid requirement status" in r.stderr, r.stderr
 
     def test_the_successful_path_is_untouched(self, tmp_project):
         r = self._run(tmp_project, "reqs-add", "FR-4", "-d", "x")
@@ -203,11 +220,23 @@ class TestTheCommandLineSurface:
         assert "Added: FR-4" in r.stdout, r.stdout
 
     def test_a_refused_add_leaves_no_row_behind(self, tmp_project):
+        """Читается прямо из базы, а не глазами через `reqs-query`.
+
+        Форматировщик таблицы стоит между строкой и утверждением и в принципе
+        может её усечь, так что проверка «второе» не видно» через него
+        проверяет вывод, а не запись. Прямое чтение спрашивает ровно то, что
+        нужно, и экономит третий запуск интерпретатора.
+        """
         self._run(tmp_project, "reqs-add", "FR-5", "-d", "первое")
         self._run(tmp_project, "reqs-add", "FR-5", "-d", "второе")
-        shown = self._run(tmp_project, "reqs-query", "--id", "FR-5")
-        assert "первое" in shown.stdout, shown.stdout
-        assert "второе" not in shown.stdout, shown.stdout
+        connection = db.connect(tmp_project)
+        try:
+            stored = connection.execute(
+                "SELECT description FROM requirements WHERE id = 'FR-5'"
+            ).fetchall()
+        finally:
+            connection.close()
+        assert [r[0] for r in stored] == ["первое"]
 
 
 class TestTheProtocolSurface:
@@ -240,7 +269,7 @@ class TestTheProtocolSurface:
             with factory() as connection:
                 return reqs.add_requirement(connection, req_id="FR-1", description="второе")
 
-        with self._factory(tmp_project)() as connection:
+        with factory() as connection:
             reqs.add_requirement(connection, req_id="FR-1", description="первое")
 
         wrapped = server._refusal_reaches_the_client(body)
