@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import json
 import os
 import signal
 import sqlite3
 import sys
 
-from codebugs import __version__, db
+from codebugs import __version__, db, refusals
 
 
 @contextlib.contextmanager
@@ -29,7 +28,12 @@ def domain_errors(*, prefix: str = ""):
       mutation that already committed, which CB-86 names as the same lie as
       CB-15/CB-16. So it is re-raised, unchanged, and reaches the user as a
       loud traceback — the discriminator `tests/test_bench.py` pins between a
-      post-commit failure and an input error.
+      post-commit failure and an input error. **The post-commit case is what
+      DECIDED this arm, not the whole of what reaches it**: `findings._bump_row`
+      raises the same class on malformed stored meta BEFORE any write, landing
+      nothing. The classification is right either way — a corrupted row is a
+      broken tracker rather than a caller's bad argument — but the reason is
+      narrower than "it always means the write landed".
     - Plain ``ValueError`` / ``KeyError`` are genuine bad input (an unknown
       vocabulary value, a missing id) and print one line to stderr, then
       ``sys.exit(1)``.
@@ -45,12 +49,20 @@ def domain_errors(*, prefix: str = ""):
     message text (some print ``str(e)`` bare, some ``f"codebugs: {e}"``, some
     ``f"Error: {e}"``) — it is formatting, not part of the rule, and the rule
     itself never changes with it.
+
+    SINCE CB-311 THE TWO ARMS ARE DERIVED, NOT SPELLED. Both tuples come from
+    ``refusals.CLASSIFICATION``, the package's single classification table, so
+    the pair above and `server.py`'s own wrapper can no longer drift apart —
+    which they had, silently. The ORDER is unchanged and is now a property of
+    the data: ``CRASHES_INSIDE_REFUSALS`` holds exactly those crashes that
+    DESCEND from a refusal, so an arm that did not come first would swallow
+    them.
     """
     try:
         yield
-    except json.JSONDecodeError:
+    except refusals.CRASHES_INSIDE_REFUSALS:
         raise
-    except (ValueError, KeyError) as e:
+    except refusals.INPUT_REFUSALS as e:
         print(f"{prefix}{e}", file=sys.stderr)
         sys.exit(1)
 
@@ -311,7 +323,14 @@ def main() -> None:
         sys.exit(1)
     try:
         commands[args.command](args)
-    except (db.DatabaseNotFoundError, db.TrackerExistsError, db.TrackerUnwritableError) as e:
+    except refusals.TRACKER_REFUSALS as e:
+        # DERIVED since CB-311 from `refusals.CLASSIFICATION`, where these are the
+        # rows whose kind is `tracker` — the refusals raised while OPENING or
+        # CREATING the tracker, which is why they cannot be caught by
+        # `domain_errors` and need an arm out here. The three classes this used to
+        # spell inline are unchanged; what changed is that they are no longer a
+        # second copy of a list `server.py` kept separately.
+        #
         # `TrackerUnwritableError` (CB-86) is a TYPE here rather than a
         # classification made at this boundary, and the difference is the whole
         # design. A `sqlite3.OperationalError` arm added here could not tell a

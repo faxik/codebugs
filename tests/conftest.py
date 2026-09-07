@@ -10,7 +10,9 @@ Every inhabitant answers the same question in a different place: WHAT DID THIS
 RUN ACTUALLY JUDGE? The first two are a test that NAMES one state and gets
 another, because `db.connect()` resolves against ambient state the test never
 declared. The third is the same question asked of the SOURCE TREE instead of the
-tracker, and it is an alarm rather than a guard, for the reason given at it.
+tracker, and it is an alarm rather than a guard, for the reason given at it. The
+fourth asks it of the MCP SURFACE: a test that builds the surface by hand is
+judging a server the product never produces.
 
 FIRST: neutralize an ambient tracker DECLARATION. `CODEBUGS_ROOT` redirects
 every `db.connect()` in this process *and* in any subprocess that inherits the
@@ -32,6 +34,21 @@ main checkout while other branches land on `main`, so a red can be a verdict on
 a file the run never started with. That is not something a test file can hold
 for itself: no single test knows what the tree looked like before it started.
 
+FOURTH: refuse a call into a tool that was registered on a BARE `MCPServer`,
+bypassing `server.build_registrar` (CB-311). CB-310 measured this failure in ten
+tests at once: each built its own server, each therefore measured a surface
+`_build_server` never produces, and all ten stayed green against a defect that
+was live on the shipped one. A test file cannot hold this for itself — the file
+that needs the guard is precisely the file whose author did not know it applied
+— and the failure is silent, since a hand-built surface answers every call
+happily and merely answers about the wrong object. It lets a call through only
+when the SERVER carries the production build's adapter pair AND the TOOL's body
+carries the production decorator — which catches every hand assembly this suite
+could produce by ACCIDENT, and is not proof of provenance against an author who
+sets out to defeat it. The guard below states that threat model, names the
+bypasses that exist, and says why each half is recognised by an OBJECT rather
+than by how the registration is spelled.
+
 A per-file fixture would have to be remembered by every test module added later,
 and the cost of forgetting is silent destruction of the developer's own data, or
 a thousand failures pointing at code that is fine — exactly the kind of rule
@@ -41,11 +58,14 @@ variable themselves *after* the first fixture has run.
 
 import os
 import subprocess
+import sys
+import weakref
 from pathlib import Path
 
 import pytest
+from mcp.server.mcpserver import MCPServer
 
-from codebugs import db
+from codebugs import db, server as _server
 
 
 @pytest.fixture(autouse=True)
@@ -545,3 +565,303 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     report = _tree_moved_report(changes, head_before, _head_signature(), unexamined)
     for line in report.splitlines():
         terminalreporter.write_line(line)
+
+
+# --- CB-311: a test that CALLS a tool must have built the surface for real ----
+#
+# WHAT IT REFUSES. Registering tools on a bare `MCPServer` and then calling one
+# through `call_tool`. That server carries bodies which never passed through
+# `_RefusalsReachTheClient`, so every question the test then asks is answered by
+# an object `server._build_server` does not produce.
+#
+# WHAT IT CHECKS, IN TWO PARTS, AND WHY ONE PART WAS NOT ENOUGH. A call is let
+# through only when BOTH hold: the SERVER was assembled by the full production
+# build, and the TOOL's body went through production registration. The first
+# round of this guard checked only the second, and a cross-model review of that
+# round found two ways past it, both reproduced here before being fixed:
+#
+#   * `MCPServer.add_tool` is a PUBLIC method that puts a tool straight into the
+#     server's manager without going through `.tool()` at all, so nothing was
+#     recorded and the call sailed through. (The product never uses it — every
+#     registration in `src/` goes through `.tool()` — so any use of it is by
+#     definition hand assembly.)
+#   * `build_registrar` composes TWO adapters, and a test that wraps only the
+#     outer one gets bodies carrying an allowed code object while description
+#     normalization — the other half of what ships — is absent.
+#
+# WHY IT KEYS ON OBJECTS, NOT ON HOW THE CALL IS WRITTEN. A guard that grepped
+# for `MCPServer(` or for `build_registrar` would be the defect this repository
+# has paid for repeatedly — an instrument that inspects SPELLING finds spelling.
+# So the server half is recognised by the ADAPTER PAIR the production build
+# constructs: the outer adapter's `__init__` is observed, and the server is
+# marked only when the object handed to it is the inner adapter. That is
+# independent of how the caller spelled the build — deliberately, because
+# `tests/_mcp_schema.py` imports `build_registrar` by name, so patching the
+# module attribute would have missed it and refused a correctly built surface.
+# The tool half compares the registered body's CODE OBJECT against the two the
+# production decorator emits.
+#
+# AN EARLIER ATTEMPT WALKED THE CALL STACK for a frame whose `self` was the
+# adapter, and it was WRONG — measured, 41 false refusals on correctly built
+# servers, because the adapter's inner closure captures only `inner` and never
+# `self`. It is recorded here because a discarded mechanism that is not written
+# down gets re-proposed.
+#
+# WHY IT FIRES AT `call_tool` AND NOT AT REGISTRATION. Building a bare server is
+# LEGITIMATE and three places do it deliberately: `test_boundary.py` inspects
+# un-normalized descriptions (the bare object IS its subject), `test_findings.py`
+# enumerates tool names, and `test_add_lines_surface.py` uses a stand-in that is
+# not an `MCPServer` at all. What none of them does is CALL a tool — and calling
+# is exactly the act that claims "this is the boundary the client meets". Keying
+# on the claim rather than on the construction is what lets the three stay legal
+# with no exception rows at all, which is better than three rows that would have
+# to be maintained.
+#
+# WHAT IT DOES NOT DO, said plainly: it is per-TOOL, so a server built through
+# `build_registrar` that then has one further tool registered on it by hand is
+# caught for that tool only — which is right — but a surface assembled by some
+# future third route this suite does not use would be invisible. And it observes
+# the RUN, so a hand-built surface that is never called is never reported.
+#
+# THE THREAT MODEL, STATED BEFORE THE GUARANTEE, because the guarantee is only
+# true inside it. THIS GUARD IS AIMED AT THE HONEST AUTHOR who does not know the
+# rule — which is the case CB-310 actually measured: ten tests built the surface
+# by hand, nobody was being clever, and all ten were green against a live
+# defect. It is NOT proof of provenance, and it cannot be: a test harness is
+# edited by the same person it would have to outwit. Three bypasses are known
+# and each needs deliberate construction — call the production build, discard
+# its result and keep the mark while assembling half a stack by hand; attach a
+# production code object onto some other callable; replace the tool manager.
+# They are named rather than closed, because closing them is a different unit
+# with a different price.
+#
+# WHAT THE TWO HALVES ACTUALLY ESTABLISH, at their real width. The server mark
+# says the production ADAPTER PAIR was constructed around this server — not
+# that `_build_server` ran, which also loops over providers and installs two
+# middlewares. The body check says the stored function carries the code object
+# the production decorator emits — a MARK, not a proof of origin. Together they
+# refuse every hand assembly this suite could produce by accident, and that is
+# the claim.
+#
+# ONE RESIDUAL HAS A PLAUSIBLY ACCIDENTAL SHAPE and is therefore named on its
+# own: a test that builds ONE provider through `build_registrar` and a second
+# through the outer adapter alone. The bodies still carry the refusal
+# translation, so CB-310's own subject is unharmed; what is lost is description
+# normalization. That one is left open deliberately.
+#
+# WHERE IT FAILS SILENTLY. An SDK that stored something other than the
+# registered function under `.fn` would make production bodies unrecognisable —
+# and that fails toward REFUSING correct code, which is the safe direction. An
+# SDK that RENAMED the registry is NOT the loud case an earlier version of this
+# comment claimed: it would rename it on its own call path too, so the call
+# would run and the body would be whatever was registered. That is exactly why
+# an unreadable registry now REFUSES instead of falling through.
+#
+# Renaming `_refusal_reaches_the_client` fails the import and reddens the whole
+# suite; a third branch in that wrapper, or its removal from `build_registrar`,
+# makes correctly built tools start getting refused. Both are loud.
+#
+# WHAT IT DELIBERATELY DOES NOT COVER: assertions about the SHAPE of the surface
+# — tool names, descriptions, argument schemas — which a bare server answers just
+# as happily and just as wrongly. Those are legitimately checked without ever
+# calling a tool (`test_boundary.py`, `test_findings.py`), so this guard cannot
+# see them, and widening it to registration would refuse those three legitimate
+# places. The mechanism for that class already exists and is separate: the wire
+# golden in `tests/_mcp_schema.py`, which IS collected through `build_registrar`.
+
+_HAND_BUILT_SURFACES_ALLOWED: dict[str, str] = {
+    # site -> why this place may call a tool on a hand-registered surface.
+    # EMPTY TODAY, and that is a measurement rather than an oversight: the three
+    # legitimate bare-server places named above do not reach `call_tool`, so
+    # nothing needs licensing. A row here must carry a real reason —
+    # `tests/test_hand_built_surfaces.py` refuses an empty one and refuses a row
+    # naming a place that no longer exists, on the CB-179 discipline.
+}
+
+
+def _production_wrapper_codes() -> frozenset:
+    """The code objects `_refusal_reaches_the_client` produces, both branches.
+
+    THE FIRST ATTEMPT WALKED THE CALL STACK looking for a frame whose `self` is
+    a `_RefusalsReachTheClient`, and it was WRONG — measured, 41 false refusals
+    on servers built correctly. The adapter's inner closure captures only
+    `inner`, never `self`, so by the time `MCPServer.tool` actually runs there is
+    no such frame to find. Keeping it would have been a guard that refuses the
+    thing it exists to require.
+
+    What the production stack leaves behind instead is the OBJECT it produces:
+    every body it registers has been replaced by `_refusal_reaches_the_client`'s
+    `wrapper`, so comparing the registered function's `__code__` against the two
+    code objects that decorator can emit answers "did this body come through the
+    production build" directly, about the artifact rather than about the route.
+    A hand-registered body is the domain module's own function and matches
+    neither.
+    """
+    def probe() -> dict:
+        """probe."""
+
+    async def async_probe() -> dict:
+        """probe."""
+
+    return frozenset(
+        {
+            _server._refusal_reaches_the_client(probe).__code__,
+            _server._refusal_reaches_the_client(async_probe).__code__,
+        }
+    )
+
+
+def hand_built_registration_site(frame) -> str:
+    """The test-owned frame that registered a tool, as `<file>::<function>`."""
+    while frame is not None:
+        filename = frame.f_code.co_filename
+        if filename.startswith(_TESTS_DIR) and not filename.endswith("conftest.py"):
+            return f"{Path(filename).name}::{frame.f_code.co_name}"
+        frame = frame.f_back
+    return "<outside the test tree>"
+
+
+def undeterminable_surface_refusal(tool: str) -> str:
+    return (
+        f"CB-311: could not determine how the surface carrying {tool!r} was built.\n"
+        "The guard reads the SDK's tool registry to see which body a call will run, and that "
+        "registry was not readable — most likely the SDK moved or renamed it.\n"
+        "This refuses rather than admits, because a guard that passes when blind is not a "
+        "guard. Repair `_call_tool_refusing_a_hand_built_surface` in tests/conftest.py "
+        "against the SDK's current shape."
+    )
+
+
+def hand_built_surface_refusal(tool: str, site: str) -> str:
+    return (
+        f"CB-311: {site} called the tool {tool!r} on a surface it registered by hand.\n"
+        "Those tools never went through `server.build_registrar`, so their bodies carry "
+        "none of the production registration stack — the exact shape CB-310 found in ten "
+        "tests at once, all green against a live defect.\n"
+        "Fix: `mod.register_tools(server.build_registrar(mcp), factory)`. Note what that "
+        "does and does not buy: it gives the registration adapters, NOT the two "
+        "middlewares `_build_server` installs on top (strict arguments, usage tracking), "
+        "so a test about those must build the server the way `server.py` does.\n"
+        "If this fires on a tool you DID register through `build_registrar`, the "
+        "production wrapper changed and `_production_wrapper_codes` is what needs fixing, "
+        "not your test.\n"
+        "If this place genuinely needs the bare object AND a call, add a row to "
+        "`_HAND_BUILT_SURFACES_ALLOWED` in tests/conftest.py naming the reason."
+    )
+
+
+_TESTS_DIR = str(Path(__file__).resolve().parent)
+_HAND_BUILT: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_FULLY_BUILT: "weakref.WeakSet" = weakref.WeakSet()
+_PRODUCTION_WRAPPER_CODES = _production_wrapper_codes()
+_REAL_ADD_TOOL = MCPServer.add_tool
+_REAL_CALL_TOOL = MCPServer.call_tool
+
+
+def _add_tool_recording_who_registered(self, fn, name=None, *args, **kwargs):
+    """Where a hand registration's PLACE is learned — not where the verdict is made.
+
+    `MCPServer.tool`'s decorator body calls `self.add_tool(fn, name=…, …)`, so
+    every registration made through a METHOD arrives here. That is a fact about
+    the SDK rather than a guess — and it is deliberately not stated as "the one
+    registration point", because it is not: `MCPServer(tools=[…])` hands its
+    list straight to the tool manager, which fills its own registry without
+    calling this at all. **Nothing here would see that, and nothing here needs
+    to** — the verdict is taken at call time from the body the server actually
+    stores, so a tool nobody recorded is judged exactly like one that was.
+
+    What this records is the SITE, for the refusal text and for the allowance
+    table's key. The name is `name or fn.__name__`, which is what
+    `Tool.from_function` itself computes, so the record keys the same way the
+    manager does.
+    """
+    site = hand_built_registration_site(sys._getframe(1))
+    result = _REAL_ADD_TOOL(self, fn, name, *args, **kwargs)
+    if getattr(fn, "__code__", None) not in _PRODUCTION_WRAPPER_CODES:
+        _HAND_BUILT.setdefault(self, {})[name or getattr(fn, "__name__", "?")] = site
+    return result
+
+
+def _mark_fully_built(self, registrar, *args, **kwargs):
+    """Observe the production build: the OUTER adapter wrapping the INNER one.
+
+    Marking on the outer adapter alone would accept half a build — the review
+    that found that gap is named in the comment above. The inner adapter's
+    server attribute is what carries the mark, because that is the object
+    `call_tool` is later invoked on.
+    """
+    result = _REAL_REFUSALS_INIT(self, registrar, *args, **kwargs)
+    if isinstance(registrar, _server._NormalizedDescriptions):
+        try:
+            _FULLY_BUILT.add(registrar._server)
+        except TypeError:
+            # An unhashable server (a subclass setting `__hash__ = None`, or a
+            # stand-in) cannot be marked. Swallowing that is the SAFE direction
+            # and is deliberate: an unmarked server is REFUSED at its first
+            # call, so the failure is a loud refusal on a legitimate build
+            # rather than a silent admission of an illegitimate one. None exists
+            # in this suite today; the arm is here so the shape is decided
+            # rather than discovered.
+            pass
+    return result
+
+
+async def _call_tool_refusing_a_hand_built_surface(self, name, *args, **kwargs):
+    """The verdict is read from the LIVE ARTEFACT, never from bookkeeping.
+
+    A first version asked its own records ("was a violation noted for this
+    name?") and that was WRONG, measured: `ToolManager.add_tool` does NOT
+    replace a tool registered under a name it already holds — it logs and
+    returns the incumbent — so registering by hand and then "correctly" under
+    the same name leaves the HAND body in the server while a record-clearing
+    branch erased the note. Two lines turned the guard off completely, and the
+    test written beside them enshrined the bypass as correct.
+
+    So the question asked here is about the object the server will actually
+    run: does the body stored under this name carry the production decorator,
+    and was this server assembled by the production build. Records survive only
+    to say WHERE a hand registration happened, for the refusal text and for the
+    allowance table's key — they can no longer decide anything.
+
+    Reaching into `_tool_manager` is reaching into the SDK's internals, and that
+    is deliberate here: `src/codebugs/server.py` forbids it for PRODUCT code,
+    while this harness already replaces two of the SDK's methods and one
+    adapter's `__init__`. Bookkeeping was the alternative, and bookkeeping is
+    what produced the hole.
+    """
+    registry = getattr(getattr(self, "_tool_manager", None), "_tools", None)
+    if not isinstance(registry, dict):
+        # UNREADABLE REGISTRY IS NOT AN ABSENT NAME, and conflating the two is
+        # how the first version of this failed OPEN: `getattr(..., {})` turned
+        # "I cannot see the registry" into "no such tool" and let the call
+        # through with nothing checked. Every gate in this repository refuses
+        # when it cannot tell — an empty answer, an unparseable answer, a
+        # missing interpreter — and a guard that admits on blindness is the one
+        # shape none of them takes.
+        raise AssertionError(undeterminable_surface_refusal(name))
+    tool = registry.get(name)
+    if tool is None:
+        # A readable registry that does not hold this NAME is a different thing
+        # and is legitimate: the test asked for a tool that does not exist, and
+        # the SDK's own "unknown tool" is the right answer, not ours.
+        return await _REAL_CALL_TOOL(self, name, *args, **kwargs)
+    body_is_production = (
+        getattr(getattr(tool, "fn", None), "__code__", None) in _PRODUCTION_WRAPPER_CODES
+    )
+    if not body_is_production or self not in _FULLY_BUILT:
+        site = _HAND_BUILT.get(self, {}).get(name) or hand_built_registration_site(
+            sys._getframe(1)
+        )
+        if site not in _HAND_BUILT_SURFACES_ALLOWED:
+            raise AssertionError(hand_built_surface_refusal(name, site))
+    return await _REAL_CALL_TOOL(self, name, *args, **kwargs)
+
+
+# Installed at IMPORT rather than in a session fixture: a module-level
+# registration in some future test file would run during collection, before any
+# fixture, and the guard would then be blind to exactly the construction it
+# exists to see.
+_REAL_REFUSALS_INIT = _server._RefusalsReachTheClient.__init__
+_server._RefusalsReachTheClient.__init__ = _mark_fully_built
+MCPServer.add_tool = _add_tool_recording_who_registered
+MCPServer.call_tool = _call_tool_refusing_a_hand_built_surface

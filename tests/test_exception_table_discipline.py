@@ -144,6 +144,14 @@ DECLARED_EXCEPTIONS: dict[tuple[str, str], str] = {
         "string values are severities, not reasons, and no check consults "
         "membership to excuse anything."
     ),
+    ("tests/test_refusal_classification.py", "RATIFIED"): (
+        "The INVERSE of an exception table, and recognised only by shape: its rows take "
+        "nothing out from under a check, they PIN what the check must find. Values are "
+        "classification kinds (input/tracker/crash), not reasons — the reasons live in "
+        "`refusals.CLASSIFICATION`, where that file's own test reads them. Membership is "
+        "never consulted to excuse anything; the whole dict is compared for equality, so "
+        "a row that went stale fails by being unequal rather than by being tolerated."
+    ),
     ("tests/test_dedup.py", "TestAttentionBlock.ESCALATED"): (
         "Expected values, not exemptions: the from/to severities the attention "
         "block must report. Membership is never consulted."
