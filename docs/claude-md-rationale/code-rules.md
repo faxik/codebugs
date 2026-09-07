@@ -14,8 +14,9 @@ in this file that reads as an instruction is a defect, and its place is the rule
 
 **Why the ordering pin needed a second test at a different grain (CB-159).** The paragraph once named
 only the end-to-end pin, leaving the wrapper itself unexercised. The ordering was then measured
-against its exact mutant: removing the `except json.JSONDecodeError: raise` arm turns `test_a_committed_write_is_never_reported_as_bad_input` red while 5 of that class's other 6 tests are
-unaffected — which is what "the ordering is load-bearing" means concretely.
+against its exact mutant: removing the `except json.JSONDecodeError: raise` arm turns `test_a_committed_write_is_never_reported_as_bad_input` red while all 5 of that class's other tests are
+unaffected — which is what "the ordering is load-bearing" means concretely (`TestRetriageCliContract`
+carries 6 tests in total, this one included; CB-299).
 
 **The two holes CB-71's `open(` sweep structurally could not see, both reproduced (CB-79).** `reqs-verify` from a **deleted cwd** printed a raw `FileNotFoundError` — a long-lived MCP server outlives the worktree it started in. And a **non-executable git** raised `PermissionError` out of `provenance.file_status`, whose guard caught only `FileNotFoundError`, i.e. *git is missing* and
 nothing else.

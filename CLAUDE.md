@@ -79,8 +79,6 @@ fetch refspec, a rewritten `remote.origin.fetch` (which then re-arms on every or
 or simply an upstream whose `main` holds untyped work all land content here.
 → почему именно так: `docs/claude-md-rationale/workflow.md#cb-57-гейт-мержа`
 
-→ почему именно так: `docs/claude-md-rationale/workflow.md#сторожа-читают-fail-closed`
-
 **A plan note landing on main must be NAMED in the commit message, and the mechanism is a
 `commit-msg` hook.** The rule it mechanises is that parallel sessions add files to main **by name,
 never by directory**: `.claude/plans/` is the one place they may all write, and `git add
@@ -375,7 +373,7 @@ rewritten the same way, expect the same one-time manual merge.
 
 ## Architecture
 
-- **Domain modules** (`src/codebugs/`): `db.py` (findings + shared infra), `reqs.py`, `bench.py`, `blockers.py`, `merge.py`, `sweep.py`, `embeddings.py` (vector storage/similarity search, delegates from reqs), and the `milestones/` PACKAGE — a directory of modules, not a single file (releases / streams / capacity-aware pull)
+- **Domain modules** (`src/codebugs/`): `db.py`, `findings.py` (largest module, the tracker's own domain), `reqs.py`, `bench.py`, `blockers.py`, `merge.py`, `sweep.py`, `embeddings.py`, `loc.py`, `provenance.py`, `grouping.py`, `similarity.py`, `relations.py`, `surfacegen.py`, `entities.py`, `usage.py`, and the `milestones/` PACKAGE — a directory of modules, not a single file
 
 - **Shared types** (`types.py`): Entity constants (statuses, priorities, severities), resolver functions, terminal states. Zero-dependency — safe to import from anywhere
 
