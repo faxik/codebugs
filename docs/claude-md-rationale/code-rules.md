@@ -67,13 +67,55 @@ type library yields a RESULT carrying a foreign text; `install_strict_arguments`
 error carrying the project's text, which a client library RAISES rather than returns. Two different
 failure texts and two different things a caller must write to handle them.
 
-**The cheap fix was measured and rejected, which is the finding worth keeping.** Rewriting the error
-result on the way out is possible — a middleware really does see it, and a substituted text reaches
-the client verbatim, both measured. But a DOMAIN refusal arrives in the identical shape, so a
-rewriting layer could only tell the two apart by matching the validation library's own wording:
-taking a dependency on precisely the thing the card exists to remove, and one that would fail
-silently the day that library rephrased itself. Asking the tool's own declared schema which arguments
-are required needs no such match. Hence a check AHEAD of the call.
+**The first landing attempt got the SHAPE of the fix wrong, and the mistake is recorded because the
+reasoning behind it was seductive and is worth inoculating against.** That attempt refused EARLY: it
+computed the missing fields, returned its own result and never called through. The argument was that
+rewriting the SDK's result could not distinguish a schema refusal from a DOMAIN refusal — the two do
+arrive in the identical shape — without matching the validation library's wording, i.e. depending on
+the very thing the card removes. **The premise is true and the conclusion does not follow.** The
+discriminator never had to come out of the result: it is the set of missing required fields, and it
+is known BEFORE the call is made. Deciding early and replacing late is available, and is strictly
+better.
+
+**What made the early return actually wrong, measured on a second protocol axis nobody had asked
+about.** A client session opened with `discover()` negotiates the current protocol revision, whose
+`CallToolResult` carries a REQUIRED `resultType` field; one opened with `initialize()` negotiates the
+older revision, which does not. The hand-built result carried only `content` and `isError`, so under
+`discover()` the CLIENT's own validator rejected it and the call RAISED instead of returning —
+changing the channel a refusal arrives through, the one thing this card must not do. Measured on the
+branch, same call, both handshakes: `initialize()` returned the project's text, `discover()` raised
+`ValidationError: CallToolResult.resultType Field required`.
+
+**The reasoning error is the transferable part.** The dict a middleware OBSERVES is the SDK
+serializer's OUTPUT; it is not a specification of what is valid to hand back. Reading an output as if
+it were an accepted input is a substitution of questions, and it survived a measurement-first
+discipline precisely because a measurement WAS taken — of the wrong thing. The layer now lets the SDK
+build every envelope and replaces only the `content` inside it, so `resultType`, `_meta` and whatever
+a future revision adds travel through untouched.
+
+**A second shape of the same defect was open for the commonest case of all.** Calling a tool with no
+arguments makes the client omit the `arguments` field entirely rather than send `{}` — different
+bytes on the wire, the same meaning. The first attempt tested "is this a mapping?", got `None`, fell
+through, and answered in the library's words under BOTH handshakes. An absent field is now read as an
+empty mapping; anything else non-mapping still falls through, because malformed arguments are the
+protocol layer's to refuse.
+
+**The precedence rule, and its named cost.** When a call both omits a required field and mistypes
+another, the answer names the omission only. The replacement swaps content whole, and appending
+instead would leave the foreign text in place and fail the card's headline requirement. So "a wrong
+type falls through" holds precisely when nothing is missing — the rules file says `a wrong TYPE ALONE`
+for that reason. Cost, stated rather than absorbed: a client with both faults used to see both at
+once and now learns of the second on its next call, one extra round trip in a rare shape. The
+alternative is this package holding a second opinion about types, which is the drift the boundary
+exists to avoid.
+
+**Two residuals named rather than closed.** The tool catalogue is cached on first use and never
+refreshed, so the claim that an unknown tool stays the SDK's to answer holds only while the catalogue
+is complete before serving begins — true today, since `_build_server` registers every provider up
+front and nothing removes a tool afterwards. The identical staleness sits in `install_strict_arguments`'
+own cache, so making it false is one question about both layers rather than this card's. And the
+replacement swaps `content` alone: were a future SDK to put the validation library's wording into a
+`structuredContent` field on an error result, that copy would survive untouched.
 
 **Placement was decided by a measurement, not by taste, and it is why this is a second middleware
 rather than a branch in the first.** The two checks need OPPOSITE positions relative to
@@ -102,6 +144,12 @@ after the change. This was needed because the wire golden is not a gate on the r
 REQUIRED ones, because the required list contains every name anyway. The replacement compares the
 answers to a one-missing and a two-missing call and requires them to differ — format-independent, so
 it survives rewording, and still fatal to the loss of content.
+
+**And one refusal text claimed more than it knew.** It read "the tool did not run and nothing was
+written"; the second half was false, because `install_usage_tracking` records a row in `tool_calls`
+for exactly this call — which the placement oracle in the same test file proves by asserting that row
+exists. A refusal overstating what did NOT happen is the CB-15/CB-16 class of lie pointed the other
+way, so the sentence now speaks only of the tool BODY, which genuinely never runs.
 
 **A pre-existing false sentence found on the way, and why nothing had caught it.** The rule bullet
 read "This is the one place the project touches `MCPServer.middleware`". That had already become

@@ -13,11 +13,26 @@
 
 ЧТО СНИМАЕТСЯ, И ПОЧЕМУ ИМЕННО ЭТО.
 
-Раздел «протокол» — восемь случаев на поверхности находок. Четыре из них
-описывает сам бриф, остальные четыре добавлены как КОНТРОЛЬНЫЕ: правка обязана
-их не задеть, а снимок, где нет ни одного случая, который обязан остаться
-неизменным, не умеет отличить «ничего лишнего не сломалось» от «снимок просто
-не туда смотрит».
+Раздел «протокол» — одиннадцать случаев на поверхности находок, и каждый
+снимается ДВАЖДЫ: под старой редакцией протокола (сеанс поднят через
+`initialize()`) и под текущей (через `discover()`), где у результата вызова есть
+обязательное поле `resultType`.
+
+ЭТА ВТОРАЯ ОСЬ ДОБАВЛЕНА НЕ ДЛЯ ПОЛНОТЫ, А ПОТОМУ ЧТО ЕЁ ОТСУТСТВИЕ УЖЕ СТОИЛО
+ОДНОЙ НЕГОДНОЙ ПОЧИНКИ. Первый круг работы по CB-326 собирал ответ руками из
+полей `content` и `isError`; под старой редакцией это проходило, под текущей
+клиентская библиотека отвергала такой ответ своим же проверяльщиком, и вызов
+поднимал исключение вместо возврата значения. Снимок, знавший только старую
+редакцию, объявил тогда, что наблюдаемый клиентом договор не изменился, — и
+ошибся, потому что смотрел вдоль одной оси из двух. Снимок, который не умеет
+покраснеть на смене канала доставки отказа, не выполняет своего назначения.
+
+Из одиннадцати случаев четыре описывает сам бриф, три добавлены вторым кругом
+(вызов вовсе без аргументов, вызов с пустым отображением, смешанный случай
+«пропущено плюс неверный тип»), остальные — КОНТРОЛЬНЫЕ: правка обязана их не
+задеть, а снимок, где нет ни одного случая, который обязан остаться неизменным,
+не умеет отличить «ничего лишнего не сломалось» от «снимок просто не туда
+смотрит».
 
   - `ok_add`            — удачное добавление; контрольный.
   - `missing_required`  — не подано обязательное поле; ПРЕДМЕТ карты.
@@ -113,7 +128,7 @@ def _shape_of_stream(text: str) -> str:
 # --- поверхность протокола ----------------------------------------------
 
 
-def _over_the_wire(built, name: str, arguments: dict) -> tuple[bool, str]:
+def _over_the_wire(built, name: str, arguments: dict | None, protocol: str) -> tuple[bool, str]:
     """Прогон через настоящую клиентскую сессию; ошибка ПРОТОКОЛА — отдельная форма.
 
     Асинхронная обвязка заимствована из `tests/test_cb310_refusal_text.py`, а не
@@ -124,7 +139,7 @@ def _over_the_wire(built, name: str, arguments: dict) -> tuple[bool, str]:
     когда им хотят ДОКАЗАТЬ, что починка сработала.
     """
     try:
-        return call_over_the_wire(built, name, arguments)
+        return call_over_the_wire(built, name, arguments, protocol=protocol)
     except BaseException as exc:  # noqa: BLE001 — форма ответа и есть предмет
         return True, f"[protocol-error] {_first_message(exc)}"
 
@@ -146,6 +161,11 @@ _MCP_SCENARIOS = [
                                   "description": "z", "new_category": True}),
     ("missing_required", "project", "add", {"category": "x", "file": "y", "description": "z"}),
     ("missing_two", "project", "add", {"category": "x", "description": "z"}),
+    # `None` означает «поле аргументов не посылать вовсе» — на проводе это не то
+    # же самое, что пустое отображение, и путать их сервер не имеет права.
+    ("no_arguments", "project", "add", None),
+    ("empty_arguments", "project", "add", {}),
+    ("missing_plus_wrong_type", "project", "add", {"category": "x", "file": "y", "severity": 5}),
     ("wrong_type", "project", "add", {"severity": 5, "category": "x", "file": "y",
                                       "description": "z"}),
     ("undeclared_arg", "project", "add", {"severity": "low", "category": "x", "file": "y",
@@ -224,24 +244,33 @@ def _mcp_snapshot() -> list[str]:
     rows: list[str] = []
     with tempfile.TemporaryDirectory() as tmp:
         project, empty = _fresh_pair(tmp, "wire")
-        for name, where, tool, arguments in _MCP_SCENARIOS:
-            # Свой сервер на каждый случай: слой строгих имён аргументов
-            # запоминает каталог инструментов при первом вызове, и общий сервер
-            # сделал бы порядок случаев значимым.
-            built = server._build_server("findings", _factory_of(project if where == "project"
-                                                                else empty))
-            is_error, text = _over_the_wire(built, tool, arguments)
-            text = _normalize(text, tmp)
-            shape = _shape_of_answer(is_error, text, tool)
-            # Идентификатор находки нормализуется только в удачном ответе: там
-            # он выдаётся трекером и меняется от прогона к прогону, тогда как в
-            # отказе он приходит от вызывающего и обязан быть виден дословно.
-            body = _FINDING_ID.sub("<CB-N>", text) if not is_error else text
-            rows.append(
-                f"mcp  {name:<16} is_error={str(is_error):<5} shape={shape:<9} "
-                f"foreign={_foreign_marks(text)}\n"
-                f"     {name:<16} text={body.replace(chr(10), ' / ')}"
-            )
+        # ОСЬ РЕДАКЦИИ ПРОТОКОЛА. `initialize()` согласует старую редакцию,
+        # `discover()` — текущую, где у результата вызова есть обязательное поле
+        # `resultType`. Снимок обязан ходить по обеим, и это не запас прочности:
+        # первый круг починки CB-326 был зелен под старой редакцией и ронял
+        # клиента под текущей, а снимок, знавший только старую, объявил тогда,
+        # что договор не изменился.
+        for protocol in ("initialize", "discover"):
+            for name, where, tool, arguments in _MCP_SCENARIOS:
+                # Свой сервер на каждый случай: слой строгих имён аргументов
+                # запоминает каталог инструментов при первом вызове, и общий
+                # сервер сделал бы порядок случаев значимым.
+                built = server._build_server("findings", _factory_of(project if where == "project"
+                                                                    else empty))
+                is_error, text = _over_the_wire(built, tool, arguments, protocol)
+                text = _normalize(text, tmp)
+                shape = _shape_of_answer(is_error, text, tool)
+                # Идентификатор находки нормализуется только в удачном ответе:
+                # там он выдаётся трекером и меняется от прогона к прогону,
+                # тогда как в отказе он приходит от вызывающего и обязан быть
+                # виден дословно.
+                body = _FINDING_ID.sub("<CB-N>", text) if not is_error else text
+                tag = f"{protocol[:4]}/{name}"
+                rows.append(
+                    f"mcp  {tag:<26} is_error={str(is_error):<5} shape={shape:<9} "
+                    f"foreign={_foreign_marks(text)}\n"
+                    f"     {tag:<26} text={body.replace(chr(10), ' / ')}"
+                )
     return rows
 
 
@@ -256,7 +285,12 @@ def _usage_snapshot() -> list[str]:
             project, empty = _fresh_pair(tmp, "usage")
             factory = _factory_of(project if where == "project" else empty)
             built = server._build_server("findings", factory)
-            _over_the_wire(built, tool, arguments)
+            # Одной редакции протокола здесь достаточно, и это обосновано, а не
+            # сэкономлено: учёт ведёт промежуточный слой, который стоит до
+            # всякой сериализации ответа, поэтому редакция протокола на него не
+            # влияет. Раздел выше ходит по обеим именно потому, что там предмет
+            # — форма ОТВЕТА, а она от редакции зависит.
+            _over_the_wire(built, tool, arguments, "initialize")
             # Учёт пишет в ТОТ ЖЕ трекер, что и инструмент, поэтому на случае
             # «трекера нет» записывать некуда — это не пробел снимка, а прямое
             # следствие правила «учёт никогда не роняет вызов».

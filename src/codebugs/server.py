@@ -539,16 +539,22 @@ def install_required_arguments(server: MCPServer) -> None:
     table records `add` refusing about a ninth of its calls, the highest share of
     any core tool, and a missing required field is the commonest shape of it.
 
-    WHY A CHECK AHEAD OF THE CALL AND NOT A REWRITE OF ITS RESULT. The obvious
-    cheaper design — let the SDK validate, then rewrite the error result on the
-    way out — was measured and rejected, not skipped. `_handle_call_tool` catches
-    the validation failure inside itself and returns an ordinary error result, so
-    a middleware really can see and rewrite it (measured). But a DOMAIN refusal
-    arrives in the *identical* shape, so a rewriting layer could only tell the two
-    apart by matching the validation library's own TEXT — taking a dependency on
-    the exact thing this card exists to stop depending on, and one that would fail
-    silently the day that library rephrased itself. Asking the tool's own declared
-    schema which arguments are required needs no such match.
+    DECIDE BEFORE THE CALL, REPLACE AFTER IT, AND THE SPLIT IS THE WHOLE DESIGN.
+    The set of missing names is computed BEFORE `call_next`, from the tool's own
+    declared schema. The call then proceeds normally, and only the WORDS in the
+    result the SDK returns are replaced — see `_with_missing_arguments_text` for
+    why the envelope is never built here. Deciding early is what makes the
+    replacement safe: a non-empty missing set means the SDK's schema validation is
+    certain to refuse, so nothing has to be inferred from the refusal's text.
+
+    A FIRST ATTEMPT GOT THIS BACKWARDS AND THE REASONING IS KEPT SO IT IS NOT
+    REPEATED. It refused early, returning its own result and never calling
+    through, on the argument that a rewrite could not tell a schema refusal from a
+    DOMAIN refusal — the two arrive in the identical shape — without matching the
+    validation library's text. The premise about the shapes is true; the
+    conclusion does not follow, because the discriminator never had to come from
+    the result at all. It is the missing set, and it is known before the call is
+    made.
 
     WHY ONLY *MISSING* ARGUMENTS, STATED AS A BOUNDARY RATHER THAN LEFT AS A GAP.
     A missing name is decidable exactly from the tool's declared `required` list —
@@ -557,9 +563,20 @@ def install_required_arguments(server: MCPServer) -> None:
     beside the real one, and two validators drift. The drift's failure mode is the
     expensive direction — this layer refusing a value the tool would have
     accepted — so the type case deliberately falls through and still answers in
-    the library's words. That residual is written down in `src/codebugs/CLAUDE.md`
-    rather than being discovered later, and
-    `tests/test_cb326_required_arguments.py` pins the boundary from this side.
+    the library's words.
+
+    THAT BOUNDARY HAS A PRECEDENCE RULE, AND IT IS STATED BECAUSE IT IS OBSERVABLE.
+    When a call BOTH omits one required field AND mistypes another, the answer
+    names the omission and says nothing about the type: the replacement swaps the
+    content whole rather than appending to it, and appending would leave the
+    foreign text in place, failing this card's own headline test. So "a wrong type
+    falls through" holds precisely when nothing is missing. The cost is named
+    rather than absorbed: before this layer a client saw both faults at once and
+    fixed them in one pass, and now learns of the second on its next call — one
+    extra round trip in a rare shape, accepted against the alternative of this
+    package holding a second opinion about types. `src/codebugs/CLAUDE.md` carries
+    the narrowed sentence, and `tests/test_cb326_required_arguments.py` pins both
+    halves — the precedence and the fall-through — from this side.
 
     PLACEMENT IS NOT A DETAIL, AND IT IS WHY THIS IS A SECOND MIDDLEWARE RATHER
     THAN A BRANCH INSIDE `install_strict_arguments`. The two checks need OPPOSITE
@@ -579,7 +596,12 @@ def install_required_arguments(server: MCPServer) -> None:
     validation failure has always come back as a returned result, and client code
     is written accordingly. Merging the two channels would change how every caller
     must handle this, and buys nothing — the card is about the words, not the
-    channel.
+    channel. **The line was crossed once, by accident, which is why it is
+    stated this firmly:** the hand-built result described in
+    `_with_missing_arguments_text` was rejected by the client's own validator
+    under a `discover()` session, so the refusal arrived as a raised exception
+    instead of a returned result — the exact forbidden change, produced by a
+    layer whose author believed he was leaving the channel alone.
 
     THE SDK COUPLING LIVES HERE, BESIDE ITS TWO SIBLINGS, for the reason their
     docstrings already give: `MCPServer.middleware` is public but documented as
@@ -631,6 +653,19 @@ def install_required_arguments(server: MCPServer) -> None:
                 # answer — the SDK's own "Unknown tool" stays authoritative,
                 # exactly as in `install_strict_arguments`. A KNOWN tool that
                 # declares no required arguments has nothing to check.
+                #
+                # THAT FIRST CLAIM HOLDS UNDER A CONDITION, AND THE CONDITION IS
+                # NAMED RATHER THAN ASSUMED: the catalogue is complete before the
+                # server begins serving. It is cached on first use and never
+                # refreshed, so a tool REGISTERED later is invisible to this
+                # layer (it simply goes unchecked, which is safe), while a tool
+                # REMOVED later would still be found here — and this layer would
+                # then replace the SDK's rightful "Unknown tool" with its own
+                # "missing required argument". `_build_server` registers every
+                # provider before the server runs and nothing removes a tool
+                # afterwards, so neither case is reachable today. The identical
+                # staleness sits in `install_strict_arguments`' own cache; making
+                # it false is one question about both layers, not this card's.
                 declared = required.get(name) or []
                 missing = [field for field in declared if field not in arguments]
                 tool = name
