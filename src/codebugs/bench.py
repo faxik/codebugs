@@ -1016,42 +1016,48 @@ def _cmd_bench_import(args: argparse.Namespace) -> None:
 def _cmd_bench_query(args: argparse.Namespace) -> None:
     from codebugs.cli import domain_errors
 
+    # THE `print`s ARE OUTSIDE THE WRAPPER (CB-319, form landed by CB-316 in
+    # `reqs._cmd_reqs_add`): only the domain call stays inside `with
+    # domain_errors():`, so a `UnicodeEncodeError` from one of these lines —
+    # a `ValueError` subclass — is never caught by the input-refusal arm and
+    # reported as "bad input". This handler is read-only, so the mechanism
+    # cannot misreport a committed write, but the form is applied uniformly.
     conn = db.connect()
     try:
-        with domain_errors():
-            kwargs: dict[str, Any] = {
-                "benchmark": args.benchmark,
-                "group_by": args.group_by or "row",
-                "format": args.format or "json",
-            }
-            if args.runs:
-                kwargs["runs"] = args.runs
-            if args.date_from:
-                kwargs["date_from"] = args.date_from
-            if args.date_to:
-                kwargs["date_to"] = args.date_to
-            if args.metrics:
-                kwargs["metrics"] = [m.strip() for m in args.metrics.split(",")]
-            if args.rows:
-                kwargs["rows"] = [r.strip() for r in args.rows.split(",")]
-            # `is not None`, never truthiness: with `if args.last_n:` a typed
-            # `--last-n 0` was dropped here and `query` never saw it, so the CLI
-            # kept returning every run after the domain fix had already made a
-            # supplied zero mean zero rows. The guard one frame up defeats the
-            # guard one frame down (CB-161).
-            if args.last_n is not None:
-                kwargs["last_n"] = args.last_n
+        kwargs: dict[str, Any] = {
+            "benchmark": args.benchmark,
+            "group_by": args.group_by or "row",
+            "format": args.format or "json",
+        }
+        if args.runs:
+            kwargs["runs"] = args.runs
+        if args.date_from:
+            kwargs["date_from"] = args.date_from
+        if args.date_to:
+            kwargs["date_to"] = args.date_to
+        if args.metrics:
+            kwargs["metrics"] = [m.strip() for m in args.metrics.split(",")]
+        if args.rows:
+            kwargs["rows"] = [r.strip() for r in args.rows.split(",")]
+        # `is not None`, never truthiness: with `if args.last_n:` a typed
+        # `--last-n 0` was dropped here and `query` never saw it, so the CLI
+        # kept returning every run after the domain fix had already made a
+        # supplied zero mean zero rows. The guard one frame up defeats the
+        # guard one frame down (CB-161).
+        if args.last_n is not None:
+            kwargs["last_n"] = args.last_n
 
+        with domain_errors():
             result = query(conn, **kwargs)
 
-            if result["runs_matched"] == 0:
-                print("(no matching runs)")
-                return
+        if result["runs_matched"] == 0:
+            print("(no matching runs)")
+            return
 
-            if result["format"] == "csv":
-                print(result["csv"])
-            else:
-                print(json.dumps(result["data"], indent=2))
+        if result["format"] == "csv":
+            print(result["csv"])
+        else:
+            print(json.dumps(result["data"], indent=2))
     finally:
         conn.close()
 
@@ -1059,6 +1065,14 @@ def _cmd_bench_query(args: argparse.Namespace) -> None:
 def _cmd_bench_list(args: argparse.Namespace) -> None:
     from codebugs.cli import domain_errors
 
+    # THE `print`s ARE OUTSIDE THE WRAPPER (CB-319, form landed by CB-316 in
+    # `reqs._cmd_reqs_add`). With a print INSIDE, a `UnicodeEncodeError` from
+    # one of these lines — a `ValueError` subclass — would be caught by the
+    # input-refusal arm below and reported as "bad input", masking a domain
+    # call that already ran. The pre-domain-call `--last-n` validation stays
+    # inside `with domain_errors():`, unchanged: it raises before any domain
+    # call, so it carries none of that risk, and moving it out would turn it
+    # back into a raw traceback (see the comment on it below).
     conn = db.connect()
     try:
         # `domain_errors()` is required rather than decorative here: `list_runs`
@@ -1079,34 +1093,37 @@ def _cmd_bench_list(args: argparse.Namespace) -> None:
                 )
             if args.benchmark:
                 result = list_runs(conn, benchmark=args.benchmark, last_n=args.last_n)
-                if not result["runs"]:
-                    print("(no runs)")
-                    return
-                data = [
-                    {
-                        "run_id": r["run_id"],
-                        "date": r["date"],
-                        "results": str(r["result_count"]),
-                        "tags": ",".join(r["tags"]),
-                    }
-                    for r in result["runs"]
-                ]
-                print(format_table(data, ["run_id", "date", "results", "tags"]))
             else:
                 result = list_benchmarks(conn)
-                if not result["benchmarks"]:
-                    print("(no benchmarks)")
-                    return
-                data = [
-                    {
-                        "benchmark": b["benchmark"],
-                        "runs": str(b["run_count"]),
-                        "first": b["first_date"],
-                        "last": b["last_date"],
-                    }
-                    for b in result["benchmarks"]
-                ]
-                print(format_table(data, ["benchmark", "runs", "first", "last"]))
+
+        if args.benchmark:
+            if not result["runs"]:
+                print("(no runs)")
+                return
+            data = [
+                {
+                    "run_id": r["run_id"],
+                    "date": r["date"],
+                    "results": str(r["result_count"]),
+                    "tags": ",".join(r["tags"]),
+                }
+                for r in result["runs"]
+            ]
+            print(format_table(data, ["run_id", "date", "results", "tags"]))
+        else:
+            if not result["benchmarks"]:
+                print("(no benchmarks)")
+                return
+            data = [
+                {
+                    "benchmark": b["benchmark"],
+                    "runs": str(b["run_count"]),
+                    "first": b["first_date"],
+                    "last": b["last_date"],
+                }
+                for b in result["benchmarks"]
+            ]
+            print(format_table(data, ["benchmark", "runs", "first", "last"]))
     finally:
         conn.close()
 
@@ -1114,6 +1131,13 @@ def _cmd_bench_list(args: argparse.Namespace) -> None:
 def _cmd_bench_delete(args: argparse.Namespace) -> None:
     from codebugs.cli import domain_errors
 
+    # THE `print`s ARE OUTSIDE THE WRAPPER (CB-319, form landed by CB-316 in
+    # `reqs._cmd_reqs_add`). With a print INSIDE, a `UnicodeEncodeError` from
+    # one of these lines — a `ValueError` subclass, raised only after the
+    # delete committed — would be caught by the input-refusal arm and
+    # reported as "bad input" for a mutation that landed. `_require_exactly_one`
+    # stays inside `with domain_errors():`: it raises before any domain call,
+    # so it carries none of that risk.
     conn = db.connect()
     try:
         with domain_errors():
@@ -1122,10 +1146,12 @@ def _cmd_bench_delete(args: argparse.Namespace) -> None:
             )
             if args.run_id:
                 result = delete_run(conn, args.run_id)
-                print(f"Deleted run {result['deleted']} ({result['results_removed']} results)")
             else:
                 result = delete_benchmark(conn, args.benchmark)
-                print(f"Deleted benchmark {result['deleted_benchmark']} ({result['runs_removed']} runs, {result['results_removed']} results)")
+        if args.run_id:
+            print(f"Deleted run {result['deleted']} ({result['results_removed']} results)")
+        else:
+            print(f"Deleted benchmark {result['deleted_benchmark']} ({result['runs_removed']} runs, {result['results_removed']} results)")
     finally:
         conn.close()
 

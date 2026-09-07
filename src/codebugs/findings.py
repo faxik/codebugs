@@ -5534,14 +5534,19 @@ def register_cli(sub, commands) -> None:
     def _cmd_update(args: argparse.Namespace) -> None:
         from codebugs.cli import domain_errors
 
+        # THE `print` IS OUTSIDE THE WRAPPER (CB-319, form landed by CB-316 in
+        # `_cmd_reqs_add`). `json.JSONDecodeError` re-raises rather than
+        # printing as bad input (domain_errors, cli.py): this is a corrupted
+        # stored row, not bad user input, and the write has ALREADY been
+        # committed by the time result serialization raises. Leaving the
+        # print INSIDE the wrapper would additionally let a `UnicodeEncodeError`
+        # from THIS line — a `ValueError` subclass, raised only after the
+        # commit — be caught by the input-refusal arm and reported as "bad
+        # input" for a mutation that landed. Outside the wrapper the same
+        # failure is a traceback, the correct answer to a committed write
+        # whose report could not be delivered.
         conn = db.connect()
         try:
-            # json.JSONDecodeError re-raises rather than printing as bad input
-            # (domain_errors, cli.py): this is a corrupted stored row, not bad
-            # user input, and the write has ALREADY been committed by the time
-            # result serialization raises. Reporting it as a clean input error
-            # would exit 1 on a successful mutation — a failure-shaped signal
-            # for a write that landed.
             with domain_errors():
                 result = update_finding(
                     conn,
@@ -5551,10 +5556,10 @@ def register_cli(sub, commands) -> None:
                     notes=args.notes,
                     append_note=args.append_note,
                 )
-                print(
-                    f"Updated: {result['id']} "
-                    f"(status={result['status']}, severity={result['severity']})"
-                )
+            print(
+                f"Updated: {result['id']} "
+                f"(status={result['status']}, severity={result['severity']})"
+            )
         finally:
             conn.close()
 
