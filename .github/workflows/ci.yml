@@ -217,9 +217,29 @@ jobs:
       - name: Interpreter (from .python-version)
         run: uv python install && uv run python -V
 
-      - name: Resolve the newest versions the dependency ranges admit
+      # THE `uv sync` LINE REFUSES A HYBRID ENVIRONMENT, AND THAT IS THE WHOLE
+      # REASON IT IS HERE. `uv run` synchronises INEXACTLY: it installs what the
+      # lockfile now asks for and LEAVES BEHIND what it no longer asks for
+      # (measured 2026-09-07 on a disposable clone — a package planted in `.venv`
+      # survives `uv run` and is reported `Uninstalled 1 package` by `uv sync`).
+      # So without this line, the day a future `mcp` release stops requiring
+      # `mcp-types` or `pydantic`, `--upgrade-package` adds no requirement for
+      # them, the copies installed from the OLD graph survive, the versions print,
+      # the suite imports them and the job goes GREEN — while a fresh `pipx`
+      # install, which starts from nothing, cannot import them at all. That is a
+      # gate reporting green because it is looking at an environment no user has.
+      #
+      # ORDER IS LOAD-BEARING IN BOTH DIRECTIONS. After `uv lock`, because syncing
+      # first would materialise the OLD graph. Before the version print, because a
+      # print taken from the inexact environment names packages the exact sync is
+      # about to remove — the gate's own report lying about what the tests ran on,
+      # which is the defect this whole job exists to catch. And before the suite,
+      # obviously. `tests/test_cb314_linter_pin.py` asserts that order off this
+      # file rather than trusting anyone's memory of it.
+      - name: Resolve the newest versions the ranges admit, and build exactly that
         run: |
           uv lock --upgrade-package mcp --upgrade-package mcp-types --upgrade-package pydantic
+          uv sync --extra dev
           uv run --extra dev python -c "import importlib.metadata as m; [print(n, m.version(n)) for n in ('mcp', 'mcp-types', 'pydantic')]"
 
       - name: Tests

@@ -356,6 +356,63 @@ class TestTheNewestDependenciesJobNamesEveryDirectImport:
                 f"for: {line.strip()}"
             )
 
+    def test_the_resolved_graph_is_materialised_before_anything_reads_it(self):
+        """The job must run the tests against EXACTLY the graph it just resolved.
+
+        `uv run` synchronises inexactly — it installs what the lockfile now asks for
+        and leaves behind what it no longer asks for (measured: a package planted in
+        `.venv` survives `uv run` and is removed by `uv sync`). So a job that
+        resolves and then goes straight to `uv run` tests a HYBRID: the new versions
+        plus whatever the old graph had left lying there. The day a future `mcp`
+        release stops requiring `mcp-types` or `pydantic`, that hybrid still imports
+        them and the job passes, while a fresh install — which starts from nothing —
+        cannot.
+
+        THIS IS WHAT MAKES THE `newest-sdk` JOB'S RED MEAN ANYTHING, and therefore
+        what makes this file's other assertion about that job's package list mean
+        anything: a run against an inexactly built environment can neither fail
+        reliably for the right reason nor pass reliably, because a surviving old
+        copy can equally mask a real incompatibility and manufacture a false one.
+
+        THREE ORDERINGS ARE ASSERTED, and each is load-bearing in its own direction:
+        the sync AFTER `uv lock` (before it, and it would build the OLD graph); the
+        sync BEFORE the version print (after it, and the printed versions describe an
+        environment the sync is about to change — the gate lying in its own report);
+        and the sync BEFORE the suite (after it, and the tests ran on the hybrid).
+        """
+        code = _strip_comments(WORKFLOW.read_text(encoding="utf-8"))
+
+        syncs = [ln for ln in code.splitlines() if "uv sync" in ln]
+        assert len(syncs) == 1, (
+            f"expected exactly one `uv sync` in ci.yml, found {len(syncs)}: {syncs}. The "
+            "assertions below locate the other commands relative to it, so a second one "
+            "would leave them judging an ordering nobody meant."
+        )
+        prints = [ln for ln in code.splitlines() if "importlib.metadata" in ln]
+        assert len(prints) == 1, (
+            f"expected exactly one version-printing command in ci.yml, found {prints}"
+        )
+
+        at_lock = code.index("uv lock")
+        at_sync = code.index("uv sync --extra dev")
+        at_print = code.index("importlib.metadata")
+        at_tests = code.index("python -m pytest tests/ -q", at_sync)
+
+        assert at_lock < at_sync, (
+            "`uv sync` runs BEFORE `uv lock --upgrade-package …` in ci.yml, so it builds "
+            "the environment from the OLD graph and the upgrade never reaches the tests."
+        )
+        assert at_sync < at_print, (
+            "the version-printing command runs BEFORE `uv sync`, so it reports the "
+            "environment as it was — including packages the exact sync is about to "
+            "remove. A gate whose own report names versions the tests did not run on is "
+            "the defect this job exists to catch, rebuilt inside it."
+        )
+        assert at_print < at_tests, (
+            "the suite runs before the versions are printed; the log would then not say "
+            "what the run below it was measuring."
+        )
+
     def test_nothing_in_the_project_file_narrows_resolution_behind_the_job(self):
         """The same attack as above, moved out of the command and into settings.
 
