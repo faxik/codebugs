@@ -123,8 +123,20 @@ class TestAddRequirement:
             reqs.add_requirement(conn, req_id="FR-001", description="test", status="done")
 
     def test_duplicate_id_raises(self, conn):
+        """CB-316 changed the CLASS deliberately: `sqlite3.IntegrityError` → `ValueError`.
+
+        The old expectation pinned the defect. `refusals.CLASSIFICATION` does not
+        name `sqlite3.IntegrityError` — a foreign class, and by the table's own
+        fail-closed rule an unnamed class is a CRASH — so the refusal reached the
+        command line as a traceback and, under `mcp` 2.1.1, reached the MCP
+        client with no text at all. `ValueError` is the contract this package
+        declares for invalid input and the table classifies it as a refusal, so
+        the text now survives on both surfaces. The behavioural detail lives in
+        `tests/test_cb316_reqs_add_refusals.py`; what is pinned here is the class
+        this long-standing test is about.
+        """
         reqs.add_requirement(conn, req_id="FR-001", description="first")
-        with pytest.raises(sqlite3.IntegrityError):
+        with pytest.raises(ValueError, match="FR-001 already exists"):
             reqs.add_requirement(conn, req_id="FR-001", description="second")
 
     def test_tags_and_meta(self, conn):

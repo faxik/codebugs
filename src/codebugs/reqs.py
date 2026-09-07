@@ -140,25 +140,80 @@ def add_requirement(
     not apply here: this is a fresh INSERT, and the stored ``tags``/``meta`` are
     the exact JSON strings this call just serialized two lines below, never a
     previously-stored value another writer could have left malformed.
+
+    Raises ``ValueError`` when the table refuses the row (CB-316) — see
+    ``_constraint_refusal`` for what the message may and may not claim. Before
+    that the ``sqlite3.IntegrityError`` travelled to the caller unchanged, and
+    since ``refusals.CLASSIFICATION`` does not name that foreign class it was
+    classified as a CRASH: on the command line a full traceback, and over MCP —
+    measured under ``mcp`` 2.1.1, the version the owner runs — the bare line
+    ``Error executing tool reqs_add`` with the reason stripped entirely.
     """
     priority = resolve_priority(priority)
     status = resolve_requirement_status(status)
 
     now = utc_now()
-    with db.txn(conn):
-        row = conn.execute(
-            """INSERT INTO requirements (id, section, description, priority, status,
-               source, test_coverage, tags, meta, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               RETURNING *""",
-            (
-                req_id, section, description, priority, status,
-                source, test_coverage, json.dumps(tags or []),
-                json.dumps(meta or {}), now, now,
-            ),
-        ).fetchone()
-        result = db.row_to_dict(row)
+    try:
+        with db.txn(conn):
+            row = conn.execute(
+                """INSERT INTO requirements (id, section, description, priority, status,
+                   source, test_coverage, tags, meta, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   RETURNING *""",
+                (
+                    req_id, section, description, priority, status,
+                    source, test_coverage, json.dumps(tags or []),
+                    json.dumps(meta or {}), now, now,
+                ),
+            ).fetchone()
+            result = db.row_to_dict(row)
+    except sqlite3.IntegrityError as exc:
+        # OUTSIDE the `with`, so `db.txn` has already rolled back by the time the
+        # refusal is built: nothing of this call is left half-written, and the
+        # message is composed over a settled database rather than an open one.
+        raise ValueError(_constraint_refusal(req_id, exc)) from exc
     return result
+
+
+def _constraint_refusal(req_id: str, exc: sqlite3.IntegrityError) -> str:
+    """The person-facing text for a row the requirements table refused (CB-316).
+
+    WHY A MESSAGE IS CHOSEN AT ALL, RATHER THAN ONE SENTENCE FOR EVERY CASE.
+    ``PRIMARY KEY`` is not the only constraint this INSERT can violate:
+    ``description``, ``section``, ``source`` and ``test_coverage`` are all
+    ``NOT NULL``, and ``add_requirement`` is a public domain function, so a
+    library caller reaches them (measured — ``description=None`` raises with
+    ``sqlite_errorname == 'SQLITE_CONSTRAINT_NOTNULL'``). Answering *"requirement
+    FR-1 already exists"* there would be a LIE dressed as a refusal, about a row
+    that is not in the table at all. Neither surface reaches those columns today
+    — the CLI declares ``-d`` required and substitutes ``""`` for every optional
+    string, and the MCP SDK's own argument validation refuses ``None`` against
+    ``description: str`` before the body runs — but a message must be true of the
+    function it belongs to, not of the callers that happen to exist.
+
+    HOW THIS DIFFERS FROM WHAT CB-99 FORBADE, BECAUSE THE NEXT READER WILL
+    OTHERWISE READ IT AS A VIOLATION. CB-99 is thirty lines below in this same
+    file, and it ratified: do NOT enumerate sqlite result codes, because review
+    measured such a list wrong in both directions. That decision is about
+    CLASSIFYING a failure — deciding whether it means *this row is malformed* or
+    *the environment broke* — and it stands here untouched: the classification is
+    still made by the exception TREE, ``sqlite3.IntegrityError``, whose whole
+    membership is "this ROW violates the table's constraints". The code is read
+    only to CHOOSE BETWEEN TWO TRUE SENTENCES, which is the same split ``db.py``
+    already draws for ``SQLITE_CANTOPEN`` ("for message selection only", CB-86).
+
+    And the direction of failure is what makes that split safe rather than a
+    loophole: a code this function does not recognise — a future constraint, an
+    absent attribute, a build that spells it differently — falls through to the
+    weaker sentence, which is true of EVERY member of ``IntegrityError``. A
+    mis-read code costs precision, never truth; there is no input for which this
+    invents a duplicate that does not exist.
+    """
+    if getattr(exc, "sqlite_errorname", "") == "SQLITE_CONSTRAINT_PRIMARYKEY":
+        return f"requirement {req_id} already exists"
+    return (
+        f"requirement {req_id} was refused by the requirements table's constraints: {exc}"
+    )
 
 
 def batch_add_requirements(
@@ -999,16 +1054,32 @@ def register_cli(sub, commands) -> None:
     from codebugs.types import REQUIREMENT_STATUSES, PRIORITIES
 
     def _cmd_reqs_add(args: argparse.Namespace) -> None:
+        from codebugs.cli import domain_errors
+
+        # Routed through the shared wrapper, exactly like `_cmd_reqs_update` and
+        # the other neighbours in this file (CB-316). Without it this handler
+        # caught nothing at all, and CLAUDE.md's Error-handling section is
+        # explicit that this is a violation of the same rule as catching in the
+        # wrong order: an unknown `--priority` printed a raw traceback and leaked
+        # the connection, and so did a duplicate identifier once
+        # `add_requirement` began refusing one.
+        #
+        # `try/finally` around the whole region, not just `close()` after the
+        # call: `domain_errors` exits the process on a refusal, so a `close()`
+        # written below it would simply never run.
         conn = db.connect()
-        tags = [t.strip() for t in args.tags.split(",")] if args.tags else []
-        result = add_requirement(
-            conn, req_id=args.id, description=args.description,
-            section=args.section or "", priority=args.priority or "should",
-            status=args.status or "planned", source=args.source or "",
-            test_coverage=args.test_coverage or "", tags=tags,
-        )
-        conn.close()
-        print(f"Added: {result['id']}")
+        try:
+            tags = [t.strip() for t in args.tags.split(",")] if args.tags else []
+            with domain_errors():
+                result = add_requirement(
+                    conn, req_id=args.id, description=args.description,
+                    section=args.section or "", priority=args.priority or "should",
+                    status=args.status or "planned", source=args.source or "",
+                    test_coverage=args.test_coverage or "", tags=tags,
+                )
+                print(f"Added: {result['id']}")
+        finally:
+            conn.close()
 
     def _cmd_reqs_update(args: argparse.Namespace) -> None:
         from codebugs.cli import domain_errors
