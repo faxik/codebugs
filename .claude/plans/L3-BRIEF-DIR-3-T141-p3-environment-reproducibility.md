@@ -385,8 +385,13 @@ src/ tests/`. Строки `uvx` в файле не осталось; прове
    построен на `mcp.server.mcpserver.MCPServer`. Установщик выбирает версию свободно внутри
    диапазона; именно так у владельца оказался `mcp` 2.1.1 при 2.0.0 в файле блокировки.
 2. **`mcp-types`** — импортируется как `mcp_types` безусловно, на уровне модуля, в
-   `src/codebugs/surfacegen.py`. Не объявлена, приходит транзитивно: `mcp` 2.1.1 требует
-   `mcp-types==2.1.1`.
+   `src/codebugs/server.py` (строка 18, `from mcp_types import INVALID_PARAMS, CallToolResult`).
+   Не объявлена, приходит транзитивно: `mcp` 2.1.1 требует `mcp-types==2.1.1`.
+   **Поправка, названная вслух: в первой редакции и этого раздела, и комментария `ci.yml` стоял
+   `surfacegen.py` — я спутал файлы, потому что `surfacegen.py` импортирует `pydantic`.** Найдено
+   собственной сверкой при перечитывании карты CB-267, исправлено коммитом `a30abdd`; заодно
+   перепроверены два соседних утверждения того же перечня (`server.py:15` действительно
+   `from mcp.server.mcpserver import MCPServer`; `pydantic` — ровно девять файлов под `src/`).
 3. **`pydantic`** — импортируется безусловно, на уровне модуля, в девяти файлах `src/`
    (`blockers.py`, `claims.py`, `findings.py`, `loc.py`, `merge.py`, `milestones/__init__.py`,
    `provenance.py`, `relations.py`, `surfacegen.py`). Не объявлена, приходит транзитивно: `mcp`
