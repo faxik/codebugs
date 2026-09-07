@@ -1093,6 +1093,14 @@ def register_cli(sub, commands) -> None:
         # CLAUDE.md-named debt ("reproduces the bug the day someone adds a
         # ValueError arm for resolve_priority"), closed here rather than by a
         # hand-written local ValueError arm.
+        #
+        # THE `print` IS OUTSIDE THE WRAPPER (CB-319, form landed by CB-316 in
+        # `_cmd_reqs_add` above). With the print INSIDE, a `UnicodeEncodeError`
+        # from THIS line — a `ValueError` subclass, raised only after the
+        # write committed — would be caught by the input-refusal arm and
+        # reported as "bad input" for a mutation that landed. Outside the
+        # wrapper the same failure is a traceback, the correct answer to a
+        # committed write whose report could not be delivered.
         conn = db.connect()
         try:
             with domain_errors():
@@ -1101,7 +1109,7 @@ def register_cli(sub, commands) -> None:
                     description=args.description, priority=args.priority,
                     test_coverage=args.test_coverage, notes=args.notes,
                 )
-                print(f"Updated: {result['id']} (status={result['status']})")
+            print(f"Updated: {result['id']} (status={result['status']})")
         finally:
             conn.close()
 
