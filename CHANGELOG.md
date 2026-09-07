@@ -8,6 +8,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Leaving out a required field over MCP now gets you an answer written by this tracker, instead
+  of a stranger's error message with a link to a stranger's website.** Calling `add` without
+  `severity` used to come back as `1 validation error for addArguments / severity / Field required
+  [type=missing, input_value={…}] / For further information visit https://errors.pydantic.dev/…` —
+  the wording of a library you never installed on purpose, the name of an internal object you have
+  no way to look up, and a documentation link that leads away from this project. You now get
+  `Missing required argument(s) for tool 'add': severity. Required: category, description, file,
+  severity. Refused before the call — the tool did not run and nothing was written.` The field you
+  forgot is still named, and so is every field the tool needs, so the second attempt is likelier to
+  work than the first.
+
+  Three things deliberately did NOT change, because each of them is something your code may already
+  depend on. The answer is still an ordinary error result, not a protocol-level failure, so client
+  libraries return it rather than raising — the shape your error handling is written against.
+  Passing an argument the tool does not declare still fails exactly as before, as a protocol error
+  naming the accepted arguments. And such a call is still counted the same way in `codebugs usage`,
+  so your own failure statistics stay comparable across this release.
+
+  One case is knowingly left as it was: a required field supplied with the **wrong type** still
+  answers in the validation library's words. Recognising a bad type here would mean this project
+  keeping a second opinion about your arguments alongside the one that actually decides, and two
+  opinions drift apart — the way they drift is that this project starts refusing values the tool
+  would have happily accepted, which is worse than an ugly message.
+
 - **Adding a requirement that already exists now tells you so, in one line, instead of printing a
   crash.** `codebugs reqs-add FR-1 …` twice used to end in a full Python traceback whose last line
   was a raw database message, `UNIQUE constraint failed: requirements.id`. You now get

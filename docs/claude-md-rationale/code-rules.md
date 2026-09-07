@@ -32,7 +32,7 @@ than the list".
 
 ---
 
-### MCP tool registration — CB-28, CB-73 {#регистрация-mcp-инструментов}
+### MCP tool registration — CB-28, CB-73, CB-326 {#регистрация-mcp-инструментов}
 
 **Justifies the rules** in `CLAUDE.md` → `## Code rules` → `### MCP tool registration`.
 
@@ -45,6 +45,69 @@ repo had already designed.
 older hosts, and 61 of 68 carried the indented-code-block pattern; both counts are 0 after the fix,
 and 3.13 output is byte-identical before and after — which is exactly why the wire golden did not
 move.
+
+**The FOURTH refusal channel, and why it turned out to be two channels rather than one (CB-326).**
+The project's error model described what happens INSIDE a tool and said nothing about what happens on
+the way IN. Measured 2026-09-07 through a live client session on a really-built server, under both
+admitted `mcp` versions and byte-identically on the two: a call omitting a required field came back
+as an error result reading `Error executing tool add: 1 validation error for addArguments / severity
+/ Field required [...] / For further information visit https://errors.pydantic.dev/2.12/v/missing` —
+another party's phrasing, the name of an internal model, and a link to a third-party site, in a
+tracker whose every other refusal speaks its own words. Not a rare path: this tracker's own usage
+table recorded `add` refusing 65 of 591 calls, the highest share of any core tool.
+
+**The revision document asked for an experiment on both versions because it expected them to differ,
+and they do not.** All four measured shapes are byte-identical; the only difference is that 2.1.1
+writes an extra line to the server's stderr (`Tool 'add' rejected arguments: ['severity']`), which no
+client sees. Checking both remains worthwhile as a CHECK — it is cheap, and a divergence could appear
+where none is today — but expecting one wastes the reader's attention.
+
+**The boundary is a PAIR, and the halves do not reduce to each other.** Schema validation by the
+type library yields a RESULT carrying a foreign text; `install_strict_arguments` yields a PROTOCOL
+error carrying the project's text, which a client library RAISES rather than returns. Two different
+failure texts and two different things a caller must write to handle them.
+
+**The cheap fix was measured and rejected, which is the finding worth keeping.** Rewriting the error
+result on the way out is possible — a middleware really does see it, and a substituted text reaches
+the client verbatim, both measured. But a DOMAIN refusal arrives in the identical shape, so a
+rewriting layer could only tell the two apart by matching the validation library's own wording:
+taking a dependency on precisely the thing the card exists to remove, and one that would fail
+silently the day that library rephrased itself. Asking the tool's own declared schema which arguments
+are required needs no such match. Hence a check AHEAD of the call.
+
+**Placement was decided by a measurement, not by taste, and it is why this is a second middleware
+rather than a branch in the first.** The two checks need OPPOSITE positions relative to
+`install_usage_tracking`. An unknown argument NAME is refused outside it and deliberately goes
+uncounted. A missing required field is counted TODAY — measured, one call, `add: calls=1 failures=1`
+— because the SDK catches it deeper than the usage layer reaches. Installing the new layer outside
+usage tracking would have silently stopped counting those calls, and the evidence justifying the card
+was read out of that very table. One function cannot occupy both positions, so there are two.
+
+**What was deliberately NOT taken on.** A wrong argument TYPE still answers in the library's words.
+Deciding it here means a second schema validator beside the real one; validators drift, and this one
+would drift toward refusing values the tool would have accepted — the expensive direction. The
+answer's SHAPE was also left alone: the refusal stays a result rather than becoming a protocol error,
+because merging the two channels would change how every existing caller must handle it and buys
+nothing, the card being about the words and not the channel.
+
+**How the client-visible contract was held.** `tests/manual/snapshot_cb326_error_contract.py` records
+eight protocol scenarios, a usage-counting section and a CLI section, under each version, before and
+after. The before/after diff is exactly the two subject scenarios; the six controls, the whole usage
+section and the whole CLI section are byte-identical, and the two versions still agree byte for byte
+after the change. This was needed because the wire golden is not a gate on the response FORM — no
+`outputSchema` is snapshotted and the live schema carries `additionalProperties: True`.
+
+**One mutation probe corrected the tests rather than the code.** Asserting "the text contains
+`severity`" survived a mutant that dropped the list of MISSING fields while keeping the list of
+REQUIRED ones, because the required list contains every name anyway. The replacement compares the
+answers to a one-missing and a two-missing call and requires them to differ — format-independent, so
+it survives rewording, and still fatal to the loss of content.
+
+**A pre-existing false sentence found on the way, and why nothing had caught it.** The rule bullet
+read "This is the one place the project touches `MCPServer.middleware`". That had already become
+false when `install_usage_tracking` landed, and `tests/test_claude_md_truth.py` could not see it: its
+declared vocabulary omits the word `one`, because in this prose `one` is almost always a pronoun.
+The blind spot is documented in the root rules file; this is an instance of it doing real harm.
 
 ---
 
