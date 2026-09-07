@@ -1002,10 +1002,10 @@ SERVER_NAMES = {
 
 #: Told to every connecting client via `MCPServer(instructions=...)` (T-75). The
 #: 83-tool catalogue says nothing about ORDER; this is the one place that does.
-#: Names the recommended loop and the 5-8 tool names it cannot be read without,
-#: never a full tool listing (that already exists, and is longer than any text
-#: written here) — see the unit brief for the content contract this text is
-#: negotiated against.
+#: Names the recommended loop and the situations that call for the other tool
+#: families, never a full tool listing (that already exists, and is longer than
+#: any text written here) — see the unit brief for the content contract this
+#: text is negotiated against.
 INSTRUCTIONS = """Recommended loop for a finding:
 
 1. File the observation with `add` (or `batch_add` for several at once).
@@ -1034,6 +1034,24 @@ done, or two agents can end up fixing the same thing.
 Requirements (`reqs_add`, `reqs_query`, ...) are a separate, authored entity
 next to findings: they have no deduplication. Do not file a requirement
 through `add`, or a defect through `reqs_add`.
+
+Beyond one finding at a time — the situation that calls for each:
+
+- A list worked across several sessions (a backlog, a file-by-file audit):
+  `codesweep_create`, then `codesweep_next` / `codesweep_mark` — progress
+  survives a session that dies halfway.
+- Several agents editing one tree: `codemerge_start`, `codemerge_claim` the
+  files you will touch, `codemerge_check` before editing, `codemerge_finish`
+  when the branch lands. `claims_claim` reserves CARDS; this reserves FILES.
+- Work outliving one card — a release, a standing queue: `milestone_create`,
+  `milestone_add_item`, then `pull_next` for the next eligible item and
+  `wip_status` to see who is loaded.
+- Blocked until something else lands: `blockers_add`, later `blockers_check`.
+- Numbers a later session will compare: `codebench_import`, `codebench_query`
+  — a measurement left in a file is one nobody can query.
+- Housekeeping: `similarity_check` a suspected duplicate, `staleness_check` a
+  card whose code may have moved, `relations_relate` cards that belong
+  together, `triage_inbox` for what arrived unsorted.
 """
 
 
