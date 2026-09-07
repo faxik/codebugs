@@ -106,7 +106,9 @@ holds. That is repaired in the harness, not in this tree.
 from __future__ import annotations
 
 import ast
+import io
 import re
+import tokenize
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -1440,10 +1442,34 @@ def test_every_historical_measurement_carries_a_stamp() -> None:
 
 
 def test_every_row_carries_a_reason() -> None:
+    """Every table in this module, of every shape, is read for its reason field.
+
+    A reason that lives only in a comment beside a table is text no test reads, so
+    `tests/test_exception_table_discipline.py` refuses a table without this check —
+    and it caught SEARCH_DIRS and SANCTIONED_VALUE_INTERPOLATIONS when they had it
+    only in prose above them.
+    """
     blank = [
         f"{row.file}:{row.anchor[:40]!r}"
         for row in (*LIVE, *HISTORICAL, *NOT_A_CLAIM)
         if not row.reason.strip()
+    ]
+    blank += [f"NOT_A_PATH:{row.text!r}" for row in NOT_A_PATH if not row.reason.strip()]
+    blank += [f"REMOVED:{row.was!r}" for row in REMOVED if not row.reason.strip()]
+    blank += [
+        f"SEARCH_DIRS:{name!r}"
+        for name, reason in SEARCH_DIRS.items()
+        if not isinstance(reason, str) or not reason.strip()
+    ]
+    blank += [
+        f"SANCTIONED_VALUE_INTERPOLATIONS:{key!r}"
+        for key, reason in SANCTIONED_VALUE_INTERPOLATIONS.items()
+        if not isinstance(reason, str) or not reason.strip()
+    ]
+    blank += [
+        f"PAIRED_RULES:{root_text!r}"
+        for root_text, _sub, reason in PAIRED_RULES
+        if not reason.strip()
     ]
     assert not blank, f"rows declared with no reason: {blank}"
 
@@ -1703,9 +1729,6 @@ def test_every_rationale_anchor_resolves(rel: str) -> None:
 # declared list is EXACTLY the set of value interpolations this predicate sees,
 # in both directions, and what the predicate cannot see is named here.
 # --------------------------------------------------------------------------- #
-import io  # noqa: E402
-import tokenize  # noqa: E402
-
 PACKAGE = REPO_ROOT / "src" / "codebugs"
 
 # NOTE THE BOUNDARIES, because the first draft got them wrong and a mutant caught
@@ -1858,15 +1881,20 @@ SANCTIONED_VALUE_INTERPOLATIONS: dict[tuple[str, str], str] = {
 
 
 def _statement_span(tree: ast.Module, line: int) -> tuple[int, int]:
-    """The innermost statement containing a line, as (first line, last line)."""
+    """The SMALLEST statement containing a line, as (first line, last line).
+
+    Smallest, not outermost: a reason has to sit near the interpolation, and the
+    enclosing function would put the whole body in scope.
+    """
     best = (line, line)
     for node in ast.walk(tree):
         if not isinstance(node, ast.stmt):
             continue
         end = getattr(node, "end_lineno", None) or node.lineno
-        if node.lineno <= line <= end and (end - node.lineno) <= (best[1] - best[0]) or best == (line, line):
-            if node.lineno <= line <= end:
-                best = (node.lineno, end)
+        if not node.lineno <= line <= end:
+            continue
+        if best == (line, line) or (end - node.lineno) < (best[1] - best[0]):
+            best = (node.lineno, end)
     return best
 
 
