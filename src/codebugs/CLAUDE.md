@@ -421,7 +421,7 @@ Every response is
 
 ## Milestones module
 
-`milestones.py` owns four tables (`milestones`, `milestone_items`, `milestone_audit`, `agent_capacity`) and 19 MCP tools across three phases:
+The `milestones/` package — a directory of modules, not a single file — owns four tables (`milestones`, `milestone_items`, `milestone_audit`, `agent_capacity`) and 19 MCP tools across three phases:
 
 1. **Foundation** — milestone & item CRUD, audit log, auto-routing every new finding into `stream/triage` (or `stream/security` for `severity=critical && category.startswith("security:")`).
 
@@ -431,4 +431,4 @@ Every response is
 
 `pull_next` eligibility: item is `open`, no active blockers (skipped for `item_kind='external'`), acceptance required for `size='large'`, and large bugs in release milestones must declare `linked_frs` whose ids resolve to rows in `requirements`. Agent capacity is tracked per `(agent_id, size)` and decremented by `release_item`.
 
-For the design and adversarial-review history, see `docs/superpowers/plans/2026-05-11-milestones-streams.md` and the source spec at `../autosorter/.claude/plans/codebugs-milestones-streams-v1.md`.
+For the design and adversarial-review history, see `docs/superpowers/plans/2026-05-11-milestones-streams.md`. The source spec was written in the sibling `autosorter` repository and the path this line used to name is not there any more; it is dropped rather than replaced with a fresh guess, because a pointer into another checkout is something this tree can never verify (CB-296).

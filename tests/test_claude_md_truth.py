@@ -1451,3 +1451,201 @@ def test_a_count_that_introduces_an_enumeration_matches_it(rel: str) -> None:
             wrong.append(f"line {token.line}: says {token.text!r} but lists {length} items")
     assert not wrong, f"{rel}: a count disagrees with the enumeration it introduces: {wrong}"
 
+# --------------------------------------------------------------------------- #
+# THE POINTERS — the other half of a normative text that rots (oracle point 4)
+#
+# A number and a path fail the same way: the tree moves and the prose does not.
+# Extraction is the same shape as for numbers — one declared lexical rule, then a
+# total accounting in which the unclassified is REFUSED.
+#
+# THE LEXICAL RULE: a Markdown inline-code span with no whitespace that either
+# contains a "/" or ends in a source extension is a path candidate. Everything
+# else in backticks is a name, a command or a fragment of code.
+#
+# RESOLUTION, and every step of it is a convention this corpus really uses:
+#   * a glob must match at least one tracked path;
+#   * a path resolves at the repository root;
+#   * or relative to the DIRECTORY OF THE FILE THAT NAMES IT — which is why the
+#     subsystem file may write `db.py` and mean `src/codebugs/db.py`;
+#   * or under one of SEARCH_DIRS, the directories this corpus habitually elides;
+#   * or with `.py` appended, for a module named without its extension.
+# Anything left must sit in NOT_A_PATH with a reason. The seven shapes a naive
+# check would have reddened on are all there, each named.
+# --------------------------------------------------------------------------- #
+_CODE_SPAN = re.compile(r"`([^`\n]+)`")
+_PATH_SHAPED = re.compile(r"^[\w./*<>-]+$")
+_SOURCE_EXT = re.compile(r"\.(?:py|md|sh|yml|yaml|toml|json|html|lock|csv|db)$")
+
+# directory -> why this corpus writes paths under it without naming it.
+# SELF-DELETING: a directory nothing needs any more fails the test below.
+SEARCH_DIRS: dict[str, str] = {
+    "tools": "the harness scripts are named by basename throughout the Workflow section",
+    "tests": "test modules are named by basename in both files",
+    ".github/workflows": "`ci.yml` and `main-invariants.yml` are named by basename",
+    "src/codebugs": "the subsystem file names its own siblings by basename",
+}
+
+
+@dataclass(frozen=True)
+class NotAPath:
+    file: str
+    text: str
+    reason: str
+
+
+NOT_A_PATH: tuple[NotAPath, ...] = (
+    # --- the seven shapes the reconnaissance found a naive check would redden on
+    NotAPath(
+        ROOT,
+        ".worktrees/<slug>",
+        "a TEMPLATE with a placeholder, not a path — the slug is filled in per branch",
+    ),
+    NotAPath(ROOT, ".worktrees/<type>-<slug>", "the same template, in its two-part form"),
+    NotAPath(
+        SUB,
+        "tools/call",
+        "not a path at all: the name of an MCP protocol method. The `tools/` prefix "
+        "is what fools a pattern written for filenames",
+    ),
+    # (the fabricated `git mv src/keep.py .claude/plans/keep.md` example, the
+    #  `*.md` / `*.html` / `worktree-*.sh` name patterns, `tests/_mcp_schema` and
+    #  the `db.py:_open` file-symbol notation are all handled by RESOLUTION above
+    #  rather than by a row: globs are expanded, the module gets its `.py`, and
+    #  the illustrative example names two paths that really do resolve.)
+    # --- runtime and gitignored paths -------------------------------------
+    NotAPath(ROOT, ".worktrees/", "created by the harness and gitignored; absent in a clean clone"),
+    NotAPath(ROOT, ".worktrees/.integrate.lock", "the integration lock file, created per run"),
+    NotAPath(ROOT, ".claude/worktrees/", "the legacy worktree directory, likewise gitignored"),
+    NotAPath(ROOT, ".codebugs/findings.db", "the tracker database, created by `codebugs init`"),
+    NotAPath(SUB, ".codebugs/", "the tracker directory, likewise created at runtime"),
+    NotAPath(SUB, "findings.db", "the tracker database again, named by basename"),
+    NotAPath(ROOT, ".git/FETCH_HEAD", "a file git writes inside its own administrative directory"),
+    # --- names that are not paths ------------------------------------------
+    NotAPath(ROOT, "fix/", "a branch-name PREFIX; the trailing slash is naming, not a directory"),
+    NotAPath(ROOT, "feature/", "a branch-name prefix"),
+    NotAPath(ROOT, "refactor/", "a branch-name prefix"),
+    NotAPath(ROOT, "fix/cb-48-tracker-root-init", "an example BRANCH name"),
+    NotAPath(ROOT, "origin/main", "a git ref"),
+    NotAPath(SUB, "stream/triage", "a milestone name in this product's own vocabulary"),
+    NotAPath(SUB, "stream/security", "a milestone name in this product's own vocabulary"),
+    NotAPath(ROOT, "briefs/", "a directory named by its last segment inside `.claude/plans/`"),
+    # --- foreign trees ------------------------------------------------------
+    NotAPath(
+        ROOT,
+        "../autosorter",
+        "a SIBLING REPOSITORY. Nothing in this tree can promise what is in another "
+        "checkout, or that it is checked out at all",
+    ),
+    NotAPath(
+        ROOT,
+        "FINAL-DESIGN.md",
+        "a document belonging to that sibling repository, named by basename",
+    ),
+)
+
+
+def path_candidates(rel: str) -> list[tuple[str, int]]:
+    """Every path-shaped inline-code span in a corpus file, with its offset."""
+    out: list[tuple[str, int]] = []
+    for hit in _CODE_SPAN.finditer(_read(rel)):
+        text = hit.group(1).strip()
+        if not _PATH_SHAPED.match(text):
+            continue
+        if "/" in text or _SOURCE_EXT.search(text):
+            out.append((text, hit.start()))
+    return out
+
+
+def _resolves(text: str, rel: str) -> bool:
+    if "*" in text:
+        return bool(list(REPO_ROOT.glob(text)))
+    here = (REPO_ROOT / rel).parent
+    bases = [REPO_ROOT, here] + [REPO_ROOT / d for d in SEARCH_DIRS]
+    for base in bases:
+        for candidate in (base / text, base / (text + ".py")):
+            try:
+                if candidate.exists():
+                    return True
+            except OSError:
+                pass
+    return False
+
+
+def unresolved_pointers(rel: str) -> list[str]:
+    excused = {row.text for row in NOT_A_PATH if row.file == rel}
+    return sorted(
+        {text for text, _ in path_candidates(rel) if text not in excused and not _resolves(text, rel)}
+    )
+
+
+@pytest.mark.parametrize("rel", CORPUS)
+def test_every_pointer_either_resolves_or_says_why_not(rel: str) -> None:
+    loose = unresolved_pointers(rel)
+    assert not loose, (
+        f"{rel} names paths that do not resolve and carry no reason: {loose}.\n"
+        "Fix the pointer, or add a NOT_A_PATH row saying what the text is instead — "
+        "a template, a branch name, a protocol method, a foreign tree."
+    )
+
+
+@pytest.mark.parametrize("rel", CORPUS)
+def test_pointer_discovery_is_not_vacuous(rel: str) -> None:
+    """A gate that found no paths would excuse every dangling one."""
+    assert len(path_candidates(rel)) > 20, (
+        f"{rel} yielded almost no path candidates; the extraction is broken, and a "
+        "broken extraction makes the test above pass on any text at all"
+    )
+
+
+def test_no_declared_search_directory_is_unused() -> None:
+    """Self-deleting: a directory nothing is resolved through must not linger."""
+    needed = set()
+    for rel in CORPUS:
+        for text, _ in path_candidates(rel):
+            if "*" in text or (REPO_ROOT / text).exists():
+                continue
+            for name in SEARCH_DIRS:
+                if (REPO_ROOT / name / text).exists() or (REPO_ROOT / name / (text + ".py")).exists():
+                    needed.add(name)
+    idle = sorted(set(SEARCH_DIRS) - needed)
+    assert not idle, (
+        f"nothing in the corpus resolves through {idle} any more — delete the row "
+        "rather than leaving a standing permission behind"
+    )
+
+
+def test_no_not_a_path_row_is_stale() -> None:
+    """Self-deleting: a row must still describe text the corpus really carries."""
+    stale = []
+    for row in NOT_A_PATH:
+        if row.text not in {text for text, _ in path_candidates(row.file)}:
+            stale.append(f"{row.file}: {row.text!r}")
+    assert not stale, (
+        f"these NOT_A_PATH rows describe nothing in the text any more: {stale}. "
+        "Delete them — a table that only grows is where dangling pointers get parked."
+    )
+
+
+_RATIONALE_LINK = re.compile(r"`([\w./-]+\.md)#([^`]+)`")
+
+
+@pytest.mark.parametrize("rel", CORPUS)
+def test_every_rationale_anchor_resolves(rel: str) -> None:
+    """`→ почему именно так: file.md#anchor` must land on a heading that exists.
+
+    The archive declares its anchors EXPLICITLY as `{#slug}`, so this is an exact
+    check and not a guess at how a renderer would slugify a Russian heading. It is
+    the cheapest real check in this module: renaming a section in the archive is
+    ordinary work, and nothing else would notice the pointers it orphaned.
+    """
+    broken = []
+    for hit in _RATIONALE_LINK.finditer(_read(rel)):
+        target, anchor = hit.group(1), hit.group(2)
+        path = REPO_ROOT / target
+        if not path.is_file():
+            broken.append(f"{target} does not exist (anchor {anchor})")
+        elif "{#" + anchor + "}" not in path.read_text(encoding="utf-8"):
+            broken.append(f"{target} carries no heading anchored {{#{anchor}}}")
+    assert not broken, (
+        f"{rel} points into the rationale archive at headings that are gone: {broken}"
+    )
