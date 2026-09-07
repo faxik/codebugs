@@ -137,7 +137,7 @@ dev = [
 requires-dist = [
     { name = "mcp", specifier = ">=2.0.0,<3" },
     { name = "pytest", marker = "extra == 'dev'" },
-    { name = "ruff", marker = "extra == 'dev'" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.7" },
 ]
 provides-extras = ["dev"]
 
