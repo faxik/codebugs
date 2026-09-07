@@ -117,13 +117,25 @@ own cache, so making it false is one question about both layers rather than this
 replacement swaps `content` alone: were a future SDK to put the validation library's wording into a
 `structuredContent` field on an error result, that copy would survive untouched.
 
-**Placement was decided by a measurement, not by taste, and it is why this is a second middleware
-rather than a branch in the first.** The two checks need OPPOSITE positions relative to
-`install_usage_tracking`. An unknown argument NAME is refused outside it and deliberately goes
-uncounted. A missing required field is counted TODAY — measured, one call, `add: calls=1 failures=1`
-— because the SDK catches it deeper than the usage layer reaches. Installing the new layer outside
-usage tracking would have silently stopped counting those calls, and the evidence justifying the card
-was read out of that very table. One function cannot occupy both positions, so there are two.
+**Placement was load-bearing while the layer short-circuited, and stopped being so the moment it no
+longer did — and the second half of that sentence had to be found by a mutant rather than noticed.**
+While the layer answered without calling through, its position decided whether
+`install_usage_tracking` saw the call at all: installed outside the usage layer, a missing-field
+refusal would have stopped being counted, silently erasing the rows the card's own evidence came from
+(measured before the redesign: one call, `add: calls=1 failures=1`). After the redesign the layer
+always calls through, so the usage layer records the call from either side of it. The mutant that
+moves the installation outside usage tracking now leaves the counting assertion GREEN and reddens
+only the structural order test — which is how the stale justification was caught, still sitting in a
+docstring one edit after the change that had falsified it.
+
+**It stays innermost for a weaker and honestly weaker reason** — it speaks about a tool's own
+declared arguments and belongs nearest the tool — with the order test kept as a STRUCTURAL pin so
+that moving it stays a deliberate act. The freedom is conditional: give the layer back an early
+return and placement matters again the same day. **What IS still load-bearing is
+`install_strict_arguments`' own position**, because that layer RAISES before calling through and must
+stay outside usage tracking for an unknown argument name to go uncounted. One function cannot both
+raise early and call through, which is why there are two middlewares rather than one with two
+branches.
 
 **What was deliberately NOT taken on.** A wrong argument TYPE still answers in the library's words.
 Deciding it here means a second schema validator beside the real one; validators drift, and this one
