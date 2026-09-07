@@ -459,6 +459,7 @@ class Historical:
     stamp: str
     reason: str
     occurrences: int = 1
+    of_this_tree: bool = True
 
 
 @dataclass(frozen=True)
@@ -931,6 +932,30 @@ HISTORICAL: tuple[Historical, ...] = (
         "how a CLEAN cherry-pick behaves is a property of git, not of this tree, so "
         "no commit of ours pins it; the tool version is the stamp, and it pins the "
         "measurement more tightly than a date could",
+        of_this_tree=False,
+    ),
+    Historical(
+        SUB,
+        'Measured on `adcf354` (2026-08-31), ruff `0.15.7`, a real `[tool.ruff.lint] select = ["S608"]` in a throwaway copy: `src/` carries 52 unsuppressed `S608` sites across 11 files, and **29 of them sit in nine files',
+        '`adcf354` (2026-08-31)',
+        "the S608 survey: how many interpolation sites `src/` carries, and how many "
+        "of them sit in files that never validate an identifier. Recomputing it "
+        "needs a throwaway copy of the tree carrying a lint rule this project has "
+        "never enabled — which is exactly why it is a measurement and not a gate",
+    ),
+    Historical(
+        SUB,
+        'measured on `adcf354` (2026-08-31) with ruff `0.15.7`, a real `[tool.ruff.lint]` section carrying `select = ["S608"]` and one carrying `extend-select = ["S608"]` each give 56 `S608` hits',
+        '`adcf354` (2026-08-31)',
+        "the RUF100 survey from the same session: enabling one rule raises no "
+        "dead-marker diagnostics, measured rather than reasoned",
+    ),
+    Historical(
+        SUB,
+        '(measured on `adcf354` (2026-08-31): 517 diagnostics',
+        '`adcf354` (2026-08-31)',
+        "the preview-selection survey from the same session, which is what stops "
+        "the sentence beside it overclaiming in the other direction",
     ),
 )
 
@@ -945,7 +970,6 @@ _SELF_COUNT = (
 _SHELL_LITERAL = "part of a quoted command line, where the digits are syntax rather than a quantity"
 _POSIX = "a constant of POSIX, the kernel or CPython, fixed outside this repository"
 _CROSS_REF = "points back at things named nearby in the document; it counts no population"
-_PENDING_3 = "CLASS 3, deleted in the next commit of this branch: "
 _CODE_LITERAL = "a literal inside quoted code, where the digit is the program's own text"
 _SQLITE = "a SQLite result code, numbered by SQLite and not by this repository"
 _GONE = (
@@ -1047,30 +1071,12 @@ NOT_A_CLAIM: tuple[NotAClaim, ...] = (
         "derives from the tree",
     ),
     # ---------------- root: pending class 3 ----------------------------------
-    NotAClaim(
-        ROOT,
-        "firing is two",
-        _PENDING_3 + "it sizes a race window inside `worktree-finish.sh` in "
-        "statements, which is prose precision no reader can act on",
-    ),
     NotAClaim(ROOT, "exits 0 on an empty list", _POSIX),
     NotAClaim(
         ROOT,
         "stealing one.   2. **Finish",
         "the second item of a two-item ordered list whose marker sits mid-line "
         "after a reflow, so the ordered-list lexical rule cannot see it",
-    ),
-    NotAClaim(
-        ROOT,
-        "orchestrator (~48 lines)",
-        _PENDING_3 + "the file holds many hundreds of lines; a line count moves on "
-        "every ordinary edit, so it must be deleted rather than bound",
-    ),
-    NotAClaim(
-        ROOT,
-        "(three test modules call it in-process)",
-        _PENDING_3 + "three different ways of counting the callers give three "
-        "different answers, which is itself the argument for deleting the number",
     ),
     # ======================= subsystem file ==================================
     # ---------------- counts of their own lists ------------------------------
@@ -1170,7 +1176,7 @@ NOT_A_CLAIM: tuple[NotAClaim, ...] = (
     NotAClaim(SUB, "because three paths did", _GONE),
     NotAClaim(SUB, "it took THREE review rounds", _PAST_ROUND),
     NotAClaim(SUB, "three existing tests caught it", _PAST_ROUND),
-    NotAClaim(SUB, "not the four that got fixed", _PAST_ROUND),
+    NotAClaim(SUB, "larger than the four that got fixed", _PAST_ROUND),
     NotAClaim(SUB, "CB-24 fixed four sites", _PAST_ROUND),
     NotAClaim(SUB, "three independent passes over the same function", _PAST_ROUND),
     # ---------------- arbitrary numbers inside hypotheticals -----------------
@@ -1189,50 +1195,83 @@ NOT_A_CLAIM: tuple[NotAClaim, ...] = (
     NotAClaim(SUB, "the rejected 0.95", "a threshold considered and rejected during calibration; the archive records the corpus it was rejected on"),
     NotAClaim(SUB, '"Bug 1"/"Bug 2" ≈ 0.8 and two empty strings 1.0', "illustrative scores demonstrating why a minimum text length exists"),
     # ---------------- pending class 3 ----------------------------------------
-    NotAClaim(SUB, "because about fifty `db.connect()` call sites", _PENDING_3 + "a call-site count that moves with ordinary work"),
-    NotAClaim(SUB, "population is ~19 sites", _PENDING_3 + "this file's own rule says a number that decides something belongs in a test"),
-    NotAClaim(SUB, "The outstanding 13 are on CB-36", _PENDING_3 + "same population, same rule"),
-    NotAClaim(SUB, "the five write sites and four filter sites", _PENDING_3 + "two counts that move whenever a filter or a writer is added"),
-    NotAClaim(SUB, "package's seven string-built SET clauses", _PENDING_3 + "a count of a shape nothing derives"),
-    NotAClaim(SUB, "three test modules call it in-process", _PENDING_3 + "the second copy of the root file's wrong caller count"),
     NotAClaim(SUB, "Two consequences beyond", _SELF_COUNT),
     # ---------------- pending class 2: measurements needing a date ----------
-    NotAClaim(
-        SUB,
-        "Measured on `adcf354`, ruff `0.15.7`",
-        "PENDING CLASS 2: the S608 survey. It carries a commit and a tool version "
-        "but no date; the date is added in the next commit of this branch",
-    ),
-    NotAClaim(
-        SUB,
-        'copy: `src/` carries 52 unsuppressed `S608` sites across 11 files, and **29 of them sit in nine files',
-        "PENDING CLASS 2: the counts of that same survey",
-    ),
-    NotAClaim(
-        SUB,
-        "measured on `adcf354` with ruff `0.15.7`",
-        "PENDING CLASS 2: the RUF100 survey, same measurement session, same gap",
-    ),
-    NotAClaim(
-        SUB,
-        "each give 56 `S608` hits",
-        "PENDING CLASS 2: the count of that survey",
-    ),
-    NotAClaim(
-        SUB,
-        "(measured: 517 diagnostics",
-        "PENDING CLASS 2: the preview-selection survey, same session, same gap",
-    ),
 )
 
 
-REMOVED: tuple[Removed, ...] = ()
+REMOVED: tuple[Removed, ...] = (
+    Removed(
+        ROOT,
+        "(~48 lines)",
+        "`server.py` holds many hundreds of lines, and the word \"thin\" beside a "
+        "small number was an instruction about where NOT to look. A line count "
+        "moves on every ordinary edit, so binding it would redden this gate weekly; "
+        "the sentence now says the file is large and says why that matters",
+    ),
+    Removed(
+        ROOT,
+        "three test modules call it in-process",
+        "three ways of counting the callers of `cli.main` give three different "
+        "answers — 14 files by syntax tree, 15 by text search, one of the 14 a "
+        "manual script pytest never collects. A number with no single value cannot "
+        "have a derivation, and the argument it supports (the split is load-bearing "
+        "because the in-process callers are many) survives without it",
+    ),
+    Removed(
+        ROOT,
+        "assignments wide",
+        "the width of a race window inside `worktree-finish.sh`, counted in "
+        "statements. Nothing derives it and no reader can act on the difference "
+        "between two statements and three",
+    ),
+    Removed(
+        SUB,
+        "three test modules call it in-process",
+        "the second copy of the same wrong caller count, in the subsystem file",
+    ),
+    Removed(
+        SUB,
+        "about fifty",
+        "how many `db.connect()` call sites pass no arguments. It moves with "
+        "ordinary work, and the sentence needs only that MOST of them do",
+    ),
+    Removed(
+        SUB,
+        "~19 sites",
+        "the size of the CB-24 population. This file's own rule says a number that "
+        "decides something belongs in a test, and this one decided nothing while "
+        "going stale",
+    ),
+    Removed(
+        SUB,
+        "outstanding 13",
+        "the remainder of that same population; CB-36 carries the list with "
+        "`file:line`, which is where a reader should look anyway",
+    ),
+    Removed(
+        SUB,
+        "five write sites and four filter sites",
+        "two counts that move whenever a writer or a filter is added, in a sentence "
+        "whose claim is that EVERY one of them resolves — a claim the counts do not "
+        "strengthen",
+    ),
+    Removed(
+        SUB,
+        "seven string-built",
+        "a count of a shape nothing in the tree derives, in a sentence pointing at "
+        "an open card",
+    ),
+)
 
 
 # --------------------------------------------------------------------------- #
 # accounting
 # --------------------------------------------------------------------------- #
 _WORD_TO_DIGITS = {word: str(value) for word, value in _WORD_VALUE.items()}
+
+_ISO_DATE = re.compile(r"\b20\d\d-\d\d-\d\d\b")
+_SHORT_SHA = re.compile(r"\b[0-9a-f]{7,40}\b")
 
 
 def _normalize(value: str) -> str:
@@ -1365,17 +1404,22 @@ def test_every_number_in_the_corpus_is_accounted_for(rel: str) -> None:
 def test_every_historical_measurement_carries_a_stamp() -> None:
     """Class 2 is never recomputed, so its stamp is the only thing holding it.
 
-    A measurement of THIS tree is stamped with a date and a commit; a measurement
-    of an external tool is stamped with that tool's version, which pins it more
-    tightly than a date could. Both are checked as text present in the anchor,
-    because a stamp the prose does not carry helps no reader.
+    A measurement OF THIS TREE must carry a date AND a commit, and both must sit
+    inside the anchored text — a stamp the prose does not carry helps no reader. A
+    measurement of an EXTERNAL tool carries that tool's version instead, which pins
+    the measurement more tightly than a date could.
     """
     unstamped = []
     for row in HISTORICAL:
-        if not row.stamp.strip():
-            unstamped.append(f"{row.file}: {row.anchor[:50]!r} declares no stamp")
-        elif row.stamp not in _read(row.file):
-            unstamped.append(f"{row.file}: stamp {row.stamp!r} is not in the prose")
+        if row.stamp not in row.anchor:
+            unstamped.append(f"{row.file}: stamp {row.stamp!r} is not inside its own anchor")
+        elif row.of_this_tree and not (
+            _ISO_DATE.search(row.stamp) and _SHORT_SHA.search(row.stamp)
+        ):
+            unstamped.append(
+                f"{row.file}: {row.stamp!r} measures THIS tree but names no date "
+                "and commit — the pair is what makes it re-findable"
+            )
     assert not unstamped, (
         "these historical measurements are unstamped, so nothing says what state "
         f"they described: {unstamped}"

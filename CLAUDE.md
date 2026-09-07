@@ -50,8 +50,8 @@ finish (worktree removal, claim release) and speaks at the very end, with a loud
 — deliberately not `exit 13`, which means *nothing landed, re-run*. `exit 15` means *the merge step
 already ran and the premise is unconfirmed*, and the block says in words not to re-run: a second
 finish after a landed merge is a worse outcome than the defect being reported. **The residual is
-stated rather than closed: the interval between `git merge` returning and the `trap` firing is two
-assignments wide, and nothing in the script can close it** — so a missing `exit 15` is NOT proof the
+stated rather than closed: the interval between `git merge` returning and the `trap` firing is only a
+couple of statements wide, and nothing in the script can close it** — so a missing `exit 15` is NOT proof the
 merge did not land.
 
 `merge.ff=false` is the one no hook could replace: **git fires no hook on a fast-forward at all**,
@@ -379,9 +379,9 @@ rewritten the same way, expect the same one-time manual merge.
 
 - **Shared types** (`types.py`): Entity constants (statuses, priorities, severities), resolver functions, terminal states. Zero-dependency — safe to import from anywhere
 
-- **MCP server** (`server.py`): Thin `MCPServer` orchestrator (~48 lines). Discovers tool providers via registry, filters by `--mode` flag. Requires the mcp 2.x SDK (`mcp.server.mcpserver.MCPServer`, which replaced 1.x's `mcp.server.fastmcp.FastMCP`)
+- **MCP server** (`server.py`): a LARGE module. Its `MCPServer` orchestrator proper is short, but the file around it carries most of the protocol surface — do not read the word "thin" as permission to skip it. Discovers tool providers via registry, filters by `--mode` flag. Requires the mcp 2.x SDK (`mcp.server.mcpserver.MCPServer`, which replaced 1.x's `mcp.server.fastmcp.FastMCP`)
 
-- **CLI** (`cli.py`): Thin argparse orchestrator. Discovers CLI providers via registry, filters by `--mode` flag. Two entry points, and the split is load-bearing: `main()` is the importable body (three test modules call it in-process), while `run()` — what `[project.scripts]` and `python -m codebugs.cli` reach — first restores the POSIX `SIGPIPE` disposition (CB-78) and then refuses to run at all when stdout is already closed (CB-134). 
+- **CLI** (`cli.py`): Thin argparse orchestrator. Discovers CLI providers via registry, filters by `--mode` flag. Two entry points, and the split is load-bearing: `main()` is the importable body, called in-process by test modules across the suite — enough of them that changing its signature is not a cheap edit — while `run()` — what `[project.scripts]` and `python -m codebugs.cli` reach — first restores the POSIX `SIGPIPE` disposition (CB-78) and then refuses to run at all when stdout is already closed (CB-134). 
 
 - **Formatting** (`fmt.py`): Shared CLI output utilities (ASCII table formatting). Text for a stream, nothing else — file writing deliberately does NOT live here (CB-76)
 
