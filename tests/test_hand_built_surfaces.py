@@ -72,13 +72,20 @@ def _why_the_call_failed(raised: BaseException) -> str:
     keeps its text off the message "so nothing from an unexpected exception
     reaches the client". Measured on both versions as well as read.
 
-    So a pair of assertions taken off `str(raised)` answers a question about
-    the installed SDK rather than about this suite's guard. Under 2.1.1 the
-    body's marker is absent from that string however healthy the guard is, so
-    the positive half fails on a correct tree; and its partner — "the CB-311
-    marker is ABSENT" — is then satisfied by almost any crash, that string
-    having almost no text left to test. A gate that cannot fire, which is the
-    defect these tests exist to forbid, rebuilt inside them.
+    So the POSITIVE half of each pair below, taken off `str(raised)`, answers a
+    question about the installed SDK rather than about this suite's guard:
+    under 2.1.1 the body's marker is absent from that string however healthy
+    the guard is, so the assertion fails on a correct tree and the test is red
+    whatever the guard does. A test that is red either way discriminates
+    nothing — the defect these tests exist to forbid, rebuilt inside them.
+
+    THE NEGATIVE HALF WAS NEVER BROKEN, and recording that keeps the SDK's
+    boundary in the right place for the next reader. A guard refusal never
+    passes through the SDK at all (see the paragraph after next), so its text
+    carries the `CB-311` marker on both versions — measured, and visible in
+    this file: the refusal tests assert that marker's PRESENCE off `str` and
+    are green under 2.1.1 today. Reading that half off the chain as well is a
+    small strengthening — a larger haystack for an absence test — not a repair.
 
     What both versions preserve is the CHAIN, and 2.1.1 states it as a
     contract rather than leaving it incidental: every failure it wraps is
@@ -98,8 +105,8 @@ def _why_the_call_failed(raised: BaseException) -> str:
     The GUARD's refusal needs no chain at all: it is raised in
     `conftest._call_tool_refusing_a_hand_built_surface` BEFORE the SDK's tool
     invocation is reached, so it arrives as itself, marker intact, on both
-    versions — which is why the eleven tests that only need a refusal never
-    noticed any of this.
+    versions — which is why every test here that needs only a refusal never
+    noticed any of this, and why only the three that need the BODY's text did.
 
     ONE BOUNDARY, because it decides what may be asserted with this. The
     question answered here is "did the call reach the tool body", NOT "could a
