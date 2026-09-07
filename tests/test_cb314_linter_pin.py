@@ -11,25 +11,46 @@ repository's own recurring defect committed inside its own fix.
 
 WHAT IS NOT TESTED HERE, AND WHY EACH ONE IS ABSENT ON PURPOSE.
 
-* That `uv.lock` resolved ruff to the version `pyproject.toml` pins. It looks like
-  the obvious invariant and it is A TEST THAT CANNOT FAIL: this suite is run
-  through `uv run`, which re-locks before pytest starts, so by the time any
-  assertion executes the two agree by construction. Asserting it would add a green
-  light that means nothing.
+* That `uv.lock` resolved ruff to the version `pyproject.toml` pins. Under ordinary
+  uv behaviour this is a test that cannot fail: the suite runs through `uv run`,
+  which re-locks before pytest starts, so by the time any assertion executes the two
+  agree by construction. *Not "cannot fail" in the absolute* — a hand-resolved
+  lockfile can record the constraint while holding an excluded version, and uv
+  accepts it — but a green light that means nothing on every ordinary path is worse
+  than no light.
 * That ruff at that version passes on this tree. `ruff check` is the lint gate and
   runs as its own step; re-running it from inside pytest would double a four-second
   cost to restate a result the gate already owns.
-* That `tools/worktree-finish.sh` calls ruff. `tests/test_worktree_harness.py`
-  already asserts the wiring of every guard, and that file owns it.
+* That the workflow, or the merge guard, ACTUALLY EXECUTES. Every assertion here
+  reads committed text. A `run:` line that is syntactically the sanctioned command
+  and semantically dead — the file renamed, the job removed from the trigger, the
+  runner label wrong — passes. This is the standing limit of every static workflow
+  test in this suite, and it is the reason the assertions below insist on the whole
+  `run:` value rather than a substring: within the text, at least, there is nothing
+  left to hide behind.
+* Dynamic imports. `_third_party_modules_imported_by_src` walks the AST, which sees
+  every STATIC import shape — inside functions, conditionals, `TYPE_CHECKING`
+  blocks, `try/except ImportError`. It does NOT see `importlib.import_module`,
+  `__import__` bound to a name, or anything else resolved at run time, so a
+  dependency introduced that way never enters the list. It also over-counts in the
+  other direction: an import used only for typing still demands its name in the
+  workflow. Both are stated rather than chased; the sibling ratchet in
+  `tests/test_no_network_capability.py` has the same boundary for the same reason.
 
 WHY THESE ASSERTIONS READ THE FILES AS TEXT rather than through a YAML parser: the
 project declares no YAML dependency, and adding one to test a workflow would be a
-new runtime requirement bought for one assertion. Comments are stripped WHOLE-LINE
-before matching, which is not a formality here — the comments in `ci.yml` and
+new runtime requirement bought for one assertion. Comments are stripped before
+matching, which is not a formality here — the comments in `ci.yml` and
 `pyproject.toml` deliberately name `uvx` while explaining why it was removed, and a
 test that grepped the raw bytes would read that explanation as the thing it forbids.
-The convention matches `tests/test_cb310_refusal_text.py` and
-`tests/test_worktree_harness.py`.
+**Both whole-line AND trailing comments are stripped, and the second half is
+load-bearing:** with whole-line stripping alone,
+`uv lock -P mcp -P mcp-types  # -P pydantic` reads as naming three packages while
+the shell runs two, and `: # uv run --extra dev ruff check src/ tests/` reads as the
+sanctioned lint command while the shell does nothing at all. Both were live holes
+here until a cross-model review constructed them. The cut is at the first ` #`, so
+a `#` that is part of a command rather than a comment would be lost — no command in
+this workflow contains one, and a future one must not.
 """
 
 from __future__ import annotations
@@ -57,9 +78,44 @@ _MODULE_TO_DISTRIBUTION = {
 }
 
 
+LINT_COMMAND = "uv run --extra dev ruff check src/ tests/"
+FINISH_GUARD = REPO_ROOT / "tools" / "worktree-finish.sh"
+
+# Flags that would leave every assertion below green while changing which version
+# actually runs. `--with` layers a second requirement over the project's own;
+# `--frozen` / `--no-sync` run whatever the environment already holds; a version
+# written onto the invocation bypasses the pin outright.
+_PIN_BYPASSING_FLAGS = ("--with", "--frozen", "--no-sync", "ruff==", "ruff@")
+
+# Flags and settings that keep all three names in the command while deliberately
+# resolving something other than the newest admissible release, which is the one
+# thing the `newest-sdk` job exists to run against.
+_RESOLUTION_NARROWING = ("--resolution", "--exclude-newer", "--frozen", "--no-sync")
+
+
 def _strip_comments(text: str) -> str:
-    """Drop whole comment lines. Same convention as the two sibling suites."""
-    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    """Drop whole comment lines AND trailing comments. See the module docstring.
+
+    Whole-line stripping alone lets a trailing comment smuggle text into a command
+    that the shell never runs, in both directions: adding a name the command omits,
+    and hiding a command behind a no-op. Cutting at the first ` #` closes both.
+    """
+    kept: list[str] = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        head, sep, _ = line.partition(" #")
+        kept.append(head if sep else line)
+    return "\n".join(kept)
+
+
+def _run_values(stripped: str) -> list[str]:
+    """Every `run:` value in the workflow, as the shell would receive its first line.
+
+    A block scalar (`run: |`) yields the empty string here and its body is matched
+    separately; the assertions that use this helper are about single-line commands.
+    """
+    return [m.group(1).strip() for m in re.finditer(r"^\s*run:[ \t]*(.*)$", stripped, re.M)]
 
 
 def _third_party_modules_imported_by_src() -> set[str]:
@@ -88,9 +144,16 @@ def _upgrade_package_names(stripped_workflow: str) -> tuple[set[str], str]:
     assert len(lines) == 1, (
         f"expected exactly one `uv lock` command in ci.yml, found {len(lines)}: {lines}. "
         "This helper reads the names off that single line; a second command means the "
-        "assertions below would silently be judging the wrong one."
+        "assertions below would silently be judging the wrong one. If a second `uv lock` "
+        "is legitimate (`--check`, say), teach this helper which one is the upgrade step "
+        "rather than relaxing the count — the cost of this shape is stated in the module "
+        "docstring and it is a formatting invariant, deliberately, because the cheap "
+        "alternative is a fourth copy of the job-slicing helper this suite already has "
+        "three of."
     )
-    return set(re.findall(r"--upgrade-package\s+(\S+)", lines[0])), lines[0]
+    # `-P` is uv's documented alias; accepting only the long form would fail a
+    # legitimate edit while catching nothing.
+    return set(re.findall(r"(?:--upgrade-package|-P)[ \t]+(\S+)", lines[0])), lines[0]
 
 
 class TestTheLinterVersionIsDecidedInOnePlace:
@@ -131,14 +194,78 @@ class TestTheLinterVersionIsDecidedInOnePlace:
         is pinned.
         """
         code = _strip_comments(WORKFLOW.read_text(encoding="utf-8"))
-        assert "uv run --extra dev ruff check src/ tests/" in code, (
-            "ci.yml must lint through the project environment, so that it runs the "
-            "version pyproject.toml pins — the same one tools/worktree-finish.sh runs."
+        assert LINT_COMMAND in _run_values(code), (
+            "ci.yml must lint through the project environment with EXACTLY "
+            f"`{LINT_COMMAND}` as the whole `run:` value, so that it runs the version "
+            "pyproject.toml pins — the same one tools/worktree-finish.sh runs. Found: "
+            f"{[v for v in _run_values(code) if 'ruff' in v]}. Matching a SUBSTRING "
+            "instead would accept `uv run --extra dev --with ruff==<other> ruff check …`, "
+            "which layers a second requirement over the project's own and reopens the "
+            "split this test exists to close."
         )
         assert "uvx" not in code, (
             "an executable line of ci.yml calls `uvx`, which downloads its own copy "
             "of a tool and reads neither uv.lock nor pyproject.toml. That is exactly "
             "how the linter version came to live in two independent places (CB-314)."
+        )
+
+    def test_the_merge_guard_runs_the_same_pinned_linter(self):
+        """The OTHER side of "cannot be driven apart", which nothing else checks.
+
+        `tests/test_worktree_harness.py` asserts that the finish script CALLS ruff,
+        and accepts any uv command line containing a standalone `ruff`. So
+        `uv run --extra dev --with ruff==<other> ruff check …` on that line leaves
+        the whole suite green while CI and the merge guard run different linters —
+        exactly the state CB-314 was filed about, rebuilt on the guard's side. That
+        gap was found by a cross-model review of this very file, not by the mutants.
+        """
+        lines = [
+            ln.strip()
+            for ln in _strip_comments(FINISH_GUARD.read_text(encoding="utf-8")).splitlines()
+            if "ruff check" in ln
+        ]
+        invocations = [ln for ln in lines if "uv run" in ln]
+        assert invocations, (
+            "tools/worktree-finish.sh no longer invokes ruff through `uv run`; the merge "
+            "guard and CI would then be reading the pin from different places, if at all."
+        )
+        for line in invocations:
+            assert LINT_COMMAND in line, (
+                f"the merge guard's linter command is not `{LINT_COMMAND}`: {line}"
+            )
+            for flag in _PIN_BYPASSING_FLAGS:
+                assert flag not in line, (
+                    f"the merge guard's linter command carries `{flag}`, which lets it run a "
+                    f"different ruff from the one `pyproject.toml` pins: {line}"
+                )
+
+    def test_no_step_of_the_workflow_is_disabled_or_made_advisory(self):
+        """A gate that reports success without running is this repo's oldest defect.
+
+        `continue-on-error: true` turns a red step into a pass; `if:` can make a job
+        or step skip entirely — and a skipped job is reported as PASSING to branch
+        protection, which is why `main-invariants.yml` deliberately does not subscribe
+        to `pull_request`. Either one, applied to `newest-sdk`, would keep every other
+        assertion in this file green while making failures on the versions users
+        actually install unable to refuse anything.
+
+        THE SCOPE IS THE WHOLE FILE, not just `newest-sdk`, and that is the cheap
+        choice rather than the precise one: slicing one job's body out by indentation
+        would be this suite's FOURTH copy of that helper. The cost is real and named —
+        a future legitimate `if:` anywhere in `ci.yml` fails here and must be argued
+        for in this test rather than added silently.
+        """
+        code = _strip_comments(WORKFLOW.read_text(encoding="utf-8"))
+        offenders = [
+            ln.strip()
+            for ln in code.splitlines()
+            if re.match(r"^\s*(continue-on-error|if)\s*:", ln)
+        ]
+        assert not offenders, (
+            f"ci.yml carries {offenders}. A step with `continue-on-error: true` cannot "
+            "refuse anything, and a job skipped by an `if:` is reported as PASSING for "
+            "required-status-check purposes. If one of these is genuinely wanted, say so "
+            "here first."
         )
 
 
@@ -217,4 +344,35 @@ class TestTheNewestDependenciesJobNamesEveryDirectImport:
         assert "==" not in line, (
             "the `uv lock --upgrade-package` command names a version constant: "
             f"{line.strip()}. It must re-resolve against the declared ranges instead."
+        )
+        # Refusing a written-in version is NOT the same as resolving the NEWEST one:
+        # `--resolution lowest` and `--exclude-newer` keep all three names and pass
+        # the assertion above while deliberately picking something older. Found by a
+        # cross-model review; the mutants did not reach it.
+        for flag in _RESOLUTION_NARROWING:
+            assert flag not in line, (
+                f"the `uv lock` command carries `{flag}`, which keeps the names but stops "
+                f"the job resolving the NEWEST admissible release — the only thing it runs "
+                f"for: {line.strip()}"
+            )
+
+    def test_nothing_in_the_project_file_narrows_resolution_behind_the_job(self):
+        """The same attack as above, moved out of the command and into settings.
+
+        `[tool.uv] resolution = "lowest"` or an `exclude-newer` cutoff makes the
+        workflow command resolve something other than the newest release while every
+        assertion about that command stays green. There is no `[tool.uv]` table here
+        today, so this FAILS CLOSED on the appearance of one rather than trying to
+        enumerate the settings that would matter — a list of settings is the letter,
+        and the intent is one sentence: nothing may quietly narrow what `newest-sdk`
+        resolves. A legitimate `[tool.uv]` therefore has to be argued for here.
+        """
+        text = PYPROJECT.read_text(encoding="utf-8")
+        tables = re.findall(r"^\[tool\.uv[^\]]*\]", text, re.M)
+        assert not tables, (
+            f"pyproject.toml now declares {tables}. That table can narrow what the "
+            "`newest-sdk` job resolves (`resolution = \"lowest\"`, `exclude-newer`) or "
+            "replace a dependency outright (`override-dependencies`) without changing a "
+            "single line this suite reads. Check what it actually sets, then relax this "
+            "assertion to the settings you have decided are safe."
         )
