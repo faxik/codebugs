@@ -58,11 +58,28 @@ jobs:
         run: uv python install && uv run python -V
 
       - name: Lint
-        # Pinned: CLAUDE.md records that ruff 0.16.x flags the whole repo, so an
-        # unpinned CI lint would go red on a release nobody here made.
+        # NO VERSION IS NAMED ON THIS LINE, AND THAT IS THE POINT (CB-314).
+        # This step used to read `uvx ruff@0.15.7 check src/ tests/`, and that
+        # command downloads its OWN copy of ruff without reading the project
+        # environment at all — so the only exact version in the whole tree sat
+        # here, while the guard that can actually refuse a merge
+        # (`tools/worktree-finish.sh`, `uv run --extra dev ruff check`) took
+        # whatever `uv.lock` happened to carry. Nothing tied the two numbers
+        # together, so one ordinary `uv lock --upgrade` moved the guard to
+        # 0.16.x (416 default rules instead of 62, 566 violations on an
+        # unchanged tree) and refused every subsequent merge while THIS job
+        # stayed green. Pinning `ruff==0.15.7` in `pyproject.toml` alone would
+        # not have closed it: `uvx` would still have ignored that pin, leaving
+        # two independent literals in two files. Both halves are required.
+        #
+        # This adds no step and no meaningful minute: `uv run` builds the
+        # project environment, which the `Tests` step below builds anyway with
+        # the same `--extra dev`; the cost simply moves one step earlier, and
+        # a separate standalone ruff download is no longer paid at all.
+        #
         # `ruff format` is deliberately NOT a gate — much of the existing tree is
         # non-conformant to it and gating would refuse every change.
-        run: uvx ruff@0.15.7 check src/ tests/
+        run: uv run --extra dev ruff check src/ tests/
 
       - name: Tests
         run: uv run --extra dev python -m pytest tests/ -q

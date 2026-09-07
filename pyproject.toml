@@ -29,7 +29,26 @@ codebugs = "codebugs.cli:run"
 codebugs-mcp = "codebugs.server:main"
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff"]
+# ruff IS PINNED TO AN EXACT PATCH VERSION, AND THIS FILE IS THE ONLY PLACE THE
+# NUMBER APPEARS (CB-314). Before this pin the version lived in exactly one line
+# of the whole tree — `.github/workflows/ci.yml`'s `uvx ruff@0.15.7` — and that
+# command downloads its own copy without reading this environment at all. The
+# guard that can actually refuse a merge (`tools/worktree-finish.sh`, via
+# `uv run --extra dev ruff check`) took whatever version `uv.lock` happened to
+# carry, and nothing tied the two numbers together: one ordinary `uv lock
+# --upgrade` moves the guard to 0.16.x (416 default rules instead of 62, 566
+# violations on an unchanged tree) and refuses every subsequent merge, while CI
+# stays green on its own downloaded copy. CI now calls ruff through `uv run`, so
+# both sides read the version from here.
+#
+# EXACT PATCH, NOT `~=0.15`, for the same reason `.python-version` carries a full
+# patch: a MAJOR.MINOR range leaves a divergent state representable, and making
+# that state unrepresentable is the whole point. The cost is the ordinary cost of
+# a pin — bumping it is a deliberate, reviewable edit.
+#
+# pytest is deliberately NOT pinned: no documented behaviour of this repo depends
+# on its version, and a pin nobody needs is a maintenance bill nobody agreed to.
+dev = ["pytest", "ruff==0.15.7"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/codebugs"]

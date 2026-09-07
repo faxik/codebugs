@@ -35,13 +35,27 @@ codebugs is one SQLite database (`.codebugs/findings.db`). Modules are self-regi
 
 ## Install
 
-```bash
-# Global install (recommended)
-pipx install codebugs
+**codebugs is not published to PyPI.** There is nothing under that name in the public index, so
+`pipx install codebugs` and `pip install codebugs` cannot resolve — they fail before they start.
+Install it from a clone instead, by path:
 
-# Or with pip/uv
-pip install codebugs
+```bash
+git clone https://github.com/faxik/codebugs.git
+pipx install ./codebugs        # global install, recommended
 ```
+
+`pip install ./codebugs` works too, into whatever environment is active.
+
+Two consequences of installing by path, both worth knowing before the first surprise:
+
+- **The installed copy is a snapshot, not a link.** Editing the clone afterwards does not change
+  what `codebugs` runs. Re-run `pipx install --force ./codebugs` to pick the changes up, or pass
+  `--editable` at install time if you want the clone itself to be what runs.
+- **The installer resolves dependencies on its own and does not read this repository's
+  `uv.lock`.** So an install picks the newest release each declared range admits, which is not
+  necessarily the combination the test suite ran against. That gap is real and has bitten once
+  already; the `newest-sdk` job in `.github/workflows/ci.yml` exists to run the suite against the
+  newest versions the ranges admit, so the two sides are at least both tested.
 
 ## Setup
 
