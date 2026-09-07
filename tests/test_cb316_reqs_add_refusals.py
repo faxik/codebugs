@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import sqlite3
 import subprocess
 import sys
@@ -122,6 +123,56 @@ class TestADuplicateIdIsARefusalAndNotACrash:
         assert [r[0] for r in rows] == ["первое"]
 
 
+class TestTheRefusalIsNarrowerThanTheExceptionTree:
+    """Только НАРУШЕНИЕ ОГРАНИЧЕНИЙ становится отказом — не всё дерево SQLite.
+
+    Эта граница — ратифицированное решение CB-99 тридцатью строками ниже в том
+    же файле: перехват `sqlite3.Error` (всё дерево) считал бы средовой сбой,
+    пришедший посреди записи — полный диск, отказ ввода-вывода, — «плохой
+    строкой» и докладывал бы его как ошибку ввода. Это строго хуже аварийной
+    распечатки, потому что распечатка громкая.
+
+    Без этой проверки граница не закреплена ничем: все прочие подсовываемые в
+    этом файле отказы — нарушения ограничений, поэтому мутант, расширяющий
+    перехват до `sqlite3.DatabaseError`, проходил бы весь файл незамеченным.
+    """
+
+    def test_an_operational_failure_passes_through_unchanged(self):
+        """Таблицы нет — вставка даёт `OperationalError`, а не отказ по вводу.
+
+        `sqlite3.OperationalError` — сестра `IntegrityError` под общим предком
+        `sqlite3.DatabaseError`, поэтому расширение перехвата до предка ловит
+        именно её. Отсутствие таблицы взято как самый дешёвый способ получить
+        настоящий `OperationalError` из НАСТОЯЩЕЙ вставки; предмет проверки —
+        класс, а не причина его появления.
+        """
+        bare = sqlite3.connect(":memory:")
+        bare.row_factory = sqlite3.Row
+        try:
+            with pytest.raises(sqlite3.OperationalError):
+                reqs.add_requirement(bare, req_id="FR-1", description="x")
+        finally:
+            bare.close()
+
+    def test_an_operational_failure_is_not_an_input_refusal(self):
+        """Вторая половина того же утверждения, и она нужна отдельно.
+
+        Первая проверка требует `OperationalError`; эта требует, чтобы он не
+        был вдобавок отказом по вводу. Порознь их обойти можно, вместе — нет.
+        """
+        bare = sqlite3.connect(":memory:")
+        bare.row_factory = sqlite3.Row
+        try:
+            with pytest.raises(sqlite3.Error) as caught:
+                reqs.add_requirement(bare, req_id="FR-1", description="x")
+        finally:
+            bare.close()
+        assert not isinstance(caught.value, refusals.INPUT_REFUSALS), (
+            "средовой сбой посреди записи доложен как ошибка ввода — "
+            "ровно то, что запретила CB-99"
+        )
+
+
 class TestTheMessageNeverClaimsMoreThanIsKnown:
     """Развилка §2.2: сообщение о дубликате, выданное на другое нарушение, — ложь.
 
@@ -153,6 +204,119 @@ class TestTheMessageNeverClaimsMoreThanIsKnown:
         text = str(caught.value)
         assert "FR-НОВЫЙ" in text, text
 
+    def test_a_conflict_on_ANOTHER_table_is_not_reported_as_a_duplicate(self, conn):
+        """Код ошибки называет РАЗРЯД ограничения, а не таблицу — вход построен.
+
+        Измерено: триггер `BEFORE INSERT ON requirements`, вставляющий строку в
+        ЧУЖУЮ таблицу с конфликтом её первичного ключа, даёт исключение с
+        `sqlite_errorname == 'SQLITE_CONSTRAINT_PRIMARYKEY'` и текстом
+        `UNIQUE constraint failed: audit.id`. Различение по этому имени кода
+        отвечало здесь «требование FR-НОВЫЙ уже существует» про строку, которой
+        в таблице требований нет вовсе.
+
+        Сегодняшняя поставляемая схема триггеров не несёт (измерено: ноль строк
+        типа `trigger` в `sqlite_master`), поэтому этот вход недостижим у
+        пользователя — но утверждение «нет входа, на котором это выдумало бы
+        дубликат» было шире своего замера, а это ровно тот класс дефекта,
+        которым живёт направление. Закрыто структурно: конфликт по `id`
+        доказывается ЦЕЛЕВЫМ предложением `ON CONFLICT(id) DO NOTHING`, вернувшим
+        ноль строк, а не догадкой по коду.
+        """
+        conn.execute("CREATE TABLE audit (id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO audit VALUES ('only')")
+        conn.execute(
+            "CREATE TRIGGER t_audit BEFORE INSERT ON requirements "
+            "BEGIN INSERT INTO audit VALUES ('only'); END"
+        )
+        with pytest.raises(refusals.INPUT_REFUSALS) as caught:
+            reqs.add_requirement(conn, req_id="FR-НОВЫЙ", description="x")
+        text = str(caught.value)
+        assert "already exists" not in text, (
+            "нарушено ограничение ЧУЖОЙ таблицы, а отказ доложил дубликат "
+            f"требования, которого в таблице нет: {text!r}"
+        )
+
+    def test_the_databases_own_words_do_not_reach_the_client(self, conn):
+        """Запасное сообщение не выносит наружу произвольный текст базы.
+
+        `RAISE(ABORT, '…')` в триггере кладёт в текст исключения любые слова, и
+        под версией 2.1.1 библиотеки протокола такой текст РАНЬШЕ придерживался
+        — авария доходила до клиента без слов. Шапка `refusals.py` объясняет
+        почему: сообщение неожиданного исключения может нести данные другого
+        вызывающего. Превратив этот класс в отказ, мы обязаны не приложить к
+        нему чужие слова.
+
+        Исходное исключение остаётся в цепочке через `raise … from`, поэтому
+        вызывающий из библиотеки увидит слова базы в трассировке — для
+        единственной достижимой сегодня аудитории не теряется ничего.
+        """
+        conn.execute(
+            "CREATE TRIGGER t_raise BEFORE INSERT ON requirements "
+            "BEGIN SELECT RAISE(ABORT, 'SECRET-MARKER-9137'); END"
+        )
+        with pytest.raises(refusals.INPUT_REFUSALS) as caught:
+            reqs.add_requirement(conn, req_id="FR-НОВЫЙ", description="x")
+        assert "SECRET-MARKER-9137" not in str(caught.value), str(caught.value)
+        assert "SECRET-MARKER-9137" in str(caught.value.__cause__), (
+            "слова базы обязаны остаться в цепочке — иначе потеряна диагностика"
+        )
+
+    def test_an_identifier_carrying_a_newline_cannot_forge_a_second_line(self, conn):
+        """Идентификаторы ничем не ограничены, а договор обещает ОДНУ строку.
+
+        Подставленный как есть, `FR-9\\nforged` печатает две непустые строки, и
+        вторая читается как самостоятельное сообщение программы. Подстановка
+        через представление — уже принятая в пакете форма: `types._resolve`
+        пишет `f"Invalid {label}: {value!r}"`.
+        """
+        forged = "FR-9\nforged"
+        reqs.add_requirement(conn, req_id=forged, description="первое")
+        with pytest.raises(refusals.INPUT_REFUSALS) as caught:
+            reqs.add_requirement(conn, req_id=forged, description="второе")
+        text = str(caught.value)
+        assert "\n" not in text, f"отказ подделал вторую строку вывода: {text!r}"
+
+
+class TestARefusalInsideTheCallersTransaction:
+    """Вложенный случай: `db.txn` под чужой транзакцией НЕ делает ничего.
+
+    При уже открытой транзакции `db.txn` отдаёт `False` и не выполняет ни
+    `BEGIN`, ни `ROLLBACK` — распоряжается кадр-владелец. Значит утверждение
+    «к моменту построения текста база улеглась» верно только для транзакции,
+    открытой ЭТИМ кадром, и проверка ниже закрепляет, что в чужой транзакции
+    работа вызывающего цела, а сама транзакция осталась открытой.
+
+    Поведение при этом корректно и без всяких усилий: политика разрешения
+    конфликта по умолчанию (`ABORT`) отменяет только неудавшийся оператор, а
+    не транзакцию.
+    """
+
+    def test_the_callers_transaction_stays_open_and_intact(self, conn):
+        reqs.add_requirement(conn, req_id="FR-1", description="первое")
+        with db.txn(conn) as owned:
+            assert owned is True
+            reqs.add_requirement(conn, req_id="FR-2", description="работа вызывающего")
+            with pytest.raises(refusals.INPUT_REFUSALS):
+                reqs.add_requirement(conn, req_id="FR-1", description="повтор")
+            assert conn.in_transaction, "чужая транзакция закрыта чужим кадром"
+        stored = {r[0] for r in conn.execute("SELECT id FROM requirements")}
+        assert stored == {"FR-1", "FR-2"}, stored
+
+    def test_a_constraint_violation_inside_it_is_also_survivable(self, conn):
+        """Тот же вопрос для отказа, поднятого САМОЙ базой, а не Python-ветвью.
+
+        Повтор идентификатора отбивается целевым `ON CONFLICT` и до исключения
+        SQLite не доходит; нарушение обязательности значения доходит, и именно
+        на нём проверяется, что оператор отменён, а транзакция — нет.
+        """
+        with db.txn(conn):
+            reqs.add_requirement(conn, req_id="FR-2", description="работа вызывающего")
+            with pytest.raises(refusals.INPUT_REFUSALS):
+                reqs.add_requirement(conn, req_id="FR-3", description=None)
+            assert conn.in_transaction
+        stored = {r[0] for r in conn.execute("SELECT id FROM requirements")}
+        assert stored == {"FR-2"}, stored
+
 
 class TestTheCommandLineSurface:
     """Обе половины через НАСТОЯЩИЙ вход процесса.
@@ -164,12 +328,49 @@ class TestTheCommandLineSurface:
     """
 
     @staticmethod
-    def _run(project, *args):
+    def _run(project, *args, env=None):
         return subprocess.run(
             [sys.executable, "-m", "codebugs.cli", *args],
             cwd=project,
             capture_output=True,
             text=True,
+            env={**os.environ, **env} if env else None,
+        )
+
+    def test_a_committed_write_is_never_reported_as_bad_input(self, tmp_project):
+        """CB-15/CB-16 в новом месте: печать успеха стояла ВНУТРИ помощника.
+
+        Механизм, целиком. `UnicodeEncodeError` наследует от `ValueError`,
+        который единый источник классификации называет отказом по вводу. Пока
+        строка «Added: …» печаталась внутри `with domain_errors():`, отказ
+        кодировки при её печати — то есть сбой, случившийся ПОСЛЕ того, как
+        запись уже совершилась и транзакция закрылась, — ловился плечом
+        проверки ввода, печатался одной опрятной строкой и завершал процесс
+        кодом 1. Требование записано в файле правил подсистемы дословно: сбой,
+        поднятый после коммита, никогда не докладывается через плечо проверки
+        ввода, потому что «ошибка ввода» читается как «ничего не произошло».
+
+        Воспроизведение: `PYTHONIOENCODING=ascii` плюс идентификатор с
+        кириллицей. Измерено на непочиненном дереве — `Ж-1` в базе ЕСТЬ, а
+        команда отчиталась неудачей.
+
+        Различает здесь ФОРМА, а не код возврата: он равен 1 в обоих случаях.
+        Аварийная распечатка — правильный ответ на такой сбой, тот же вывод,
+        что и у `TestRetriageCliContract::test_a_committed_write_is_never_
+        reported_as_bad_input` для испорченной хранимой строки.
+        """
+        r = self._run(tmp_project, "reqs-add", "Ж-1", "-d", "x", env={"PYTHONIOENCODING": "ascii"})
+        connection = db.connect(tmp_project)
+        try:
+            landed = connection.execute(
+                "SELECT count(*) FROM requirements WHERE id = 'Ж-1'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        assert landed == 1, "предпосылка проверки: запись обязана была совершиться"
+        assert "Traceback" in r.stderr, (
+            "запись совершилась, а сбой печати доложен опрятной строкой — "
+            f"успех подан как отказ по вводу: {r.stderr!r}"
         )
 
     def test_a_duplicate_identifier_prints_one_line_and_no_traceback(self, tmp_project):
