@@ -74,11 +74,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   linter without consulting the project environment at all — while the guard that can actually
   refuse a merge took whatever version the lockfile happened to carry. Nothing tied the two
   numbers together, so an ordinary `uv lock --upgrade` moved the guard to a newer linter that
-  reports 568 errors on a tree the old one passes clean, and every later merge would have been
-  refused on violations unrelated to it, with CI still reporting the lint as fine. The version is
-  now pinned in `pyproject.toml`, which is the only place it appears, and CI reads it from there
-  through the same command the merge guard uses. This changes nothing for users of the tracker; it
-  is recorded because it changes what a contributor's environment does.
+  reports 568 errors on a tree the old one passes clean (measured 2026-09-07; drifts as the tree
+  grows), and every later merge would have been refused on violations unrelated to it, with CI
+  still reporting the lint as fine. The version is now pinned in `pyproject.toml`, which is the
+  only place that DECIDES it, and CI reads it from there through the same command the merge guard
+  uses. The number itself still appears in a couple of other places for a human reader — the root
+  `CLAUDE.md`'s prose, and this entry — none of which drive anything. This changes nothing for
+  users of the tracker; it is recorded because it changes what a contributor's environment does.
 
 ## [0.3.0] — 2026-09-01
 

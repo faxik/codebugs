@@ -32,9 +32,12 @@ codebugs-mcp = "codebugs.server:main"
 # ruff IS PINNED TO AN EXACT PATCH VERSION, AND THE `dev =` LINE BELOW IS THE ONLY
 # PLACE THAT DECIDES IT (CB-314) — a claim about what decides, not about what is
 # written down, exactly as `.python-version` is the single source for the
-# interpreter. `CONTRIBUTING.md` and the root `CLAUDE.md` still name the number
-# in prose for a reader; neither drives anything, and stale prose there is a
-# documentation defect rather than a tree that lints itself two different ways.
+# interpreter. The root `CLAUDE.md` still names the number in prose for a
+# reader — `CONTRIBUTING.md` no longer does, it was pared back to "pinned in
+# pyproject.toml" with no digit of its own. That prose does not drive anything,
+# but it is no longer a silent documentation defect if it goes stale: since
+# CB-323, `tests/test_claude_md_truth.py` reads the number straight out of
+# CLAUDE.md's prose and turns red the moment it disagrees with this line.
 # What no EXECUTABLE line repeats is the number — not here, and no longer in
 # `.github/workflows/ci.yml`, which used to be the one place it lived. The
 # measurement recorded below names both versions on purpose: a measurement that
@@ -57,10 +60,14 @@ codebugs-mcp = "codebugs.server:main"
 # MEASURED RATHER THAN ASSUMED: change this line alone, leave the lockfile
 # untouched, and a plain `uv run --extra dev ruff --version` answers with the NEW
 # version and rewrites the lockfile on its way. **But that rewrite is a TRACKED
-# change you still have to commit** — one edit, two files — and the finish script
-# commits before its first `uv run`, so a bump landed without re-committing the
-# lockfile leaves a stale lock in main that every ordinary `uv run` silently
-# rewrites again and a `--frozen` caller consumes as-is.
+# change you still have to commit**, and since CB-323 it is no longer the whole
+# job: a real bump now touches FOUR files, not two — this line, `uv.lock`, the
+# `0.15.7` named in the root CLAUDE.md's prose, and that number's expected
+# value inside `tests/test_claude_md_truth.py` — or the suite goes red with no
+# hint which of the four was missed. The finish script commits before its
+# first `uv run`, so a bump landed without re-committing the lockfile leaves a
+# stale lock in main that every ordinary `uv run` silently rewrites again and
+# a `--frozen` caller consumes as-is.
 #
 # THE BOUNDARY, STATED RATHER THAN IMPLIED: this pin decides under uv's DEFAULT
 # settings. `UV_FROZEN` / `--frozen` and `UV_NO_SYNC` run whatever the environment
