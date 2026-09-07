@@ -53,6 +53,15 @@ codebugs-mcp = "codebugs.server:main"
 # went 0.15.7 -> 0.16.6 and reported 568 errors on a tree 0.15.7 passes clean.
 # CI now calls ruff through `uv run`, so both sides read the version from here.
 #
+# AND THE PIN OUTRANKS A STALE `uv.lock`, WHICH IS THE OBVIOUS DOUBT AND IS
+# MEASURED RATHER THAN ASSUMED: change this line alone, leave the lockfile
+# untouched, and a plain `uv run --extra dev ruff --version` answers with the NEW
+# version and rewrites the lockfile on its way. So bumping the pin is one edit,
+# not two. Note the boundary that creates: `uv run --frozen` forbids that re-lock
+# and would run the LOCKED version instead — which is why the CI lint command is
+# asserted verbatim by `tests/test_cb314_linter_pin.py`, and why adding `--frozen`
+# to it refuses there rather than silently reopening the split.
+#
 # EXACT PATCH, NOT `~=0.15`, for the same reason `.python-version` carries a full
 # patch: a MAJOR.MINOR range leaves a divergent state representable, and making
 # that state unrepresentable is the whole point. The cost is the ordinary cost of
