@@ -29,17 +29,26 @@ codebugs = "codebugs.cli:run"
 codebugs-mcp = "codebugs.server:main"
 
 [project.optional-dependencies]
-# ruff IS PINNED TO AN EXACT PATCH VERSION, AND THIS FILE IS THE ONLY PLACE THE
-# NUMBER APPEARS (CB-314). Before this pin the version lived in exactly one line
-# of the whole tree — `.github/workflows/ci.yml`'s `uvx ruff@0.15.7` — and that
-# command downloads its own copy without reading this environment at all. The
-# guard that can actually refuse a merge (`tools/worktree-finish.sh`, via
-# `uv run --extra dev ruff check`) took whatever version `uv.lock` happened to
-# carry, and nothing tied the two numbers together: one ordinary `uv lock
-# --upgrade` moves the guard to 0.16.x (416 default rules instead of 62, 566
-# violations on an unchanged tree) and refuses every subsequent merge, while CI
-# stays green on its own downloaded copy. CI now calls ruff through `uv run`, so
-# both sides read the version from here.
+# ruff IS PINNED TO AN EXACT PATCH VERSION, AND THE `dev =` LINE BELOW IS THE ONLY
+# PLACE THAT DECIDES IT (CB-314) — a claim about what decides, not about what is
+# written down, exactly as `.python-version` is the single source for the
+# interpreter. `CONTRIBUTING.md` and the root `CLAUDE.md` still name the number
+# in prose for a reader; neither drives anything, and stale prose there is a
+# documentation defect rather than a tree that lints itself two different ways.
+# What no EXECUTABLE line repeats is the number: not this comment, not
+# `.github/workflows/ci.yml`, which used to be the one place it lived.
+#
+# Before the pin the version lived in one line of `.github/workflows/ci.yml`, as
+# `uvx ruff@<version>`, and that command downloads its own copy without reading
+# this environment at all. The guard that can actually refuse a merge
+# (`tools/worktree-finish.sh`, via `uv run --extra dev ruff check`) took whatever
+# version `uv.lock` happened to carry, and nothing tied the two together: one
+# ordinary `uv lock --upgrade` moves the guard to the next minor release, which
+# flags this tree from top to bottom, and every subsequent merge is refused on
+# violations unrelated to it while CI stays green on its own downloaded copy.
+# Measured 2026-09-07 on a disposable copy with the pin removed: the guard's ruff
+# went 0.15.7 -> 0.16.6 and reported 568 errors on a tree 0.15.7 passes clean.
+# CI now calls ruff through `uv run`, so both sides read the version from here.
 #
 # EXACT PATCH, NOT `~=0.15`, for the same reason `.python-version` carries a full
 # patch: a MAJOR.MINOR range leaves a divergent state representable, and making

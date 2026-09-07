@@ -58,19 +58,25 @@ jobs:
         run: uv python install && uv run python -V
 
       - name: Lint
-        # NO VERSION IS NAMED ON THIS LINE, AND THAT IS THE POINT (CB-314).
-        # This step used to read `uvx ruff@0.15.7 check src/ tests/`, and that
+        # NO VERSION IS NAMED ON THIS LINE OR IN THIS COMMENT, AND THAT IS THE
+        # POINT (CB-314). The version lives in `pyproject.toml` and nowhere else;
+        # repeating it here — even in a comment that decides nothing — would put
+        # back the second copy this change exists to remove, and a comment is
+        # exactly the copy nobody remembers to update.
+        #
+        # This step used to read `uvx ruff@<version> check src/ tests/`, and that
         # command downloads its OWN copy of ruff without reading the project
         # environment at all — so the only exact version in the whole tree sat
         # here, while the guard that can actually refuse a merge
         # (`tools/worktree-finish.sh`, `uv run --extra dev ruff check`) took
         # whatever `uv.lock` happened to carry. Nothing tied the two numbers
-        # together, so one ordinary `uv lock --upgrade` moved the guard to
-        # 0.16.x (416 default rules instead of 62, 566 violations on an
-        # unchanged tree) and refused every subsequent merge while THIS job
-        # stayed green. Pinning `ruff==0.15.7` in `pyproject.toml` alone would
-        # not have closed it: `uvx` would still have ignored that pin, leaving
-        # two independent literals in two files. Both halves are required.
+        # together, so one ordinary `uv lock --upgrade` moved the guard to the
+        # next minor release, which flags this tree from top to bottom (measured
+        # 2026-09-07 on a disposable copy: 0.15.7 -> 0.16.6, 568 errors on a tree
+        # 0.15.7 passes clean), and refused every subsequent merge while THIS job
+        # stayed green. Pinning the version in `pyproject.toml` alone would not
+        # have closed it: `uvx` would still have ignored that pin, leaving two
+        # independent literals in two files. Both halves are required.
         #
         # This adds no step and no meaningful minute: `uv run` builds the
         # project environment, which the `Tests` step below builds anyway with
