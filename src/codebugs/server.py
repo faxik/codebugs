@@ -15,7 +15,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.shared.exceptions import MCPError
-from mcp_types import INVALID_PARAMS, CallToolResult
+from mcp_types import INVALID_PARAMS, CallToolResult, TextContent
 
 from codebugs import db, refusals, usage
 
@@ -455,19 +455,8 @@ def install_strict_arguments(server: MCPServer) -> None:
     server.middleware.append(reject_unknown_arguments)
 
 
-def _missing_arguments_result(tool: str, missing: list[str], declared: list[str]) -> dict[str, Any]:
-    """The refusal a client receives when a required argument was not supplied (CB-326).
-
-    THE SHAPE IS THE MEASURED ONE, NOT THE TYPED ONE, AND THAT WAS A CHOICE.
-    `mcp_types.CallToolResult` is the declared type and would read better here.
-    What actually travels through `server.middleware` on a failed call was
-    measured instead of assumed (`tests/manual/probe_cb326_middleware_premise.py`,
-    both admitted SDK versions): a PLAIN DICT carrying exactly `content` and
-    `isError`. `install_usage_tracking` below already reads both shapes
-    (`CallToolResult(is_error=True) | {"isError": True}`) precisely because the
-    dict is what it meets. Emitting the shape the SDK itself emits keeps this
-    layer's answer indistinguishable from the SDK's own on every axis but the
-    words — which is the whole point of the card.
+def _missing_arguments_text(tool: str, missing: list[str], declared: list[str]) -> str:
+    """The words this package says when a required argument was not supplied (CB-326).
 
     WHAT THE TEXT MUST CARRY, AND WHY EACH PART IS THERE. The foreign text this
     replaces named the FIELD and the KIND of trouble, and that was its entire
@@ -475,28 +464,67 @@ def _missing_arguments_result(tool: str, missing: list[str], declared: list[str]
     the field name would be a regression wearing a fix's clothes. So the missing
     names come first. The full required set follows because the client that got
     one name wrong is the client most likely to get the next one wrong too, and
-    it is free to state. The closing sentence answers the question this
-    repository's error model asks of every refusal (CB-15/CB-16/CB-136): DID THE
-    EFFECT LAND? Here the answer is unambiguous and worth saying, because the
-    layer returns before `call_next` and the tool body never runs at all.
+    it is free to state.
+
+    THE LAST SENTENCE CLAIMS EXACTLY WHAT IS TRUE AND NOT ONE WORD MORE, and the
+    narrowing is a correction rather than a style choice. It first read "the tool
+    did not run and nothing was written" — and the second half was FALSE:
+    `install_usage_tracking` records a row in `tool_calls` for this very call,
+    which `tests/test_cb326_required_arguments.py`'s placement oracle proves by
+    asserting that row exists. A refusal that overstates what did not happen is
+    the same class of lie as CB-15/CB-16's success-shaped failure, merely
+    pointing the other way, so the sentence now speaks only of the TOOL BODY,
+    which genuinely never runs.
 
     BOTH LISTS ARE SORTED, following `install_strict_arguments`' own `Accepted:`
     list. A set difference has no order of its own, and a message whose word
     order depends on dict iteration is a message two runs can disagree about.
     """
-    return {
-        "content": [
-            {
-                "type": "text",
-                "text": (
-                    f"Missing required argument(s) for tool {tool!r}: {', '.join(missing)}. "
-                    f"Required: {', '.join(declared)}. "
-                    "Refused before the call — the tool did not run and nothing was written."
-                ),
-            }
-        ],
-        "isError": True,
-    }
+    return (
+        f"Missing required argument(s) for tool {tool!r}: {', '.join(missing)}. "
+        f"Required: {', '.join(declared)}. "
+        "The tool body did not run."
+    )
+
+
+def _with_missing_arguments_text(
+    result: Any, tool: str, missing: list[str], declared: list[str]
+) -> Any:
+    """Put this package's words into the SDK's OWN error envelope (CB-326).
+
+    WHY THE ENVELOPE IS BORROWED RATHER THAN BUILT, which is this function's
+    whole reason to exist and was learned the expensive way. The first version of
+    this layer assembled a result by hand — a dict carrying `content` and
+    `isError`, the shape observed travelling through `server.middleware`. That
+    observation was real and the conclusion drawn from it was wrong: what a
+    middleware SEES is what the SDK's serializer has already PRODUCED, which is
+    not the same question as what is valid to hand back. Measured through a real
+    client session (`tests/manual/probe_cb326_protocol_and_arguments.py`): under
+    a session opened with `discover()` the current protocol revision requires a
+    `resultType` field, so the hand-built result was rejected by the CLIENT's own
+    validator and the call RAISED instead of returning. That changes the channel
+    a refusal arrives through — the one thing this card must not do.
+
+    So the SDK builds the envelope, always, and this replaces only the `content`
+    inside it. `resultType`, `_meta` and anything a future revision adds travel
+    through untouched, because they are never this package's to invent. The two
+    shapes handled are the two `install_usage_tracking` already reads, for the
+    same reason it reads both.
+
+    IT REWRITES ONLY AN ERROR-SHAPED RESULT, and a non-error one is returned
+    untouched. That branch is unreachable today — a call with a missing required
+    field cannot succeed — and it is written this way deliberately: if it ever
+    becomes reachable, the failure is that a client sees the truth instead of
+    this package's guess about it.
+    """
+    text = _missing_arguments_text(tool, missing, declared)
+    if isinstance(result, Mapping) and result.get("isError"):
+        replaced = dict(result)
+        replaced["content"] = [{"type": "text", "text": text}]
+        return replaced
+    if isinstance(result, CallToolResult) and result.is_error:
+        return result.model_copy(update={"content": [TextContent(type="text", text=text)]})
+    return result
 
 
 def install_required_arguments(server: MCPServer) -> None:
@@ -576,24 +604,47 @@ def install_required_arguments(server: MCPServer) -> None:
     required: dict[str, list[str]] = {}
 
     async def refuse_missing_required_arguments(ctx: Any, call_next: Any) -> Any:
+        tool = ""
+        missing: list[str] = []
+        declared: list[str] = []
         if ctx.method == "tools/call" and isinstance(ctx.params, Mapping):
             name = ctx.params.get("name")
             arguments = ctx.params.get("arguments")
+            # A call with NO arguments at all OMITS this field; the client
+            # library sends nothing rather than an empty object, so the two are
+            # different bytes on the wire while meaning the same thing — nothing
+            # was supplied. An absent field is therefore read as an empty
+            # mapping. Reading it as "not a mapping" and falling through is what
+            # left the COMMONEST shape of this defect unfixed through the card's
+            # first landing attempt: `add` with no arguments still answered in
+            # the validation library's words, under both protocol revisions.
+            # Anything else that is not a mapping still falls through, because
+            # a malformed `arguments` is the protocol layer's to refuse.
+            if arguments is None:
+                arguments = {}
             if isinstance(name, str) and isinstance(arguments, Mapping):
                 if not required:
-                    for tool in await server.list_tools():
-                        required[tool.name] = sorted(tool.input_schema.get("required") or ())
-                # Two different reasons to fall through, both landing here. An
-                # UNKNOWN tool name is not ours to answer — the SDK's own
-                # "Unknown tool" stays authoritative, exactly as in
-                # `install_strict_arguments`. A KNOWN tool that declares no
-                # required arguments has nothing for this layer to check.
-                declared = required.get(name)
-                if declared:
-                    missing = [field for field in declared if field not in arguments]
-                    if missing:
-                        return _missing_arguments_result(name, missing, declared)
-        return await call_next(ctx)
+                    for known in await server.list_tools():
+                        required[known.name] = sorted(known.input_schema.get("required") or ())
+                # Two different reasons to leave `missing` empty, both landing
+                # here. A tool name absent from the catalogue is not ours to
+                # answer — the SDK's own "Unknown tool" stays authoritative,
+                # exactly as in `install_strict_arguments`. A KNOWN tool that
+                # declares no required arguments has nothing to check.
+                declared = required.get(name) or []
+                missing = [field for field in declared if field not in arguments]
+                tool = name
+
+        # ALWAYS call through, even when this layer already knows the call will
+        # be refused. The refusal still comes from the SDK's schema validation,
+        # exactly as before; what changes is only the WORDS inside the envelope
+        # the SDK returns. Returning early instead — which this layer used to do
+        # — meant inventing the envelope, and an invented envelope is valid only
+        # against the protocol revision its author happened to measure.
+        result = await call_next(ctx)
+        if not missing:
+            return result
+        return _with_missing_arguments_text(result, tool, missing, declared)
 
     server.middleware.append(refuse_missing_required_arguments)
 

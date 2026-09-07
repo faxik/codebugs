@@ -116,7 +116,9 @@ def _innermost(exc: BaseException) -> BaseException:
     return _innermost(inner[0]) if inner else exc
 
 
-def _observe(built, name: str, arguments: dict, *, rewrite: bool) -> tuple[str, str]:
+def _observe(
+    built, name: str, arguments: dict | None, *, rewrite: bool, protocol: str = "initialize"
+) -> tuple[str, str]:
     """Прогон одного случая через живого клиента с наблюдателем в самом внешнем слое.
 
     Возвращает пару «что увидел наблюдатель» и «что в итоге получил клиент».
@@ -146,7 +148,7 @@ def _observe(built, name: str, arguments: dict, *, rewrite: bool) -> tuple[str, 
     built.middleware.insert(0, observer)
     try:
         try:
-            is_error, text = call_over_the_wire(built, name, arguments)
+            is_error, text = call_over_the_wire(built, name, arguments, protocol=protocol)
             client = f"is_error={is_error} text[:70]={text[:70]!r}"
         except BaseException as exc:  # noqa: BLE001 — форма ответа и есть предмет замера
             inner = _innermost(exc)
@@ -198,17 +200,21 @@ def main() -> None:
     print()
     with tempfile.TemporaryDirectory() as root:
         factory = _tracker(root)
-        for rewrite in (False, True):
-            print("=" * 78)
-            print("ПОДМЕНА ВКЛЮЧЕНА" if rewrite else "ТОЛЬКО НАБЛЮДЕНИЕ")
-            print("=" * 78)
-            for label, tool, args in CASES:
-                built = server._build_server("findings", factory)
-                seen, client = _observe(built, tool, args, rewrite=rewrite)
-                print(f"--- {label} ({tool}) ---")
-                print(f"  слой видит : {seen}")
-                print(f"  клиент     : {client}")
-                print()
+        for protocol in ("initialize", "discover"):
+            for rewrite in (False, True):
+                print("=" * 78)
+                head = "ПОДМЕНА ВКЛЮЧЕНА" if rewrite else "ТОЛЬКО НАБЛЮДЕНИЕ"
+                print(f"{head} — редакция протокола {protocol}()")
+                print("=" * 78)
+                for label, tool, args in CASES:
+                    built = server._build_server("findings", factory)
+                    seen, client = _observe(
+                        built, tool, args, rewrite=rewrite, protocol=protocol
+                    )
+                    print(f"--- {label} ({tool}) ---")
+                    print(f"  слой видит : {seen}")
+                    print(f"  клиент     : {client}")
+                    print()
     print("=" * 78)
     print("ЧТО УЧЁТНАЯ ТАБЛИЦА ПИШЕТ СЕГОДНЯ (по одному вызову на свежем трекере)")
     print("=" * 78)
