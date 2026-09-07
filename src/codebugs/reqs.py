@@ -208,12 +208,23 @@ def _constraint_refusal(req_id: str, exc: sqlite3.IntegrityError) -> str:
     weaker sentence, which is true of EVERY member of ``IntegrityError``. A
     mis-read code costs precision, never truth; there is no input for which this
     invents a duplicate that does not exist.
+
+    THE FALLBACK CARRIES THE DATABASE'S OWN WORDS, AND THAT IS DELIBERATE.
+    ``NOT NULL constraint failed: requirements.description`` names the column,
+    which is the whole content of the answer to someone who has just hit it.
+    What CB-310 objected to was a raw library string arriving as the WHOLE
+    message, unframed and classified as a crash; here it is quoted inside a
+    sentence that says what happened and about which requirement.
+
+    HONEST SCOPE ON ONE ARM. The ``getattr`` default is insurance and no test
+    discriminates it: ``sqlite_errorname`` exists on ``sqlite3.Error`` from
+    Python 3.11, which is the floor ``requires-python`` declares. The FALLBACK
+    ITSELF is a live path, reached by every ``NOT NULL`` violation and covered
+    by ``tests/test_cb316_reqs_add_refusals.py``.
     """
     if getattr(exc, "sqlite_errorname", "") == "SQLITE_CONSTRAINT_PRIMARYKEY":
         return f"requirement {req_id} already exists"
-    return (
-        f"requirement {req_id} was refused by the requirements table's constraints: {exc}"
-    )
+    return f"requirement {req_id} was refused by the requirements table's constraints: {exc}"
 
 
 def batch_add_requirements(
@@ -1058,15 +1069,16 @@ def register_cli(sub, commands) -> None:
 
         # Routed through the shared wrapper, exactly like `_cmd_reqs_update` and
         # the other neighbours in this file (CB-316). Without it this handler
-        # caught nothing at all, and CLAUDE.md's Error-handling section is
-        # explicit that this is a violation of the same rule as catching in the
-        # wrong order: an unknown `--priority` printed a raw traceback and leaked
-        # the connection, and so did a duplicate identifier once
-        # `add_requirement` began refusing one.
+        # caught nothing at all, which CLAUDE.md's Error-handling section calls a
+        # violation of the same rule as catching in the WRONG ORDER: an unknown
+        # `--priority` printed a raw traceback here while `reqs-update` printed
+        # one sentence for the identical bad value.
         #
-        # `try/finally` around the whole region, not just `close()` after the
-        # call: `domain_errors` exits the process on a refusal, so a `close()`
-        # written below it would simply never run.
+        # `try/finally` around the whole region rather than `close()` after the
+        # call, and the reason is exact rather than hygienic: `close()` sat below
+        # the call and was therefore skipped on EVERY failing path — harmless
+        # only because the process then died with the traceback, and no longer
+        # true at all once `domain_errors` starts exiting deliberately.
         conn = db.connect()
         try:
             tags = [t.strip() for t in args.tags.split(",")] if args.tags else []
