@@ -62,7 +62,8 @@ against the checkout you run in, so that tests main's source and passes on a tre
 
 **ruff is pinned to `==0.15.7` in `pyproject.toml`, and that line is the only place that decides
 which linter runs.** No workflow, script or guard names a version any more; this paragraph does, for
-you the reader, and it decides nothing. 0.16.x flags the whole repo: measured on 2026-09-07, dropping the pin and running a plain
+you the reader, and it decides nothing — if the two ever disagree, `pyproject.toml` is right and this
+sentence is stale. 0.16.x flags the whole repo: measured on 2026-09-07, dropping the pin and running a plain
 `uv lock --upgrade` moved the linter to 0.16.6, which reports **568 errors** on a tree 0.15.7 passes
 clean. So an unpinned linter turns one routine lockfile refresh into a refusal of every subsequent
 merge, on violations that have nothing to do with the branch being merged. CI reads the pin through

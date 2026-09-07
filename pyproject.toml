@@ -35,8 +35,11 @@ codebugs-mcp = "codebugs.server:main"
 # interpreter. `CONTRIBUTING.md` and the root `CLAUDE.md` still name the number
 # in prose for a reader; neither drives anything, and stale prose there is a
 # documentation defect rather than a tree that lints itself two different ways.
-# What no EXECUTABLE line repeats is the number: not this comment, not
-# `.github/workflows/ci.yml`, which used to be the one place it lived.
+# What no EXECUTABLE line repeats is the number — not here, and no longer in
+# `.github/workflows/ci.yml`, which used to be the one place it lived. The
+# measurement recorded below names both versions on purpose: a measurement that
+# hides what it ran on cannot be re-checked, and a dated one cannot be mistaken
+# for the pin.
 #
 # Before the pin the version lived in one line of `.github/workflows/ci.yml`, as
 # `uvx ruff@<version>`, and that command downloads its own copy without reading

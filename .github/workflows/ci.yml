@@ -58,11 +58,13 @@ jobs:
         run: uv python install && uv run python -V
 
       - name: Lint
-        # NO VERSION IS NAMED ON THIS LINE OR IN THIS COMMENT, AND THAT IS THE
-        # POINT (CB-314). The version lives in `pyproject.toml` and nowhere else;
-        # repeating it here — even in a comment that decides nothing — would put
-        # back the second copy this change exists to remove, and a comment is
-        # exactly the copy nobody remembers to update.
+        # NO VERSION IS NAMED ON THIS LINE, AND THAT IS THE POINT (CB-314). The
+        # version is decided in `pyproject.toml` and nowhere else; naming it here
+        # again — even in a comment that decides nothing — would put back the
+        # second copy this change exists to remove, and a comment is exactly the
+        # copy nobody remembers to update when the pin is bumped. The dated
+        # measurement below names its versions because a measurement that hides
+        # what it ran on cannot be re-checked; it is evidence, not a pin.
         #
         # This step used to read `uvx ruff@<version> check src/ tests/`, and that
         # command downloads its OWN copy of ruff without reading the project
