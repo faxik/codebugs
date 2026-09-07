@@ -113,7 +113,11 @@ def _next_claim_id(conn: sqlite3.Connection) -> str:
     read-then-insert is not a race."""
     prefix_len = len(CLAIM_ID_PREFIX) + 1  # 1-based SUBSTR offset past the prefix
     row = conn.execute(
-        f"SELECT claim_id FROM entity_claims WHERE claim_id LIKE ? "  # noqa: S608 (constant)
+        # SANCTIONED VALUE INTERPOLATION, 1 of 3 (the list with each mechanism is in
+        # src/codebugs/CLAUDE.md, under the identifier-validation rule): `prefix_len`
+        # is a NUMBER `len()` computes from a module constant, so nothing a caller
+        # passes can reach this text.
+        f"SELECT claim_id FROM entity_claims WHERE claim_id LIKE ? "  # noqa: S608 (value)
         f"ORDER BY CAST(SUBSTR(claim_id, {prefix_len}) AS INTEGER) DESC LIMIT 1",
         (f"{CLAIM_ID_PREFIX}%",),
     ).fetchone()

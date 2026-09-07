@@ -399,7 +399,8 @@ rewritten the same way, expect the same one-time manual merge.
 
 ### Database
 
-- Use parameterized queries exclusively. Never interpolate values into SQL.
+- Use parameterized queries exclusively. Never interpolate values into SQL. Existing sanctioned
+  exceptions are listed in the subsystem rules file, and each carries a reason at the line of code.
 
 ### Testing
 

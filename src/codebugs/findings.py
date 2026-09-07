@@ -84,7 +84,11 @@ RECURRENCE_STATUSES = ("wont_fix", "not_a_bug")  # decision stays closed -> new 
 _POST_MIGRATION_INDEXES = (
     "CREATE UNIQUE INDEX IF NOT EXISTS ux_findings_fingerprint_live ON findings(fingerprint) "
     "WHERE fingerprint IS NOT NULL AND status IN ("
-    + ", ".join(f"'{s}'" for s in LIVE_STATUSES)
+    # SANCTIONED VALUE INTERPOLATION, 3 of 3, AND ITS MECHANISM IS NOT THE OTHER TWO'S
+    # (the list is in src/codebugs/CLAUDE.md): these are repo-owned status literals, and
+    # the reason interpolating them is sanctioned is that a table definition cannot bind
+    # parameters AT ALL — there is no parameterized form of this statement to prefer.
+    + ", ".join(f"'{s}'" for s in LIVE_STATUSES)  # noqa: S608 (value)
     + ")",
     # CB-115: both historical creators of this index live on migration paths a FRESH
     # database never takes (_migrate_statuses early-returns because SCHEMA already
@@ -201,7 +205,10 @@ def _next_id(conn: sqlite3.Connection) -> str:
     """Generate next CB-N id."""
     prefix_len = len(FINDING_ID_PREFIX) + 1  # 1-based SUBSTR offset past the prefix
     row = conn.execute(
-        f"SELECT id FROM findings WHERE id LIKE ? "
+        # SANCTIONED VALUE INTERPOLATION, 2 of 3 (the list with each mechanism is in
+        # src/codebugs/CLAUDE.md): `prefix_len` is a NUMBER `len()` computes from a
+        # module constant — the mirror image of `claims._next_claim_id`.
+        f"SELECT id FROM findings WHERE id LIKE ? "  # noqa: S608 (value)
         f"ORDER BY CAST(SUBSTR(id, {prefix_len}) AS INTEGER) DESC LIMIT 1",
         (f"{FINDING_ID_PREFIX}%",),
     ).fetchone()

@@ -873,6 +873,15 @@ LIVE: tuple[Live, ...] = (
     ),
     Live(
         SUB,
+        "with exactly THREE sanctioned exceptions",
+        "THREE",
+        lambda: {str(len(value_interpolation_sites()))},
+        "the size of the sanctioned-exception list, derived from the tree by the "
+        "same predicate the list itself is checked against — so the prose, the "
+        "table and the code cannot disagree three ways",
+    ),
+    Live(
+        SUB,
         "All three registries are complete",
         "three",
         _registry_functions,
@@ -1190,12 +1199,16 @@ NOT_A_CLAIM: tuple[NotAClaim, ...] = (
     NotAClaim(SUB, "until two writers overlap", _SCENARIO),
     NotAClaim(SUB, "two rules a rounding apart", _SCENARIO),
     NotAClaim(SUB, "treats as two", _SCENARIO),
-    NotAClaim(SUB, "with two deliberate and caller-unreachable exceptions", "PENDING: the SQL-interpolation exception count, reconciled with the root rule in the last commit of this branch"),
     # ---------------- calibration and illustration ---------------------------
     NotAClaim(SUB, "the rejected 0.95", "a threshold considered and rejected during calibration; the archive records the corpus it was rejected on"),
     NotAClaim(SUB, '"Bug 1"/"Bug 2" ≈ 0.8 and two empty strings 1.0', "illustrative scores demonstrating why a minimum text length exists"),
     # ---------------- pending class 3 ----------------------------------------
     NotAClaim(SUB, "Two consequences beyond", _SELF_COUNT),
+    NotAClaim(SUB, "of TWO different kinds", _SELF_COUNT),
+    NotAClaim(SUB, "under the first two's wording", _CROSS_REF),
+    NotAClaim(SUB, "*(1) and (2):*", "the corpus's own enumeration of the three exceptions, written inline rather than with the `**(N)**` markers the lexical rule knows"),
+    NotAClaim(SUB, "*(3), a different licence:*", "the third item of that same inline enumeration"),
+    NotAClaim(SUB, "Each carries its reason at the site", _CROSS_REF),
     # ---------------- pending class 2: measurements needing a date ----------
 )
 
@@ -1648,4 +1661,304 @@ def test_every_rationale_anchor_resolves(rel: str) -> None:
             broken.append(f"{target} carries no heading anchored {{#{anchor}}}")
     assert not broken, (
         f"{rel} points into the rationale archive at headings that are gone: {broken}"
+    )
+
+# --------------------------------------------------------------------------- #
+# THE ONE LIVE PAIR OF RULES: the root's absolute ban on interpolating VALUES
+# into SQL, against the subsystem's three sanctioned exceptions (oracle point 5,
+# and point 6's amendment by the level-(2) holder).
+#
+# HOW THE PREDICATE TELLS A VALUE FROM AN IDENTIFIER, said out loud because being
+# unable to say it was declared an escalation rather than a licence to widen.
+#
+#   An interpolation puts PYTHON DATA into SQL text — a VALUE — when the
+#   expression's own syntactic form can produce nothing an identifier could be:
+#     * it produces a NUMBER — a numeric literal, arithmetic, or `len()`/`int()`/
+#       `abs()`/`sum()`/`round()`. No SQLite identifier is a number.
+#     * it RENDERS DATA AS AN SQL STRING LITERAL — an f-string with a `'` pressed
+#       against both sides of a slot, `f"'{s}'"`. That is data being quoted, and
+#       it is deliberately NOT "the text happens to contain a quote": SQL
+#       fragments held in constants (`strftime('now')`) are full of quotes and are
+#       SQL CODE, not data. Keying on the quote CHARACTER instead of on a quote
+#       AROUND A SLOT was measured: it turned 3 sites into 13.
+#   Everything else — a bare name, an attribute, a joined list of names, a clause
+#   built elsewhere — is an identifier or a fragment, and is not this list's
+#   business. Those are held by validation (`types.is_sql_identifier`) and by
+#   membership of closed enumerations, which the subsystem file describes.
+#
+# ONE-STEP LOCAL RESOLUTION, and no more. A slot holding a bare name assigned
+# EXACTLY ONCE in the same function is resolved to that assignment before the
+# predicate runs — without it the two `SUBSTR(…, {prefix_len})` sites, the very
+# ones the rule exists for, would read as identifiers. Two steps, a conditional
+# assignment or a value crossing a function boundary are NOT followed.
+#
+# WHERE IT IS BLIND, AND THE DIRECTION OF THE BLINDNESS. The predicate reads the
+# expression's SHAPE, never its data flow, so a value arriving through a plain
+# parameter (`f"LIMIT {n}"`) reads as an identifier and is invisible. Closing
+# that means value tracking — the boundary `test_no_network_capability.py` draws
+# around `__import__` and `test_two_valued_path_gate.py` around `getattr`.
+# Widening instead to EVERY interpolation would take the population from 3 to 69
+# across thirteen files, which is a package-wide change refused by the level-(2)
+# holder for that reason. So the guarantee is stated at the width it holds: the
+# declared list is EXACTLY the set of value interpolations this predicate sees,
+# in both directions, and what the predicate cannot see is named here.
+# --------------------------------------------------------------------------- #
+import io  # noqa: E402
+import tokenize  # noqa: E402
+
+PACKAGE = REPO_ROOT / "src" / "codebugs"
+
+_SQL_STATEMENT = re.compile(
+    r"\b(SELECT\s|INSERT\s+INTO|UPDATE\s|DELETE\s+FROM|CREATE\s+(UNIQUE\s+)?INDEX"
+    r"|CREATE\s+TABLE|ALTER\s+TABLE)\b",
+    re.IGNORECASE,
+)
+
+_NUMERIC_CALLS = {"len", "int", "abs", "sum", "round"}
+
+
+def _flatten_sql(node: ast.expr, static: list[str], slots: list[ast.expr]) -> None:
+    """Split a built SQL string into its static text and its interpolation slots."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        static.append(node.value)
+    elif isinstance(node, ast.JoinedStr):
+        for part in node.values:
+            if isinstance(part, ast.Constant):
+                static.append(str(part.value))
+            else:
+                slots.append(part.value)
+                static.append("\0")
+    elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        _flatten_sql(node.left, static, slots)
+        _flatten_sql(node.right, static, slots)
+    else:
+        slots.append(node)
+        static.append("\0")
+
+
+def _produces_a_number(node: ast.expr) -> bool:
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return not isinstance(node.value, bool)
+    if isinstance(node, ast.BinOp) and isinstance(
+        node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod)
+    ):
+        return _produces_a_number(node.left) or _produces_a_number(node.right)
+    if isinstance(node, ast.Call) and getattr(node.func, "id", None) in _NUMERIC_CALLS:
+        return True
+    return False
+
+
+def _quotes_a_slot(node: ast.expr) -> bool:
+    """True when a `'` is pressed against both sides of an interpolation."""
+    for inner in ast.walk(node):
+        if not isinstance(inner, ast.JoinedStr):
+            continue
+        parts = inner.values
+        for i, part in enumerate(parts):
+            if not isinstance(part, ast.FormattedValue):
+                continue
+            before = str(parts[i - 1].value) if i and isinstance(parts[i - 1], ast.Constant) else ""
+            after = (
+                str(parts[i + 1].value)
+                if i + 1 < len(parts) and isinstance(parts[i + 1], ast.Constant)
+                else ""
+            )
+            if before.endswith("'") and after.startswith("'"):
+                return True
+    return False
+
+
+def value_interpolation_sites() -> dict[tuple[str, str], int]:
+    """Every place in the package where PYTHON DATA is spliced into SQL text.
+
+    Keyed by (module, the enclosing function or module-level name) rather than by
+    line number: a line number is the one key an edit three screens above silently
+    invalidates, and this table exists precisely to survive ordinary edits.
+    """
+    found: dict[tuple[str, str], int] = {}
+    for path in sorted(PACKAGE.rglob("*.py")):
+        rel = str(path.relative_to(REPO_ROOT))
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+
+        def visit(node: ast.AST, where: str, assigns: dict[str, list[ast.expr]]) -> None:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                inner: dict[str, list[ast.expr]] = {}
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Assign):
+                        for target in sub.targets:
+                            if isinstance(target, ast.Name):
+                                inner.setdefault(target.id, []).append(sub.value)
+                for child in node.body:
+                    visit(child, node.name, inner)
+                return
+            if isinstance(node, ast.Assign) and where == "<module>":
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        where = target.id
+            _collect(node, rel, where, assigns, found)
+            for child in ast.iter_child_nodes(node):
+                visit(child, where, assigns)
+
+        module_assigns: dict[str, list[ast.expr]] = {}
+        for sub in tree.body:
+            if isinstance(sub, ast.Assign):
+                for target in sub.targets:
+                    if isinstance(target, ast.Name):
+                        module_assigns.setdefault(target.id, []).append(sub.value)
+        for child in tree.body:
+            visit(child, "<module>", module_assigns)
+    return found
+
+
+def _collect(
+    node: ast.AST,
+    rel: str,
+    where: str,
+    assigns: dict[str, list[ast.expr]],
+    found: dict[tuple[str, str], int],
+) -> None:
+    if not isinstance(node, (ast.JoinedStr, ast.BinOp)):
+        return
+    static: list[str] = []
+    slots: list[ast.expr] = []
+    _flatten_sql(node, static, slots)
+    if not slots or not _SQL_STATEMENT.search("".join(static).replace("\0", "")):
+        return
+    for slot in slots:
+        resolved = slot
+        if isinstance(slot, ast.Name) and len(assigns.get(slot.id, [])) == 1:
+            resolved = assigns[slot.id][0]
+        if _produces_a_number(resolved) or _quotes_a_slot(resolved):
+            found[(rel, where)] = slot.lineno
+
+
+# The list the subsystem rules file states in prose, written here as data so the
+# two cannot drift. SELF-DELETING in both directions: a row the predicate no
+# longer sees fails, and a site the predicate sees that has no row fails too.
+SANCTIONED_VALUE_INTERPOLATIONS: dict[tuple[str, str], str] = {
+    ("src/codebugs/claims.py", "_next_claim_id"): (
+        "1 of 3: `prefix_len` is a NUMBER `len()` computes from the module constant "
+        "CLAIM_ID_PREFIX, so no caller can reach the interpolated text"
+    ),
+    ("src/codebugs/findings.py", "_next_id"): (
+        "2 of 3: the mirror image of the claims site, on FINDING_ID_PREFIX"
+    ),
+    ("src/codebugs/findings.py", "_POST_MIGRATION_INDEXES"): (
+        "3 of 3, AND ITS MECHANISM IS DIFFERENT: repo-owned status literals are "
+        "spliced into the WHERE of a partial unique index. The licence is not that "
+        "the value is unreachable but that a table definition cannot bind parameters "
+        "at all, so there is no parameterized form of the statement to prefer"
+    ),
+}
+
+
+def _statement_span(tree: ast.Module, line: int) -> tuple[int, int]:
+    """The innermost statement containing a line, as (first line, last line)."""
+    best = (line, line)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.stmt):
+            continue
+        end = getattr(node, "end_lineno", None) or node.lineno
+        if node.lineno <= line <= end and (end - node.lineno) <= (best[1] - best[0]) or best == (line, line):
+            if node.lineno <= line <= end:
+                best = (node.lineno, end)
+    return best
+
+
+def _comment_lines(source: str) -> set[int]:
+    out: set[int] = set()
+    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+        if token.type == tokenize.COMMENT:
+            out.add(token.start[0])
+    return out
+
+
+def sites_without_a_reason() -> list[str]:
+    """Value interpolations whose statement carries no comment explaining itself.
+
+    THE LETTER OF THE REQUIREMENT WAS "a reason on the same line of code"; it is
+    read here as "a reason attached to the interpolating STATEMENT" — its own line,
+    any line of the statement, or the comment block directly above it. The intent
+    is that a reader meets the reason where the interpolation is rather than
+    hunting for it, and a multi-line `conn.execute(...)` is one statement. Read
+    literally, the requirement would have been unsatisfiable without reflowing SQL.
+    """
+    bad = []
+    for (rel, where), line in sorted(value_interpolation_sites().items()):
+        source = _read(rel)
+        tree = ast.parse(source)
+        first, last = _statement_span(tree, line)
+        comments = _comment_lines(source)
+        lines = source.split("\n")
+        above = first - 1
+        while above >= 1 and lines[above - 1].strip().startswith("#"):
+            above -= 1
+        if not any(c for c in comments if above < c <= last):
+            bad.append(f"{rel}::{where} (line {line})")
+    return bad
+
+
+def test_the_value_interpolation_predicate_is_not_vacuous() -> None:
+    """A predicate that saw nothing would license the whole package."""
+    assert value_interpolation_sites(), (
+        "the value-interpolation predicate found no site at all. It is supposed to "
+        "see the three sanctioned exceptions; seeing none means it is broken, and a "
+        "broken predicate makes both tests below pass over anything"
+    )
+
+
+def test_no_value_interpolation_lacks_a_reason() -> None:
+    """The count the level-(2) holder asked for, and it must be zero."""
+    bad = sites_without_a_reason()
+    assert not bad, (
+        f"these places splice a VALUE into SQL text and say nothing about why: {bad}.\n"
+        "The root rule forbids it outright; an exception has to carry its mechanism "
+        "at the site, and be listed in src/codebugs/CLAUDE.md."
+    )
+
+
+def test_the_sanctioned_list_matches_the_tree_in_both_directions() -> None:
+    """Neither the list nor the tree may grow past the other in silence."""
+    seen = set(value_interpolation_sites())
+    declared = set(SANCTIONED_VALUE_INTERPOLATIONS)
+    new = sorted(f"{rel}::{where}" for rel, where in seen - declared)
+    gone = sorted(f"{rel}::{where}" for rel, where in declared - seen)
+    assert not new, (
+        f"a value is spliced into SQL at {new}, and the sanctioned list does not "
+        "name it. Either bind the value, or add a row here AND a sentence to "
+        "src/codebugs/CLAUDE.md — the list and the prose are one thing."
+    )
+    assert not gone, (
+        f"the sanctioned list still names {gone}, where no value interpolation "
+        "remains. Delete the row and the sentence: a list that only grows is where "
+        "the next exception gets parked."
+    )
+
+
+# The pairs of rules the root and the subsystem file state about the same subject.
+# The completeness of THIS LIST is a declared limit, exactly as the package brief
+# says: no systematic comparison of every root rule against every subsystem rule
+# has been done, so this table can prove a VIOLATION and never the absence of one.
+PAIRED_RULES: tuple[tuple[str, str, str], ...] = (
+    (
+        "Never interpolate values into SQL. Existing sanctioned",
+        "Values are bound, with exactly THREE sanctioned exceptions",
+        "the root states the prescription and points at the list; the subsystem "
+        "carries the list. A session that reads only the root now learns that "
+        "exceptions exist and where they are, instead of meeting an absolute that "
+        "the code contradicts in three places",
+    ),
+)
+
+
+def test_every_paired_rule_is_still_stated_on_both_sides() -> None:
+    broken = []
+    for root_text, sub_text, _reason in PAIRED_RULES:
+        if root_text not in _read(ROOT):
+            broken.append(f"the root no longer says {root_text!r}")
+        if sub_text not in _read(SUB):
+            broken.append(f"the subsystem file no longer says {sub_text!r}")
+    assert not broken, (
+        f"a rule stated on both sides has lost one of them: {broken}. A session "
+        "reading only the root would then meet an absolute the code contradicts."
     )
