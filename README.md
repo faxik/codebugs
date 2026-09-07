@@ -54,8 +54,10 @@ Two consequences of installing by path, both worth knowing before the first surp
 - **The installer resolves dependencies on its own and does not read this repository's
   `uv.lock`.** So an install picks the newest release each declared range admits, which is not
   necessarily the combination the test suite ran against. That gap is real and has bitten once
-  already; the `newest-sdk` job in `.github/workflows/ci.yml` exists to run the suite against the
-  newest versions the ranges admit, so the two sides are at least both tested.
+  already, which is why the `newest-sdk` job in `.github/workflows/ci.yml` runs the whole suite
+  against the newest versions the ranges admit. Note what that buys and what it does not: a break
+  on the versions you would install becomes VISIBLE there instead of passing silently on the
+  locked ones — it is not a promise that the newest combination currently works.
 
 ## Setup
 
