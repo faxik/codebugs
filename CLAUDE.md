@@ -379,7 +379,7 @@ rewritten the same way, expect the same one-time manual merge.
 
 - **Shared types** (`types.py`): Entity constants (statuses, priorities, severities), resolver functions, terminal states. Zero-dependency — safe to import from anywhere
 
-- **MCP server** (`server.py`): a LARGE module. Its `MCPServer` orchestrator proper is short, but the file around it carries most of the protocol surface — do not read the word "thin" as permission to skip it. Discovers tool providers via registry, filters by `--mode` flag. Requires the mcp 2.x SDK (`mcp.server.mcpserver.MCPServer`, which replaced 1.x's `mcp.server.fastmcp.FastMCP`)
+- **MCP server** (`server.py`): a LARGE module, and what fills it is NOT the tools — every tool is declared by its own domain module. What lives here is the orchestrator plus the adapters and startup checks wrapped around it: strict-argument refusal, description normalization, refusal classification, the tracker preflight. Read "thin" as describing the orchestrator function alone, never the file. Discovers tool providers via registry, filters by `--mode` flag. Requires the mcp 2.x SDK (`mcp.server.mcpserver.MCPServer`, which replaced 1.x's `mcp.server.fastmcp.FastMCP`)
 
 - **CLI** (`cli.py`): Thin argparse orchestrator. Discovers CLI providers via registry, filters by `--mode` flag. Two entry points, and the split is load-bearing: `main()` is the importable body, called in-process by test modules across the suite — enough of them that changing its signature is not a cheap edit — while `run()` — what `[project.scripts]` and `python -m codebugs.cli` reach — first restores the POSIX `SIGPIPE` disposition (CB-78) and then refuses to run at all when stdout is already closed (CB-134). 
 

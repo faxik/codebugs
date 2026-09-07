@@ -120,9 +120,11 @@ WHERE IT IS WRONG FIRST BESIDES THAT.
     though nothing changed in substance. That is the commonest false alarm and it is
     the price of having no shape generalization -- the repair is one edited anchor,
     and it forces the number to be re-affirmed by whoever touched the paragraph.
-  * Several claims spelled with `one` ARE carried in LIVE below, so the per-claim
-    half is deliberately WIDER than the completeness half at that spot -- but only
-    for the claims a human listed, which is precisely the asymmetry above.
+  * A count that introduces its own list in PROSE, with no `**(N)**` markers, is
+    excused as NOT_A_CLAIM and therefore never verified. A cross-model review found
+    a false one that way: `src/codebugs/CLAUDE.md` said "five writers bypass the
+    hook entirely" and then named six. The number is corrected; the CLASS stays
+    unverified, and this is where to look first when something reads wrong.
 
 WHAT THIS GATE DOES NOT PROMISE (C-14, ratified in the package brief). It answers
 whether the text is TRUE. It says nothing about how long an already-running session
@@ -1182,7 +1184,14 @@ NOT_A_CLAIM: tuple[NotAClaim, ...] = (
     ),
     # ======================= subsystem file ==================================
     # ---------------- counts of their own lists ------------------------------
-    NotAClaim(SUB, "because five writers bypass the hook", _SELF_COUNT),
+    NotAClaim(
+        SUB,
+        "because six writers bypass the hook",
+        _SELF_COUNT
+        + ". THIS ROW IS THE CLASS'S OWN COUNTEREXAMPLE: it said FIVE while the "
+        "sentence named six, and a cross-model review found it. Corrected by hand, "
+        "because nothing here verifies a count whose list has no `**(N)**` markers",
+    ),
     NotAClaim(SUB, "of two specific rows", _SELF_COUNT),
     NotAClaim(SUB, "its only two consumers", _SELF_COUNT),
     NotAClaim(SUB, "asks three questions per directory", _SELF_COUNT),
