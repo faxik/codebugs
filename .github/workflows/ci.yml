@@ -165,6 +165,17 @@ jobs:
   # package in the lock, and moving them to the newest version their constraints
   # admit is precisely what an installer does to a user.
   #
+  # ONE OF THE THREE NAMES DECIDES NOTHING TODAY, AND SAYING SO IS CHEAPER THAN
+  # LETTING THE NEXT READER ASSUME IT DOES. `mcp` pins its companion EXACTLY
+  # (`mcp-types==<its own version>`, measured on 2.0.0 and 2.1.1), so
+  # `--upgrade-package mcp-types` on its own moves nothing — verified: it resolves
+  # and leaves 2.0.0 in place — and the companion in fact travels with `mcp`.
+  # It is named anyway because the rule this list follows is "every library `src/`
+  # imports by name", not "every library that happens to be movable this month":
+  # the day `mcp` relaxes that pin to a range, the name already here is what makes
+  # this job cover it, and `tests/test_cb314_linter_pin.py` derives the same list
+  # from the source so the two cannot drift.
+  #
   # DELIBERATELY NOT IN THE LIST: `pytest` and `anyio`, imported only by
   # `tests/`, never by `src/`. No user installs the `dev` extra, so no user ever
   # runs those versions, and this job's whole subject is what users get. `ruff`
