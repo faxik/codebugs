@@ -140,24 +140,75 @@ def add_requirement(
     not apply here: this is a fresh INSERT, and the stored ``tags``/``meta`` are
     the exact JSON strings this call just serialized two lines below, never a
     previously-stored value another writer could have left malformed.
+
+    Raises ``ValueError`` when the table refuses the row (CB-316). Before that
+    the ``sqlite3.IntegrityError`` travelled to the caller unchanged, and since
+    ``refusals.CLASSIFICATION`` does not name that foreign class it was
+    classified as a CRASH: on the command line a full traceback, and over MCP —
+    measured under ``mcp`` 2.1.1, the version the owner runs — the bare line
+    ``Error executing tool reqs_add`` with the reason stripped entirely.
+
+    A DUPLICATE IDENTIFIER IS PROVED, NEVER INFERRED, AND THAT IS WHAT
+    ``ON CONFLICT(id) DO NOTHING`` BUYS. The obvious alternative — catch the
+    ``IntegrityError`` and read its result code — was built first and is wrong,
+    because the code names the KIND of constraint and never the TABLE. Measured:
+    a ``BEFORE INSERT`` trigger whose own INSERT collides with ANOTHER table's
+    primary key arrives here as ``SQLITE_CONSTRAINT_PRIMARYKEY`` with the text
+    ``UNIQUE constraint failed: audit.id`` — so the code-reading answered
+    "requirement FR-new already exists" about a row that is not in this table at
+    all. With a targeted conflict clause the question is answered by the
+    database instead: a zero-row ``RETURNING`` is affirmative proof that the
+    conflict was on ``id``, and there is no other way to reach it. The shipped
+    schema carries no triggers (measured), so nothing about the old code was
+    observable — what was wrong was the CLAIM, and a claim wider than its
+    measurement is worth closing structurally rather than narrowing in prose.
+
+    EVERY OTHER CONSTRAINT STILL RAISES, AND THE MESSAGE THEN CLAIMS NOTHING
+    ABOUT WHICH. ``DO NOTHING`` suppresses only the named conflict target
+    (measured: a ``NOT NULL`` violation still raises), so ``description``,
+    ``section``, ``source`` and ``test_coverage`` — all ``NOT NULL``, all
+    reachable by a library caller — land in the arm below. That arm names the
+    requirement and says the table refused it, and stops there.
+
+    THE DATABASE'S OWN WORDS DO NOT TRAVEL WITH IT. ``RAISE(ABORT, '…')`` in a
+    trigger puts arbitrary author-supplied text into that exception, and under
+    ``mcp`` 2.1.1 such text used to be withheld from the client precisely
+    because an unexpected exception's message can carry another caller's data
+    (the reasoning is in ``refusals.py``'s header). Translating the class into a
+    refusal must not smuggle the text past that. The original stays on the
+    ``__cause__`` chain, so a library caller still reads it in the traceback —
+    which is the only audience that can reach these constraints today.
+
+    THE CATCH IS ``IntegrityError`` AND NOT ``sqlite3.Error``. That is CB-99's
+    ratified boundary, thirty lines below in this file: the wider tree includes
+    the environmental failures, and calling a full disk "bad input" is strictly
+    worse than the traceback CB-86 removes, because a traceback is loud.
     """
     priority = resolve_priority(priority)
     status = resolve_requirement_status(status)
 
     now = utc_now()
-    with db.txn(conn):
-        row = conn.execute(
-            """INSERT INTO requirements (id, section, description, priority, status,
-               source, test_coverage, tags, meta, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               RETURNING *""",
-            (
-                req_id, section, description, priority, status,
-                source, test_coverage, json.dumps(tags or []),
-                json.dumps(meta or {}), now, now,
-            ),
-        ).fetchone()
-        result = db.row_to_dict(row)
+    try:
+        with db.txn(conn):
+            row = conn.execute(
+                """INSERT INTO requirements (id, section, description, priority, status,
+                   source, test_coverage, tags, meta, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO NOTHING
+                   RETURNING *""",
+                (
+                    req_id, section, description, priority, status,
+                    source, test_coverage, json.dumps(tags or []),
+                    json.dumps(meta or {}), now, now,
+                ),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"requirement {req_id!r} already exists")
+            result = db.row_to_dict(row)
+    except sqlite3.IntegrityError as exc:
+        raise ValueError(
+            f"requirement {req_id!r} was refused by the requirements table's constraints"
+        ) from exc
     return result
 
 
@@ -999,16 +1050,40 @@ def register_cli(sub, commands) -> None:
     from codebugs.types import REQUIREMENT_STATUSES, PRIORITIES
 
     def _cmd_reqs_add(args: argparse.Namespace) -> None:
+        from codebugs.cli import domain_errors
+
+        # Through the shared wrapper, like `_cmd_reqs_update` below (CB-316).
+        #
+        # `try/finally` around the whole region rather than `close()` after the
+        # call, and the reason is exact rather than hygienic: `close()` sat below
+        # the call and was therefore skipped on EVERY failing path — harmless
+        # only because the process then died with the traceback, and no longer
+        # true at all once `domain_errors` starts exiting deliberately.
+        #
+        # THE `print` IS OUTSIDE THE WRAPPER, AND THAT PLACEMENT IS THE RULE
+        # RATHER THAN A PREFERENCE. `UnicodeEncodeError` is a `ValueError`
+        # subclass, so with the print INSIDE, a failure to encode this line —
+        # raised AFTER the write committed and the transaction closed — was
+        # caught by the input-refusal arm and reported as one tidy line at
+        # exit 1. Measured: `PYTHONIOENCODING=ascii codebugs reqs-add Ж-1 -d x`
+        # left `Ж-1` in the tracker while the command claimed failure. That is
+        # the CB-15/CB-16 lie CLAUDE.md's error-handling section forbids by
+        # name — "bad input" reads as "nothing happened". Outside the wrapper
+        # the same failure is a traceback, which is the correct answer to a
+        # committed write whose report could not be delivered.
         conn = db.connect()
-        tags = [t.strip() for t in args.tags.split(",")] if args.tags else []
-        result = add_requirement(
-            conn, req_id=args.id, description=args.description,
-            section=args.section or "", priority=args.priority or "should",
-            status=args.status or "planned", source=args.source or "",
-            test_coverage=args.test_coverage or "", tags=tags,
-        )
-        conn.close()
-        print(f"Added: {result['id']}")
+        try:
+            tags = [t.strip() for t in args.tags.split(",")] if args.tags else []
+            with domain_errors():
+                result = add_requirement(
+                    conn, req_id=args.id, description=args.description,
+                    section=args.section or "", priority=args.priority or "should",
+                    status=args.status or "planned", source=args.source or "",
+                    test_coverage=args.test_coverage or "", tags=tags,
+                )
+            print(f"Added: {result['id']}")
+        finally:
+            conn.close()
 
     def _cmd_reqs_update(args: argparse.Namespace) -> None:
         from codebugs.cli import domain_errors

@@ -1,0 +1,20 @@
+# снимок договора об ошибках, поверхность reqs-add / reqs_add (CB-316)
+# mcp=2.1.1 python=3.14.4
+#
+cli  ok_create        rc=0 shape=empty       last=Added: FR-1
+cli  duplicate_id     rc=1 shape=traceback   last=sqlite3.IntegrityError: UNIQUE constraint failed: requirements.id
+cli  bad_priority     rc=1 shape=traceback   last=ValueError: Invalid priority: 'bogus'
+cli  bad_status       rc=1 shape=traceback   last=ValueError: Invalid requirement status: 'bogus'
+cli  missing_tracker  rc=1 shape=one-line    last=codebugs: --tracker-root names <TMP>/elsewhere, which has no .codebugs/; run `codebugs init <TMP>/elsewhere`, or clear --tracker-root to fall back to directory discovery
+mcp  ok_create        is_error=False shape=result    raised=-
+     ok_create        text={ /   "id": "FR-1", /   "section": "", /   "description": "первое", /   "priority": "should", /   "status": "planned", /   "source": "", /   "test_coverage": "", /   "tags": [], /   "meta": {}, /   "embedding": null, /   "created_at": "<TS>", /   "updated_at": "<TS>" / }
+mcp  duplicate_id     is_error=True  shape=anonymous raised=sqlite3.IntegrityError
+     duplicate_id     text=Error executing tool reqs_add
+mcp  bad_priority     is_error=True  shape=text      raised=mcp.server.mcpserver.exceptions.ToolError
+     bad_priority     text=Error executing tool reqs_add: Invalid priority: 'bogus'
+mcp  bad_status       is_error=True  shape=text      raised=mcp.server.mcpserver.exceptions.ToolError
+     bad_status       text=Error executing tool reqs_add: Invalid requirement status: 'bogus'
+mcp  missing_tracker  is_error=True  shape=text      raised=mcp.server.mcpserver.exceptions.ToolError
+     missing_tracker  text=Error executing tool reqs_add: no .codebugs/ in <TMP>/elsewhere-wire; check the path, or run `codebugs init <TMP>/elsewhere-wire` to create a tracker there
+mcp  undeclared_arg   is_error=True  shape=protocol  raised=(не доходит до тела — отбивает промежуточный слой)
+     undeclared_arg   text=[protocol-error] Unknown argument(s) for tool 'reqs_add': bogus_arg. Accepted: description, meta, priority, req_id, section, source, status, tags, test_coverage. Refused rather than ignored — a dropped argument would otherwise look like a successful write.

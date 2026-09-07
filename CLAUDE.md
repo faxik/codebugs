@@ -50,8 +50,8 @@ finish (worktree removal, claim release) and speaks at the very end, with a loud
 — deliberately not `exit 13`, which means *nothing landed, re-run*. `exit 15` means *the merge step
 already ran and the premise is unconfirmed*, and the block says in words not to re-run: a second
 finish after a landed merge is a worse outcome than the defect being reported. **The residual is
-stated rather than closed: the interval between `git merge` returning and the `trap` firing is two
-assignments wide, and nothing in the script can close it** — so a missing `exit 15` is NOT proof the
+stated rather than closed: the interval between `git merge` returning and the `trap` firing is only a
+couple of statements wide, and nothing in the script can close it** — so a missing `exit 15` is NOT proof the
 merge did not land.
 
 `merge.ff=false` is the one no hook could replace: **git fires no hook on a fast-forward at all**,
@@ -375,13 +375,13 @@ rewritten the same way, expect the same one-time manual merge.
 
 ## Architecture
 
-- **Domain modules** (`src/codebugs/`): `db.py` (findings + shared infra), `reqs.py`, `bench.py`, `blockers.py`, `merge.py`, `sweep.py`, `embeddings.py` (vector storage/similarity search, delegates from reqs), `milestones.py` (releases / streams / capacity-aware pull)
+- **Domain modules** (`src/codebugs/`): `db.py` (findings + shared infra), `reqs.py`, `bench.py`, `blockers.py`, `merge.py`, `sweep.py`, `embeddings.py` (vector storage/similarity search, delegates from reqs), and the `milestones/` PACKAGE — a directory of modules, not a single file (releases / streams / capacity-aware pull)
 
 - **Shared types** (`types.py`): Entity constants (statuses, priorities, severities), resolver functions, terminal states. Zero-dependency — safe to import from anywhere
 
-- **MCP server** (`server.py`): Thin `MCPServer` orchestrator (~48 lines). Discovers tool providers via registry, filters by `--mode` flag. Requires the mcp 2.x SDK (`mcp.server.mcpserver.MCPServer`, which replaced 1.x's `mcp.server.fastmcp.FastMCP`)
+- **MCP server** (`server.py`): a LARGE module, and what fills it is NOT the tools — every tool is declared by its own domain module. What lives here is the orchestrator plus the adapters and startup checks wrapped around it: strict-argument refusal, description normalization, refusal classification, the tracker preflight. Read "thin" as describing the orchestrator function alone, never the file. Discovers tool providers via registry, filters by `--mode` flag. Requires the mcp 2.x SDK (`mcp.server.mcpserver.MCPServer`, which replaced 1.x's `mcp.server.fastmcp.FastMCP`)
 
-- **CLI** (`cli.py`): Thin argparse orchestrator. Discovers CLI providers via registry, filters by `--mode` flag. Two entry points, and the split is load-bearing: `main()` is the importable body (three test modules call it in-process), while `run()` — what `[project.scripts]` and `python -m codebugs.cli` reach — first restores the POSIX `SIGPIPE` disposition (CB-78) and then refuses to run at all when stdout is already closed (CB-134). 
+- **CLI** (`cli.py`): Thin argparse orchestrator. Discovers CLI providers via registry, filters by `--mode` flag. Two entry points, and the split is load-bearing: `main()` is the importable body, called in-process by test modules across the suite — enough of them that changing its signature is not a cheap edit — while `run()` — what `[project.scripts]` and `python -m codebugs.cli` reach — first restores the POSIX `SIGPIPE` disposition (CB-78) and then refuses to run at all when stdout is already closed (CB-134). 
 
 - **Formatting** (`fmt.py`): Shared CLI output utilities (ASCII table formatting). Text for a stream, nothing else — file writing deliberately does NOT live here (CB-76)
 
@@ -399,7 +399,8 @@ rewritten the same way, expect the same one-time manual merge.
 
 ### Database
 
-- Use parameterized queries exclusively. Never interpolate values into SQL.
+- Use parameterized queries exclusively. Never interpolate values into SQL. Existing sanctioned
+  exceptions are listed in the subsystem rules file, and each carries a reason at the line of code.
 
 ### Testing
 
@@ -408,6 +409,14 @@ rewritten the same way, expect the same one-time manual merge.
 - Run lint: `uv run ruff check src/ tests/`
 
 - Run format: `uv run ruff format src/ tests/`
+
+- **Both rules files are gated on TRUTH, not only on size** (`tests/test_claude_md_truth.py`): a
+  number in this file or in `src/codebugs/CLAUDE.md` is either derived from the tree, or stamped as
+  a past measurement carrying its date and commit, or declared not to be a claim — and a number
+  nobody classified turns the suite red. **Know its declared limit BEFORE you write a claim here:
+  the word `one` is outside the gate's vocabulary**, because in this prose it is almost always a
+  pronoun, so a false sentence like *"the milestones package has exactly one module"* passes unseen
+  while the same claim written with any other quantity does not. **Write a quantity as a digit.**
 
 ### CLI
 
