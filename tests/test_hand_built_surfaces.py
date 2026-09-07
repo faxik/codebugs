@@ -60,6 +60,72 @@ def _factory():
     return factory
 
 
+def _why_the_call_failed(raised: BaseException) -> str:
+    """Every reason text behind `raised`, the CHAINED ones included (CB-318).
+
+    Deliberately not `str(raised)`. When a tool BODY crashes, the SDK decides
+    how much of that crash the caller may read, and the two admitted versions
+    decide differently: `mcp` 2.0.0 appends the body's text to its `ToolError`
+    message, while 2.1.1 raises an `UnexpectedToolError` whose message is the
+    bare `Error executing tool <name>`. The second is a deliberate design
+    choice, not an accident — `Tool.run`'s own docstring there says a crash
+    keeps its text off the message "so nothing from an unexpected exception
+    reaches the client". Measured on both versions as well as read.
+
+    So the POSITIVE half of each pair below, taken off `str(raised)`, answers a
+    question about the installed SDK rather than about this suite's guard:
+    under 2.1.1 the body's marker is absent from that string however healthy
+    the guard is, so the assertion fails on a correct tree and the test is red
+    whatever the guard does. A test that is red either way discriminates
+    nothing — the defect these tests exist to forbid, rebuilt inside them.
+
+    THE NEGATIVE HALF WAS NEVER BROKEN, and recording that keeps the SDK's
+    boundary in the right place for the next reader. A guard refusal never
+    passes through the SDK at all (see the paragraph after next), so its text
+    carries the `CB-311` marker on both versions — measured, and visible in
+    this file: the refusal tests assert that marker's PRESENCE off `str` and
+    are green under 2.1.1 today. Reading that half off the chain as well is a
+    small strengthening — a larger haystack for an absence test — not a repair.
+
+    What both versions preserve is the CHAIN, and 2.1.1 states it as a
+    contract rather than leaving it incidental: every failure it wraps is
+    raised `from` the original, so the body's own `AssertionError` hangs off
+    `__cause__`. `__context__` is walked too, covering a wrapper that some day
+    omits the explicit `from` — the chain is implicit then, and without that
+    branch this file would go red on a perfectly healthy guard, CB-318 rebuilt
+    inside its own fix.
+
+    THE SECOND COPY OF THIS IDIOM IS NAMED RATHER THAN HIDDEN.
+    `tests/test_refusal_classification.py::_causes` walks the same two links,
+    bounding itself by depth where this bounds itself by identity. It was not
+    importable here and merging them would be wrong: it returns exception
+    OBJECTS because its question is a link's CLASS, while this one needs the
+    TEXT. Same traversal, two questions.
+
+    The GUARD's refusal needs no chain at all: it is raised in
+    `conftest._call_tool_refusing_a_hand_built_surface` BEFORE the SDK's tool
+    invocation is reached, so it arrives as itself, marker intact, on both
+    versions — which is why every test here that needs only a refusal never
+    noticed any of this, and why only the three that need the BODY's text did.
+
+    ONE BOUNDARY, because it decides what may be asserted with this. The
+    question answered here is "did the call reach the tool body", NOT "could a
+    client read the reason" — and under 2.1.1 the honest answer to the second
+    is no, by the SDK's design. That second question belongs to
+    `tests/test_cb310_refusal_text.py`, which owns the client boundary.
+    Conflating the two is what made these tests depend on the SDK's
+    presentation in the first place.
+    """
+    texts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = raised
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        texts.append(str(current))
+        current = current.__cause__ or current.__context__
+    return "\n".join(texts)
+
+
 class TestTheGuardFires:
     def test_a_hand_registered_tool_is_refused_at_the_call(self):
         """The mutant this file exists to be: a surface assembled by hand."""
@@ -161,11 +227,18 @@ class TestTheGuardFires:
         # before the body — including one caused by the guard itself in some
         # future edit. The connection factory's own message proves the call
         # reached the tool body, which is the thing being claimed.
+        #
+        # The chain, not `str(raised.value)`: that string measures the SDK
+        # rather than the guard, for the reason `_why_the_call_failed` sets
+        # out (CB-318).
         with pytest.raises(BaseException) as raised:
             asyncio.run(mcp.call_tool("query", {}))
-        assert "CB-311" not in str(raised.value), "the correctly built tools must still work"
-        assert "no connection is ever needed" in str(raised.value), (
-            "the call must reach the tool body, not fail somewhere before it"
+        reason = _why_the_call_failed(raised.value)
+        assert "CB-311" not in reason, f"the correctly built tools must still work: {reason!r}"
+        assert "no connection is ever needed" in reason, (
+            "the call must reach the tool body, not fail somewhere before it -- an SDK that "
+            "stopped chaining the body's exception would land here too, and is the one other "
+            "thing this can mean"
         )
 
     def test_an_unreadable_registry_REFUSES_rather_than_admitting(self):
@@ -252,14 +325,17 @@ class TestTheGuardFires:
 
         The tool body here is reached — the connection factory raises, and that
         raise arriving is the proof the guard let the call through rather than
-        stopping it.
+        stopping it. Which raise arrived is read off the chain rather than off
+        the outermost exception's text, for the reason `_why_the_call_failed`
+        sets out (CB-318).
         """
         mcp = MCPServer("cb311-production")
         findings.register_tools(server.build_registrar(mcp), _factory())
         with pytest.raises(BaseException) as raised:
             asyncio.run(mcp.call_tool("query", {}))
-        assert "CB-311" not in str(raised.value)
-        assert "no connection is ever needed" in str(raised.value)
+        reason = _why_the_call_failed(raised.value)
+        assert "CB-311" not in reason, f"a production surface was refused: {reason!r}"
+        assert "no connection is ever needed" in reason, "the call never reached the tool body"
 
 
 class TestTheAllowanceTableIsDisciplined:
@@ -288,6 +364,11 @@ class TestTheAllowanceTableIsDisciplined:
         With the table empty this cannot be shown from the live rows, so it is
         shown on the mechanism: the refusal is keyed by the same site string the
         table is keyed by, so adding that string licenses exactly that place.
+
+        The surface here IS hand-built, so without the row the guard refuses;
+        the pair below says the row turned that refusal off and let the call
+        through to the body. Both halves read the chain rather than the
+        outermost exception's text (CB-318, see `_why_the_call_failed`).
         """
         site = "test_hand_built_surfaces.py::test_a_row_actually_licenses_the_place_it_names"
         mcp = MCPServer("cb311-licensed")
@@ -296,7 +377,10 @@ class TestTheAllowanceTableIsDisciplined:
         try:
             with pytest.raises(BaseException) as raised:
                 asyncio.run(mcp.call_tool("query", {}))
-            assert "CB-311" not in str(raised.value)
-            assert "no connection is ever needed" in str(raised.value)
+            reason = _why_the_call_failed(raised.value)
+            assert "CB-311" not in reason, f"the row licensed nothing: {reason!r}"
+            assert "no connection is ever needed" in reason, (
+                "the licensed call never reached the tool body"
+            )
         finally:
             del conftest._HAND_BUILT_SURFACES_ALLOWED[site]
