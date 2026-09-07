@@ -509,7 +509,12 @@ def _with_missing_arguments_text(
     inside it. `resultType`, `_meta` and anything a future revision adds travel
     through untouched, because they are never this package's to invent. The two
     shapes handled are the two `install_usage_tracking` already reads, for the
-    same reason it reads both.
+    same reason it reads both — and the TYPED one is insurance rather than a live
+    path: what a middleware meets on both admitted SDK versions is the plain
+    dict, measured. It is kept because a layer narrower than its sibling would
+    silently stop replacing anything the day a future SDK passes the modelled
+    result, and silently is the operative word — the validation library's wording
+    would simply reappear on the wire with every test still green.
 
     IT REWRITES ONLY AN ERROR-SHAPED RESULT, and a non-error one is returned
     untouched. That branch is unreachable today — a call with a missing required

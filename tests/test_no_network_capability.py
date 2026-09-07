@@ -450,6 +450,19 @@ DECLARED_THIRD_PARTY: dict[str, str] = {
         "which server.py's strict-argument middleware returns. Same "
         "undeclared distribution as the row above."
     ),
+    "mcp_types.TextContent": (
+        "CB-326: the SDK's text content item, used by server.py's "
+        "required-argument middleware when it replaces the words inside an "
+        "error result the SDK itself built. It is needed only on the TYPED "
+        "branch: what that middleware actually meets on both admitted SDK "
+        "versions is a plain dict, whose content items are plain dicts too, so "
+        "this class is reached only if a future SDK hands middleware the "
+        "modelled result instead. The branch is kept rather than trimmed "
+        "because `install_usage_tracking` already reads both shapes, and a "
+        "layer narrower than its sibling would silently stop replacing the "
+        "text — leaving the validation library's wording on the wire — on the "
+        "day that changes. Same undeclared distribution as the rows above."
+    ),
     "pydantic.Field": (
         "CB-190: parameter metadata for MCP tool signatures. The SDK builds "
         "each tool's argument model with pydantic, so `Field` is how a tool "
