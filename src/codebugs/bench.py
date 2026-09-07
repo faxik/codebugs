@@ -1151,7 +1151,10 @@ def _cmd_bench_delete(args: argparse.Namespace) -> None:
         if args.run_id:
             print(f"Deleted run {result['deleted']} ({result['results_removed']} results)")
         else:
-            print(f"Deleted benchmark {result['deleted_benchmark']} ({result['runs_removed']} runs, {result['results_removed']} results)")
+            print(
+                f"Deleted benchmark {result['deleted_benchmark']} "
+                f"({result['runs_removed']} runs, {result['results_removed']} results)"
+            )
     finally:
         conn.close()
 
