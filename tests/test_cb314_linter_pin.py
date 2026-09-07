@@ -171,6 +171,40 @@ class TestTheNewestDependenciesJobNamesEveryDirectImport:
             f"nothing tests (CB-314). The command was: {line.strip()}"
         )
 
+    def test_every_row_of_the_module_table_carries_a_usable_distribution_name(self):
+        """The table's VALUES are read, not just its keys.
+
+        A row whose value is blank or is not a string would not raise: it would
+        flow into `expected` below as an empty name, and the comparison against
+        `ci.yml` would fail with a message about a missing library rather than
+        about a broken row — a true red for a false reason, which is worse than
+        either a pass or an honest failure.
+        """
+        for module, distribution in _MODULE_TO_DISTRIBUTION.items():
+            assert isinstance(distribution, str) and distribution.strip(), (
+                f"_MODULE_TO_DISTRIBUTION maps {module!r} to {distribution!r}, which is "
+                "not a usable distribution name. Every row must name the distribution "
+                "an installer and `uv lock --upgrade-package` know."
+            )
+
+    def test_no_row_of_the_module_table_survives_the_import_that_justified_it(self):
+        """The table cannot only grow — the direction the sibling test misses.
+
+        `test_the_job_names_exactly_the_distributions_src_imports` fails closed on a
+        module the table does not know. That is one direction. This is the other: a
+        module the table still knows but `src/` no longer imports. Without it, a
+        dependency dropped from the product keeps its row here and its name in
+        `ci.yml`'s `--upgrade-package` list forever, and the job goes on resolving a
+        library nothing uses while the list quietly stops describing the product.
+        """
+        live = _third_party_modules_imported_by_src()
+        stale = [module for module in _MODULE_TO_DISTRIBUTION if module not in live]
+        assert not stale, (
+            f"_MODULE_TO_DISTRIBUTION still carries {sorted(stale)}, which nothing under "
+            "src/ imports any more. Drop the row, and drop the matching name from the "
+            "`uv lock --upgrade-package` list in ci.yml's `newest-sdk` job."
+        )
+
     def test_the_job_resolves_versions_rather_than_naming_them(self):
         """A written-in version goes stale the day the library releases again.
 
