@@ -410,6 +410,14 @@ rewritten the same way, expect the same one-time manual merge.
 
 - Run format: `uv run ruff format src/ tests/`
 
+- **Both rules files are gated on TRUTH, not only on size** (`tests/test_claude_md_truth.py`): a
+  number in this file or in `src/codebugs/CLAUDE.md` is either derived from the tree, or stamped as
+  a past measurement carrying its date and commit, or declared not to be a claim — and a number
+  nobody classified turns the suite red. **Know its declared limit BEFORE you write a claim here:
+  the word `one` is outside the gate's vocabulary**, because in this prose it is almost always a
+  pronoun, so a false sentence like *"the milestones package has exactly one module"* passes unseen
+  while the same claim written with any other quantity does not. **Write a quantity as a digit.**
+
 ### CLI
 
 **`cli.run` REFUSES at the process entry, before any work, with the same 141** — one vocabulary for one condition ("the reader of my output is gone"), uniform on 3.11 through 3.14, measured by the `contracts` matrix in `.github/workflows/ci.yml` (`test_cli_signals.py` + `test_fsio.py`). **Honest scope: 3.15 and later are admitted by `requires-python` and are NOT verified** until they are added to that matrix; narrowing the sentence to the pinned version alone was rejected as the more expensive option, since it would leave `requires-python = ">=3.11"` advertising a range nothing checks. **The price is a real behaviour change on 3.13 and is named rather than absorbed**: a closed-object stdout there used to let the write land and then fail on output, and now lands nothing — which is the point, since with the refusal ahead of the work there is no committed write left to misreport.

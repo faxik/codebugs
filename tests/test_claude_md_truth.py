@@ -48,8 +48,10 @@ which is the line that separates this from the shape filter the next section rej
 
 STEP TWO: ACCOUNTING. EVERY SURVIVING TOKEN MUST BE COVERED BY EXACTLY ONE ROW.
 
-Four buckets, and the union must be TOTAL over the token population. An uncovered
-token FAILS -- the default is refusal, not permission:
+Four buckets, and the union must be total over the token population AS THE
+VOCABULARY ABOVE DEFINES IT -- read the limit below before trusting that
+sentence, because the vocabulary is not every way a quantity can be written. An
+uncovered token FAILS -- the default is refusal, not permission:
 
   LIVE (class 1)        a claim about TODAY's tree. The row carries the value as
                         WRITTEN and a function that derives the admissible values
@@ -82,19 +84,45 @@ seventh `exit 1` in a paragraph nobody classified is uncovered, and uncovered is
 red. The four lexical rules above are the only generalizing step in the whole
 module, and they are confined to spelling.
 
-WHERE IT IS WRONG FIRST, NAMED RATHER THAN DISCOVERED LATER.
+THE DECLARED LIMIT OF THE COMPLETENESS HALF, AND IT IS A LIMIT RATHER THAN A BUG.
+The half is total over THE DECLARED VOCABULARY -- digits, and the cardinal words
+`two` through `thousand` -- and that vocabulary is where it ends. **`one` is
+deliberately NOT in it.** In this English prose `one` is overwhelmingly a pronoun
+("the one that", "no one", "one of them"), and admitting it would bury the
+population in false refusals: the ratchet that reddens forever is the ratchet
+nobody keeps, which is the whole failure this module exists to avoid.
+
+**The cost is exact, and here it is as an example rather than as a sentence,
+because the example is worth more.** A cross-model review put this line into the
+root file:
+
+    The milestones package has exactly one module.
+
+It is FALSE -- the package holds eight modules -- and the completeness half passed
+it without a word. Say the consequence plainly: **two claims with the same meaning
+get different protection depending on how they are SPELLED.** "one module" is
+invisible; "eight modules" is refused until somebody classifies it. So when you
+write a claim about this tree into either file, WRITE THE NUMBER AS A DIGIT or as
+a cardinal from `two` up, and this gate will make you account for it.
+
+The same limit, one step wider: a quantity written as neither digits nor a listed
+cardinal -- "a handful", "a couple", "a dozen or so", "a single" -- is invisible
+to the tokenizer for exactly the same reason.
+
+Closing this properly is not a bigger word list. It is a structural markup for
+facts in the prose (`<!-- fact: milestones.module_count -->` against a registry),
+which makes the half exact BY CONSTRUCTION rather than by vocabulary. That trades
+away the normative text's readability and works against the open card about corpus
+growth, so it is an owner's decision and is carried on its own card, not here.
+
+WHERE IT IS WRONG FIRST BESIDES THAT.
   * Rewording a sentence around an already-classified number reddens this file even
     though nothing changed in substance. That is the commonest false alarm and it is
     the price of having no shape generalization -- the repair is one edited anchor,
     and it forces the number to be re-affirmed by whoever touched the paragraph.
-  * `one` is NOT in the cardinal vocabulary. In this English prose it is
-    overwhelmingly a pronoun ("the one that", "no one"), and admitting it would bury
-    the population in noise. The cost is exact and real: a claim spelled "exactly one
-    call site" is invisible to the COMPLETENESS half. Several such claims are
-    nonetheless carried in LIVE below, so the per-claim half is deliberately WIDER
-    than the completeness half at that spot.
-  * A quantity written as neither digits nor a listed cardinal -- "a handful", "a
-    couple", "a dozen or so" -- is invisible to the tokenizer.
+  * Several claims spelled with `one` ARE carried in LIVE below, so the per-claim
+    half is deliberately WIDER than the completeness half at that spot -- but only
+    for the claims a human listed, which is precisely the asymmetry above.
 
 WHAT THIS GATE DOES NOT PROMISE (C-14, ratified in the package brief). It answers
 whether the text is TRUE. It says nothing about how long an already-running session
@@ -320,7 +348,19 @@ CARDINALS = (
 
 _CARDINAL_ALT = "|".join(CARDINALS)
 
-_TOKEN = re.compile(r"\d[\d_,]*(?:\.\d+)?|\b(?:" + _CARDINAL_ALT + r")\b", re.IGNORECASE)
+# A COMPOUND NUMERAL is ONE number, not two. `twenty-two` used to reach the
+# accounting as the token `two`, because the compound-ADJECTIVE rule swallowed
+# `twenty-` and left the tail exposed: the right outcome (a refusal) arrived by the
+# wrong mechanism, which is the exact defect this module exists to remove. `one` is
+# admitted HERE and nowhere else — inside `twenty-one` it cannot be a pronoun.
+_TENS = "twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety"
+_UNITS = "one|two|three|four|five|six|seven|eight|nine"
+_COMPOUND_NUMERAL = r"\b(?:" + _TENS + r")-(?:" + _UNITS + r")\b"
+
+_TOKEN = re.compile(
+    _COMPOUND_NUMERAL + r"|\d[\d_,]*(?:\.\d+)?|\b(?:" + _CARDINAL_ALT + r")\b",
+    re.IGNORECASE,
+)
 
 LEXICAL_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
@@ -329,7 +369,15 @@ LEXICAL_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     ("ordered-list marker", re.compile(r"(?m)^\s*\d+\.\s")),
     ("enumeration marker", re.compile(r"\*\*\(\d+\)")),
-    ("compound adjective", re.compile(r"\b(?:" + _CARDINAL_ALT + r")-(?=[A-Za-z])", re.IGNORECASE)),
+    (
+        "compound adjective",
+        # `three-valued` is one lexeme; `twenty-two` is one NUMBER and must not be
+        # eaten here, which is what the negative lookahead protects.
+        re.compile(
+            r"\b(?:" + _CARDINAL_ALT + r")-(?!(?:" + _UNITS + r")\b)(?=[A-Za-z])",
+            re.IGNORECASE,
+        ),
+    ),
 )
 
 
@@ -374,7 +422,23 @@ def number_tokens(source: str) -> list[Token]:
 # --------------------------------------------------------------------------- #
 # a count that introduces its own enumeration is checked against it
 # --------------------------------------------------------------------------- #
+# `two`..`twenty` are consecutive; the tens and the round numbers are not, so they
+# are written out. Without the tens a compound numeral like `forty-five` would
+# normalize to itself and never compare equal to anything the tree computes.
 _WORD_VALUE = {word: i + 2 for i, word in enumerate(CARDINALS[:19])}
+_WORD_VALUE.update(
+    {
+        "thirty": 30,
+        "forty": 40,
+        "fifty": 50,
+        "sixty": 60,
+        "seventy": 70,
+        "eighty": 80,
+        "ninety": 90,
+        "hundred": 100,
+        "thousand": 1000,
+    }
+)
 
 _ENUM_HEAD = re.compile(r"\*\*\((\d+)\)")
 _TRAILING_CARDINAL = re.compile(r"\b(" + _CARDINAL_ALT + r")\b(?!.*\b(?:" + _CARDINAL_ALT + r")\b)", re.IGNORECASE | re.DOTALL)
@@ -1305,9 +1369,17 @@ _ISO_DATE = re.compile(r"\b20\d\d-\d\d-\d\d\b")
 _SHORT_SHA = re.compile(r"\b[0-9a-f]{7,40}\b")
 
 
+_UNIT_VALUE = {word: i + 1 for i, word in enumerate(_UNITS.split("|"))}
+
+
 def _normalize(value: str) -> str:
     """Compare a written cardinal and a computed integer as the same thing."""
-    return _WORD_TO_DIGITS.get(value.strip().lower(), value.strip())
+    text = value.strip().lower()
+    if "-" in text:
+        tens, _, unit = text.partition("-")
+        if tens in _WORD_TO_DIGITS and unit in _UNIT_VALUE:
+            return str(int(_WORD_TO_DIGITS[tens]) + _UNIT_VALUE[unit])
+    return _WORD_TO_DIGITS.get(text, text)
 
 
 def _rows_for(rel: str):
@@ -1744,6 +1816,21 @@ def test_every_rationale_anchor_resolves(rel: str) -> None:
 # parameter (`f"LIMIT {n}"`) reads as an identifier and is invisible. Closing
 # that means value tracking — the boundary `test_no_network_capability.py` draws
 # around `__import__` and `test_two_valued_path_gate.py` around `getattr`.
+#
+# TWO MORE BLIND SPOTS, NAMED BECAUSE A CROSS-MODEL REVIEW WALKED THEM PAST THE
+# FIRST DRAFT AND BECAUSE NAMING BEATS DISCOVERING:
+#   * `str.join` OVER A COMPREHENSION — `", ".join(str(v) for v in values)` spliced
+#     into a query. The quote test does not fire (nothing quotes a slot) and the
+#     number test does not fire (a `join` call is not arithmetic). Seeing it needs
+#     to know what the comprehension yields, which is data flow.
+#   * A STATEMENT FORM OUTSIDE `_SQL_STATEMENT`. The review proved this by running
+#     it: `CREATE VIEW cap AS VALUES (3)` is valid SQLite and returns `[(3,)]`, and
+#     a form nobody listed is a form this gate does not look at.
+# Both are DECLARED rather than closed. The general answer to both is the same one,
+# and it is not a longer list: refuse every interpolation by default and admit only
+# an expression whose identifier type was checked. That is the shape of CB-172's
+# debt (turning `S608` on across the package), which this unit is forbidden to
+# enter, so it is recorded here and carried there.
 # Widening instead to EVERY interpolation would take the population from 3 to 69
 # across thirteen files, which is a package-wide change refused by the level-(2)
 # holder for that reason. So the guarantee is stated at the width it holds: the
@@ -1765,9 +1852,15 @@ PACKAGE = REPO_ROOT / "src" / "codebugs"
 # the space and whatever follows, so `SELECT * FROM …` did NOT match while
 # `SELECT claim_id FROM …` did — the gate was blind to every star-select. Each
 # alternative now ends on a WORD, and the boundary is asserted after the word.
+# THIS ENUMERATION IS ITSELF A DECLARED LIMIT. A statement form nobody listed is a
+# statement this gate does not look at, and the cross-model review demonstrated one
+# by execution: `CREATE VIEW cap AS VALUES (3)` is valid SQLite and was invisible.
+# `VIEW` and `TRIGGER` are added for that reason; the general answer is not a longer
+# list but refusing every interpolation by default, which is CB-172's territory.
 _SQL_STATEMENT = re.compile(
-    r"\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|CREATE\s+(UNIQUE\s+)?INDEX"
-    r"|CREATE\s+TABLE|ALTER\s+TABLE)\b",
+    r"\b(SELECT|INSERT\s+INTO|REPLACE\s+INTO|UPDATE|DELETE\s+FROM"
+    r"|CREATE\s+(UNIQUE\s+)?INDEX|CREATE\s+TABLE|CREATE\s+VIEW|CREATE\s+TRIGGER"
+    r"|ALTER\s+TABLE)\b",
     re.IGNORECASE,
 )
 
@@ -1775,7 +1868,12 @@ _NUMERIC_CALLS = {"len", "int", "abs", "sum", "round"}
 
 
 def _flatten_sql(node: ast.expr, static: list[str], slots: list[ast.expr]) -> None:
-    """Split a built SQL string into its static text and its interpolation slots."""
+    """Split a built SQL string into its static text and its interpolation slots.
+
+    FOUR WAYS OF BUILDING A STRING, not one. The first draft understood only the
+    f-string and `+` concatenation, and a cross-model review walked `.format()` and
+    `%` straight past the gate. Both are handled here now, at the same depth.
+    """
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         static.append(node.value)
     elif isinstance(node, ast.JoinedStr):
@@ -1788,6 +1886,23 @@ def _flatten_sql(node: ast.expr, static: list[str], slots: list[ast.expr]) -> No
     elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         _flatten_sql(node.left, static, slots)
         _flatten_sql(node.right, static, slots)
+    elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+        # `"… LIMIT %d" % n` — the template is the LEFT side, the values the right.
+        _flatten_sql(node.left, static, slots)
+        right = node.right
+        for value in right.elts if isinstance(right, ast.Tuple) else [right]:
+            slots.append(value)
+            static.append("\0")
+    elif (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "format"
+    ):
+        # `"… LIMIT {}".format(n)` — the receiver is the template.
+        _flatten_sql(node.func.value, static, slots)
+        for value in [*node.args, *(kw.value for kw in node.keywords)]:
+            slots.append(value)
+            static.append("\0")
     else:
         slots.append(node)
         static.append("\0")
@@ -1825,6 +1940,33 @@ def _quotes_a_slot(node: ast.expr) -> bool:
     return False
 
 
+def _accumulated_sql_names(scope: ast.AST) -> set[str]:
+    """Names whose value, ACROSS ALL the statements that build it, holds SQL.
+
+    A query assembled in two steps — `query = "SELECT …"` then `query += f"… {n}"`
+    — hides the keyword from the fragment carrying the interpolation, and a
+    cross-model review walked exactly that past the first draft. Here the pieces
+    are joined per NAME before the keyword is looked for.
+    """
+    parts: dict[str, list[str]] = {}
+    for node in ast.walk(scope):
+        target = None
+        if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+            target = node.target.id
+        elif isinstance(node, ast.Assign):
+            target = next((t.id for t in node.targets if isinstance(t, ast.Name)), None)
+        if target is None or node.value is None:
+            continue
+        static: list[str] = []
+        _flatten_sql(node.value, static, [])
+        parts.setdefault(target, []).append("".join(static))
+    return {
+        name
+        for name, chunks in parts.items()
+        if _SQL_STATEMENT.search("".join(chunks).replace("\0", ""))
+    }
+
+
 def value_interpolation_sites() -> dict[tuple[str, str], int]:
     """Every place in the package where PYTHON DATA is spliced into SQL text.
 
@@ -1833,19 +1975,25 @@ def value_interpolation_sites() -> dict[tuple[str, str], int]:
     invalidates, and this table exists precisely to survive ordinary edits.
 
     DELIBERATELY NOT MEMOIZED, and this note exists so nobody "optimizes" it into
-    a defect. Four tests call it, and a session-lifetime cache would let a SAFETY
-    gate report clean about a snapshot rather than about the tree — the reasoning
-    `tests/test_no_network_capability.py::_package_modules` already wrote down for
-    the same shape of sweep, and the state `tests/CLAUDE.md`'s CB-215 alarm exists
-    to notice. Measured cost of not caching: about 0.14 s per call over the 34
-    modules of the package, four calls, against a full suite of some three minutes.
+    a defect. Several tests call it, and a session-lifetime cache would let a
+    SAFETY gate report clean about a snapshot rather than about the tree — the
+    reasoning `tests/test_no_network_capability.py::_package_modules` already wrote
+    down for the same shape of sweep, and the state `tests/CLAUDE.md`'s CB-215
+    alarm exists to notice. Measured cost of not caching: about 0.14 s per call
+    over the modules of the package, against a full suite of some three minutes.
     """
     found: dict[tuple[str, str], int] = {}
     for path in sorted(PACKAGE.rglob("*.py")):
         rel = str(path.relative_to(REPO_ROOT))
         tree = ast.parse(path.read_text(encoding="utf-8"))
 
-        def visit(node: ast.AST, where: str, assigns: dict[str, list[ast.expr]]) -> None:
+        def visit(
+            node: ast.AST,
+            where: str,
+            assigns: dict[str, list[ast.expr]],
+            sql_names: set[str],
+            assigned: str | None,
+        ) -> None:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 inner: dict[str, list[ast.expr]] = {}
                 for sub in ast.walk(node):
@@ -1853,16 +2001,21 @@ def value_interpolation_sites() -> dict[tuple[str, str], int]:
                         for target in sub.targets:
                             if isinstance(target, ast.Name):
                                 inner.setdefault(target.id, []).append(sub.value)
+                inner_sql = _accumulated_sql_names(node)
                 for child in node.body:
-                    visit(child, node.name, inner)
+                    visit(child, node.name, inner, inner_sql, None)
                 return
-            if isinstance(node, ast.Assign) and where == "<module>":
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        where = target.id
-            _collect(node, rel, where, assigns, found)
+            if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+                assigned = node.target.id
+            elif isinstance(node, ast.Assign):
+                named = next((t.id for t in node.targets if isinstance(t, ast.Name)), None)
+                if named is not None:
+                    assigned = named
+                    if where == "<module>":
+                        where = named
+            _collect(node, rel, where, assigns, found, sql_names, assigned)
             for child in ast.iter_child_nodes(node):
-                visit(child, where, assigns)
+                visit(child, where, assigns, sql_names, assigned)
 
         module_assigns: dict[str, list[ast.expr]] = {}
         for sub in tree.body:
@@ -1870,8 +2023,9 @@ def value_interpolation_sites() -> dict[tuple[str, str], int]:
                 for target in sub.targets:
                     if isinstance(target, ast.Name):
                         module_assigns.setdefault(target.id, []).append(sub.value)
+        module_sql = _accumulated_sql_names(tree)
         for child in tree.body:
-            visit(child, "<module>", module_assigns)
+            visit(child, "<module>", module_assigns, module_sql, None)
     return found
 
 
@@ -1881,13 +2035,18 @@ def _collect(
     where: str,
     assigns: dict[str, list[ast.expr]],
     found: dict[tuple[str, str], int],
+    sql_names: set[str],
+    assigned: str | None,
 ) -> None:
-    if not isinstance(node, (ast.JoinedStr, ast.BinOp)):
+    if not isinstance(node, (ast.JoinedStr, ast.BinOp, ast.Call)):
         return
     static: list[str] = []
     slots: list[ast.expr] = []
     _flatten_sql(node, static, slots)
-    if not slots or not _SQL_STATEMENT.search("".join(static).replace("\0", "")):
+    if not slots:
+        return
+    own_text = "".join(static).replace("\0", "")
+    if not _SQL_STATEMENT.search(own_text) and assigned not in sql_names:
         return
     for slot in slots:
         resolved = slot
