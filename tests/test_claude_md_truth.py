@@ -1008,14 +1008,17 @@ LIVE: tuple[Live, ...] = (
     ),
     Live(
         SUB,
-        "All six subprocess guards (`provenance.py` ×5, `db.git_rev_parse`)",
+        "All six subprocess guards (`provenance.py` ×5, `db.git_rev_parse`",
         "six, 5",
         lambda: _subprocess_guards("src/codebugs/provenance.py", "src/codebugs/db.py")
         | _subprocess_guards("src/codebugs/provenance.py"),
         "the population the widening claim ranges over, counted twice over: the "
         "whole and `provenance.py`'s share. Building this row is what found the "
         "number wrong — it read five and ×4 against six handlers and five — and a "
-        "claim about ALL of a population must know that population's size",
+        "claim about ALL of a population must know that population's size. "
+        "`loc.py`'s own guards route through a `_git()` helper rather than a "
+        "literal `subprocess.` call, so this AST walk cannot see them and they "
+        "are named separately, in prose only (CB-294)",
     ),
     Live(
         SUB,
@@ -1250,7 +1253,7 @@ NOT_A_CLAIM: tuple[NotAClaim, ...] = (
     NotAClaim(SUB, "gate are two halves of one", _CROSS_REF),
     NotAClaim(SUB, "and the two kinds of check", _CROSS_REF),
     NotAClaim(SUB, "FINAL-DESIGN.md` §10.", "a section reference into a foreign document"),
-    NotAClaim(SUB, "(`findings.py:546`, `:581`)", "a line reference in this project's file:line notation"),
+    NotAClaim(SUB, "(`findings.py:4584`)", "a line reference in this project's file:line notation"),
     # ---------------- literals inside quoted code ----------------------------
     NotAClaim(SUB, "`rowcount == 1`", _CODE_LITERAL),
     NotAClaim(SUB, "`SET n = n + 1`", _CODE_LITERAL),
