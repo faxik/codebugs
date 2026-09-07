@@ -2,14 +2,14 @@
 # mcp=2.0.0 python=3.14.4
 #
 cli  ok_create        rc=0 shape=empty       last=Added: FR-1
-cli  duplicate_id     rc=1 shape=one-line    last=requirement FR-1 already exists
+cli  duplicate_id     rc=1 shape=one-line    last=requirement 'FR-1' already exists
 cli  bad_priority     rc=1 shape=one-line    last=Invalid priority: 'bogus'
 cli  bad_status       rc=1 shape=one-line    last=Invalid requirement status: 'bogus'
 cli  missing_tracker  rc=1 shape=one-line    last=codebugs: --tracker-root names <TMP>/elsewhere, which has no .codebugs/; run `codebugs init <TMP>/elsewhere`, or clear --tracker-root to fall back to directory discovery
 mcp  ok_create        is_error=False shape=result    raised=-
      ok_create        text={ /   "id": "FR-1", /   "section": "", /   "description": "первое", /   "priority": "should", /   "status": "planned", /   "source": "", /   "test_coverage": "", /   "tags": [], /   "meta": {}, /   "embedding": null, /   "created_at": "<TS>", /   "updated_at": "<TS>" / }
 mcp  duplicate_id     is_error=True  shape=text      raised=mcp.server.mcpserver.exceptions.ToolError
-     duplicate_id     text=Error executing tool reqs_add: requirement FR-1 already exists
+     duplicate_id     text=Error executing tool reqs_add: requirement 'FR-1' already exists
 mcp  bad_priority     is_error=True  shape=text      raised=mcp.server.mcpserver.exceptions.ToolError
      bad_priority     text=Error executing tool reqs_add: Invalid priority: 'bogus'
 mcp  bad_status       is_error=True  shape=text      raised=mcp.server.mcpserver.exceptions.ToolError

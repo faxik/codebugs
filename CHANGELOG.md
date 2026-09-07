@@ -11,17 +11,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Adding a requirement that already exists now tells you so, in one line, instead of printing a
   crash.** `codebugs reqs-add FR-1 …` twice used to end in a full Python traceback whose last line
   was a raw database message, `UNIQUE constraint failed: requirements.id`. You now get
-  `requirement FR-1 already exists` and nothing else, and the command still exits non-zero. Over
+  `requirement 'FR-1' already exists` and nothing else, and the command still exits non-zero. Over
   MCP the same refusal was worse than untidy: because the failure arrived as a database error
   rather than as one of the refusals this server anticipates, a client on a recent MCP library
   received the blank `Error executing tool reqs_add` with the reason discarded — the very failure
   the entry below describes, reaching clients through a door that entry could not close. It now
   carries its text on every library version this package accepts.
 
-  The message is careful about what it claims. A duplicate identifier is named as one; anything
-  else the requirements table refuses is reported as refused, naming the identifier and the
-  database's own words, without asserting *which* rule was broken. A wrong guess dressed as a
-  precise answer is worse than an honest imprecise one.
+  The message is careful about what it claims, and about what it repeats. A duplicate identifier is
+  established by asking the database to refuse that exact clash, never by guessing from an error
+  code — an error code names the kind of rule broken and not the table it belongs to, so a rule
+  broken elsewhere could be reported as a duplicate that does not exist. Anything else the table
+  refuses is reported as refused, naming the requirement and stopping there: the database's own
+  wording stays out of the message, because a database can be made to put arbitrary text in it. The
+  identifier is quoted, so one containing a line break cannot forge a second line of output.
 
 - **A bad `--priority` or `--status` on `reqs-add` is now a one-line error too.** That command was
   the one requirement verb that never routed its errors through the shared handler its neighbours
