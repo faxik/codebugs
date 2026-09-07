@@ -58,11 +58,23 @@ jobs:
         run: uv python install && uv run python -V
 
       - name: Lint
-        # Pinned: CLAUDE.md records that ruff 0.16.x flags the whole repo, so an
-        # unpinned CI lint would go red on a release nobody here made.
+        # NO VERSION IS NAMED ON THIS LINE, AND THAT IS THE POINT (CB-314). This
+        # step used to be `uvx ruff@<version>`, which downloads its own copy and
+        # never reads the project environment — so CI and the merge guard could
+        # drift apart. `uv run` reads the pin from `pyproject.toml`, which is now
+        # the only place that DECIDES the version; the full story, the incident
+        # and the measurement live beside that pin rather than being retold here,
+        # because a comment repeating a number is the copy nobody updates.
+        # `tests/test_cb314_linter_pin.py` refuses a change that undoes either half.
+        #
+        # This adds no step and no meaningful minute: `uv run` builds the
+        # project environment, which the `Tests` step below builds anyway with
+        # the same `--extra dev`; the cost simply moves one step earlier, and
+        # a separate standalone ruff download is no longer paid at all.
+        #
         # `ruff format` is deliberately NOT a gate — much of the existing tree is
         # non-conformant to it and gating would refuse every change.
-        run: uvx ruff@0.15.7 check src/ tests/
+        run: uv run --extra dev ruff check src/ tests/
 
       - name: Tests
         run: uv run --extra dev python -m pytest tests/ -q
@@ -128,15 +140,52 @@ jobs:
   # `mcp` satisfying `pyproject.toml`. That is how 2.1.1 reached the owner's
   # installed server while the lockfile still said 2.0.0.
   #
-  # WHY `uv lock --upgrade-package mcp` AND NOT A PINNED VERSION STRING. The job
-  # must run the NEWEST version the declared range admits, and a hardcoded
+  # WHY `uv lock --upgrade-package <name>` AND NOT A PINNED VERSION STRING. The
+  # job must run the NEWEST version the declared ranges admit, and a hardcoded
   # `mcp==2.1.1` goes stale the day the SDK releases again — at which point this
   # job would go on testing a version nobody runs, which is the very defect it
-  # exists to close, rebuilt inside its own fix. `uv lock --upgrade-package mcp`
-  # re-resolves that ONE dependency against `pyproject.toml`'s own
-  # `mcp>=2.0.0,<3` and writes the answer into the checkout's lockfile, which is
-  # thrown away with the runner. Measured locally: it moved `mcp` 2.0.0 -> 2.1.1
-  # and `mcp-types` 2.0.0 -> 2.1.1, and named no version anywhere.
+  # exists to close, rebuilt inside its own fix. `uv lock --upgrade-package`
+  # re-resolves the NAMED dependencies against the ranges already declared —
+  # `pyproject.toml`'s own `mcp>=2.0.0,<3` for `mcp`, and for the other two the
+  # ranges `mcp` itself declares — and writes the answer into the checkout's
+  # lockfile, which is thrown away with the runner. It names no version anywhere.
+  #
+  # WHY THESE THREE NAMES AND NOT MORE, AND NOT FEWER (CB-314). The list is
+  # exactly the libraries this package's OWN SOURCE imports by name, whose
+  # version an installer is free to choose:
+  #   * `mcp`       — the one declared dependency; `src/codebugs/server.py` is
+  #                   built on `mcp.server.mcpserver.MCPServer`.
+  #   * `mcp-types` — imported as `mcp_types` by `src/codebugs/server.py`,
+  #                   unconditionally at module level, for `CallToolResult` and
+  #                   `INVALID_PARAMS`.
+  #   * `pydantic`  — imported unconditionally at module level by NINE files
+  #                   under `src/`; every tool surface is a pydantic model.
+  # The last two are undeclared and reach the environment only as transitive
+  # dependencies of `mcp` — that gap is CB-267 and this job does not close it.
+  # Naming them here needs no declaration: `--upgrade-package` addresses any
+  # package in the lock, and moving them to the newest version their constraints
+  # admit is precisely what an installer does to a user.
+  #
+  # ONE OF THE THREE NAMES DECIDES NOTHING TODAY, AND SAYING SO IS CHEAPER THAN
+  # LETTING THE NEXT READER ASSUME IT DOES. `mcp` pins its companion EXACTLY
+  # (`mcp-types==<its own version>`, measured on 2.0.0 and 2.1.1), so
+  # `--upgrade-package mcp-types` on its own moves nothing — verified: it resolves
+  # and leaves 2.0.0 in place — and the companion in fact travels with `mcp`.
+  # It is named anyway because the rule this list follows is "every library `src/`
+  # imports by name", not "every library that happens to be movable this month":
+  # the day `mcp` relaxes that pin to a range, the name already here is what makes
+  # this job cover it, and `tests/test_cb314_linter_pin.py` derives the same list
+  # from the source so the two cannot drift.
+  #
+  # DELIBERATELY NOT IN THE LIST: `pytest` and `anyio`, imported only by
+  # `tests/`, never by `src/`. No user installs the `dev` extra, so no user ever
+  # runs those versions, and this job's whole subject is what users get. `ruff`
+  # is excluded for a different reason — since CB-314 it is pinned to an exact
+  # patch in `pyproject.toml`, so there is no newest version for it to move to.
+  # And the list stops at direct imports rather than growing into the full
+  # dependency graph: that expansion would make this gate red on any transitive
+  # release, i.e. a source of false refusals, which is the very failure the ruff
+  # pin above exists to prevent.
   #
   # WHY THE WHOLE SUITE AND NOT THE TEN TESTS. The ten are today's symptom, and
   # a job scoped to them is an enumeration: it would be blind to the eleventh
@@ -145,12 +194,13 @@ jobs:
   # would buy coverage nobody asked for — this is ONE extra run of a suite that
   # takes about four minutes.
   #
-  # HONEST SCOPE: this checks the newest version at the moment the job runs. It
-  # says nothing about a version released between two pushes, and nothing about
-  # what any particular user's installer resolved. Building the installed server
-  # from the lockfile is the other half of the answer and is a separate unit.
+  # HONEST SCOPE: this checks the newest versions at the moment the job runs. It
+  # says nothing about a version released between two pushes, nothing about what
+  # any particular user's installer resolved, and nothing about any library
+  # outside the three named above. Building the installed server from the
+  # lockfile is the other half of the answer and is a separate unit.
   newest-sdk:
-    name: newest mcp in the declared range
+    name: newest direct dependencies in the declared ranges
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -167,10 +217,30 @@ jobs:
       - name: Interpreter (from .python-version)
         run: uv python install && uv run python -V
 
-      - name: Resolve the newest mcp the dependency range admits
+      # THE `uv sync` LINE REFUSES A HYBRID ENVIRONMENT, AND THAT IS THE WHOLE
+      # REASON IT IS HERE. `uv run` synchronises INEXACTLY: it installs what the
+      # lockfile now asks for and LEAVES BEHIND what it no longer asks for
+      # (measured 2026-09-07 on a disposable clone — a package planted in `.venv`
+      # survives `uv run` and is reported `Uninstalled 1 package` by `uv sync`).
+      # So without this line, the day a future `mcp` release stops requiring
+      # `mcp-types` or `pydantic`, `--upgrade-package` adds no requirement for
+      # them, the copies installed from the OLD graph survive, the versions print,
+      # the suite imports them and the job goes GREEN — while a fresh `pipx`
+      # install, which starts from nothing, cannot import them at all. That is a
+      # gate reporting green because it is looking at an environment no user has.
+      #
+      # ORDER IS LOAD-BEARING IN BOTH DIRECTIONS. After `uv lock`, because syncing
+      # first would materialise the OLD graph. Before the version print, because a
+      # print taken from the inexact environment names packages the exact sync is
+      # about to remove — the gate's own report lying about what the tests ran on,
+      # which is the defect this whole job exists to catch. And before the suite,
+      # obviously. `tests/test_cb314_linter_pin.py` asserts that order off this
+      # file rather than trusting anyone's memory of it.
+      - name: Resolve the newest versions the ranges admit, and build exactly that
         run: |
-          uv lock --upgrade-package mcp
-          uv run --extra dev python -c "import importlib.metadata as m; print('mcp', m.version('mcp'))"
+          uv lock --upgrade-package mcp --upgrade-package mcp-types --upgrade-package pydantic
+          uv sync --extra dev
+          uv run --extra dev python -c "import importlib.metadata as m; [print(n, m.version(n)) for n in ('mcp', 'mcp-types', 'pydantic')]"
 
       - name: Tests
         run: uv run --extra dev python -m pytest tests/ -q

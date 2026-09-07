@@ -54,6 +54,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   were already loud; nothing anywhere ran them on the version people actually end up installing,
   so they passed forever while the shipped server misbehaved.
 
+  That check now covers three libraries instead of one — the MCP library, its companion type
+  package, and `pydantic`, which is to say every library this package's own source imports by
+  name. All three arrive in an installed copy at whatever version the installer resolved, not at
+  the version recorded in this repository's lockfile, so all three are versions someone is
+  actually running and nothing was testing.
+
+- **The install instructions in the README described a way to install that could never work.**
+  They told you to run `pipx install codebugs` or `pip install codebugs`, and this package is not
+  published to PyPI — there is nothing under that name in the public index, so the very first
+  command in the README failed for anyone who was not its author. The README now documents
+  installing from a clone by path, which is how the working installation was actually made, and
+  it states the two things that follow from installing that way: the installed copy is a snapshot
+  rather than a link to your clone, and the installer resolves dependency versions on its own
+  instead of reading this repository's lockfile.
+
+- **One routine lockfile refresh could have refused every merge afterwards.** The exact linter
+  version lived in a single line of the CI workflow, and that line downloaded its own copy of the
+  linter without consulting the project environment at all — while the guard that can actually
+  refuse a merge took whatever version the lockfile happened to carry. Nothing tied the two
+  numbers together, so an ordinary `uv lock --upgrade` moved the guard to a newer linter that
+  reports 568 errors on a tree the old one passes clean, and every later merge would have been
+  refused on violations unrelated to it, with CI still reporting the lint as fine. The version is
+  now pinned in `pyproject.toml`, which is the only place it appears, and CI reads it from there
+  through the same command the merge guard uses. This changes nothing for users of the tracker; it
+  is recorded because it changes what a contributor's environment does.
+
 ## [0.3.0] — 2026-09-01
 
 This release is about the tracker answering the question you asked. In a handful of places it used
