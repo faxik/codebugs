@@ -40,18 +40,20 @@
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import importlib.metadata as md
+import pathlib
+import sys
 import tempfile
 from typing import Any
 
-import anyio
-from mcp.client.session import ClientSession
-from mcp.shared.memory import create_client_server_memory_streams
 from mcp_types import CallToolResult, TextContent
 
 from codebugs import db, server
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
+from test_cb310_refusal_text import call_over_the_wire  # noqa: E402
 
 #: Метка, которой наблюдатель подменяет текст. Выбрана заведомо непохожей на всё,
 #: что может написать сам проект или чужая библиотека, чтобы её появление у
@@ -103,10 +105,30 @@ def _rewritten(value: Any) -> Any:
     return value
 
 
+def _innermost(exc: BaseException) -> BaseException:
+    """Самое внутреннее исключение: группы исключений разворачиваются.
+
+    Живой сеанс идёт под группой задач, поэтому отказ протокола выходит наружу
+    завёрнутым. Без разворачивания замер сообщал бы класс обёртки вместо класса
+    отказа — то есть отвечал бы не на тот вопрос, который задан.
+    """
+    inner = getattr(exc, "exceptions", None)
+    return _innermost(inner[0]) if inner else exc
+
+
 def _observe(built, name: str, arguments: dict, *, rewrite: bool) -> tuple[str, str]:
     """Прогон одного случая через живого клиента с наблюдателем в самом внешнем слое.
 
     Возвращает пару «что увидел наблюдатель» и «что в итоге получил клиент».
+
+    Обвязка живого сеанса ЗАИМСТВУЕТСЯ из `tests/test_cb310_refusal_text.py`, а
+    не пишется здесь заново — тот же довод, что и у соседнего снимка договора в
+    этой же ветке. Она дважды обращается к внутренности чужой библиотеки, две
+    допущенные версии которой в этом проекте уже ведут себя по-разному; вторая
+    копия жила бы своей жизнью и при поломке молчала бы, потому что этот скрипт
+    запускают руками и ровно в ту минуту, когда им хотят что-то ДОКАЗАТЬ.
+    Наблюдатель к ней не относится: он ставится в список слоёв ДО вызова, и
+    заимствованная функция о нём ничего знать не обязана.
     """
     seen: list[str] = []
 
@@ -123,35 +145,12 @@ def _observe(built, name: str, arguments: dict, *, rewrite: bool) -> tuple[str, 
 
     built.middleware.insert(0, observer)
     try:
-
-        async def go() -> str:
-            async with create_client_server_memory_streams() as (client_streams, server_streams):
-                client_read, client_write = client_streams
-                server_read, server_write = server_streams
-                options = built._lowlevel_server.create_initialization_options()
-                async with anyio.create_task_group() as task_group:
-
-                    async def serve() -> None:
-                        await built._lowlevel_server.run(server_read, server_write, options)
-
-                    task_group.start_soon(serve)
-                    async with ClientSession(client_read, client_write) as session:
-                        await session.initialize()
-                        try:
-                            result = await session.call_tool(name, arguments)
-                        except BaseException as exc:  # noqa: BLE001
-                            return f"RAISED {type(exc).__name__}: {exc}"[:200]
-                        text = result.content[0].text if result.content else ""
-                        return f"is_error={result.is_error} text[:70]={text[:70]!r}"
-            return "<недостижимо>"
-
         try:
-            client = asyncio.run(go())
-        except BaseException as exc:  # noqa: BLE001
-            inner = exc
-            while isinstance(inner, BaseExceptionGroup) and inner.exceptions:
-                inner = inner.exceptions[0]
-            client = f"RAISED-OUTER {type(inner).__name__}: {inner}"[:200]
+            is_error, text = call_over_the_wire(built, name, arguments)
+            client = f"is_error={is_error} text[:70]={text[:70]!r}"
+        except BaseException as exc:  # noqa: BLE001 — форма ответа и есть предмет замера
+            inner = _innermost(exc)
+            client = f"RAISED {type(inner).__name__}: {inner}"[:200]
     finally:
         built.middleware.remove(observer)
     return (seen[0] if seen else "<наблюдатель не сработал>"), client

@@ -561,6 +561,17 @@ def install_required_arguments(server: MCPServer) -> None:
     `list_tools()` on the first tool call of a server's life. Sharing one cache
     would mean changing that function's signature, and the accepted trade is a
     one-off cost against touching a layer this unit was told to leave alone.
+
+    THE GUARD CLAUSE BELOW IS ALSO A DELIBERATE COPY, and for a DIFFERENT reason
+    than the cache — said separately because a reader who saw only the cache
+    argument would reasonably think this one had simply been missed. The four
+    lines testing `ctx.method` and the shape of `ctx.params` are identical to
+    `install_strict_arguments`', and a third variant sits in
+    `install_usage_tracking`. Extracting them would edit the BODY of two layers
+    this unit was told not to touch, to save four lines whose drift a shared
+    helper would not actually prevent: all three read the same `ctx` the SDK
+    hands them, so the day that shape changes, all three break together whether
+    or not they share code. The duplication costs re-reading, not correctness.
     """
     required: dict[str, list[str]] = {}
 
@@ -622,9 +633,14 @@ def install_usage_tracking(server: MCPServer, conn_factory: db.ConnFactory) -> N
     same rule stated from the storage side.
 
     ORDERING, AND THE COMPOSITION THIS PROJECT'S OWN CLAUDE.md CALLS OUT: this
-    is registered in `main()` AFTER `install_strict_arguments`, so on
+    is registered in `_build_server` AFTER `install_strict_arguments`, so on
     `server.middleware` (outermost-first, per `MCPServer.middleware`'s own
-    docstring) strict-arguments sits OUTER and this sits INNER. `reject_unknown_arguments`
+    docstring) strict-arguments sits OUTER and this sits INSIDE IT. Inside it,
+    but NOT innermost, and the difference started mattering with CB-326:
+    `install_required_arguments` is registered after this one and therefore sits
+    inside THIS one — deliberately, so that a missing-required refusal keeps
+    being counted here, exactly as it was when the SDK caught it deeper still.
+    `reject_unknown_arguments`
     raises `MCPError` BEFORE ever calling ITS OWN `call_next` when an argument
     name is unknown — so this middleware's `__call__` is never invoked at all
     for such a call, and a refused-for-bad-arguments call is NOT counted here.
