@@ -258,20 +258,32 @@ def _subprocess_guards(*rels: str) -> set[str]:
     return {str(total)}
 
 
-def _dict_literal_keys(rel: str, name: str) -> set[str]:
-    """The keys of a module-level dict literal, read from the syntax tree."""
+def _module_dict(rel: str, name: str) -> ast.Dict | None:
+    """The module-level dict literal assigned to `name`, or None.
+
+    ONE walker, because two of them drifted apart within a single review round:
+    the earlier pair spelled "find the assignment target" two different ways for
+    the same question, and a future refinement would have had to be remembered
+    twice.
+    """
     for node in ast.walk(ast.parse(_read(rel))):
-        if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", None) == name:
-            value = node.value
-        elif isinstance(node, ast.Assign) and name in [
-            getattr(t, "id", None) for t in node.targets
-        ]:
-            value = node.value
+        if isinstance(node, ast.AnnAssign):
+            targets = [getattr(node.target, "id", None)]
+        elif isinstance(node, ast.Assign):
+            targets = [getattr(t, "id", None) for t in node.targets]
         else:
             continue
-        if isinstance(value, ast.Dict):
-            return {ast.literal_eval(k) for k in value.keys if isinstance(k, ast.Constant)}
-    return set()
+        if name in targets and isinstance(node.value, ast.Dict):
+            return node.value
+    return None
+
+
+def _dict_literal_keys(rel: str, name: str) -> set[str]:
+    """The keys of a module-level dict literal, read from the syntax tree."""
+    found = _module_dict(rel, name)
+    if found is None:
+        return set()
+    return {ast.literal_eval(k) for k in found.keys if isinstance(k, ast.Constant)}
 
 
 def _attention_signal_names() -> set[str]:
@@ -286,15 +298,8 @@ def _attention_signal_names() -> set[str]:
 
 def _declared_exception_rows(rel: str) -> set[str]:
     """How many rows a test module's `DECLARED_EXCEPTIONS` table carries."""
-    for node in ast.walk(ast.parse(_read(rel))):
-        target = None
-        if isinstance(node, ast.AnnAssign):
-            target = getattr(node.target, "id", None)
-        elif isinstance(node, ast.Assign):
-            target = next((getattr(t, "id", None) for t in node.targets), None)
-        if target == "DECLARED_EXCEPTIONS" and isinstance(node.value, ast.Dict):
-            return {str(len(node.value.keys))}
-    return set()
+    found = _module_dict(rel, "DECLARED_EXCEPTIONS")
+    return {str(len(found.keys))} if found is not None else set()
 
 
 def _registry_functions() -> set[str]:
@@ -339,20 +344,31 @@ class Token:
         return source[max(0, self.start - 70) : self.end + 55].replace("\n", " ")
 
 
+def _mask(length: int, spans: list[tuple[int, int]]) -> bytearray:
+    """A byte-per-character map of what some rule has already claimed."""
+    covered = bytearray(length)
+    for start, end in spans:
+        covered[start:end] = b"\1" * (end - start)
+    return covered
+
+
+def _uncovered(tokens: list[Token], covered: bytearray) -> list[Token]:
+    return [t for t in tokens if not any(covered[i] for i in range(t.start, t.end))]
+
+
 def number_tokens(source: str) -> list[Token]:
     """Every number token left after the four lexical rules have run."""
-    masked = bytearray(len(source))
-    for _name, pattern in LEXICAL_RULES:
-        for hit in pattern.finditer(source):
-            masked[hit.start() : hit.end()] = b"\1" * (hit.end() - hit.start())
-    out: list[Token] = []
-    for hit in _TOKEN.finditer(source):
-        if any(masked[i] for i in range(hit.start(), hit.end())):
-            continue
-        out.append(
-            Token(hit.start(), hit.end(), hit.group(), source.count("\n", 0, hit.start()) + 1)
-        )
-    return out
+    spans = [
+        (hit.start(), hit.end())
+        for _name, pattern in LEXICAL_RULES
+        for hit in pattern.finditer(source)
+    ]
+    covered = _mask(len(source), spans)
+    raw = [
+        Token(hit.start(), hit.end(), hit.group(), source.count("\n", 0, hit.start()) + 1)
+        for hit in _TOKEN.finditer(source)
+    ]
+    return _uncovered(raw, covered)
 
 
 # --------------------------------------------------------------------------- #
@@ -1317,12 +1333,9 @@ def _anchor_spans(rel: str, source: str) -> list[tuple[int, int, object]]:
 def unaccounted(rel: str) -> list[Token]:
     """Every number token no row and no enumeration pairing covers."""
     source = _read(rel)
-    covered = bytearray(len(source))
-    for start, end, _row in _anchor_spans(rel, source):
-        covered[start:end] = b"\1" * (end - start)
-    for token, _length in enumeration_counts(source):
-        covered[token.start : token.end] = b"\1" * (token.end - token.start)
-    return [t for t in number_tokens(source) if not any(covered[i] for i in range(t.start, t.end))]
+    spans = [(start, end) for start, end, _row in _anchor_spans(rel, source)]
+    spans += [(t.start, t.end) for t, _length in enumeration_counts(source)]
+    return _uncovered(number_tokens(source), _mask(len(source), spans))
 
 
 # --------------------------------------------------------------------------- #
@@ -1595,19 +1608,29 @@ def path_candidates(rel: str) -> list[tuple[str, int]]:
     return out
 
 
-def _resolves(text: str, rel: str) -> bool:
+def _resolves_via(text: str, rel: str) -> str | None:
+    """WHICH base resolves a path, or None. One resolver, two callers.
+
+    The first draft answered yes/no here and re-spelled the candidate list inside
+    the search-directory test — where the `OSError` arm was silently dropped in
+    the copying. Returning the base that worked lets both callers share one arm.
+    """
     if "*" in text:
-        return bool(list(REPO_ROOT.glob(text)))
-    here = (REPO_ROOT / rel).parent
-    bases = [REPO_ROOT, here] + [REPO_ROOT / d for d in SEARCH_DIRS]
-    for base in bases:
+        return "<glob>" if list(REPO_ROOT.glob(text)) else None
+    bases: list[tuple[str, Path]] = [("<repo root>", REPO_ROOT), ("<naming file>", (REPO_ROOT / rel).parent)]
+    bases += [(name, REPO_ROOT / name) for name in SEARCH_DIRS]
+    for label, base in bases:
         for candidate in (base / text, base / (text + ".py")):
             try:
                 if candidate.exists():
-                    return True
+                    return label
             except OSError:
                 pass
-    return False
+    return None
+
+
+def _resolves(text: str, rel: str) -> bool:
+    return _resolves_via(text, rel) is not None
 
 
 def unresolved_pointers(rel: str) -> list[str]:
@@ -1638,14 +1661,12 @@ def test_pointer_discovery_is_not_vacuous(rel: str) -> None:
 
 def test_no_declared_search_directory_is_unused() -> None:
     """Self-deleting: a directory nothing is resolved through must not linger."""
-    needed = set()
-    for rel in CORPUS:
-        for text, _ in path_candidates(rel):
-            if "*" in text or (REPO_ROOT / text).exists():
-                continue
-            for name in SEARCH_DIRS:
-                if (REPO_ROOT / name / text).exists() or (REPO_ROOT / name / (text + ".py")).exists():
-                    needed.add(name)
+    needed = {
+        label
+        for rel in CORPUS
+        for text, _offset in path_candidates(rel)
+        if (label := _resolves_via(text, rel)) in SEARCH_DIRS
+    }
     idle = sorted(set(SEARCH_DIRS) - needed)
     assert not idle, (
         f"nothing in the corpus resolves through {idle} any more — delete the row "
@@ -1728,6 +1749,14 @@ def test_every_rationale_anchor_resolves(rel: str) -> None:
 # holder for that reason. So the guarantee is stated at the width it holds: the
 # declared list is EXACTLY the set of value interpolations this predicate sees,
 # in both directions, and what the predicate cannot see is named here.
+#
+# THE REMAINING POPULATION HAS AN OWNER, so this boundary is discoverable from the
+# tracker and not only from this comment: the 69 raw interpolation sites are the
+# debt CB-172 carries (turning the `S608` lint rule on), and `src/codebugs/CLAUDE.md`
+# describes what actually holds them today — identifier validation and membership
+# of closed enumerations. This repository's own recorded lesson is that a rule
+# written as an enumeration gets fixed only at the sites somebody enumerated; the
+# card is what keeps the rest of the population from being forgotten here.
 # --------------------------------------------------------------------------- #
 PACKAGE = REPO_ROOT / "src" / "codebugs"
 
@@ -1802,6 +1831,14 @@ def value_interpolation_sites() -> dict[tuple[str, str], int]:
     Keyed by (module, the enclosing function or module-level name) rather than by
     line number: a line number is the one key an edit three screens above silently
     invalidates, and this table exists precisely to survive ordinary edits.
+
+    DELIBERATELY NOT MEMOIZED, and this note exists so nobody "optimizes" it into
+    a defect. Four tests call it, and a session-lifetime cache would let a SAFETY
+    gate report clean about a snapshot rather than about the tree — the reasoning
+    `tests/test_no_network_capability.py::_package_modules` already wrote down for
+    the same shape of sweep, and the state `tests/CLAUDE.md`'s CB-215 alarm exists
+    to notice. Measured cost of not caching: about 0.14 s per call over the 34
+    modules of the package, four calls, against a full suite of some three minutes.
     """
     found: dict[tuple[str, str], int] = {}
     for path in sorted(PACKAGE.rglob("*.py")):
@@ -1917,11 +1954,13 @@ def sites_without_a_reason() -> list[str]:
     literally, the requirement would have been unsatisfiable without reflowing SQL.
     """
     bad = []
+    parsed: dict[str, tuple[str, ast.Module, set[int]]] = {}
     for (rel, where), line in sorted(value_interpolation_sites().items()):
-        source = _read(rel)
-        tree = ast.parse(source)
+        if rel not in parsed:
+            source = _read(rel)
+            parsed[rel] = (source, ast.parse(source), _comment_lines(source))
+        source, tree, comments = parsed[rel]
         first, last = _statement_span(tree, line)
-        comments = _comment_lines(source)
         lines = source.split("\n")
         above = first - 1
         while above >= 1 and lines[above - 1].strip().startswith("#"):
