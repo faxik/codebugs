@@ -52,7 +52,9 @@ Two consequences of installing by path, both worth knowing before the first surp
   what `codebugs` runs. Re-run `pipx install --force ./codebugs` to pick the changes up, or pass
   `--editable` at install time if you want the clone itself to be what runs.
 - **The installer resolves dependencies on its own and does not read this repository's
-  `uv.lock`.** So an install picks the newest release each declared range admits, which is not
+  `uv.lock`.** So the versions you end up running are whatever your installer resolved — for a
+  fresh `pipx` install, typically the newest release each declared range admits; for `pip` into an
+  environment that already has a satisfying version, whatever was already there — and neither is
   necessarily the combination the test suite ran against. That gap is real and has bitten once
   already, which is why the `newest-sdk` job in `.github/workflows/ci.yml` runs the whole suite
   against the newest versions the ranges admit. Note what that buys and what it does not: a break

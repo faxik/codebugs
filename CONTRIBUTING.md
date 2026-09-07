@@ -62,12 +62,21 @@ against the checkout you run in, so that tests main's source and passes on a tre
 
 **ruff is pinned to an exact patch version in `pyproject.toml`, and that line is the only place that
 decides which linter runs** (CB-314). No workflow, script or guard names a version any more: CI reads
-the pin through the same `uv run --extra dev ruff check` the merge guard uses, so the two cannot be
-driven apart, and a newer ruff release cannot arrive through a routine `uv lock --upgrade` and start
-refusing merges on violations unrelated to the branch. Bumping the pin is a deliberate edit in
-`pyproject.toml` — the comment beside it carries the incident and the measurement — and it is the only
-edit that changes the linter anywhere. `tests/test_cb314_linter_pin.py` refuses a change that undoes
-either half.
+the pin through the same `uv run --extra dev ruff check` the merge guard uses, so a newer ruff release
+cannot arrive through a routine `uv lock --upgrade` and start refusing merges on violations unrelated
+to the branch. Bumping the pin is a deliberate edit in `pyproject.toml` — the comment beside it
+carries the incident and the measurement — and `tests/test_cb314_linter_pin.py` refuses a change that
+undoes either half, on both sides.
+
+**The honest scope, because "the two cannot be driven apart" would be an overclaim.** That holds under
+uv's default settings, and uv has several ways to leave both commands textually intact while changing
+what runs: `UV_FROZEN` and `UV_NO_SYNC` (trust a stale lock or a stale environment), `UV_PROJECT` and
+`UV_WORKING_DIR` (resolve against a different project), `UV_OVERRIDE` and a `[tool.uv]
+override-dependencies` table (replace the requirement outright), and `--resolution` / `exclude-newer`
+(keep the names, resolve something older). Nothing local can see an exported environment variable, so
+this is documented rather than gated; the test does refuse the ones that live in committed files.
+**Note also that bumping the pin regenerates `uv.lock`, and that regenerated file is a tracked change
+you still have to commit** — the edit is one, the commit is two files.
 
 ## Project structure
 

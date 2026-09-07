@@ -56,11 +56,20 @@ codebugs-mcp = "codebugs.server:main"
 # AND THE PIN OUTRANKS A STALE `uv.lock`, WHICH IS THE OBVIOUS DOUBT AND IS
 # MEASURED RATHER THAN ASSUMED: change this line alone, leave the lockfile
 # untouched, and a plain `uv run --extra dev ruff --version` answers with the NEW
-# version and rewrites the lockfile on its way. So bumping the pin is one edit,
-# not two. Note the boundary that creates: `uv run --frozen` forbids that re-lock
-# and would run the LOCKED version instead — which is why the CI lint command is
-# asserted verbatim by `tests/test_cb314_linter_pin.py`, and why adding `--frozen`
-# to it refuses there rather than silently reopening the split.
+# version and rewrites the lockfile on its way. **But that rewrite is a TRACKED
+# change you still have to commit** — one edit, two files — and the finish script
+# commits before its first `uv run`, so a bump landed without re-committing the
+# lockfile leaves a stale lock in main that every ordinary `uv run` silently
+# rewrites again and a `--frozen` caller consumes as-is.
+#
+# THE BOUNDARY, STATED RATHER THAN IMPLIED: this pin decides under uv's DEFAULT
+# settings. `UV_FROZEN` / `--frozen` and `UV_NO_SYNC` run whatever the environment
+# already holds; `UV_PROJECT` / `UV_WORKING_DIR` resolve against another project;
+# `UV_OVERRIDE` and a `[tool.uv] override-dependencies` table replace the
+# requirement outright. Nothing local can see an exported variable, so those are
+# documented; the ones that live in committed files are refused by
+# `tests/test_cb314_linter_pin.py`, which asserts the CI and merge-guard commands
+# whole rather than by substring and fails closed on a `[tool.uv]` table appearing.
 #
 # EXACT PATCH, NOT `~=0.15`, for the same reason `.python-version` carries a full
 # patch: a MAJOR.MINOR range leaves a divergent state representable, and making
