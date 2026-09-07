@@ -357,8 +357,11 @@ _TENS = "twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety"
 _UNITS = "one|two|three|four|five|six|seven|eight|nine"
 _COMPOUND_NUMERAL = r"\b(?:" + _TENS + r")-(?:" + _UNITS + r")\b"
 
+# A numeric run may CONTAIN a comma (`1,000`) but may not END on one: the trailing
+# comma is punctuation, and admitting it made the token one character wider than the
+# number, so a row anchored on the number alone stopped covering it.
 _TOKEN = re.compile(
-    _COMPOUND_NUMERAL + r"|\d[\d_,]*(?:\.\d+)?|\b(?:" + _CARDINAL_ALT + r")\b",
+    _COMPOUND_NUMERAL + r"|\d(?:[\d_,]*\d)?(?:\.\d+)?|\b(?:" + _CARDINAL_ALT + r")\b",
     re.IGNORECASE,
 )
 
@@ -401,7 +404,15 @@ def _mask(length: int, spans: list[tuple[int, int]]) -> bytearray:
 
 
 def _uncovered(tokens: list[Token], covered: bytearray) -> list[Token]:
-    return [t for t in tokens if not any(covered[i] for i in range(t.start, t.end))]
+    """A token survives unless EVERY character of it is claimed by something.
+
+    `any` here was a hole, and a cross-model review walked through it: in
+    `a twenty-four-module package` the compound-ADJECTIVE rule masks the `four-`
+    tail, one character of the token overlaps, and under `any` the whole numeral
+    vanished — so a false claim spelled that way produced no token at all. Partial
+    coverage is not coverage.
+    """
+    return [t for t in tokens if not all(covered[i] for i in range(t.start, t.end))]
 
 
 def number_tokens(source: str) -> list[Token]:
@@ -955,8 +966,8 @@ LIVE: tuple[Live, ...] = (
     ),
     Live(
         SUB,
-        "with exactly THREE sanctioned exceptions",
-        "THREE",
+        "with exactly FOUR sanctioned exceptions",
+        "FOUR",
         lambda: {str(len(value_interpolation_sites()))},
         "the size of the sanctioned-exception list, derived from the tree by the "
         "same predicate the list itself is checked against — so the prose, the "
@@ -1286,9 +1297,9 @@ NOT_A_CLAIM: tuple[NotAClaim, ...] = (
     NotAClaim(SUB, '"Bug 1"/"Bug 2" ≈ 0.8 and two empty strings 1.0', "illustrative scores demonstrating why a minimum text length exists"),
     # ---------------- pending class 3 ----------------------------------------
     NotAClaim(SUB, "Two consequences beyond", _SELF_COUNT),
-    NotAClaim(SUB, "of TWO different kinds", _SELF_COUNT),
-    NotAClaim(SUB, "under the first two's wording", _CROSS_REF),
-    NotAClaim(SUB, "*(1) and (2):*", "the corpus's own enumeration of the three exceptions, written inline rather than with the `**(N)**` markers the lexical rule knows"),
+    NotAClaim(SUB, "of TWO kinds", _SELF_COUNT),
+    NotAClaim(SUB, "the odd one under the others'", _CROSS_REF),
+    NotAClaim(SUB, "*(1), (2), (4), one mechanism:*", "the corpus's own enumeration of the three exceptions, written inline rather than with the `**(N)**` markers the lexical rule knows"),
     NotAClaim(SUB, "*(3), a different licence:*", "the third item of that same inline enumeration"),
     NotAClaim(SUB, "Each carries its reason at the site", _CROSS_REF),
     # ---------------- pending class 2: measurements needing a date ----------
@@ -1987,6 +1998,13 @@ def value_interpolation_sites() -> dict[tuple[str, str], int]:
         rel = str(path.relative_to(REPO_ROOT))
         tree = ast.parse(path.read_text(encoding="utf-8"))
 
+        module_assigns: dict[str, list[ast.expr]] = {}
+        for sub in tree.body:
+            if isinstance(sub, ast.Assign):
+                for target in sub.targets:
+                    if isinstance(target, ast.Name):
+                        module_assigns.setdefault(target.id, []).append(sub.value)
+
         def visit(
             node: ast.AST,
             where: str,
@@ -2013,16 +2031,10 @@ def value_interpolation_sites() -> dict[tuple[str, str], int]:
                     assigned = named
                     if where == "<module>":
                         where = named
-            _collect(node, rel, where, assigns, found, sql_names, assigned)
+            _collect(node, rel, where, assigns, found, sql_names, assigned, module_assigns)
             for child in ast.iter_child_nodes(node):
                 visit(child, where, assigns, sql_names, assigned)
 
-        module_assigns: dict[str, list[ast.expr]] = {}
-        for sub in tree.body:
-            if isinstance(sub, ast.Assign):
-                for target in sub.targets:
-                    if isinstance(target, ast.Name):
-                        module_assigns.setdefault(target.id, []).append(sub.value)
         module_sql = _accumulated_sql_names(tree)
         for child in tree.body:
             visit(child, "<module>", module_assigns, module_sql, None)
@@ -2037,6 +2049,7 @@ def _collect(
     found: dict[tuple[str, str], int],
     sql_names: set[str],
     assigned: str | None,
+    module_assigns: dict[str, list[ast.expr]],
 ) -> None:
     if not isinstance(node, (ast.JoinedStr, ast.BinOp, ast.Call)):
         return
@@ -2050,8 +2063,17 @@ def _collect(
         return
     for slot in slots:
         resolved = slot
-        if isinstance(slot, ast.Name) and len(assigns.get(slot.id, [])) == 1:
-            resolved = assigns[slot.id][0]
+        if isinstance(slot, ast.Name):
+            local = assigns.get(slot.id, [])
+            outer = module_assigns.get(slot.id, [])
+            if len(local) == 1:
+                resolved = local[0]
+            elif not local and len(outer) == 1:
+                # A MODULE CONSTANT reached from inside a function. Without this the
+                # resolution saw only the enclosing function and read a module-level
+                # numeric flag as an identifier — the hole a cross-model review found
+                # on `f"… json_valid(tags, {_JSON5}) …"`.
+                resolved = outer[0]
         if _produces_a_number(resolved) or _quotes_a_slot(resolved):
             found[(rel, where)] = slot.lineno
 
@@ -2066,6 +2088,13 @@ SANCTIONED_VALUE_INTERPOLATIONS: dict[tuple[str, str], str] = {
     ),
     ("src/codebugs/findings.py", "_next_id"): (
         "2 of 3: the mirror image of the claims site, on FINDING_ID_PREFIX"
+    ),
+    ("src/codebugs/findings.py", "_membership_sql"): (
+        "4 of 4, and the SAME mechanism as 1 and 2 rather than a new one: the module "
+        "constant `_JSON5` is a SQLite JSON-validity FLAG, a number no caller can "
+        "reach. It was MISSED by the first draft because one-step name resolution "
+        "looked only inside the enclosing function and never at module constants — "
+        "which made the prose's `exactly THREE` false while the gate said otherwise"
     ),
     ("src/codebugs/findings.py", "_POST_MIGRATION_INDEXES"): (
         "3 of 3, AND ITS MECHANISM IS DIFFERENT: repo-owned status literals are "
@@ -2173,7 +2202,7 @@ def test_the_sanctioned_list_matches_the_tree_in_both_directions() -> None:
 PAIRED_RULES: tuple[tuple[str, str, str], ...] = (
     (
         "Never interpolate values into SQL. Existing sanctioned",
-        "Values are bound, with exactly THREE sanctioned exceptions",
+        "Values are bound, with exactly FOUR sanctioned exceptions",
         "the root states the prescription and points at the list; the subsystem "
         "carries the list. A session that reads only the root now learns that "
         "exceptions exist and where they are, instead of meeting an absolute that "

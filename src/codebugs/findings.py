@@ -3312,8 +3312,12 @@ def _membership_sql(
         # pinned as a known limit rather than repaired, because this unit may not
         # change a shipped filter's behaviour on an unmeasured population.
         inner = (
+            # SANCTIONED VALUE INTERPOLATION, 4 of 4 (the list with each mechanism is
+            # in src/codebugs/CLAUDE.md): `_JSON5` is a module constant holding a
+            # SQLite JSON-validity FLAG — a number no caller can reach, the same
+            # mechanism as the two `SUBSTR` sites.
             f"SELECT {cols}, tags FROM findings {where} {more} "
-            f"CASE WHEN json_valid(tags, {_JSON5}) THEN json_type(tags) = 'array' ELSE 0 END"
+            f"CASE WHEN json_valid(tags, {_JSON5}) THEN json_type(tags) = 'array' ELSE 0 END"  # noqa: S608 (value)
         )
         return (
             "SELECT DISTINCT f.id AS id, f.severity AS severity, "
