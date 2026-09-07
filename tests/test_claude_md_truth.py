@@ -1708,8 +1708,13 @@ import tokenize  # noqa: E402
 
 PACKAGE = REPO_ROOT / "src" / "codebugs"
 
+# NOTE THE BOUNDARIES, because the first draft got them wrong and a mutant caught
+# it: writing `SELECT\s` and then a trailing `\b` demands a word boundary between
+# the space and whatever follows, so `SELECT * FROM …` did NOT match while
+# `SELECT claim_id FROM …` did — the gate was blind to every star-select. Each
+# alternative now ends on a WORD, and the boundary is asserted after the word.
 _SQL_STATEMENT = re.compile(
-    r"\b(SELECT\s|INSERT\s+INTO|UPDATE\s|DELETE\s+FROM|CREATE\s+(UNIQUE\s+)?INDEX"
+    r"\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|CREATE\s+(UNIQUE\s+)?INDEX"
     r"|CREATE\s+TABLE|ALTER\s+TABLE)\b",
     re.IGNORECASE,
 )
