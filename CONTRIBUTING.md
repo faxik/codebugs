@@ -58,8 +58,15 @@ uv run --extra dev ruff check src/ tests/
 Never validate a worktree's changes by running the suite from main: `pythonpath = ["src"]` resolves
 against the checkout you run in, so that tests main's source and passes on a tree you did not touch.
 
-`ruff check` is the lint gate. `ruff format` is **not** — a large part of the tree predates it. Pin
-ruff 0.15.7; 0.16.x flags the whole repo.
+`ruff check` is the lint gate. `ruff format` is **not** — a large part of the tree predates it.
+
+**ruff is pinned to `==0.15.7` in `pyproject.toml`, and that file is the only place the number
+appears.** 0.16.x flags the whole repo: measured on 2026-09-07, dropping the pin and running a plain
+`uv lock --upgrade` moved the linter to 0.16.6, which reports **568 errors** on a tree 0.15.7 passes
+clean. So an unpinned linter turns one routine lockfile refresh into a refusal of every subsequent
+merge, on violations that have nothing to do with the branch being merged. CI reads the pin through
+`uv run --extra dev ruff check` exactly as the merge guard does, so the two cannot be driven apart.
+Bumping the pin is a deliberate edit here, and it is the only edit that changes the linter anywhere.
 
 ## Project structure
 
