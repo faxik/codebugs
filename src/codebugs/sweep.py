@@ -994,6 +994,11 @@ def _parse_tags(args: argparse.Namespace) -> list[str] | None:
 def _cmd_sweep_create(args: argparse.Namespace) -> None:
     from codebugs.cli import domain_errors
 
+    # THE `print`s ARE OUTSIDE THE WRAPPER (CB-319, form landed by CB-316 in
+    # `reqs._cmd_reqs_add`). With a print INSIDE, a `UnicodeEncodeError` from
+    # one of these lines — a `ValueError` subclass, raised only after the
+    # sweep was created — would be caught by the input-refusal arm and
+    # reported as "bad input" for a mutation that landed.
     conn = db.connect()
     kwargs: dict = {}
     if args.name:
@@ -1009,9 +1014,9 @@ def _cmd_sweep_create(args: argparse.Namespace) -> None:
     try:
         with domain_errors():
             result = create_sweep(conn, **kwargs)
-            print(f"Created: {result['sweep_id']}" + (f" ({result['name']})" if result["name"] else ""))
-            if result["lifecycle"] != ["pending", "done"]:
-                print(f"Lifecycle: {' -> '.join(result['lifecycle'])}")
+        print(f"Created: {result['sweep_id']}" + (f" ({result['name']})" if result["name"] else ""))
+        if result["lifecycle"] != ["pending", "done"]:
+            print(f"Lifecycle: {' -> '.join(result['lifecycle'])}")
     finally:
         conn.close()
 
@@ -1019,14 +1024,19 @@ def _cmd_sweep_create(args: argparse.Namespace) -> None:
 def _cmd_sweep_add(args: argparse.Namespace) -> None:
     from codebugs.cli import domain_errors
 
+    # THE `print` IS OUTSIDE THE WRAPPER (CB-319, form landed by CB-316 in
+    # `reqs._cmd_reqs_add`). With the print INSIDE, a `UnicodeEncodeError`
+    # from THIS line — a `ValueError` subclass, raised only after the write
+    # committed — would be caught by the input-refusal arm and reported as
+    # "bad input" for a mutation that landed.
     conn = db.connect()
     try:
         with domain_errors():
             result = add_items(conn, args.sweep, args.items, tags=_parse_tags(args))
-            msg = f"Added {result['added']} new items"
-            if result["recurrence_bumped"]:
-                msg += f", bumped recurrence on {result['recurrence_bumped']}"
-            print(msg + ".")
+        msg = f"Added {result['added']} new items"
+        if result["recurrence_bumped"]:
+            msg += f", bumped recurrence on {result['recurrence_bumped']}"
+        print(msg + ".")
     finally:
         conn.close()
 
@@ -1034,35 +1044,40 @@ def _cmd_sweep_add(args: argparse.Namespace) -> None:
 def _cmd_sweep_next(args: argparse.Namespace) -> None:
     from codebugs.cli import domain_errors
 
+    # THE `print`s ARE OUTSIDE THE WRAPPER (CB-319, form landed by CB-316 in
+    # `reqs._cmd_reqs_add`). With a print INSIDE, a `UnicodeEncodeError` from
+    # one of these lines — a `ValueError` subclass, raised only after the
+    # batch was claimed — would be caught by the input-refusal arm and
+    # reported as "bad input" for a mutation that landed.
     conn = db.connect()
     try:
         with domain_errors():
             result = next_batch(conn, args.sweep, limit=args.limit, tags=_parse_tags(args))
-            if not result["items"]:
-                # CB-210 -- see `fmt.empty_page_line`. The corpus number here is
-                # `remaining` rather than `total`: it is what the non-empty
-                # branch already prints, and it is what separates "there is
-                # nothing left" from "you asked for nothing".
-                print(
-                    empty_page_line(
-                        args.limit,
-                        result.get("remaining", 0),
-                        empty="(no unprocessed items)",
-                        requested="(limit was 0, so no items were requested — {n} remaining)",
-                    )
+        if not result["items"]:
+            # CB-210 -- see `fmt.empty_page_line`. The corpus number here is
+            # `remaining` rather than `total`: it is what the non-empty
+            # branch already prints, and it is what separates "there is
+            # nothing left" from "you asked for nothing".
+            print(
+                empty_page_line(
+                    args.limit,
+                    result.get("remaining", 0),
+                    empty="(no unprocessed items)",
+                    requested="(limit was 0, so no items were requested — {n} remaining)",
                 )
-                return
-            data = [
-                {
-                    "item": i["item"],
-                    "state": i["state"],
-                    "rec": str(i["recurrence_count"]),
-                    "tags": ",".join(i["tags"]),
-                }
-                for i in result["items"]
-            ]
-            print(format_table(data, ["item", "state", "rec", "tags"], max_widths={"item": 60}))
-            print(f"\n{result['remaining']} remaining.")
+            )
+            return
+        data = [
+            {
+                "item": i["item"],
+                "state": i["state"],
+                "rec": str(i["recurrence_count"]),
+                "tags": ",".join(i["tags"]),
+            }
+            for i in result["items"]
+        ]
+        print(format_table(data, ["item", "state", "rec", "tags"], max_widths={"item": 60}))
+        print(f"\n{result['remaining']} remaining.")
     finally:
         conn.close()
 
@@ -1070,6 +1085,11 @@ def _cmd_sweep_next(args: argparse.Namespace) -> None:
 def _cmd_sweep_mark(args: argparse.Namespace) -> None:
     from codebugs.cli import domain_errors
 
+    # THE `print` IS OUTSIDE THE WRAPPER (CB-319, form landed by CB-316 in
+    # `reqs._cmd_reqs_add`). With the print INSIDE, a `UnicodeEncodeError`
+    # from THIS line — a `ValueError` subclass, raised only after the write
+    # committed — would be caught by the input-refusal arm and reported as
+    # "bad input" for a mutation that landed.
     conn = db.connect()
     try:
         with domain_errors():
@@ -1087,7 +1107,7 @@ def _cmd_sweep_mark(args: argparse.Namespace) -> None:
                 conn, args.sweep, args.items,
                 processed=False if args.undo else None, state=args.state,
             )
-            print(f"Marked {result['updated']} items -> state={result['state']}.")
+        print(f"Marked {result['updated']} items -> state={result['state']}.")
     finally:
         conn.close()
 
@@ -1095,24 +1115,30 @@ def _cmd_sweep_mark(args: argparse.Namespace) -> None:
 def _cmd_sweep_status(args: argparse.Namespace) -> None:
     from codebugs.cli import domain_errors
 
+    # THE `print`s ARE OUTSIDE THE WRAPPER (CB-319, form landed by CB-316 in
+    # `reqs._cmd_reqs_add`): only the domain call stays inside `with
+    # domain_errors():`, so a `UnicodeEncodeError` from one of these lines —
+    # a `ValueError` subclass — is never caught by the input-refusal arm and
+    # reported as "bad input". This handler is read-only, so the mechanism
+    # cannot misreport a committed write, but the form is applied uniformly.
     conn = db.connect()
     try:
         with domain_errors():
             s = get_status(conn, args.sweep)
-            print(f"Sweep: {s['sweep_id']}" + (f" ({s['name']})" if s["name"] else ""))
-            print(f"Status: {s['status']}")
-            print(f"Lifecycle: {' -> '.join(s['lifecycle'])}")
-            print(f"Items:  {s['processed']}/{s['total']} processed, {s['remaining']} remaining")
-            if s["archived"]:
-                print(f"Archived: {s['archived']}")
-            if s["by_state"]:
-                print("\nBy state:")
-                for state, count in s["by_state"].items():
-                    print(f"  {state:20s}  {count}")
-            if s["by_tag"]:
-                print("\nBy tag:")
-                for tag, counts in sorted(s["by_tag"].items()):
-                    print(f"  {tag:20s}  {counts['processed']}/{counts['total']}")
+        print(f"Sweep: {s['sweep_id']}" + (f" ({s['name']})" if s["name"] else ""))
+        print(f"Status: {s['status']}")
+        print(f"Lifecycle: {' -> '.join(s['lifecycle'])}")
+        print(f"Items:  {s['processed']}/{s['total']} processed, {s['remaining']} remaining")
+        if s["archived"]:
+            print(f"Archived: {s['archived']}")
+        if s["by_state"]:
+            print("\nBy state:")
+            for state, count in s["by_state"].items():
+                print(f"  {state:20s}  {count}")
+        if s["by_tag"]:
+            print("\nBy tag:")
+            for tag, counts in sorted(s["by_tag"].items()):
+                print(f"  {tag:20s}  {counts['processed']}/{counts['total']}")
     finally:
         conn.close()
 
@@ -1120,11 +1146,16 @@ def _cmd_sweep_status(args: argparse.Namespace) -> None:
 def _cmd_sweep_archive(args: argparse.Namespace) -> None:
     from codebugs.cli import domain_errors
 
+    # THE `print` IS OUTSIDE THE WRAPPER (CB-319, form landed by CB-316 in
+    # `reqs._cmd_reqs_add`). With the print INSIDE, a `UnicodeEncodeError`
+    # from THIS line — a `ValueError` subclass, raised only after the write
+    # committed — would be caught by the input-refusal arm and reported as
+    # "bad input" for a mutation that landed.
     conn = db.connect()
     try:
         with domain_errors():
             result = archive_sweep(conn, args.sweep)
-            print(f"Archived: {result['sweep_id']}")
+        print(f"Archived: {result['sweep_id']}")
     finally:
         conn.close()
 
@@ -1132,6 +1163,11 @@ def _cmd_sweep_archive(args: argparse.Namespace) -> None:
 def _cmd_sweep_archive_items(args: argparse.Namespace) -> None:
     from codebugs.cli import domain_errors
 
+    # THE `print` IS OUTSIDE THE WRAPPER (CB-319, form landed by CB-316 in
+    # `reqs._cmd_reqs_add`). With the print INSIDE, a `UnicodeEncodeError`
+    # from THIS line — a `ValueError` subclass, raised only after the write
+    # committed — would be caught by the input-refusal arm and reported as
+    # "bad input" for a mutation that landed.
     conn = db.connect()
     try:
         with domain_errors():
@@ -1142,7 +1178,7 @@ def _cmd_sweep_archive_items(args: argparse.Namespace) -> None:
                 older_than=args.older_than,
                 reason=args.reason,
             )
-            print(f"Archived {result['archived']} entries in {result['sweep_id']}.")
+        print(f"Archived {result['archived']} entries in {result['sweep_id']}.")
     finally:
         conn.close()
 
@@ -1150,6 +1186,12 @@ def _cmd_sweep_archive_items(args: argparse.Namespace) -> None:
 def _cmd_sweep_list_items(args: argparse.Namespace) -> None:
     from codebugs.cli import domain_errors
 
+    # THE `print`s ARE OUTSIDE THE WRAPPER (CB-319, form landed by CB-316 in
+    # `reqs._cmd_reqs_add`): only the domain call stays inside `with
+    # domain_errors():`, so a `UnicodeEncodeError` from one of these lines —
+    # a `ValueError` subclass — is never caught by the input-refusal arm and
+    # reported as "bad input". This handler is read-only, so the mechanism
+    # cannot misreport a committed write, but the form is applied uniformly.
     conn = db.connect()
     try:
         with domain_errors():
@@ -1160,24 +1202,24 @@ def _cmd_sweep_list_items(args: argparse.Namespace) -> None:
                 archived_only=args.archived_only,
                 limit=args.limit,
             )
-            if not result["items"]:
-                print("(no items)")
-                return
-            data = [
-                {
-                    "item": i["item"],
-                    "state": i["state"],
-                    "rec": str(i["recurrence_count"]),
-                    "archived": "y" if i["archived_at"] else "",
-                    "tags": ",".join(i["tags"]),
-                }
-                for i in result["items"]
-            ]
-            print(format_table(
-                data,
-                ["item", "state", "rec", "archived", "tags"],
-                max_widths={"item": 60},
-            ))
+        if not result["items"]:
+            print("(no items)")
+            return
+        data = [
+            {
+                "item": i["item"],
+                "state": i["state"],
+                "rec": str(i["recurrence_count"]),
+                "archived": "y" if i["archived_at"] else "",
+                "tags": ",".join(i["tags"]),
+            }
+            for i in result["items"]
+        ]
+        print(format_table(
+            data,
+            ["item", "state", "rec", "archived", "tags"],
+            max_widths={"item": 60},
+        ))
     finally:
         conn.close()
 

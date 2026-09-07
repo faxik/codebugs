@@ -916,11 +916,18 @@ def register_cli(sub, commands) -> None:
     def _cmd_merge_abandon(args: argparse.Namespace) -> None:
         from codebugs.cli import domain_errors
 
+        # THE `print` IS OUTSIDE THE WRAPPER (CB-319, form landed by CB-316 in
+        # `reqs._cmd_reqs_add`). With the print INSIDE, a `UnicodeEncodeError`
+        # from THIS line — a `ValueError` subclass, raised only after the
+        # write committed — would be caught by the input-refusal arm and
+        # reported as "bad input" for a mutation that landed. Outside the
+        # wrapper the same failure is a traceback, the correct answer to a
+        # committed write whose report could not be delivered.
         conn = db.connect()
         try:
             with domain_errors():
                 result = abandon_session(conn, args.session_id)
-                print(f"Abandoned: {result['session_id']}")
+            print(f"Abandoned: {result['session_id']}")
         finally:
             conn.close()
 

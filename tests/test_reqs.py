@@ -1461,3 +1461,69 @@ class TestTheThreeBranchesOfTheLimitContract:
         ids = self._many(conn)
         assert len(reqs.query_requirements(conn, ids=ids, limit=5)["requirements"]) == 5
         assert reqs.query_requirements(conn, ids=ids, limit=0)["requirements"] == []
+
+
+class TestCb319ReqsUpdatePrintOutsideDomainErrors:
+    """CB-319, mutation probe over `_cmd_reqs_update` (`reqs-update` CLI verb).
+
+    Mirrors `TestTheCommandLineSurface.test_a_committed_write_is_never_
+    reported_as_bad_input` in `tests/test_cb316_reqs_add_refusals.py`, which
+    pins the same shape for `_cmd_reqs_add` — the worked example CB-319's
+    fix on the other 14 handlers was modeled on. That test cannot discriminate
+    `_cmd_reqs_update`'s own placement of `print`, only `_cmd_reqs_add`'s, so
+    this is a separate pin over the sibling handler.
+
+    Mechanism: `UnicodeEncodeError` is a `ValueError` subclass, and
+    `cli.domain_errors()` classifies by exact class over `refusals.
+    CLASSIFICATION` but its `except` arms match by INHERITANCE. While the
+    handler's success line was printed INSIDE `with domain_errors():`, an
+    encoding failure while printing it — raised only after
+    `update_requirement`'s write had already committed — was caught by the
+    input-refusal arm and reported as "bad input", exit 1: a lie, because the
+    write had landed. Requirement ids are caller-assigned free text (unlike
+    findings ids, which are almost always the auto-generated ASCII `CB-N`),
+    so a non-ASCII id printed back by `reqs-update` is a real, reachable way
+    to trigger the encoding failure — not a contrived one.
+
+    This differs deliberately from `TestUpdateRequirement.
+    test_non_meta_update_still_writes_when_stored_meta_is_malformed` above,
+    which drives the SAME domain-level ordering rule (CB-16) through a
+    corrupted stored `meta` column and `json.JSONDecodeError`. That test
+    calls `update_requirement` directly and never reaches the handler's own
+    `print` line at all, so it cannot see where the `print` sits — only a
+    real CLI subprocess, with the failure arriving from THAT line, can.
+    """
+
+    @staticmethod
+    def _cli(project, *args, env=None):
+        return subprocess.run(
+            [sys.executable, "-m", "codebugs.cli", *args],
+            capture_output=True, text=True, cwd=str(project),
+            env={**os.environ, **(env or {})},
+        )
+
+    def test_a_committed_write_is_never_reported_as_bad_input(self, tmp_path):
+        db.init_project(str(tmp_path))
+        added = self._cli(tmp_path, "reqs-add", "Ж-1", "-d", "x")
+        assert added.returncode == 0, added.stderr
+
+        r = self._cli(
+            tmp_path, "reqs-update", "Ж-1", "--status", "implemented",
+            env={"PYTHONIOENCODING": "ascii"},
+        )
+
+        connection = db.connect(str(tmp_path))
+        try:
+            stored = connection.execute(
+                "SELECT status FROM requirements WHERE id = 'Ж-1'"
+            ).fetchone()
+        finally:
+            connection.close()
+        assert stored is not None and stored["status"] == "implemented", (
+            "premise of the test: the write must have landed before the "
+            "print that reports it can fail"
+        )
+        assert "Traceback" in r.stderr, (
+            "the write landed, but the print's encoding failure was reported "
+            f"as a clean input error instead of a traceback: {r.stderr!r}"
+        )
