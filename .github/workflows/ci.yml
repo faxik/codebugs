@@ -155,8 +155,9 @@ jobs:
   # version an installer is free to choose:
   #   * `mcp`       — the one declared dependency; `src/codebugs/server.py` is
   #                   built on `mcp.server.mcpserver.MCPServer`.
-  #   * `mcp-types` — imported as `mcp_types` by `src/codebugs/surfacegen.py`
-  #                   unconditionally at module level.
+  #   * `mcp-types` — imported as `mcp_types` by `src/codebugs/server.py`,
+  #                   unconditionally at module level, for `CallToolResult` and
+  #                   `INVALID_PARAMS`.
   #   * `pydantic`  — imported unconditionally at module level by NINE files
   #                   under `src/`; every tool surface is a pydantic model.
   # The last two are undeclared and reach the environment only as transitive
