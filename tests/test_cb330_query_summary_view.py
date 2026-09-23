@@ -263,6 +263,14 @@ class TestAnUnknownViewIsRefused:
             # The short circuit, on a tracker with NO deferred card (CB-196):
             # the refusal must not depend on what the tracker holds.
             pytest.param("query", {"status": "deferred"}, id="query-deferred-empty"),
+            # The GROUPED short circuit of the same branch returns directly and
+            # never reaches the projection, so only the top-of-body guard can
+            # refuse there (Codex review, round 1).
+            pytest.param(
+                "query",
+                {"status": "deferred", "group_by": "severity"},
+                id="query-deferred-empty-grouped",
+            ),
         ],
     )
     def test_refused_naming_the_accepted_values(self, tracker, tool, base):
