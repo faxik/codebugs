@@ -39,7 +39,10 @@ SUMMARY_KEYS = {
 }
 
 LONG_ASCII = "x" * 300
-EXACT_200 = "e" * 200
+# Cyrillic on purpose: 200 characters are 400 UTF-8 bytes, so a truncation FLAG
+# counted in bytes would read True here while the characters fit (acceptance
+# review found that mutant surviving while this string was ASCII).
+EXACT_200 = "ж" * 200
 # Cyrillic: 2 bytes per character in UTF-8, so a byte cut at 200 would keep
 # 100 characters — the mutation this string exists to catch.
 LONG_CYRILLIC = "я" * 250
