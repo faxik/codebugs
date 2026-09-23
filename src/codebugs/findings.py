@@ -3524,6 +3524,93 @@ def _anchor_cell(summary: Any) -> str:
     return str(summary.get("state") or "")
 
 
+#: The closed set of row views the MCP `query` and `recent` tools accept (CB-330).
+#: `full` is the row exactly as the domain returns it; `summary` is the short
+#: listing row built by `_summary_row`. The order is the order a refusal names them.
+ROW_VIEWS: tuple[str, ...] = ("full", "summary")
+
+#: How many CHARACTERS of `description` a `summary` row keeps. Characters, not
+#: bytes: descriptions are often Russian, and a byte cut would split a letter.
+SUMMARY_DESCRIPTION_CHARS = 200
+
+#: The `view` parameter's annotation. The `enum` goes into the published JSON
+#: schema ONLY — `json_schema_extra` is not a validation rule, so pydantic still
+#: admits any string and the refusal of an unknown one is `require_row_view`'s,
+#: in this package's words. `Literal[...]` would publish the same enum but hand
+#: the refusal to the validation library and its foreign text (see CB-326). A
+#: wrong TYPE (`view=1`) still stays with the library, as CB-326 decided.
+RowViewArg = Annotated[str, Field(json_schema_extra={"enum": list(ROW_VIEWS)})]
+
+
+def require_row_view(view: object) -> str:
+    """Refuse a `view` outside `ROW_VIEWS` in this package's own words (CB-330).
+
+    Called FIRST in both tool bodies, before any read, so the verdict cannot
+    depend on what the tracker holds — the lesson of CB-196, where the `deferred`
+    short circuit answered one argument two ways depending on the data. A value
+    outside the set is refused rather than read as `full`: an argument quietly
+    replaced by the default is a success-shaped answer to a question nobody
+    asked, the CB-15 class.
+    """
+    if view not in ROW_VIEWS:
+        raise ValueError(
+            f"Unknown view {view!r}. Accepted: {', '.join(repr(v) for v in ROW_VIEWS)}. "
+            "Refused rather than read as 'full'."
+        )
+    return view  # type: ignore[return-value]
+
+
+def _summary_row(
+    row: dict[str, Any], *, with_blocker_count: bool, with_loc: bool
+) -> dict[str, Any]:
+    """One finding as a short listing row — a CLOSED shape, nothing else leaks in.
+
+    Built from named keys rather than by deleting `meta` from a copy, so a field
+    the domain row gains later does not silently widen the summary.
+    """
+    description = row["description"]
+    out: dict[str, Any] = {
+        "id": row["id"],
+        "severity": row["severity"],
+        "category": row["category"],
+        "file": row["file"],
+        "status": row["status"],
+        "description": description[:SUMMARY_DESCRIPTION_CHARS],
+        "description_truncated": len(description) > SUMMARY_DESCRIPTION_CHARS,
+    }
+    if with_blocker_count:
+        out["blocker_count"] = row["blocker_count"]
+    if with_loc:
+        # `.get`, as in the CLI table: an unregistered anchor extension gives a
+        # blank cell rather than a crash.
+        out["loc"] = _anchor_cell(row.get("anchor"))
+    return out
+
+
+def project_row_view(
+    result: dict[str, Any],
+    view: str,
+    *,
+    with_blocker_count: bool = False,
+    with_loc: bool = False,
+) -> dict[str, Any]:
+    """Apply a row view to a `query`/`recent` result. ONE projection for both tools.
+
+    Only the rows change: every other key of the result (`grouped`, `total`,
+    `limit`, `offset`, `since`, `status`) is carried over untouched. A grouped
+    result has no rows, so it is returned as it is.
+    """
+    view = require_row_view(view)
+    if view == "full" or result.get("grouped"):
+        return result
+    projected = dict(result)
+    projected["findings"] = [
+        _summary_row(row, with_blocker_count=with_blocker_count, with_loc=with_loc)
+        for row in result["findings"]
+    ]
+    return projected
+
+
 def query_findings(
     conn: sqlite3.Connection,
     *,
@@ -5031,6 +5118,7 @@ def register_tools(mcp, conn_factory) -> None:
         limit: int | None = None,
         offset: int = 0,
         resolve_anchors: Annotated[bool, Field(strict=True)] = False,
+        view: RowViewArg = "full",
     ) -> dict[str, Any]:
         """Search and filter findings. Returns structured results.
 
@@ -5111,7 +5199,17 @@ def register_tools(mcp, conn_factory) -> None:
                       the refusal token when capture found nothing to grab — is
                       in every result either way. `get` resolves one card by
                       default.
+            view: Row shape, "full" (default) or "summary". "summary" is the
+                  view for looking through a list: each row is only `id`,
+                  `severity`, `category`, `file`, `status`, `description` cut to
+                  its first 200 characters, and `description_truncated`; plus
+                  `blocker_count` under `status="deferred"` and `loc` (the
+                  anchor's state in one word) under `resolve_anchors=True`. No
+                  `meta`. Fetch the whole card with `get`. The default stays
+                  "full" so that existing readers of `meta` keep receiving it.
+                  Grouped results are not affected. Any other value is refused.
         """
+        view = require_row_view(view)
         with conn_factory() as conn:
             # CB-196. The `deferred` branch below RETURNS without ever reaching
             # `query_findings`, so the domain guard cannot see that call: with no
@@ -5162,7 +5260,10 @@ def register_tools(mcp, conn_factory) -> None:
                             "multi_group_rows": 0,
                             "nonscalar_value_rows": 0,
                         }
-                    return {
+                    # The same projection as the ordinary path, so this short
+                    # circuit cannot answer `view` differently (CB-330). With
+                    # no rows it changes nothing, and that is the point.
+                    empty = {
                         "grouped": False,
                         "total": 0,
                         # The EFFECTIVE limit, not the raw argument (CB-158).
@@ -5178,6 +5279,7 @@ def register_tools(mcp, conn_factory) -> None:
                         "offset": offset,
                         "findings": [],
                     }
+                    return project_row_view(empty, view, with_blocker_count=True)
                 id, ids, status = None, deferred_ids, None
             result = query_findings(
                 conn,
@@ -5202,7 +5304,12 @@ def register_tools(mcp, conn_factory) -> None:
             if deferred_ids is not None and not result.get("grouped"):
                 for row in result["findings"]:
                     row["blocker_count"] = deferred_counts.get(row["id"], 0)
-            return result
+            return project_row_view(
+                result,
+                view,
+                with_blocker_count=deferred_ids is not None,
+                with_loc=resolve_anchors,
+            )
 
     @mcp.tool()
     def recent(
@@ -5210,6 +5317,7 @@ def register_tools(mcp, conn_factory) -> None:
         status: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        view: RowViewArg = "full",
     ) -> dict[str, Any]:
         """Findings TOUCHED at or after a date — the one call for "what closed since".
 
@@ -5248,10 +5356,21 @@ def register_tools(mcp, conn_factory) -> None:
                       neighbouring `query` tool answers the same argument the
                       same way.
             offset: Pagination offset
+            view: Row shape, "full" (default) or "summary" — the same two views
+                  as `query`. "summary" is the view for looking through a list:
+                  `id`, `severity`, `category`, `file`, `status`, `description`
+                  cut to its first 200 characters, and `description_truncated`;
+                  no `meta`. Fetch the whole card with `get`. The default stays
+                  "full" so that existing readers of `meta` keep receiving it.
+                  Any other value is refused.
         """
+        view = require_row_view(view)
         with conn_factory() as conn:
-            return recent_findings(
-                conn, since=since, status=status, limit=limit, offset=offset
+            return project_row_view(
+                recent_findings(
+                    conn, since=since, status=status, limit=limit, offset=offset
+                ),
+                view,
             )
 
     @mcp.tool()
@@ -5652,8 +5771,10 @@ def register_cli(sub, commands) -> None:
             ]
             columns = ["id", "sev", "category", "file", "status", "description"]
             if args.resolve_anchors:
-                # The ONE place this module names a read enricher's key, and it
-                # is PRESENTATION rather than data flow: the domain path hands
+                # One of the TWO places this module names a read enricher's key
+                # (the other is the MCP `summary` view's `loc`, CB-330, through
+                # the same `_anchor_cell`), and both are
+                # PRESENTATION rather than data flow: the domain path hands
                 # rows to `db.run_read_enrichers` and never learns what any
                 # extension called its summary. A table needs a column header,
                 # and a flag whose effect is invisible would be worse than the
