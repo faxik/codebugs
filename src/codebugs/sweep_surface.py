@@ -63,6 +63,10 @@ from codebugs.surfacegen import (
 
 CODESWEEP_CREATE_DOC = """Create a new sweep for batch iteration over items.
 
+Use when a list of work (a backlog, a file-by-file audit) is too big to
+finish in one turn and needs to survive across sessions — progress lives in
+the sweep, not in this conversation.
+
 Args:
     name: Optional human-readable name (must be unique)
     description: What this sweep is for
@@ -80,6 +84,10 @@ CODESWEEP_ADD_DOC = """Add items to a sweep. Atomic upsert: existing items have 
 `last_seen` updated, and their archive flag cleared (R5: re-detected
 archived items un-archive automatically).
 
+Use when new items surface mid-sweep — a fresh batch of files, a re-detected
+issue — and need to join a sweep that is already in progress, rather than
+starting a new one.
+
 Args:
     sweep_ref: Sweep ID (SW-N) or name
     items: Item identifiers to add
@@ -92,6 +100,10 @@ Returns:
 CODESWEEP_NEXT_DOC = """Get next batch of unprocessed (non-terminal, non-archived) items in
 insertion order.
 
+Use when resuming a sweep — this session or a later one — to pull the next
+unworked slice instead of the whole backlog at once. Pairs with
+`codesweep_mark`: pull a batch here, then mark it there.
+
 Args:
     sweep_ref: Sweep ID (SW-N) or name
     limit: Batch size (overrides sweep default). 0 means NO items; omit it to
@@ -101,6 +113,9 @@ Args:
 """
 
 CODESWEEP_MARK_DOC = """Mark items by state transition.
+
+Use when you have finished working a batch pulled from `codesweep_next` and
+need to record what happened to each item before asking for the next batch.
 
 Args:
     sweep_ref: Sweep ID (SW-N) or name
@@ -119,19 +134,27 @@ CODESWEEP_STATUS_DOC = """Sweep overview — total/processed/remaining/archived 
 per-state breakdowns. Archived entries are excluded from total/processed/
 remaining and reported separately as `archived`.
 
+Use when resuming a sweep a previous session started, to decide whether it is
+worth continuing before pulling a batch with `codesweep_next`.
+
 Args:
     sweep_ref: Sweep ID (SW-N) or name
 """
 
 CODESWEEP_ARCHIVE_DOC = """Archive a sweep. Archived sweeps are excluded from codesweep_list by default.
 
-For entry-level archive, use `codesweep_archive_items`.
+Use when a whole sweep is finished or abandoned and should stop cluttering
+`codesweep_list`. For entry-level archive, use `codesweep_archive_items`.
 
 Args:
     sweep_ref: Sweep ID (SW-N) or name
 """
 
 CODESWEEP_ARCHIVE_ITEMS_DOC = """Selectively archive entries within a sweep (soft-delete).
+
+Use when specific entries inside a still-open sweep no longer apply (stale,
+duplicated, out of scope) and should stop appearing in `codesweep_next`
+without archiving the whole sweep.
 
 Archived entries are excluded from `codesweep_next`, `codesweep_status`
 totals, and default `codesweep_list_items`. They remain matchable by
@@ -154,6 +177,10 @@ Args:
 
 CODESWEEP_LIST_ITEMS_DOC = """List items in a sweep with optional filters.
 
+Use when auditing or debugging one sweep's contents directly — e.g. checking
+what is still open in a given state or tag — rather than pulling a working
+batch via `codesweep_next`.
+
 Args:
     sweep_ref: Sweep ID (SW-N) or name
     state: Filter to a specific state
@@ -167,6 +194,9 @@ Args:
 """
 
 CODESWEEP_LIST_DOC = """List all sweeps with summary counts.
+
+Use when you need an overview of every sweep in this tracker — which ones
+exist and how far along they are — before deciding which one to resume.
 
 Args:
     include_archived: Include archived sweeps (default: false)

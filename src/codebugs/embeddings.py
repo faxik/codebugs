@@ -489,6 +489,11 @@ def register_tools(mcp, conn_factory):
     ) -> dict[str, Any]:
         """Store an embedding vector for a requirement.
 
+        Use when you have already computed an embedding for one requirement
+        in your own process and want it stored so `reqs_search_similar` can
+        find it later — codebugs has no embedding provider of its own, so
+        nothing here can compute a vector from text for you.
+
         YOU compute the embedding, in your own process, and pass the finished
         numbers here. This tool never receives the requirement's text. codebugs
         stores the vector in its own local SQLite file and sends it nowhere.
@@ -529,6 +534,10 @@ def register_tools(mcp, conn_factory):
     ) -> dict[str, Any]:
         """Store embeddings for multiple requirements at once.
 
+        Use when you have vectors ready for many requirements at once — e.g.
+        after a bulk embedding pass over the whole tracker — rather than
+        calling reqs_embed once per requirement.
+
         Same preconditions as reqs_embed: you compute the vectors yourself and
         pass finished numbers, the requirement text never reaches this tool,
         and codebugs stores them locally and sends them nowhere.
@@ -554,6 +563,11 @@ def register_tools(mcp, conn_factory):
         status: str | None = None,
     ) -> list[dict[str, Any]]:
         """Find requirements semantically similar to a query.
+
+        Use when you already hold a query vector and need requirements close
+        to it — e.g. checking whether a proposed requirement duplicates one
+        already filed, before writing it. Pairs with `reqs_embed`: the
+        vectors it finds similar are the ones stored through that tool.
 
         Pass a query embedding (from the same model used to embed requirements).
         You compute it yourself; no text is sent anywhere by this tool, and the
@@ -585,6 +599,10 @@ def register_tools(mcp, conn_factory):
     @mcp.tool()
     def reqs_embedding_stats() -> dict[str, Any]:
         """Report on embedding coverage --- how many requirements have embeddings.
+
+        Use when `reqs_search_similar` returns fewer results than expected,
+        to check whether this tracker holds vectors of more than one width
+        and is silently excluding some rows from every search.
 
         This tool takes no input at all, so it is not a privacy surface and
         carries no precondition block of its own; that is said explicitly

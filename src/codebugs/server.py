@@ -1029,11 +1029,17 @@ Filing an observation again is normal and useful, not noise.
 
 Working alongside other agents on this tracker? Claim a card with
 `claims_claim` before starting on it and release it with `claims_release` when
-done, or two agents can end up fixing the same thing.
+done, or two agents can end up fixing the same thing. `claims_held_by` answers
+"what does agent X currently hold" — check it before assuming an agent is free.
 
 Requirements (`reqs_add`, `reqs_query`, ...) are a separate, authored entity
 next to findings: they have no deduplication. Do not file a requirement
 through `add`, or a defect through `reqs_add`.
+
+Scanning a list of cards rather than reading one? `query(view="summary")` /
+`recent(view="summary")` return a short line per card with no meta, for
+browsing many at once; switch to `get` for the full card once you know which
+one you need.
 
 Beyond one finding at a time — the situation that calls for each:
 
@@ -1046,12 +1052,19 @@ Beyond one finding at a time — the situation that calls for each:
 - Work outliving one card — a release, a standing queue: `milestone_create`,
   `milestone_add_item`, then `pull_next` for the next eligible item and
   `wip_status` to see who is loaded.
-- Blocked until something else lands: `blockers_add`, later `blockers_check`.
+- Blocked until something else lands: `blockers_add`; once you land
+  something others were waiting on, `blockers_check` shows what it unblocked.
 - Numbers a later session will compare: `codebench_import`, `codebench_query`
   — a measurement left in a file is one nobody can query.
+- A requirement that might duplicate one already filed: compute the
+  embedding yourself — codebugs has no embedding provider of its own — and
+  search with `reqs_search_similar`; store vectors with `reqs_embed` so later
+  searches can find them. `reqs_embedding_stats` explains a short result
+  list by reporting which vector widths are stored.
 - Housekeeping: `similarity_check` a suspected duplicate, `staleness_check` a
   card whose code may have moved, `relations_relate` cards that belong
-  together, `triage_inbox` for what arrived unsorted.
+  together (and `relations_unrelate` when one turns out wrong), `triage_inbox`
+  for what arrived unsorted.
 """
 
 

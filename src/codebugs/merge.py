@@ -695,6 +695,10 @@ def register_tools(mcp, conn_factory) -> None:
     ) -> dict[str, Any]:
         """Start a new merge session for a branch.
 
+        Use when several agents may be editing the same tree in parallel and
+        this session's file-level work needs to become visible to the
+        others, before calling `codemerge_claim` on any file.
+
         Args:
             session_id: Unique identifier for this merge session
             branch: Git branch name being merged
@@ -725,6 +729,10 @@ def register_tools(mcp, conn_factory) -> None:
     ) -> dict[str, Any]:
         """Claim a file as being modified by this session.
 
+        Use when about to edit a file under an active session, so a
+        concurrent session's `codemerge_check` reports the overlap instead
+        of both agents silently writing the same file.
+
         Args:
             session_id: The merge session ID
             file_path: File path being modified (relative to repo root)
@@ -738,6 +746,10 @@ def register_tools(mcp, conn_factory) -> None:
         main_changed_files: list[str] | None = None,
     ) -> dict[str, Any]:
         """Check for overlapping file claims with other sessions.
+
+        Use when about to merge your branch, to see whether another
+        session has claimed any of the same files, or whether main moved
+        underneath you, before taking the merge lock with `codemerge_merge`.
 
         Returns whether the session is clean to proceed, lists any conflicts,
         and records the current main HEAD for CAS comparison at merge time.
@@ -760,6 +772,11 @@ def register_tools(mcp, conn_factory) -> None:
         expected_main_head: str,
     ) -> dict[str, Any]:
         """Acquire the merge lock and proceed with merging.
+
+        Use when `codemerge_check` has just reported clean and it's time to
+        take the lock that prevents two sessions from merging at the same
+        time; follow up with `codemerge_finish` once the actual git merge
+        lands or fails.
 
         Uses compare-and-swap on main HEAD to prevent races. If main has moved
         since check, returns proceed=False with reason='main_moved'. If another
@@ -784,6 +801,10 @@ def register_tools(mcp, conn_factory) -> None:
     ) -> dict[str, Any]:
         """Finish a merge session and release the lock.
 
+        Use when the actual git merge or cherry-pick this session's lock was
+        guarding has just landed or failed, to release the lock and record
+        which one happened.
+
         Call this after codemerge_merge() returned proceed=true; the session must
         be in 'merging' state or this refuses in BOTH directions of `success`.
 
@@ -802,6 +823,10 @@ def register_tools(mcp, conn_factory) -> None:
         session_id: str,
     ) -> dict[str, Any]:
         """Close a session for good, so its files stop blocking everyone else.
+
+        Use when a session's own `codemerge_merge` will never succeed — the
+        branch got integrated some other way — and its claimed files need to
+        stop being reported as conflicts to everyone else.
 
         This is the way OUT of a session that will not be merged under its own
         lock — including the case an agent hits routinely: the branch was
@@ -839,6 +864,10 @@ def register_tools(mcp, conn_factory) -> None:
     def codemerge_sessions(status: str | None = None) -> list[dict[str, Any]]:
         """List merge sessions with claim counts.
 
+        Use when checking what merge activity is in flight across all
+        agents — e.g. before starting a new session, to see who else is
+        working the same tree.
+
         Args:
             status: Filter by status ('active', 'merging', 'done', 'abandoned').
                 Omit for all sessions.
@@ -849,13 +878,21 @@ def register_tools(mcp, conn_factory) -> None:
     @mcp.tool()
     def codemerge_status() -> dict[str, Any]:
         """Dashboard summary: session counts by status, total active claims,
-        and who (if anyone) holds the merge lock."""
+        and who (if anyone) holds the merge lock.
+
+        Use when you want a one-glance read of merge activity — is anything
+        blocked on the lock right now — without listing individual sessions
+        via `codemerge_sessions`.
+        """
         with conn_factory() as conn:
             return get_status(conn)
 
     @mcp.tool()
     def codemerge_claims(session_id: str) -> list[dict[str, Any]]:
         """List all files a session has claimed, in claim order.
+
+        Use when investigating a conflict `codemerge_check` reported, to see
+        exactly which files one specific session has claimed.
 
         Args:
             session_id: The merge session ID.

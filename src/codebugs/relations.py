@@ -400,6 +400,11 @@ def register_tools(mcp, conn_factory) -> None:
     ) -> dict[str, Any]:
         """Retract a relation. Tombstones it — the row and its history remain.
 
+        Use when a relation asserted with `relations_relate` turns out to be
+        wrong (e.g. two findings marked duplicate_of that are actually
+        distinct) and needs retracting without erasing the record that it
+        was once claimed.
+
         Args:
             src_id: Source finding
             rel: The relation to retract
