@@ -19,6 +19,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   changes; an unknown value is refused with a message naming the two accepted ones rather than
   quietly treated as `"full"`. Grouped answers (`group_by`) are the same in both views. (CB-330)
 
+### Changed
+
+- **The descriptions of 42 lower-traffic tools now say WHEN to reach for them, not only what they
+  do (CB-331).** The `codesweep_*`, `codemerge_*` and `codebench_*` families, most of `milestone_*`,
+  `pull_next`, `wip_status`, the embedding vector tools (`reqs_embed`, `reqs_batch_embed`,
+  `reqs_search_similar`, `reqs_embedding_stats`), `blockers_check`, `claims_held_by` and
+  `relations_unrelate` each gained a short "Use when ..." sentence naming the situation that calls
+  for that tool — a sweep spanning several sessions, several agents editing one tree, a run worth
+  comparing against later ones — in the agent's own terms rather than the implementation's. Paired
+  operations now name their counterpart (`codemerge_claim` ↔ `codemerge_check`, `pull_next` ↔
+  `release_item`, `reqs_embed` ↔ `reqs_search_similar`, `relations_unrelate` ↔ `relations_relate`,
+  and more), and the server's own startup `instructions` now mention the vector tools, name
+  `claims_held_by`, and point at `query`/`recent`'s `view="summary"` for browsing a list of cards
+  versus `get` for one full card. No tool's parameters, defaults or behaviour changed — only prose.
+
 ### Fixed
 
 - **Leaving out a required field over MCP now gets you an answer written by this tracker, instead

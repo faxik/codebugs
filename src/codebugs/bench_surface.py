@@ -53,6 +53,10 @@ from codebugs.surfacegen import (
 
 CODEBENCH_IMPORT_DOC = """Import benchmark results from CSV or JSON.
 
+Use when a benchmark run just finished and its numbers need to be queryable
+later — a measurement left only in a terminal or a log file is one nobody
+can compare against the next run.
+
 CSV convention: first column is the row label, remaining columns are
 metric names with finite numeric values.
 
@@ -72,6 +76,9 @@ Args:
 """
 
 CODEBENCH_QUERY_DOC = """Query and pivot benchmark results.
+
+Use when comparing runs over time or across metrics — checking whether a
+change actually improved something, or watching for a regression.
 
 group_by="row": original table shape (row_labels as rows, metrics as
 columns). Returns one table per run.
@@ -94,6 +101,9 @@ Args:
 
 CODEBENCH_LIST_DOC = """List benchmarks or runs.
 
+Use when you need to know what benchmarks exist, or which runs one has,
+before drilling into details with `codebench_query`.
+
 Without benchmark: lists all benchmark names with run counts.
 With benchmark: lists runs for that benchmark.
 
@@ -106,6 +116,9 @@ Args:
 """
 
 CODEBENCH_DELETE_DOC = """Delete a single run or all runs for a benchmark.
+
+Use when a run was recorded by mistake (bad data, wrong benchmark name) and
+needs removing rather than being left to skew future `codebench_query` trends.
 
 Args:
     run_id: Delete a specific run (e.g. "BE-1")

@@ -709,6 +709,10 @@ def register_tools(mcp, conn_factory) -> None:
     def blockers_check() -> dict[str, Any]:
         """Scan for currently actionable items — items whose blockers are all satisfied.
 
+        Use when sweeping the whole tracker for work that just became
+        actionable — e.g. a stand-up loop or an alternative to `pull_next`
+        — rather than checking one item's blockers by name.
+
         Returns actionable items (all blockers met), partially unblocked items
         (some blockers met), and overdue date triggers.
         """

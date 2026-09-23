@@ -594,7 +594,12 @@ def register_tools(mcp, conn_factory) -> None:
 
     @mcp.tool()
     def claims_held_by(holder: str) -> dict[str, Any]:
-        """Everything a given holder currently holds."""
+        """Everything a given holder currently holds.
+
+        Use when checking what a specific agent or branch is already
+        working on — e.g. before starting a new session, to see whether it
+        is still mid-task elsewhere.
+        """
         with conn_factory() as conn:
             return held_by(conn, holder=holder)
 

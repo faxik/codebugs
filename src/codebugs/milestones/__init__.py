@@ -88,6 +88,10 @@ def register_tools(mcp, conn_factory) -> None:
     ) -> dict[str, Any]:
         """Create a new milestone.
 
+        Use when starting a new release or a new standing stream that needs
+        its own bucket for tracked work, before any item can be attached to
+        it with `milestone_add_item`.
+
         Args:
             id: Slug identifier, e.g. 'release/1.2' or 'stream/security'.
             kind: 'release' or 'stream'. Streams never close.
@@ -109,6 +113,9 @@ def register_tools(mcp, conn_factory) -> None:
     ) -> dict[str, Any]:
         """Update mutable fields of a milestone. id and kind are immutable.
 
+        Use when a milestone's target date slipped or its state needs to
+        move (e.g. into closing) without touching any of its items.
+
         Args:
             id: Milestone slug.
             description: New description (or None to skip).
@@ -128,6 +135,9 @@ def register_tools(mcp, conn_factory) -> None:
     ) -> list[dict[str, Any]]:
         """List milestones with optional filters.
 
+        Use when scanning what releases or streams exist and their current
+        states — e.g. deciding where a new item should be filed.
+
         Args:
             kind: 'release' or 'stream'.
             state: 'open' / 'closing' / 'shipped' / 'archived'.
@@ -139,6 +149,9 @@ def register_tools(mcp, conn_factory) -> None:
     def milestone_status(id: str) -> dict[str, Any]:
         """Detailed rollup for one milestone: item counts by status / size,
         blockers, branch-only items, days to target.
+
+        Use when checking one milestone's health before deciding whether
+        it's ready to close, or why `milestone_close` is refusing.
 
         Args:
             id: Milestone slug.
@@ -157,6 +170,10 @@ def register_tools(mcp, conn_factory) -> None:
         linked_frs: list[str] | None = None,
     ) -> dict[str, Any]:
         """Attach an item (bug / requirement / external) to a milestone.
+
+        Use when a card is ready to be tracked against a specific release or
+        standing stream, rather than left floating outside milestone
+        tracking where `pull_next` can never reach it.
 
         Args:
             milestone_id: Target milestone slug.
@@ -190,6 +207,9 @@ def register_tools(mcp, conn_factory) -> None:
     ) -> dict[str, Any]:
         """Move an item to a different milestone.
 
+        Use when an item was filed against the wrong milestone, or
+        priorities shifted, and it needs to move without losing its history.
+
         Args:
             item_ref: The item to move (e.g. CB-5).
             to_milestone: Destination milestone slug.
@@ -208,6 +228,10 @@ def register_tools(mcp, conn_factory) -> None:
         reason: str = "",
     ) -> dict[str, Any]:
         """Set an item's status. Records done_commit if status is terminal.
+
+        Use when an item's progress needs recording directly — e.g. syncing
+        in status from outside this tracker — rather than through the
+        `pull_next` / `release_item` claim flow.
 
         Args:
             item_ref: The item id (e.g. CB-5).
@@ -230,6 +254,10 @@ def register_tools(mcp, conn_factory) -> None:
         limit: int = 200,
     ) -> list[dict[str, Any]]:
         """Audit log query with filters. Returns most-recent rows first.
+
+        Use when reconstructing what happened to a milestone or item over
+        time — who moved it, when it closed — rather than only its current
+        state.
 
         Args:
             milestone_id: Filter by milestone slug.
@@ -308,6 +336,11 @@ def register_tools(mcp, conn_factory) -> None:
         """Claim the next eligible item for the calling agent. Returns the
         item dict or None if nothing eligible.
 
+        Use when an agent is idle and needs its next unit of tracked work
+        assigned automatically, by priority, rather than picking one by hand
+        from `milestone_list` / `milestone_status`. Pairs with
+        `release_item`, which frees the capacity this claims.
+
         Priority: stream/security > release/* (earliest target_date) >
                   stream/triage > stream/maintenance.
 
@@ -342,6 +375,10 @@ def register_tools(mcp, conn_factory) -> None:
     def _wip_status(agent_id: str | None = None) -> list[dict[str, Any]]:
         """Snapshot of agent_capacity. agent_id=None returns all agents.
 
+        Use when checking who is currently loaded with work and how much
+        headroom each agent has — e.g. before deciding whether to call
+        `pull_next` for a new agent.
+
         Args:
             agent_id: Filter to one agent (None = all).
         """
@@ -356,6 +393,10 @@ def register_tools(mcp, conn_factory) -> None:
         requirement resolved before the status-change hook existed (CB-26).
         The hook keeps new resolutions in sync; this is the retroactive fix for
         rows it never saw.
+
+        Use when stream items are suspected stale for that specific
+        historical reason — ordinary work never calls this; the hook above
+        keeps new resolutions in sync on its own.
 
         DRY RUN BY DEFAULT — without apply=true nothing is written, and the
         response still lists every candidate transition it WOULD make. This is
@@ -415,6 +456,10 @@ def register_tools(mcp, conn_factory) -> None:
         """Close a release milestone. Refuses if items are unfinished, on a
         branch, or have unresolved blockers. Streams cannot be closed.
 
+        Use when a release milestone looks finished and you want to formally
+        close it, or find out exactly what `milestone_status` didn't spell
+        out about what is still blocking that close.
+
         Args:
             id: Milestone slug (must be kind='release').
             force: Override the close-gate (still won't close streams). Audit-logged.
@@ -431,6 +476,10 @@ def register_tools(mcp, conn_factory) -> None:
     ) -> dict[str, Any]:
         """Move an item to stream/maintenance (or another milestone) and
         mark it deferred.
+
+        Use when an item on a release can't land in time and needs to move
+        to a maintenance queue rather than keep blocking that release's
+        `milestone_close`.
 
         Args:
             item_ref: The item to defer.

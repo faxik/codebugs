@@ -395,7 +395,7 @@
     "name": "blockers_add"
   },
   {
-    "description": "Scan for currently actionable items \u2014 items whose blockers are all satisfied.\n\nReturns actionable items (all blockers met), partially unblocked items\n(some blockers met), and overdue date triggers.\n",
+    "description": "Scan for currently actionable items \u2014 items whose blockers are all satisfied.\n\nUse when sweeping the whole tracker for work that just became\nactionable \u2014 e.g. a stand-up loop or an alternative to `pull_next`\n\u2014 rather than checking one item's blockers by name.\n\nReturns actionable items (all blockers met), partially unblocked items\n(some blockers met), and overdue date triggers.\n",
     "inputSchema": {
       "properties": {},
       "title": "blockers_checkArguments",
@@ -576,7 +576,7 @@
     "name": "claims_claim"
   },
   {
-    "description": "Everything a given holder currently holds.",
+    "description": "Everything a given holder currently holds.\n\nUse when checking what a specific agent or branch is already\nworking on \u2014 e.g. before starting a new session, to see whether it\nis still mid-task elsewhere.\n",
     "inputSchema": {
       "properties": {
         "holder": {
@@ -710,7 +710,7 @@
     "name": "claims_who_holds"
   },
   {
-    "description": "Delete a single run or all runs for a benchmark.\n\nArgs:\n\n- run_id: Delete a specific run (e.g. \"BE-1\")\n- benchmark: Delete all runs for a benchmark name\n",
+    "description": "Delete a single run or all runs for a benchmark.\n\nUse when a run was recorded by mistake (bad data, wrong benchmark name) and\nneeds removing rather than being left to skew future `codebench_query` trends.\n\nArgs:\n\n- run_id: Delete a specific run (e.g. \"BE-1\")\n- benchmark: Delete all runs for a benchmark name\n",
     "inputSchema": {
       "properties": {
         "benchmark": {
@@ -744,7 +744,7 @@
     "name": "codebench_delete"
   },
   {
-    "description": "Import benchmark results from CSV or JSON.\n\nCSV convention: first column is the row label, remaining columns are\nmetric names with finite numeric values.\n\nJSON convention: array of objects, first key is the row label, rest\nare metric keys with finite numeric values.\n\nEach (row label, metric) pair may appear only once per import, and\nNaN/Infinity are refused: a non-finite measurement is not one.\n\nArgs:\n\n- benchmark: Benchmark name (e.g. \"search-perf\")\n- csv_data: CSV string (header + data rows). Provide csv_data OR json_data.\n- json_data: JSON array string. Provide csv_data OR json_data.\n- date: Run date (default: today, ISO format YYYY-MM-DD)\n- tags: Optional tags (e.g. [\"nightly\", \"v2.1\"])\n- meta: Optional metadata (e.g. {\"git_sha\": \"abc123\", \"ci_url\": \"...\"})\n",
+    "description": "Import benchmark results from CSV or JSON.\n\nUse when a benchmark run just finished and its numbers need to be queryable\nlater \u2014 a measurement left only in a terminal or a log file is one nobody\ncan compare against the next run.\n\nCSV convention: first column is the row label, remaining columns are\nmetric names with finite numeric values.\n\nJSON convention: array of objects, first key is the row label, rest\nare metric keys with finite numeric values.\n\nEach (row label, metric) pair may appear only once per import, and\nNaN/Infinity are refused: a non-finite measurement is not one.\n\nArgs:\n\n- benchmark: Benchmark name (e.g. \"search-perf\")\n- csv_data: CSV string (header + data rows). Provide csv_data OR json_data.\n- json_data: JSON array string. Provide csv_data OR json_data.\n- date: Run date (default: today, ISO format YYYY-MM-DD)\n- tags: Optional tags (e.g. [\"nightly\", \"v2.1\"])\n- meta: Optional metadata (e.g. {\"git_sha\": \"abc123\", \"ci_url\": \"...\"})\n",
     "inputSchema": {
       "properties": {
         "benchmark": {
@@ -829,7 +829,7 @@
     "name": "codebench_import"
   },
   {
-    "description": "List benchmarks or runs.\n\nWithout benchmark: lists all benchmark names with run counts.\nWith benchmark: lists runs for that benchmark.\n\nArgs:\n\n- benchmark: If provided, list runs for this benchmark\n- last_n: Limit to last N runs. Requires benchmark \u2014 supplying last_n without one is an ERROR, because benchmark names have no runs to limit and the argument would otherwise be silently discarded. 0 means NO runs; omit it for no limit. A negative value is an error.\n",
+    "description": "List benchmarks or runs.\n\nUse when you need to know what benchmarks exist, or which runs one has,\nbefore drilling into details with `codebench_query`.\n\nWithout benchmark: lists all benchmark names with run counts.\nWith benchmark: lists runs for that benchmark.\n\nArgs:\n\n- benchmark: If provided, list runs for this benchmark\n- last_n: Limit to last N runs. Requires benchmark \u2014 supplying last_n without one is an ERROR, because benchmark names have no runs to limit and the argument would otherwise be silently discarded. 0 means NO runs; omit it for no limit. A negative value is an error.\n",
     "inputSchema": {
       "properties": {
         "benchmark": {
@@ -863,7 +863,7 @@
     "name": "codebench_list"
   },
   {
-    "description": "Query and pivot benchmark results.\n\ngroup_by=\"row\": original table shape (row_labels as rows, metrics as\ncolumns). Returns one table per run.\n\ngroup_by=\"run\": trend view (runs as rows, metrics as columns).\nReturns one table per row_label.\n\nArgs:\n\n- benchmark: Benchmark name to query\n- runs: Specific run IDs (default: all matching)\n- date_from: Start date filter (inclusive, YYYY-MM-DD)\n- date_to: End date filter (inclusive, YYYY-MM-DD)\n- metrics: Which metrics to include (default: all)\n- rows: Which row_labels to include (default: all)\n- group_by: Pivot axis \u2014 \"row\" or \"run\"\n- last_n: Limit to last N runs by date. 0 means NO runs; omit it for no limit. A negative value is an error (it used to mean \"no limit\").\n- format: Output \u2014 \"json\" or \"csv\"\n",
+    "description": "Query and pivot benchmark results.\n\nUse when comparing runs over time or across metrics \u2014 checking whether a\nchange actually improved something, or watching for a regression.\n\ngroup_by=\"row\": original table shape (row_labels as rows, metrics as\ncolumns). Returns one table per run.\n\ngroup_by=\"run\": trend view (runs as rows, metrics as columns).\nReturns one table per row_label.\n\nArgs:\n\n- benchmark: Benchmark name to query\n- runs: Specific run IDs (default: all matching)\n- date_from: Start date filter (inclusive, YYYY-MM-DD)\n- date_to: End date filter (inclusive, YYYY-MM-DD)\n- metrics: Which metrics to include (default: all)\n- rows: Which row_labels to include (default: all)\n- group_by: Pivot axis \u2014 \"row\" or \"run\"\n- last_n: Limit to last N runs by date. 0 means NO runs; omit it for no limit. A negative value is an error (it used to mean \"no limit\").\n- format: Output \u2014 \"json\" or \"csv\"\n",
     "inputSchema": {
       "properties": {
         "benchmark": {
@@ -971,7 +971,7 @@
     "name": "codebench_query"
   },
   {
-    "description": "Close a session for good, so its files stop blocking everyone else.\n\nThis is the way OUT of a session that will not be merged under its own\nlock \u2014 including the case an agent hits routinely: the branch was\nintegrated by some other route (a merge harness holding its own lock), so\ncodemerge_merge refuses with reason='main_moved' and the session is\nstranded in 'active', which codemerge_finish will not accept. Until it is\nabandoned, its claimed files are reported as conflicts to every later\nsession, with no expiry \u2014 so closing it is what keeps codemerge_check\nworth consulting.\n\nWhat it does, stated exactly: the session's claim rows are NOT deleted,\nthey stop being reported, because the conflict query selects on session\nstatus. The merge lock is released only if this session holds it.\n\nRe-issuing it is safe: a second call on an already-abandoned session\nchanges nothing but the timestamps. A 'done' session is REFUSED \u2014 that\nwould erase the record of a merge that succeeded \u2014 and an unknown\nsession_id is an error.\n\nArgs:\n\n- session_id: The merge session ID. Whatever session is NAMED is the one closed; nothing ties it to the caller, so passing a stale or mistyped id closes someone else's work.\n",
+    "description": "Close a session for good, so its files stop blocking everyone else.\n\nUse when a session's own `codemerge_merge` will never succeed \u2014 the\nbranch got integrated some other way \u2014 and its claimed files need to\nstop being reported as conflicts to everyone else.\n\nThis is the way OUT of a session that will not be merged under its own\nlock \u2014 including the case an agent hits routinely: the branch was\nintegrated by some other route (a merge harness holding its own lock), so\ncodemerge_merge refuses with reason='main_moved' and the session is\nstranded in 'active', which codemerge_finish will not accept. Until it is\nabandoned, its claimed files are reported as conflicts to every later\nsession, with no expiry \u2014 so closing it is what keeps codemerge_check\nworth consulting.\n\nWhat it does, stated exactly: the session's claim rows are NOT deleted,\nthey stop being reported, because the conflict query selects on session\nstatus. The merge lock is released only if this session holds it.\n\nRe-issuing it is safe: a second call on an already-abandoned session\nchanges nothing but the timestamps. A 'done' session is REFUSED \u2014 that\nwould erase the record of a merge that succeeded \u2014 and an unknown\nsession_id is an error.\n\nArgs:\n\n- session_id: The merge session ID. Whatever session is NAMED is the one closed; nothing ties it to the caller, so passing a stale or mistyped id closes someone else's work.\n",
     "inputSchema": {
       "properties": {
         "session_id": {
@@ -988,7 +988,7 @@
     "name": "codemerge_abandon"
   },
   {
-    "description": "Check for overlapping file claims with other sessions.\n\nReturns whether the session is clean to proceed, lists any conflicts,\nand records the current main HEAD for CAS comparison at merge time.\n\nArgs:\n\n- session_id: The merge session ID\n- main_changed_files: Files changed on main since base (optional, for overlap check)\n",
+    "description": "Check for overlapping file claims with other sessions.\n\nUse when about to merge your branch, to see whether another\nsession has claimed any of the same files, or whether main moved\nunderneath you, before taking the merge lock with `codemerge_merge`.\n\nReturns whether the session is clean to proceed, lists any conflicts,\nand records the current main HEAD for CAS comparison at merge time.\n\nArgs:\n\n- session_id: The merge session ID\n- main_changed_files: Files changed on main since base (optional, for overlap check)\n",
     "inputSchema": {
       "properties": {
         "main_changed_files": {
@@ -1020,7 +1020,7 @@
     "name": "codemerge_check"
   },
   {
-    "description": "Claim a file as being modified by this session.\n\nArgs:\n\n- session_id: The merge session ID\n- file_path: File path being modified (relative to repo root)\n",
+    "description": "Claim a file as being modified by this session.\n\nUse when about to edit a file under an active session, so a\nconcurrent session's `codemerge_check` reports the overlap instead\nof both agents silently writing the same file.\n\nArgs:\n\n- session_id: The merge session ID\n- file_path: File path being modified (relative to repo root)\n",
     "inputSchema": {
       "properties": {
         "file_path": {
@@ -1042,7 +1042,7 @@
     "name": "codemerge_claim"
   },
   {
-    "description": "List all files a session has claimed, in claim order.\n\nArgs:\n\n- session_id: The merge session ID.\n",
+    "description": "List all files a session has claimed, in claim order.\n\nUse when investigating a conflict `codemerge_check` reported, to see\nexactly which files one specific session has claimed.\n\nArgs:\n\n- session_id: The merge session ID.\n",
     "inputSchema": {
       "properties": {
         "session_id": {
@@ -1059,7 +1059,7 @@
     "name": "codemerge_claims"
   },
   {
-    "description": "Finish a merge session and release the lock.\n\nCall this after codemerge_merge() returned proceed=true; the session must\nbe in 'merging' state or this refuses in BOTH directions of `success`.\n\nArgs:\n\n- session_id: The merge session ID\n- success: True if the merge succeeded (status\u2192done). False if the git merge/cherry-pick failed (status\u2192active): the lock is released and the session stays alive so it can try again. False does NOT close the session \u2014 use codemerge_abandon for that.\n",
+    "description": "Finish a merge session and release the lock.\n\nUse when the actual git merge or cherry-pick this session's lock was\nguarding has just landed or failed, to release the lock and record\nwhich one happened.\n\nCall this after codemerge_merge() returned proceed=true; the session must\nbe in 'merging' state or this refuses in BOTH directions of `success`.\n\nArgs:\n\n- session_id: The merge session ID\n- success: True if the merge succeeded (status\u2192done). False if the git merge/cherry-pick failed (status\u2192active): the lock is released and the session stays alive so it can try again. False does NOT close the session \u2014 use codemerge_abandon for that.\n",
     "inputSchema": {
       "properties": {
         "session_id": {
@@ -1081,7 +1081,7 @@
     "name": "codemerge_finish"
   },
   {
-    "description": "Acquire the merge lock and proceed with merging.\n\nUses compare-and-swap on main HEAD to prevent races. If main has moved\nsince check, returns proceed=False with reason='main_moved'. If another\nsession holds the lock, returns proceed=False with reason='lock_held'.\n\nArgs:\n\n- session_id: The merge session ID\n- expected_main_head: The main HEAD SHA recorded during codemerge_check\n",
+    "description": "Acquire the merge lock and proceed with merging.\n\nUse when `codemerge_check` has just reported clean and it's time to\ntake the lock that prevents two sessions from merging at the same\ntime; follow up with `codemerge_finish` once the actual git merge\nlands or fails.\n\nUses compare-and-swap on main HEAD to prevent races. If main has moved\nsince check, returns proceed=False with reason='main_moved'. If another\nsession holds the lock, returns proceed=False with reason='lock_held'.\n\nArgs:\n\n- session_id: The merge session ID\n- expected_main_head: The main HEAD SHA recorded during codemerge_check\n",
     "inputSchema": {
       "properties": {
         "expected_main_head": {
@@ -1103,7 +1103,7 @@
     "name": "codemerge_merge"
   },
   {
-    "description": "List merge sessions with claim counts.\n\nArgs:\n\n- status: Filter by status ('active', 'merging', 'done', 'abandoned'). Omit for all sessions.\n",
+    "description": "List merge sessions with claim counts.\n\nUse when checking what merge activity is in flight across all\nagents \u2014 e.g. before starting a new session, to see who else is\nworking the same tree.\n\nArgs:\n\n- status: Filter by status ('active', 'merging', 'done', 'abandoned'). Omit for all sessions.\n",
     "inputSchema": {
       "properties": {
         "status": {
@@ -1125,7 +1125,7 @@
     "name": "codemerge_sessions"
   },
   {
-    "description": "Start a new merge session for a branch.\n\nArgs:\n\n- session_id: Unique identifier for this merge session\n- branch: Git branch name being merged\n- description: Human-readable description of the work\n- base_commit: Git commit SHA this branch diverged from\n- repo_root: Repo root path (default: cwd)\n- allow_restart: If True, reuse this session_id when its previous session is finished \u2014 'abandoned' or 'done'. Restarting DELETES that session's file claims, so re-claim anything you still need. It does NOT restart a live one: starting over an 'active' or 'merging' session is an error whether or not this is set.\n",
+    "description": "Start a new merge session for a branch.\n\nUse when several agents may be editing the same tree in parallel and\nthis session's file-level work needs to become visible to the\nothers, before calling `codemerge_claim` on any file.\n\nArgs:\n\n- session_id: Unique identifier for this merge session\n- branch: Git branch name being merged\n- description: Human-readable description of the work\n- base_commit: Git commit SHA this branch diverged from\n- repo_root: Repo root path (default: cwd)\n- allow_restart: If True, reuse this session_id when its previous session is finished \u2014 'abandoned' or 'done'. Restarting DELETES that session's file claims, so re-claim anything you still need. It does NOT restart a live one: starting over an 'active' or 'merging' session is an error whether or not this is set.\n",
     "inputSchema": {
       "properties": {
         "allow_restart": {
@@ -1167,7 +1167,7 @@
     "name": "codemerge_start"
   },
   {
-    "description": "Dashboard summary: session counts by status, total active claims,\nand who (if anyone) holds the merge lock.",
+    "description": "Dashboard summary: session counts by status, total active claims,\nand who (if anyone) holds the merge lock.\n\nUse when you want a one-glance read of merge activity \u2014 is anything\nblocked on the lock right now \u2014 without listing individual sessions\nvia `codemerge_sessions`.\n",
     "inputSchema": {
       "properties": {},
       "title": "codemerge_statusArguments",
@@ -1176,7 +1176,7 @@
     "name": "codemerge_status"
   },
   {
-    "description": "Add items to a sweep. Atomic upsert: existing items have their\n`recurrence_count` bumped instead of being silently skipped, their\n`last_seen` updated, and their archive flag cleared (R5: re-detected\narchived items un-archive automatically).\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- items: Item identifiers to add\n- tags: Optional tags applied to this batch (overwrite on bump)\n\nReturns:\n    {sweep_id, added, recurrence_bumped, duplicates_skipped (alias)}\n",
+    "description": "Add items to a sweep. Atomic upsert: existing items have their\n`recurrence_count` bumped instead of being silently skipped, their\n`last_seen` updated, and their archive flag cleared (R5: re-detected\narchived items un-archive automatically).\n\nUse when new items surface mid-sweep \u2014 a fresh batch of files, a re-detected\nissue \u2014 and need to join a sweep that is already in progress, rather than\nstarting a new one.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- items: Item identifiers to add\n- tags: Optional tags applied to this batch (overwrite on bump)\n\nReturns:\n    {sweep_id, added, recurrence_bumped, duplicates_skipped (alias)}\n",
     "inputSchema": {
       "properties": {
         "items": {
@@ -1216,7 +1216,7 @@
     "name": "codesweep_add"
   },
   {
-    "description": "Archive a sweep. Archived sweeps are excluded from codesweep_list by default.\n\nFor entry-level archive, use `codesweep_archive_items`.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n",
+    "description": "Archive a sweep. Archived sweeps are excluded from codesweep_list by default.\n\nUse when a whole sweep is finished or abandoned and should stop cluttering\n`codesweep_list`. For entry-level archive, use `codesweep_archive_items`.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n",
     "inputSchema": {
       "properties": {
         "sweep_ref": {
@@ -1233,7 +1233,7 @@
     "name": "codesweep_archive"
   },
   {
-    "description": "Selectively archive entries within a sweep (soft-delete).\n\nArchived entries are excluded from `codesweep_next`, `codesweep_status`\ntotals, and default `codesweep_list_items`. They remain matchable by\n`codesweep_add` for recurrence detection \u2014 re-adding un-archives them\nwith `recurrence_count` carried forward (R5 invariant).\n\nAt least one filter is required.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- items: Specific item identifiers to archive. An EXPLICITLY EMPTY list selects nothing; passing it together with where_status or older_than is an ERROR, because those filters would then be silently ignored. Omit items entirely to archive by filter.\n- where_status: Archive entries currently in this state\n- older_than: Duration spec \u2014 '30d', '2w', '6m', '1y'. Compares against the entry's last activity timestamp.\n- reason: Free-form reason recorded on each archived entry\n",
+    "description": "Selectively archive entries within a sweep (soft-delete).\n\nUse when specific entries inside a still-open sweep no longer apply (stale,\nduplicated, out of scope) and should stop appearing in `codesweep_next`\nwithout archiving the whole sweep.\n\nArchived entries are excluded from `codesweep_next`, `codesweep_status`\ntotals, and default `codesweep_list_items`. They remain matchable by\n`codesweep_add` for recurrence detection \u2014 re-adding un-archives them\nwith `recurrence_count` carried forward (R5 invariant).\n\nAt least one filter is required.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- items: Specific item identifiers to archive. An EXPLICITLY EMPTY list selects nothing; passing it together with where_status or older_than is an ERROR, because those filters would then be silently ignored. Omit items entirely to archive by filter.\n- where_status: Archive entries currently in this state\n- older_than: Duration spec \u2014 '30d', '2w', '6m', '1y'. Compares against the entry's last activity timestamp.\n- reason: Free-form reason recorded on each archived entry\n",
     "inputSchema": {
       "properties": {
         "items": {
@@ -1301,7 +1301,7 @@
     "name": "codesweep_archive_items"
   },
   {
-    "description": "Create a new sweep for batch iteration over items.\n\nArgs:\n\n- name: Optional human-readable name (must be unique)\n- description: What this sweep is for\n- default_batch_size: Default items per batch (default: 10)\n- lifecycle: Ordered list of allowed states (default [\"pending\",\"done\"]). For retro-style workflows: [\"DETECTED\",\"CONFIRMED\",\"ESCALATED\", \"POSTPONED\",\"RESOLVED\",\"DROPPED\"].\n- terminal_states: States that count as \"processed\" (default [\"done\"]).\n- transitions: Optional dict[state, list[allowed_next_state]] for DAG-constrained lifecycles. None = unconstrained transitions.\n",
+    "description": "Create a new sweep for batch iteration over items.\n\nUse when a list of work (a backlog, a file-by-file audit) is too big to\nfinish in one turn and needs to survive across sessions \u2014 progress lives in\nthe sweep, not in this conversation.\n\nArgs:\n\n- name: Optional human-readable name (must be unique)\n- description: What this sweep is for\n- default_batch_size: Default items per batch (default: 10)\n- lifecycle: Ordered list of allowed states (default [\"pending\",\"done\"]). For retro-style workflows: [\"DETECTED\",\"CONFIRMED\",\"ESCALATED\", \"POSTPONED\",\"RESOLVED\",\"DROPPED\"].\n- terminal_states: States that count as \"processed\" (default [\"done\"]).\n- transitions: Optional dict[state, list[allowed_next_state]] for DAG-constrained lifecycles. None = unconstrained transitions.\n",
     "inputSchema": {
       "properties": {
         "default_batch_size": {
@@ -1381,7 +1381,7 @@
     "name": "codesweep_create"
   },
   {
-    "description": "List all sweeps with summary counts.\n\nArgs:\n\n- include_archived: Include archived sweeps (default: false)\n",
+    "description": "List all sweeps with summary counts.\n\nUse when you need an overview of every sweep in this tracker \u2014 which ones\nexist and how far along they are \u2014 before deciding which one to resume.\n\nArgs:\n\n- include_archived: Include archived sweeps (default: false)\n",
     "inputSchema": {
       "properties": {
         "include_archived": {
@@ -1396,7 +1396,7 @@
     "name": "codesweep_list"
   },
   {
-    "description": "List items in a sweep with optional filters.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- state: Filter to a specific state\n- tag: Filter to items having this tag\n- include_archived: Include archived entries alongside live ones\n- archived_only: Show only archived entries. Mutually exclusive with include_archived: passing both as true is an error (it used to mean archived-only, returning FEWER entries than include_archived alone).\n- limit: Max number of entries to return. 0 means NO entries; omit it for no limit. A negative value is an error (it used to mean \"no limit\").\n",
+    "description": "List items in a sweep with optional filters.\n\nUse when auditing or debugging one sweep's contents directly \u2014 e.g. checking\nwhat is still open in a given state or tag \u2014 rather than pulling a working\nbatch via `codesweep_next`.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- state: Filter to a specific state\n- tag: Filter to items having this tag\n- include_archived: Include archived entries alongside live ones\n- archived_only: Show only archived entries. Mutually exclusive with include_archived: passing both as true is an error (it used to mean archived-only, returning FEWER entries than include_archived alone).\n- limit: Max number of entries to return. 0 means NO entries; omit it for no limit. A negative value is an error (it used to mean \"no limit\").\n",
     "inputSchema": {
       "properties": {
         "archived_only": {
@@ -1459,7 +1459,7 @@
     "name": "codesweep_list_items"
   },
   {
-    "description": "Mark items by state transition.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- items: Item identifiers to mark\n- processed: Legacy mode \u2014 True maps to first terminal state, False to first non-terminal state. Omit it entirely (the default) to get the same effect as True. MUTUALLY EXCLUSIVE with `state`: sending both is an error, including when the two happen to agree, because `state` names one state and `processed` names a class of them.\n- state: Explicit target state. Validated against the sweep's `lifecycle` and `transitions` DAG (if declared). Mutually exclusive with `processed` \u2014 send one or the other, never both.\n",
+    "description": "Mark items by state transition.\n\nUse when you have finished working a batch pulled from `codesweep_next` and\nneed to record what happened to each item before asking for the next batch.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- items: Item identifiers to mark\n- processed: Legacy mode \u2014 True maps to first terminal state, False to first non-terminal state. Omit it entirely (the default) to get the same effect as True. MUTUALLY EXCLUSIVE with `state`: sending both is an error, including when the two happen to agree, because `state` names one state and `processed` names a class of them.\n- state: Explicit target state. Validated against the sweep's `lifecycle` and `transitions` DAG (if declared). Mutually exclusive with `processed` \u2014 send one or the other, never both.\n",
     "inputSchema": {
       "properties": {
         "items": {
@@ -1508,7 +1508,7 @@
     "name": "codesweep_mark"
   },
   {
-    "description": "Get next batch of unprocessed (non-terminal, non-archived) items in\ninsertion order.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- limit: Batch size (overrides sweep default). 0 means NO items; omit it to use the sweep's own default batch size. A negative value is an error (it used to mean \"no limit\").\n- tags: Filter to items matching any of these tags\n",
+    "description": "Get next batch of unprocessed (non-terminal, non-archived) items in\ninsertion order.\n\nUse when resuming a sweep \u2014 this session or a later one \u2014 to pull the next\nunworked slice instead of the whole backlog at once. Pairs with\n`codesweep_mark`: pull a batch here, then mark it there.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n- limit: Batch size (overrides sweep default). 0 means NO items; omit it to use the sweep's own default batch size. A negative value is an error (it used to mean \"no limit\").\n- tags: Filter to items matching any of these tags\n",
     "inputSchema": {
       "properties": {
         "limit": {
@@ -1552,7 +1552,7 @@
     "name": "codesweep_next"
   },
   {
-    "description": "Sweep overview \u2014 total/processed/remaining/archived counts, per-tag and\nper-state breakdowns. Archived entries are excluded from total/processed/\nremaining and reported separately as `archived`.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n",
+    "description": "Sweep overview \u2014 total/processed/remaining/archived counts, per-tag and\nper-state breakdowns. Archived entries are excluded from total/processed/\nremaining and reported separately as `archived`.\n\nUse when you want a progress readout for a sweep \u2014 how much is left, broken\ndown by tag or state \u2014 without pulling any of the underlying items.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n",
     "inputSchema": {
       "properties": {
         "sweep_ref": {
@@ -1836,7 +1836,7 @@
     "name": "mark_integrated"
   },
   {
-    "description": "Attach an item (bug / requirement / external) to a milestone.\n\nArgs:\n\n- milestone_id: Target milestone slug.\n- item_kind: 'bug' (CB-N), 'requirement' (FR-N), or 'external'.\n- item_ref: The id of the underlying entity (must exist for bug/req).\n- size: 'large' (worktree+sprint), 'small' (1-2h), 'triage' (minutes).\n- priority: Lower = higher priority. Default 100.\n- acceptance: Markdown acceptance criteria. Required for size='large'.\n- linked_frs: Optional list of FR ids to link (used by pull_next eligibility).\n",
+    "description": "Attach an item (bug / requirement / external) to a milestone.\n\nUse when a card is ready to be tracked against a specific release or\nstanding stream, rather than left floating outside milestone\ntracking where `pull_next` can never reach it.\n\nArgs:\n\n- milestone_id: Target milestone slug.\n- item_kind: 'bug' (CB-N), 'requirement' (FR-N), or 'external'.\n- item_ref: The id of the underlying entity (must exist for bug/req).\n- size: 'large' (worktree+sprint), 'small' (1-2h), 'triage' (minutes).\n- priority: Lower = higher priority. Default 100.\n- acceptance: Markdown acceptance criteria. Required for size='large'.\n- linked_frs: Optional list of FR ids to link (used by pull_next eligibility).\n",
     "inputSchema": {
       "properties": {
         "acceptance": {
@@ -1893,7 +1893,7 @@
     "name": "milestone_add_item"
   },
   {
-    "description": "Audit log query with filters. Returns most-recent rows first.\n\nArgs:\n\n- milestone_id: Filter by milestone slug.\n- item_ref: Filter by item id.\n- actor: Filter by actor.\n- since: ISO datetime \u2014 only rows at or after this time.\n- limit: Max rows (default 200). 0 means NO rows; a negative value is an error (it used to mean \"no limit\").\n",
+    "description": "Audit log query with filters. Returns most-recent rows first.\n\nUse when reconstructing what happened to a milestone or item over\ntime \u2014 who moved it, when it closed \u2014 rather than only its current\nstate.\n\nArgs:\n\n- milestone_id: Filter by milestone slug.\n- item_ref: Filter by item id.\n- actor: Filter by actor.\n- since: ISO datetime \u2014 only rows at or after this time.\n- limit: Max rows (default 200). 0 means NO rows; a negative value is an error (it used to mean \"no limit\").\n",
     "inputSchema": {
       "properties": {
         "actor": {
@@ -1956,7 +1956,7 @@
     "name": "milestone_audit_query"
   },
   {
-    "description": "Close a release milestone. Refuses if items are unfinished, on a\nbranch, or have unresolved blockers. Streams cannot be closed.\n\nArgs:\n\n- id: Milestone slug (must be kind='release').\n- force: Override the close-gate (still won't close streams). Audit-logged.\n- reason: Audit reason for the close.\n",
+    "description": "Close a release milestone. Refuses if items are unfinished, on a\nbranch, or have unresolved blockers. Streams cannot be closed.\n\nUse when a release milestone looks finished and you want to formally\nclose it, or find out exactly what `milestone_status` didn't spell\nout about what is still blocking that close.\n\nArgs:\n\n- id: Milestone slug (must be kind='release').\n- force: Override the close-gate (still won't close streams). Audit-logged.\n- reason: Audit reason for the close.\n",
     "inputSchema": {
       "properties": {
         "force": {
@@ -1983,7 +1983,7 @@
     "name": "milestone_close"
   },
   {
-    "description": "Create a new milestone.\n\nArgs:\n\n- id: Slug identifier, e.g. 'release/1.2' or 'stream/security'.\n- kind: 'release' or 'stream'. Streams never close.\n- description: Short charter for the milestone.\n- target_date: ISO date (e.g. '2026-06-30'). Optional, releases only.\n",
+    "description": "Create a new milestone.\n\nUse when starting a new release or a new standing stream that needs\nits own bucket for tracked work, before any item can be attached to\nit with `milestone_add_item`.\n\nArgs:\n\n- id: Slug identifier, e.g. 'release/1.2' or 'stream/security'.\n- kind: 'release' or 'stream'. Streams never close.\n- description: Short charter for the milestone.\n- target_date: ISO date (e.g. '2026-06-30'). Optional, releases only.\n",
     "inputSchema": {
       "properties": {
         "description": {
@@ -2022,7 +2022,7 @@
     "name": "milestone_create"
   },
   {
-    "description": "Move an item to stream/maintenance (or another milestone) and\nmark it deferred.\n\nArgs:\n\n- item_ref: The item to defer.\n- to_milestone: Destination (default 'stream/maintenance').\n- reason: Optional audit reason.\n",
+    "description": "Move an item to stream/maintenance (or another milestone) and\nmark it deferred.\n\nUse when an item on a release can't land in time and needs to move\nto a maintenance queue rather than keep blocking that release's\n`milestone_close`.\n\nArgs:\n\n- item_ref: The item to defer.\n- to_milestone: Destination (default 'stream/maintenance').\n- reason: Optional audit reason.\n",
     "inputSchema": {
       "properties": {
         "item_ref": {
@@ -2049,7 +2049,7 @@
     "name": "milestone_defer"
   },
   {
-    "description": "List milestones with optional filters.\n\nArgs:\n\n- kind: 'release' or 'stream'.\n- state: 'open' / 'closing' / 'shipped' / 'archived'.\n",
+    "description": "List milestones with optional filters.\n\nUse when scanning what releases or streams exist and their current\nstates \u2014 e.g. deciding where a new item should be filed.\n\nArgs:\n\n- kind: 'release' or 'stream'.\n- state: 'open' / 'closing' / 'shipped' / 'archived'.\n",
     "inputSchema": {
       "properties": {
         "kind": {
@@ -2083,7 +2083,7 @@
     "name": "milestone_list"
   },
   {
-    "description": "Move an item to a different milestone.\n\nArgs:\n\n- item_ref: The item to move (e.g. CB-5).\n- to_milestone: Destination milestone slug.\n- reason: One-line audit reason.\n",
+    "description": "Move an item to a different milestone.\n\nUse when an item was filed against the wrong milestone, or\npriorities shifted, and it needs to move without losing its history.\n\nArgs:\n\n- item_ref: The item to move (e.g. CB-5).\n- to_milestone: Destination milestone slug.\n- reason: One-line audit reason.\n",
     "inputSchema": {
       "properties": {
         "item_ref": {
@@ -2110,7 +2110,7 @@
     "name": "milestone_move_item"
   },
   {
-    "description": "One-time repair (CB-107) for stream items whose source finding or\nrequirement resolved before the status-change hook existed (CB-26).\nThe hook keeps new resolutions in sync; this is the retroactive fix for\nrows it never saw.\n\nDRY RUN BY DEFAULT \u2014 without apply=true nothing is written, and the\nresponse still lists every candidate transition it WOULD make. This is\na bulk mutation, and CLAUDE.md is explicit that a repair tool which\nwrites by default is how it becomes an accident, so the dry-run default\nis load-bearing and this wrapper refuses to weaken it.\n\nArgs:\n\n- apply: Must be a literal JSON boolean. Defaults to false (dry run). Rejected outright for any other JSON type (a string like \"false\", a number, null) rather than coerced by truthiness \u2014 an MCP client sends JSON over the wire, and Python's bool(\"0\") and bool(\"false\") are both True, which would silently turn a client's intended dry run into a write (CB-82's class of bug). CB-151: strict typing refuses this at the pydantic boundary before the tool body runs, closing the one hole the previous union annotation + isinstance check left open (1.0/0.0 coerced to a real bool before isinstance could see it).\n",
+    "description": "One-time repair (CB-107) for stream items whose source finding or\nrequirement resolved before the status-change hook existed (CB-26).\nThe hook keeps new resolutions in sync; this is the retroactive fix for\nrows it never saw.\n\nUse when stream items are suspected stale for that specific\nhistorical reason \u2014 ordinary work never calls this; the hook above\nkeeps new resolutions in sync on its own.\n\nDRY RUN BY DEFAULT \u2014 without apply=true nothing is written, and the\nresponse still lists every candidate transition it WOULD make. This is\na bulk mutation, and CLAUDE.md is explicit that a repair tool which\nwrites by default is how it becomes an accident, so the dry-run default\nis load-bearing and this wrapper refuses to weaken it.\n\nArgs:\n\n- apply: Must be a literal JSON boolean. Defaults to false (dry run). Rejected outright for any other JSON type (a string like \"false\", a number, null) rather than coerced by truthiness \u2014 an MCP client sends JSON over the wire, and Python's bool(\"0\") and bool(\"false\") are both True, which would silently turn a client's intended dry run into a write (CB-82's class of bug). CB-151: strict typing refuses this at the pydantic boundary before the tool body runs, closing the one hole the previous union annotation + isinstance check left open (1.0/0.0 coerced to a real bool before isinstance could see it).\n",
     "inputSchema": {
       "properties": {
         "apply": {
@@ -2125,7 +2125,7 @@
     "name": "milestone_reconcile"
   },
   {
-    "description": "Set an item's status. Records done_commit if status is terminal.\n\nArgs:\n\n- item_ref: The item id (e.g. CB-5).\n- status: open / in_progress / done / deferred / dismissed.\n- commit: SHA where the work landed on main (recorded for terminal status).\n- reason: Optional audit reason.\n",
+    "description": "Set an item's status. Records done_commit if status is terminal.\n\nUse when an item's progress needs recording directly \u2014 e.g. syncing\nin status from outside this tracker \u2014 rather than through the\n`pull_next` / `release_item` claim flow.\n\nArgs:\n\n- item_ref: The item id (e.g. CB-5).\n- status: open / in_progress / done / deferred / dismissed.\n- commit: SHA where the work landed on main (recorded for terminal status).\n- reason: Optional audit reason.\n",
     "inputSchema": {
       "properties": {
         "commit": {
@@ -2164,7 +2164,7 @@
     "name": "milestone_set_status"
   },
   {
-    "description": "Detailed rollup for one milestone: item counts by status / size,\nblockers, branch-only items, days to target.\n\nArgs:\n\n- id: Milestone slug.\n",
+    "description": "Detailed rollup for one milestone: item counts by status / size,\nblockers, branch-only items, days to target.\n\nUse when checking one milestone's health before deciding whether\nit's ready to close, or why `milestone_close` is refusing.\n\nArgs:\n\n- id: Milestone slug.\n",
     "inputSchema": {
       "properties": {
         "id": {
@@ -2181,7 +2181,7 @@
     "name": "milestone_status"
   },
   {
-    "description": "Update mutable fields of a milestone. id and kind are immutable.\n\nArgs:\n\n- id: Milestone slug.\n- description: New description (or None to skip).\n- target_date: New ISO target date (or None to skip).\n- state: New state (open / closing / shipped / archived).\n",
+    "description": "Update mutable fields of a milestone. id and kind are immutable.\n\nUse when a milestone's target date slipped or its state needs to\nmove (e.g. into closing) without touching any of its items.\n\nArgs:\n\n- id: Milestone slug.\n- description: New description (or None to skip).\n- target_date: New ISO target date (or None to skip).\n- state: New state (open / closing / shipped / archived).\n",
     "inputSchema": {
       "properties": {
         "description": {
@@ -2234,7 +2234,7 @@
     "name": "milestone_update"
   },
   {
-    "description": "Claim the next eligible item for the calling agent. Returns the\nitem dict or None if nothing eligible.\n\nPriority: stream/security > release/* (earliest target_date) >\n          stream/triage > stream/maintenance.\n\nArgs:\n\n- agent_id: Stable id for the calling agent. Used as actor in audit.\n- capacity: Dict like {'large':1,'small':2,'triage':5}. Defaults to those values if not provided.\n",
+    "description": "Claim the next eligible item for the calling agent. Returns the\nitem dict or None if nothing eligible.\n\nUse when an agent is idle and needs its next unit of tracked work\nassigned automatically, by priority, rather than picking one by hand\nfrom `milestone_list` / `milestone_status`. Pairs with\n`release_item`, which frees the capacity this claims.\n\nPriority: stream/security > release/* (earliest target_date) >\n          stream/triage > stream/maintenance.\n\nArgs:\n\n- agent_id: Stable id for the calling agent. Used as actor in audit.\n- capacity: Dict like {'large':1,'small':2,'triage':5}. Defaults to those values if not provided.\n",
     "inputSchema": {
       "properties": {
         "agent_id": {
@@ -2609,7 +2609,7 @@
     "name": "relations_relate"
   },
   {
-    "description": "Retract a relation. Tombstones it \u2014 the row and its history remain.\n\nArgs:\n\n- src_id: Source finding\n- rel: The relation to retract\n- dst_id: Target finding\n- retracted_by: Who is retracting it\n- reason: Why\n",
+    "description": "Retract a relation. Tombstones it \u2014 the row and its history remain.\n\nUse when a relation asserted with `relations_relate` turns out to be\nwrong (e.g. two findings marked duplicate_of that are actually\ndistinct) and needs retracting without erasing the record that it\nwas once claimed.\n\nArgs:\n\n- src_id: Source finding\n- rel: The relation to retract\n- dst_id: Target finding\n- retracted_by: Who is retracting it\n- reason: Why\n",
     "inputSchema": {
       "properties": {
         "dst_id": {
@@ -2762,7 +2762,7 @@
     "name": "reqs_add"
   },
   {
-    "description": "Store embeddings for multiple requirements at once.\n\nSame preconditions as reqs_embed: you compute the vectors yourself and\npass finished numbers, the requirement text never reaches this tool,\nand codebugs stores them locally and sends them nowhere.\n\nEvery vector in one call must have the same number of components as\nevery other vector in the call AND as the vectors already stored in\nthis tracker; empty vectors, non-numbers, NaN and infinity are refused.\nThe self-consistency rule is a separate one: in an empty tracker there\nis nothing to compare against, so without it a single call could create\nthe mixed state the rules exist to prevent.\n\nArgs:\n\n- embeddings: Dict mapping requirement ID to float vector\n",
+    "description": "Store embeddings for multiple requirements at once.\n\nUse when you have vectors ready for many requirements at once \u2014 e.g.\nafter a bulk embedding pass over the whole tracker \u2014 rather than\ncalling reqs_embed once per requirement.\n\nSame preconditions as reqs_embed: you compute the vectors yourself and\npass finished numbers, the requirement text never reaches this tool,\nand codebugs stores them locally and sends them nowhere.\n\nEvery vector in one call must have the same number of components as\nevery other vector in the call AND as the vectors already stored in\nthis tracker; empty vectors, non-numbers, NaN and infinity are refused.\nThe self-consistency rule is a separate one: in an empty tracker there\nis nothing to compare against, so without it a single call could create\nthe mixed state the rules exist to prevent.\n\nArgs:\n\n- embeddings: Dict mapping requirement ID to float vector\n",
     "inputSchema": {
       "properties": {
         "embeddings": {
@@ -2785,7 +2785,7 @@
     "name": "reqs_batch_embed"
   },
   {
-    "description": "Store an embedding vector for a requirement.\n\nYOU compute the embedding, in your own process, and pass the finished\nnumbers here. This tool never receives the requirement's text. codebugs\nstores the vector in its own local SQLite file and sends it nowhere.\n(Scope, stated precisely rather than loudly, because a promise wider\nthan its check is worse than no promise. The route above is the claim.\nA test enforces two narrower things beside it: this package's own\nsource imports none of the socket-opening modules that test lists, and\nit imports nothing at all from outside the package and the standard\nlibrary without a declared, reasoned entry \u2014 so a network client\nnobody anticipated is still refused. Neither says \"codebugs cannot\nreach the network\": the MCP transport your client is talking over is a\nseparate layer, and it is not covered.)\n\nBecause there is no embedding provider inside codebugs, nothing here\nknows the \"right\" dimensionality \u2014 it is whatever the first stored\nvector had. So the vector is refused if it is empty, contains a\nnon-number, contains NaN or infinity, or has a different number of\ncomponents than the vectors already stored in this tracker. Each of\nthose would otherwise break reqs_search_similar: a mismatched width\nmakes it unable to score the other rows, and a NaN makes a row drop out\nof every result with no error at all.\n\nOnce a tracker holds vectors of one width you cannot switch embedding\nmodel: there is no clear-and-re-embed operation in this package.\nreqs_embedding_stats reports which widths are actually present.\n\nArgs:\n\n- req_id: Requirement ID\n- embedding: Float vector. Any dimensionality, but the SAME one for every requirement in a given tracker.\n",
+    "description": "Store an embedding vector for a requirement.\n\nUse when you have already computed an embedding for one requirement\nin your own process and want it stored so `reqs_search_similar` can\nfind it later \u2014 codebugs has no embedding provider of its own, so\nnothing here can compute a vector from text for you.\n\nYOU compute the embedding, in your own process, and pass the finished\nnumbers here. This tool never receives the requirement's text. codebugs\nstores the vector in its own local SQLite file and sends it nowhere.\n(Scope, stated precisely rather than loudly, because a promise wider\nthan its check is worse than no promise. The route above is the claim.\nA test enforces two narrower things beside it: this package's own\nsource imports none of the socket-opening modules that test lists, and\nit imports nothing at all from outside the package and the standard\nlibrary without a declared, reasoned entry \u2014 so a network client\nnobody anticipated is still refused. Neither says \"codebugs cannot\nreach the network\": the MCP transport your client is talking over is a\nseparate layer, and it is not covered.)\n\nBecause there is no embedding provider inside codebugs, nothing here\nknows the \"right\" dimensionality \u2014 it is whatever the first stored\nvector had. So the vector is refused if it is empty, contains a\nnon-number, contains NaN or infinity, or has a different number of\ncomponents than the vectors already stored in this tracker. Each of\nthose would otherwise break reqs_search_similar: a mismatched width\nmakes it unable to score the other rows, and a NaN makes a row drop out\nof every result with no error at all.\n\nOnce a tracker holds vectors of one width you cannot switch embedding\nmodel: there is no clear-and-re-embed operation in this package.\nreqs_embedding_stats reports which widths are actually present.\n\nArgs:\n\n- req_id: Requirement ID\n- embedding: Float vector. Any dimensionality, but the SAME one for every requirement in a given tracker.\n",
     "inputSchema": {
       "properties": {
         "embedding": {
@@ -2810,7 +2810,7 @@
     "name": "reqs_embed"
   },
   {
-    "description": "Report on embedding coverage --- how many requirements have embeddings.\n\nThis tool takes no input at all, so it is not a privacy surface and\ncarries no precondition block of its own; that is said explicitly\nrather than left as an omission a reader has to interpret.\n\nBeyond coverage it reports `dimensions` --- which vector widths this\ntracker actually holds, and how many rows each --- plus `mixed`, true\nwhen there is more than one. That is the channel for noticing a tracker\nthat received vectors from two different embedding models:\nreqs_search_similar silently excludes rows of a width other than your\nquery's, and being able to see the split here is what keeps that from\nlooking like \"nothing is similar\". Both keys are always present; an\nempty `dimensions` list means no vectors are stored, never that the\ncheck did not run.\n",
+    "description": "Report on embedding coverage --- how many requirements have embeddings.\n\nUse when `reqs_search_similar` returns fewer results than expected,\nto check whether this tracker holds vectors of more than one width\nand is silently excluding some rows from every search.\n\nThis tool takes no input at all, so it is not a privacy surface and\ncarries no precondition block of its own; that is said explicitly\nrather than left as an omission a reader has to interpret.\n\nBeyond coverage it reports `dimensions` --- which vector widths this\ntracker actually holds, and how many rows each --- plus `mixed`, true\nwhen there is more than one. That is the channel for noticing a tracker\nthat received vectors from two different embedding models:\nreqs_search_similar silently excludes rows of a width other than your\nquery's, and being able to see the split here is what keeps that from\nlooking like \"nothing is similar\". Both keys are always present; an\nempty `dimensions` list means no vectors are stored, never that the\ncheck did not run.\n",
     "inputSchema": {
       "properties": {},
       "title": "reqs_embedding_statsArguments",
@@ -2991,7 +2991,7 @@
     "name": "reqs_query"
   },
   {
-    "description": "Find requirements semantically similar to a query.\n\nPass a query embedding (from the same model used to embed requirements).\nYou compute it yourself; no text is sent anywhere by this tool, and the\nquery vector is not stored.\n\nRequirements whose stored vector has a different number of components\nthan your query are EXCLUDED from the search rather than compared, so\none foreign vector can no longer make the whole search fail. That also\nmeans they are invisible here: if you get fewer results than you\nexpect, call reqs_embedding_stats, which reports which widths this\ntracker holds. A query vector that is empty or contains NaN or infinity\nis refused, because it would match nothing and return an empty list\nindistinguishable from an empty tracker.\n\nReturns requirements ranked by cosine similarity.\n\nArgs:\n\n- query_embedding: Query vector\n- limit: Max results (default 10)\n- min_similarity: Minimum cosine similarity (default 0.3)\n- status: Optional status filter\n",
+    "description": "Find requirements semantically similar to a query.\n\nUse when you already hold a query vector and need requirements close\nto it \u2014 e.g. checking whether a proposed requirement duplicates one\nalready filed, before writing it. Pairs with `reqs_embed`: the\nvectors it finds similar are the ones stored through that tool.\n\nPass a query embedding (from the same model used to embed requirements).\nYou compute it yourself; no text is sent anywhere by this tool, and the\nquery vector is not stored.\n\nRequirements whose stored vector has a different number of components\nthan your query are EXCLUDED from the search rather than compared, so\none foreign vector can no longer make the whole search fail. That also\nmeans they are invisible here: if you get fewer results than you\nexpect, call reqs_embedding_stats, which reports which widths this\ntracker holds. A query vector that is empty or contains NaN or infinity\nis refused, because it would match nothing and return an empty list\nindistinguishable from an empty tracker.\n\nReturns requirements ranked by cosine similarity.\n\nArgs:\n\n- query_embedding: Query vector\n- limit: Max results (default 10)\n- min_similarity: Minimum cosine similarity (default 0.3)\n- status: Optional status filter\n",
     "inputSchema": {
       "properties": {
         "limit": {
@@ -3600,7 +3600,7 @@
     "name": "update"
   },
   {
-    "description": "Snapshot of agent_capacity. agent_id=None returns all agents.\n\nArgs:\n\n- agent_id: Filter to one agent (None = all).\n",
+    "description": "Snapshot of agent_capacity. agent_id=None returns all agents.\n\nUse when checking who is currently loaded with work and how much\nheadroom each agent has \u2014 e.g. before deciding whether to call\n`pull_next` for a new agent.\n\nArgs:\n\n- agent_id: Filter to one agent (None = all).\n",
     "inputSchema": {
       "properties": {
         "agent_id": {
