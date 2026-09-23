@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`query` and `recent` over MCP can now return a short list instead of whole cards: pass
+  `view="summary"`.** Each row then carries only the card's id, severity, category, file, status and
+  the first 200 characters of its description, with `description_truncated` telling you whether
+  anything was cut — plus `blocker_count` when you asked for `status="deferred"`, and `loc` (where
+  the code is now, in one word) when you asked for `resolve_anchors=True`. There is no `meta` in
+  that view, which is most of a card's weight: a page of cards that used to be too large for an
+  agent's context and ended up saved to a file is now small enough to read directly. Use `get` for
+  the full card. The default is still `view="full"`, so nothing you already read from these tools
+  changes; an unknown value is refused with a message naming the two accepted ones rather than
+  quietly treated as `"full"`. Grouped answers (`group_by`) are the same in both views. (CB-330)
+
 ### Fixed
 
 - **Leaving out a required field over MCP now gets you an answer written by this tracker, instead
