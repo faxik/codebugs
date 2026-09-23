@@ -1052,13 +1052,15 @@ Beyond one finding at a time — the situation that calls for each:
 - Work outliving one card — a release, a standing queue: `milestone_create`,
   `milestone_add_item`, then `pull_next` for the next eligible item and
   `wip_status` to see who is loaded.
-- Blocked until something else lands: `blockers_add`, later `blockers_check`.
+- Blocked until something else lands: `blockers_add`; once you land
+  something others were waiting on, `blockers_check` shows what it unblocked.
 - Numbers a later session will compare: `codebench_import`, `codebench_query`
   — a measurement left in a file is one nobody can query.
 - A requirement that might duplicate one already filed: compute the
   embedding yourself — codebugs has no embedding provider of its own — and
-  call `reqs_embed`, then `reqs_search_similar`; `reqs_embedding_stats`
-  explains a short result list by reporting which vector widths are stored.
+  search with `reqs_search_similar`; store vectors with `reqs_embed` so later
+  searches can find them. `reqs_embedding_stats` explains a short result
+  list by reporting which vector widths are stored.
 - Housekeeping: `similarity_check` a suspected duplicate, `staleness_check` a
   card whose code may have moved, `relations_relate` cards that belong
   together (and `relations_unrelate` when one turns out wrong), `triage_inbox`

@@ -457,8 +457,8 @@ def register_tools(mcp, conn_factory) -> None:
         branch, or have unresolved blockers. Streams cannot be closed.
 
         Use when a release milestone looks finished and you want to formally
-        close it, or find out exactly what `milestone_status` didn't spell
-        out about what is still blocking that close.
+        close it — without `force`, a refusal names exactly what still
+        blocks the close.
 
         Args:
             id: Milestone slug (must be kind='release').

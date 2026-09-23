@@ -395,7 +395,7 @@
     "name": "blockers_add"
   },
   {
-    "description": "Scan for currently actionable items \u2014 items whose blockers are all satisfied.\n\nUse when sweeping the whole tracker for work that just became\nactionable \u2014 e.g. a stand-up loop or an alternative to `pull_next`\n\u2014 rather than checking one item's blockers by name.\n\nReturns actionable items (all blockers met), partially unblocked items\n(some blockers met), and overdue date triggers.\n",
+    "description": "Scan for currently actionable items \u2014 items whose blockers are all satisfied.\n\nUse when something other cards were waiting on has just landed, or\nat the start of a work session, to see which held-back items are now\nactionable. It only reports; to take work from a milestone queue, use\n`pull_next`.\n\nReturns actionable items (all blockers met), partially unblocked items\n(some blockers met), and overdue date triggers.\n",
     "inputSchema": {
       "properties": {},
       "title": "blockers_checkArguments",
@@ -1552,7 +1552,7 @@
     "name": "codesweep_next"
   },
   {
-    "description": "Sweep overview \u2014 total/processed/remaining/archived counts, per-tag and\nper-state breakdowns. Archived entries are excluded from total/processed/\nremaining and reported separately as `archived`.\n\nUse when you want a progress readout for a sweep \u2014 how much is left, broken\ndown by tag or state \u2014 without pulling any of the underlying items.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n",
+    "description": "Sweep overview \u2014 total/processed/remaining/archived counts, per-tag and\nper-state breakdowns. Archived entries are excluded from total/processed/\nremaining and reported separately as `archived`.\n\nUse when resuming a sweep a previous session started, to decide whether it is\nworth continuing before pulling a batch with `codesweep_next`.\n\nArgs:\n\n- sweep_ref: Sweep ID (SW-N) or name\n",
     "inputSchema": {
       "properties": {
         "sweep_ref": {
@@ -1956,7 +1956,7 @@
     "name": "milestone_audit_query"
   },
   {
-    "description": "Close a release milestone. Refuses if items are unfinished, on a\nbranch, or have unresolved blockers. Streams cannot be closed.\n\nUse when a release milestone looks finished and you want to formally\nclose it, or find out exactly what `milestone_status` didn't spell\nout about what is still blocking that close.\n\nArgs:\n\n- id: Milestone slug (must be kind='release').\n- force: Override the close-gate (still won't close streams). Audit-logged.\n- reason: Audit reason for the close.\n",
+    "description": "Close a release milestone. Refuses if items are unfinished, on a\nbranch, or have unresolved blockers. Streams cannot be closed.\n\nUse when a release milestone looks finished and you want to formally\nclose it \u2014 without `force`, a refusal names exactly what still\nblocks the close.\n\nArgs:\n\n- id: Milestone slug (must be kind='release').\n- force: Override the close-gate (still won't close streams). Audit-logged.\n- reason: Audit reason for the close.\n",
     "inputSchema": {
       "properties": {
         "force": {

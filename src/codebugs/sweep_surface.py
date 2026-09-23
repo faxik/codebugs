@@ -134,8 +134,8 @@ CODESWEEP_STATUS_DOC = """Sweep overview — total/processed/remaining/archived 
 per-state breakdowns. Archived entries are excluded from total/processed/
 remaining and reported separately as `archived`.
 
-Use when you want a progress readout for a sweep — how much is left, broken
-down by tag or state — without pulling any of the underlying items.
+Use when resuming a sweep a previous session started, to decide whether it is
+worth continuing before pulling a batch with `codesweep_next`.
 
 Args:
     sweep_ref: Sweep ID (SW-N) or name

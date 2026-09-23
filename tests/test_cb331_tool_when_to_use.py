@@ -19,6 +19,8 @@ check instead of silently vanishing from what this test covers.
 
 from __future__ import annotations
 
+import functools
+
 from tests._mcp_schema import collect_tool_schemas
 
 # Prefix families, and the LOWER BOUND this test was written against (CB-331,
@@ -67,6 +69,7 @@ DECLARED_PAIRS: tuple[tuple[str, str], ...] = (
 )
 
 
+@functools.cache
 def _catalog() -> dict[str, dict]:
     """Live tool name -> its schema dict ({name, description, inputSchema})."""
     return {tool["name"]: tool for tool in collect_tool_schemas()}
