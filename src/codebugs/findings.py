@@ -3508,6 +3508,22 @@ def _group_disclosure(result: dict[str, Any]) -> str:
     )
 
 
+def _anchor_cell(summary: Any) -> str:
+    """One table cell for an anchor summary. Never raises, never lies.
+
+    A RESOLVED row shows what the resolution said; anything else shows the
+    stored state, because "moved_file" and "this card has no anchor" are
+    answers to different questions and a column that printed an empty
+    string for both would recreate the conflation the summary exists to
+    end.
+    """
+    if not isinstance(summary, dict):
+        return ""
+    if summary.get("resolved"):
+        return str(summary.get("loc_status") or "")
+    return str(summary.get("state") or "")
+
+
 def query_findings(
     conn: sqlite3.Connection,
     *,
@@ -5562,21 +5578,6 @@ def register_cli(sub, commands) -> None:
             )
         finally:
             conn.close()
-
-    def _anchor_cell(summary: Any) -> str:
-        """One table cell for an anchor summary. Never raises, never lies.
-
-        A RESOLVED row shows what the resolution said; anything else shows the
-        stored state, because "moved_file" and "this card has no anchor" are
-        answers to different questions and a column that printed an empty
-        string for both would recreate the conflation the summary exists to
-        end.
-        """
-        if not isinstance(summary, dict):
-            return ""
-        if summary.get("resolved"):
-            return str(summary.get("loc_status") or "")
-        return str(summary.get("state") or "")
 
     def _cmd_query(args: argparse.Namespace) -> None:
         from codebugs.cli import domain_errors
